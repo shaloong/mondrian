@@ -333,7 +333,12 @@ until exact submission completion, so admission separately charges the
 conservative non-aliasing recording bytes when that exceeds the abstract plan
 peak. The same derivation owns both bytes and texture count and is consumed by
 Viewer active-working-set admission; recorded evidence preserves abstract and
-physical values separately. More than one backend transfer, GPU Mask/MultiInput joins,
+physical values separately. Ordered MultiInput GPU joins with at least two
+inputs reuse the same BlendMode pass as binary Blend. Their `N - 2` private
+fold intermediates are charged by that physical derivation, retained through
+submission, and never fabricated as semantic graph values. One-input
+MultiInput remains on CPU pending an exact copy primitive. More than one
+backend transfer, GPU Mask,
 color-domain conversion and temporal/stateful GPU dispatch still fail before
 pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.

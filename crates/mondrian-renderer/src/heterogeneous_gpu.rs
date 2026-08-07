@@ -1014,6 +1014,40 @@ fn record_gpu_suffix(
                         });
                     }
                 }
+                PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::MultiInput {
+                        inputs,
+                        output,
+                        opacity,
+                        blend_mode,
+                        ..
+                    },
+                ) => {
+                    let input_handles = inputs
+                        .iter()
+                        .map(|input| {
+                            handles.get(input).cloned().ok_or(
+                                HeterogeneousGpuContinuationError::InvalidPlan {
+                                    reason: "gpu_multi_input_not_materialized",
+                                },
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let (output_handle, scratch) = record_gpu_multi_input(
+                        resources,
+                        &input_handles,
+                        *opacity,
+                        *blend_mode,
+                        frame_seed,
+                        working_color_space,
+                    )?;
+                    retained.extend(scratch);
+                    if handles.insert(*output, output_handle).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
                 PreparedHeterogeneousGpuStep::Release { materialization, .. } => {
                     let handle = handles.remove(materialization).ok_or(
                         HeterogeneousGpuContinuationError::InvalidPlan {
@@ -1051,6 +1085,84 @@ fn record_gpu_suffix(
             drop(retained);
             Err(error)
         }
+    }
+}
+
+fn record_gpu_multi_input(
+    resources: &mut HeterogeneousGpuRecordResources<'_>,
+    inputs: &[crate::GpuColorFrameHandle],
+    opacity: f32,
+    blend_mode: mondrian_core::BlendMode,
+    frame_seed: i64,
+    working_color_space: WorkingColorSpace,
+) -> Result<
+    (
+        crate::GpuColorFrameHandle,
+        Vec<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    ),
+    HeterogeneousGpuContinuationError,
+> {
+    let Some((base, overlays)) = inputs.split_first() else {
+        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "gpu_multi_input_is_empty",
+        });
+    };
+    if overlays.is_empty() {
+        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "gpu_multi_input_requires_two_inputs",
+        });
+    }
+
+    let mut current = base.clone();
+    let mut produced = Vec::with_capacity(overlays.len());
+    for overlay in overlays {
+        let record = match resources.compositor.record_adjustment_blend_pass(
+            resources.device,
+            resources.queue,
+            resources.encoder,
+            resources.ids,
+            resources.table,
+            resources.resource_pool.map(Arc::as_ref),
+            &current,
+            overlay,
+            opacity,
+            blend_mode,
+            frame_seed,
+            working_color_space,
+        ) {
+            Ok(record) => record,
+            Err(error) => {
+                remove_private_gpu_outputs(resources.table, &produced);
+                return Err(error.into());
+            }
+        };
+        current = record.output.clone();
+        produced.push(record.output);
+    }
+
+    let output = produced.pop().ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
+        reason: "gpu_multi_input_produced_no_output",
+    })?;
+    let mut scratch = Vec::with_capacity(produced.len());
+    for (index, handle) in produced.iter().enumerate() {
+        match resources.table.take(handle) {
+            Ok(resource) => scratch.push(resource),
+            Err(error) => {
+                remove_private_gpu_outputs(resources.table, &produced[index + 1..]);
+                let _ = resources.table.remove(output.id());
+                return Err(HeterogeneousGpuContinuationError::ResourceTable(error));
+            }
+        }
+    }
+    Ok((output, scratch))
+}
+
+fn remove_private_gpu_outputs(
+    table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    handles: &[crate::GpuColorFrameHandle],
+) {
+    for handle in handles {
+        let _ = table.remove(handle.id());
     }
 }
 
@@ -1479,12 +1591,33 @@ fn gpu_recording_device_demand(
                 .ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
                     reason: "gpu_output_materialization_missing",
                 })?;
-        bytes = bytes.checked_add(materialization.bytes()).ok_or(
+        let physical_outputs = match dispatch {
+            PreparedHeterogeneousGpuDispatch::MultiInput { inputs, .. } => {
+                let passes = inputs.len().checked_sub(1).filter(|passes| *passes > 0).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_multi_input_requires_two_inputs",
+                    },
+                )?;
+                u64::try_from(passes).map_err(|_| {
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_recording_materialization_count_overflow",
+                    }
+                })?
+            }
+            PreparedHeterogeneousGpuDispatch::PointChain { .. }
+            | PreparedHeterogeneousGpuDispatch::Blend { .. } => 1,
+        };
+        let physical_bytes = materialization.bytes().checked_mul(physical_outputs).ok_or(
             HeterogeneousGpuContinuationError::InvalidPlan {
                 reason: "gpu_recording_byte_count_overflow",
             },
         )?;
-        materializations = materializations.checked_add(1).ok_or(
+        bytes = bytes.checked_add(physical_bytes).ok_or(
+            HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "gpu_recording_byte_count_overflow",
+            },
+        )?;
+        materializations = materializations.checked_add(physical_outputs).ok_or(
             HeterogeneousGpuContinuationError::InvalidPlan {
                 reason: "gpu_recording_materialization_count_overflow",
             },
@@ -1705,6 +1838,50 @@ fn validate_gpu_suffix_schedule(
                 require_plan(completed.insert(*signal), "gpu_blend_signal_reused")?;
                 nodes.push(*node);
             }
+            PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::MultiInput {
+                    node,
+                    inputs,
+                    output,
+                    waits,
+                    signal,
+                    ..
+                },
+            ) => {
+                require_plan(inputs.len() >= 2, "gpu_multi_input_arity")?;
+                require_plan(
+                    inputs.iter().all(|input| live.contains(input)),
+                    "gpu_multi_input_not_live",
+                )?;
+                require_plan(
+                    waits.len() == inputs.len()
+                        && waits.iter().all(|wait| completed.contains(wait)),
+                    "gpu_multi_input_wait_not_completed",
+                )?;
+                for (input, wait) in inputs.iter().zip(waits.iter()) {
+                    let input_value = plan.materialization(*input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_multi_input_materialization_missing",
+                        },
+                    )?;
+                    require_plan(
+                        input_value.completion() == *wait,
+                        "gpu_multi_input_value_or_token_mismatch",
+                    )?;
+                }
+                let output_value = plan.materialization(*output).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_multi_input_output_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    output_value.completion() == *signal && output_value.value() == *node,
+                    "gpu_multi_input_output_or_token_mismatch",
+                )?;
+                require_plan(live.insert(*output), "gpu_multi_input_output_already_live")?;
+                require_plan(completed.insert(*signal), "gpu_multi_input_signal_reused")?;
+                nodes.push(*node);
+            }
             PreparedHeterogeneousGpuStep::Release { materialization, after } => {
                 require_plan(
                     *materialization != suffix.output_materialization(),
@@ -1872,6 +2049,34 @@ mod tests {
         let output = builder.add_blend(left, right, BlendMode::Screen, 0.4);
         builder.set_current_output(output);
         compile_reference_render_graph(builder.finish()).expect("compile GPU DAG graph")
+    }
+
+    fn gpu_multi_input_graph() -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let blurred = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let left = builder.add_unary_from(
+            blurred,
+            EffectRenderOp::ColorAdjust {
+                exposure: 0.2,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WORKING_SPACE,
+            },
+        );
+        let middle = builder.add_unary_from(blurred, EffectRenderOp::Grain { amount: 0.1 });
+        let right = builder.add_unary_from(
+            blurred,
+            EffectRenderOp::ColorAdjust {
+                exposure: -0.15,
+                contrast: 1.1,
+                saturation: 0.9,
+                working_color_space: WORKING_SPACE,
+            },
+        );
+        let output = builder.add_multi_input(vec![left, middle, right], BlendMode::SoftLight, 0.35);
+        builder.set_current_output(output);
+        compile_reference_render_graph(builder.finish()).expect("compile GPU MultiInput graph")
     }
 
     fn test_input() -> Vec<[f32; 4]> {
@@ -2205,6 +2410,98 @@ mod tests {
             for channel in 0..4 {
                 assert!(
                     (actual[channel] - expected[channel]).abs() <= 8.0e-5,
+                    "channel {channel}: actual={} expected={}",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
+        }
+        assert!(!runtime.is_poisoned());
+        assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_multi_input_join_matches_ordered_scalar_and_accounts_private_scratch() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping heterogeneous GPU MultiInput test: no GPU adapter available");
+            return;
+        };
+        let graph = gpu_multi_input_graph();
+        let input = test_input();
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            &input,
+            EXTENT.width(),
+            EXTENT.height(),
+            &graph,
+            FRAME_SEED,
+        )
+        .expect("complete CPU MultiInput reference");
+        let capability =
+            HeterogeneousGpuExecutionCapability::scene_linear_f32().expect("renderer capability");
+        let prepared = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&graph),
+            capability.environment(),
+            capability.request(EXTENT, generous_graph_budget()),
+        )
+        .expect("prepare GPU MultiInput continuation");
+        assert_eq!(prepared.cpu_nodes().len(), 1);
+        assert_eq!(prepared.gpu_suffix().node_ids().len(), 4);
+
+        let frame_bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
+        let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(
+            prepared.plan(),
+            prepared.gpu_suffix(),
+        )
+        .expect("MultiInput recording requirements");
+        assert_eq!(requirements.device_materializations(), 6);
+        assert_eq!(requirements.device_bytes(), frame_bytes * 6);
+        let scratch_omitting_grant = HeterogeneousGpuResourceGrant::new(
+            frame_bytes,
+            requirements.device_bytes(),
+            requirements.device_materializations() - 1,
+            frame_bytes,
+        );
+        assert!(matches!(
+            requirements.validate(scratch_omitting_grant),
+            Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
+                kind: HeterogeneousGpuResourceKind::DeviceMaterializations,
+                required: 6,
+                limit: 5,
+            })
+        ));
+
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
+        session.bind_generation(GENERATION);
+        let completion = prepared
+            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .expect("execute MultiInput CPU prefix");
+        let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        ));
+        let mut runtime =
+            HeterogeneousGpuContinuationRuntime::with_resource_pool(context, Arc::clone(&pool))
+                .expect("heterogeneous GPU runtime");
+        let completed = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &ExecutionCancellationToken::new(),
+                gpu_test_deadline(),
+            )
+            .expect("execute GPU MultiInput and read back");
+        assert_eq!(
+            completed.evidence().recorded().recorded_device_materializations(),
+            requirements.device_materializations()
+        );
+        assert_eq!(
+            completed.evidence().recorded().recorded_device_bytes(),
+            requirements.device_bytes()
+        );
+        for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
+            for channel in 0..4 {
+                assert!(
+                    (actual[channel] - expected[channel]).abs() <= 1.0e-4,
                     "channel {channel}: actual={} expected={}",
                     actual[channel],
                     expected[channel]

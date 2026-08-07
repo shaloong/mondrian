@@ -970,6 +970,9 @@ fn raw_node_implementation_requirements(
             Some(raw_render_op_execution_requirements(op))
         }
         EffectGraphNodeKind::Blend { .. } => Some(gpu_blend_node_requirements()),
+        EffectGraphNodeKind::MultiInput { inputs, .. } if inputs.len() >= 2 => {
+            Some(gpu_blend_node_requirements())
+        }
         EffectGraphNodeKind::Mask { .. }
         | EffectGraphNodeKind::MaskSource { .. }
         | EffectGraphNodeKind::MultiInput { .. } => Some(compositing_node_requirements()),
@@ -1257,6 +1260,25 @@ impl EffectGraphBuilderState {
         self.graph.nodes.push(EffectGraphNode {
             id,
             kind: EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity },
+        });
+        id
+    }
+
+    /// Add one ordered N-input compositing node.
+    ///
+    /// Compilation rejects an empty input list. A single input remains a
+    /// valid identity-shaped CPU operation, while current GPU execution is
+    /// admitted only for two or more inputs.
+    pub fn add_multi_input(
+        &mut self,
+        inputs: Vec<EffectGraphNodeId>,
+        blend_mode: BlendMode,
+        opacity: f32,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity },
         });
         id
     }

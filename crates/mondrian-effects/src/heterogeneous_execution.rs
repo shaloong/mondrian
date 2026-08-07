@@ -1656,9 +1656,10 @@ pub struct HeterogeneousCpuCompletionEvidence {
 
 /// One executable GPU DAG dispatch prepared from the unique graph-value plan.
 ///
-/// Point chains are renderer-neutral shader programs. Blend joins retain
-/// their two exact materializations, authored mode, and opacity. Other graph-node
-/// semantics remain blocked until a production GPU Adapter exists.
+/// Point chains are renderer-neutral shader programs. Blend and ordered
+/// MultiInput joins retain their exact materializations, authored mode, and
+/// opacity. Other graph-node semantics remain blocked until a production GPU
+/// Adapter exists.
 #[derive(Debug, Clone)]
 pub enum PreparedHeterogeneousGpuDispatch {
     /// One fused unary point chain. A linear whole suffix keeps the existing
@@ -1696,34 +1697,58 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Authored BlendMode evaluated by the shared CPU/GPU algebra.
         blend_mode: BlendMode,
     },
+    /// Ordered N-input straight-alpha composition in scene-linear working
+    /// space. At least two inputs are required by this GPU execution shape.
+    MultiInput {
+        /// Exact semantic MultiInput node.
+        node: EffectGraphNodeId,
+        /// Input materializations in authored evaluation order.
+        inputs: Arc<[EffectMaterializationId]>,
+        /// New joined materialization.
+        output: EffectMaterializationId,
+        /// Producer-completion dependencies in the same order as `inputs`.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved after the final ordered blend.
+        signal: EffectCompletionToken,
+        /// Authored straight-alpha opacity applied at every fold step.
+        opacity: f32,
+        /// Authored BlendMode evaluated by the shared CPU/GPU algebra.
+        blend_mode: BlendMode,
+    },
 }
 
 impl PreparedHeterogeneousGpuDispatch {
     /// New output materialization.
     pub const fn output(&self) -> EffectMaterializationId {
         match self {
-            Self::PointChain { output, .. } | Self::Blend { output, .. } => *output,
+            Self::PointChain { output, .. }
+            | Self::Blend { output, .. }
+            | Self::MultiInput { output, .. } => *output,
         }
     }
 
     /// Completion dependencies.
     pub fn waits(&self) -> &[EffectCompletionToken] {
         match self {
-            Self::PointChain { waits, .. } | Self::Blend { waits, .. } => waits,
+            Self::PointChain { waits, .. }
+            | Self::Blend { waits, .. }
+            | Self::MultiInput { waits, .. } => waits,
         }
     }
 
     /// Completion token produced by this dispatch.
     pub const fn signal(&self) -> EffectCompletionToken {
         match self {
-            Self::PointChain { signal, .. } | Self::Blend { signal, .. } => *signal,
+            Self::PointChain { signal, .. }
+            | Self::Blend { signal, .. }
+            | Self::MultiInput { signal, .. } => *signal,
         }
     }
 
     fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
-            Self::Blend { node, .. } => output.push(*node),
+            Self::Blend { node, .. } | Self::MultiInput { node, .. } => output.push(*node),
         }
     }
 
@@ -1736,6 +1761,11 @@ impl PreparedHeterogeneousGpuDispatch {
             Self::Blend { base, overlay, .. } => {
                 visit(*base)?;
                 visit(*overlay)?;
+            }
+            Self::MultiInput { inputs, .. } => {
+                for input in inputs.iter().copied() {
+                    visit(input)?;
+                }
             }
         }
         Ok(())
@@ -2893,6 +2923,24 @@ fn prepare_gpu_suffix(
                             node: *node_id,
                             base: inputs[0],
                             overlay: inputs[1],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            opacity: *opacity,
+                            blend_mode: *blend_mode,
+                        })
+                    }
+                    EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
+                        if inputs.len() < 2 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_multi_input_dispatch_requires_two_inputs",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::MultiInput {
+                            node: *node_id,
+                            inputs: Arc::clone(inputs),
                             output: *output,
                             waits: Arc::clone(waits),
                             signal: *signal,
@@ -4274,6 +4322,95 @@ mod tests {
             work.gpu_suffix().output_materialization(),
             work.plan().output_materialization()
         );
+    }
+
+    #[test]
+    fn prepares_ordered_gpu_multi_input_join_without_parallel_semantic_ir() {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let first = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let left = builder.add_unary_from(
+            first,
+            EffectRenderOp::ColorAdjust {
+                exposure: 0.2,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+            },
+        );
+        let middle = builder.add_unary_from(first, EffectRenderOp::Grain { amount: 0.1 });
+        let right = builder.add_unary_from(
+            first,
+            EffectRenderOp::ColorAdjust {
+                exposure: -0.15,
+                contrast: 1.1,
+                saturation: 0.9,
+                working_color_space: WorkingColorSpace::LinearRec2020,
+            },
+        );
+        let output = builder.add_multi_input(vec![left, middle, right], BlendMode::SoftLight, 0.35);
+        builder.set_current_output(output);
+        let compiled = compile_reference_render_graph(builder.finish()).expect("MultiInput graph");
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&compiled),
+            &test_environment(),
+            request(EffectFrameExtent::new(8, 8)),
+        )
+        .expect("GPU MultiInput suffix");
+
+        assert_eq!(work.cpu_nodes(), [first]);
+        assert_eq!(work.gpu_suffix().node_ids(), [left, middle, right, output]);
+        let dispatches = work
+            .gpu_suffix()
+            .steps()
+            .iter()
+            .filter_map(|step| match step {
+                PreparedHeterogeneousGpuStep::Dispatch(dispatch) => Some(dispatch),
+                PreparedHeterogeneousGpuStep::Release { .. } => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(dispatches.len(), 4);
+        assert!(matches!(
+            dispatches.last(),
+            Some(PreparedHeterogeneousGpuDispatch::MultiInput {
+                node,
+                inputs,
+                waits,
+                blend_mode: BlendMode::SoftLight,
+                opacity,
+                ..
+            }) if *node == output
+                && inputs.len() == 3
+                && waits.len() == inputs.len()
+                && opacity.to_bits() == 0.35_f32.to_bits()
+        ));
+        assert_eq!(
+            work.gpu_suffix()
+                .steps()
+                .iter()
+                .filter(|step| matches!(step, PreparedHeterogeneousGpuStep::Release { .. }))
+                .count(),
+            4,
+            "upload and all three ordered inputs retire exactly once"
+        );
+    }
+
+    #[test]
+    fn one_input_multi_input_does_not_claim_an_unimplemented_gpu_copy() {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let output = builder.add_multi_input(vec![source], BlendMode::Normal, 1.0);
+        builder.set_current_output(output);
+        let compiled = compile_reference_render_graph(builder.finish()).expect("one-input graph");
+        let modes = compiled.node_execution_modes(output).expect("compiled node modes");
+        assert!(modes.contains(
+            EffectProcessingBackend::Cpu,
+            EffectWorkingPrecision::Float32
+        ));
+        assert!(!modes.contains(
+            EffectProcessingBackend::Gpu,
+            EffectWorkingPrecision::Float32
+        ));
     }
 
     #[test]

@@ -338,8 +338,14 @@ remaining live CPU value is the transfer source. Runtime moves last-use values,
 clones only fan-out values with future consumers, releases join inputs, and
 checks the resulting peak plus Mask geometry/row scratch and Gaussian/Sharpen scratch against the bound
 Effect Execution Session before allocation. Input and fan-out copies observe
-the same fixed-size cooperative checkpoints as long-running kernels. GPU Mask
-and MultiInput joins, multiple transfers, color-domain conversion,
+the same fixed-size cooperative checkpoints as long-running kernels. The GPU
+Adapter executes an ordered MultiInput with at least two inputs as a left fold
+over the shared straight-alpha BlendMode compositor. An N-input dispatch owns
+`N - 2` private intermediate textures plus its semantic output; the physical
+recording requirement and evidence count every one in bytes and resources,
+and terminal failure removes unpublished private outputs. One-input
+MultiInput remains CPU-only until an exact GPU copy primitive exists. GPU Mask,
+multiple transfers, color-domain conversion,
 temporal/stateful work, and external lanes remain typed blockers rather than
 being flattened or silently rerun.
 
