@@ -34,6 +34,13 @@ pub enum EffectGpuPointOp {
     Vignette { intensity: f32, feather: f32 },
     /// Deterministic monochromatic grain.
     Grain { amount: f32 },
+    /// Hard source-frame crop using normalized edge insets.
+    Crop {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    },
 }
 
 /// Immutable renderer-facing GPU plan for a compiled effect graph.
@@ -671,6 +678,12 @@ fn lower_point_op(
             Ok(EffectGpuPointOp::Vignette { intensity: *intensity, feather: *feather })
         }
         EffectRenderOp::Grain { amount } => Ok(EffectGpuPointOp::Grain { amount: *amount }),
+        EffectRenderOp::Crop { left, top, right, bottom } => Ok(EffectGpuPointOp::Crop {
+            left: *left,
+            top: *top,
+            right: *right,
+            bottom: *bottom,
+        }),
         unsupported => Err(EffectGpuPlanBlocker::UnsupportedOperation {
             node_id,
             op: operation_name(unsupported),
@@ -698,6 +711,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vignette { .. } => "vignette",
         EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         EffectRenderOp::Grain { .. } => "grain",
+        EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut_3d",
         EffectRenderOp::Custom { .. } => "custom",
@@ -719,9 +733,19 @@ mod tests {
             working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.25 });
+        builder.append_unary(EffectRenderOp::Crop {
+            left: 0.25,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.25,
+        });
         let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("supported point chain");
-        assert_eq!(plan.operations().len(), 2);
+        assert_eq!(plan.operations().len(), 3);
+        assert_eq!(
+            plan.operations()[2],
+            EffectGpuPointOp::Crop { left: 0.25, top: 0.0, right: 0.0, bottom: 0.25 }
+        );
         assert_eq!(plan.graph_signature(), compiled.signature_hash());
     }
 

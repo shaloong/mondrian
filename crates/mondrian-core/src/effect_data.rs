@@ -21,6 +21,7 @@ pub enum EffectType {
     ColorWheel,
     Curves,
     HueSaturationLightness,
+    Crop,
     GaussianBlur,
     Sharpen,
     Vignette,
@@ -40,6 +41,7 @@ impl EffectType {
             Self::ColorWheel => "builtin.color_wheel".to_string(),
             Self::Curves => "builtin.curves".to_string(),
             Self::HueSaturationLightness => "builtin.hue_saturation_lightness".to_string(),
+            Self::Crop => "builtin.crop".to_string(),
             Self::GaussianBlur => "builtin.gaussian_blur".to_string(),
             Self::Sharpen => "builtin.sharpen".to_string(),
             Self::Vignette => "builtin.vignette".to_string(),
@@ -59,6 +61,7 @@ impl EffectType {
             "builtin.color_wheel" => Self::ColorWheel,
             "builtin.curves" => Self::Curves,
             "builtin.hue_saturation_lightness" => Self::HueSaturationLightness,
+            "builtin.crop" => Self::Crop,
             "builtin.gaussian_blur" => Self::GaussianBlur,
             "builtin.sharpen" => Self::Sharpen,
             "builtin.vignette" => Self::Vignette,
@@ -78,6 +81,7 @@ impl EffectType {
             Self::ColorWheel => "色轮",
             Self::Curves => "曲线",
             Self::HueSaturationLightness => "色相/饱和度/亮度",
+            Self::Crop => "裁切",
             Self::GaussianBlur => "高斯模糊",
             Self::Sharpen => "锐化",
             Self::Vignette => "暗角",
@@ -97,6 +101,7 @@ impl EffectType {
             | Self::ColorWheel
             | Self::Curves
             | Self::HueSaturationLightness => vec!["颜色", "调色"],
+            Self::Crop => vec!["变换"],
             Self::GaussianBlur | Self::Sharpen => vec!["颜色", "模糊与锐化"],
             Self::Vignette | Self::ChromaticAberration | Self::Grain => vec!["颜色", "风格化"],
             Self::ChromaKey | Self::LumaKey => vec!["抠像"],
@@ -112,6 +117,7 @@ impl EffectType {
             Self::ColorWheel => "color_wheel".to_string(),
             Self::Curves => "curves".to_string(),
             Self::HueSaturationLightness => "hue_saturation_lightness".to_string(),
+            Self::Crop => "crop".to_string(),
             Self::GaussianBlur => "gaussian_blur".to_string(),
             Self::Sharpen => "sharpen".to_string(),
             Self::Vignette => "vignette".to_string(),
@@ -348,6 +354,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::ColorWheel
             | Self::Curves
             | Self::HueSaturationLightness
+            | Self::Crop
             | Self::GaussianBlur
             | Self::Sharpen
             | Self::Vignette
@@ -412,5 +419,27 @@ mod tests {
             parse_effect_id_from_property_path("effect.a1b2c3d4e5f6"),
             None
         );
+    }
+
+    #[test]
+    fn crop_effect_author_state_round_trips_without_legacy_translation() {
+        let mut effect = EffectNode::new(EffectType::Crop);
+        effect.define_property(
+            PropertyDescriptor::new(
+                EffectType::Crop.property_path("left"),
+                "左侧",
+                PropertyValue::Float(12.5),
+            )
+            .with_parameter_id(
+                EffectType::Crop.parameter_id("left").expect("Crop parameter identity"),
+            ),
+        );
+
+        let json = serde_json::to_string(&effect).expect("serialize Crop author state");
+        let reopened: EffectNode =
+            serde_json::from_str(&json).expect("deserialize Crop author state");
+
+        assert_eq!(reopened, effect);
+        assert_eq!(reopened.effect_type.key(), "builtin.crop");
     }
 }

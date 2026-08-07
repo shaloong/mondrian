@@ -47,8 +47,10 @@ the production source file.
 
 Inspector effect rows are projected from the domain `ParameterSchema`. Numeric
 soft bounds and step, enum options, and typed resource intent come from that
-single schema; `AnimatablePropertyUiMetadata` only groups or spatially lays out
-controls. The UI routes mutations through the instance address but displays and
+single schema; `AnimatablePropertyUiMetadata` groups, orders, or spatially lays
+out controls. Definition order is optional so older author data falls back to
+deterministic address order; widgets never derive semantic order from translated
+labels. The UI routes mutations through the instance address but displays and
 persists the definition-stable `ParameterId`. It must not recreate ranges,
 accept enum keys absent from the schema, or flatten a resource reference into a
 generic text parameter.

@@ -1377,12 +1377,12 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
         resource_lifetime: EffectResourceLifetime::Frame,
     };
     match op {
-        EffectRenderOp::ColorAdjust { .. } | EffectRenderOp::Vignette { .. } => {
-            EffectImplementationRequirements {
-                execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
-                ..cpu_float
-            }
-        }
+        EffectRenderOp::ColorAdjust { .. }
+        | EffectRenderOp::Vignette { .. }
+        | EffectRenderOp::Crop { .. } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
         EffectRenderOp::GaussianBlur { radius } => EffectImplementationRequirements {
             roi_from_effect_input: finite_radius_roi(*radius),
             ..cpu_float

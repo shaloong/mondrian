@@ -1884,13 +1884,25 @@ impl InspectorPanelModel {
                     effect_id: effect.id,
                     label: effect_display_name(&effect.effect_type),
                     enabled: effect.is_enabled,
-                    properties: effect
-                        .properties
-                        .iter()
-                        .map(|(path, property)| {
-                            inspector_property_model(path, property, clip_author_time)
-                        })
-                        .collect(),
+                    properties: {
+                        let mut properties = effect.properties.iter().collect::<Vec<_>>();
+                        properties.sort_by(|(left_path, left), (right_path, right)| {
+                            left.descriptor
+                                .ui_metadata
+                                .display_order
+                                .unwrap_or(u32::MAX)
+                                .cmp(
+                                    &right.descriptor.ui_metadata.display_order.unwrap_or(u32::MAX),
+                                )
+                                .then_with(|| left_path.cmp(right_path))
+                        });
+                        properties
+                            .into_iter()
+                            .map(|(path, property)| {
+                                inspector_property_model(path, property, clip_author_time)
+                            })
+                            .collect()
+                    },
                 })
                 .collect(),
             masks: clip

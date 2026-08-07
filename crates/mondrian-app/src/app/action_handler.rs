@@ -6849,10 +6849,10 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_visual_effect_sets_parameter_by_stable_address_with_undo_snapshot() {
+    fn dispatch_crop_parameter_by_stable_address_has_reversible_author_snapshot() {
         let (mut state, _, clip_id) = state_with_two_video_tracks();
         let (effect_id, path, parameter, initial_value) =
-            add_default_effect_with_first_property(&mut state, EffectType::GaussianBlur);
+            add_default_effect_with_first_property(&mut state, EffectType::Crop);
         let next_value = different_property_value(&initial_value);
 
         state
@@ -6883,6 +6883,15 @@ mod tests {
             .and_then(|effect| effect.properties.property(&path))
             .expect("restored property");
         assert_eq!(property.static_value(), &initial_value);
+
+        assert!(state.redo_timeline().expect("redo Crop property"));
+        let property = state.active_sequence().expect("sequence").video_tracks[0].clips[0]
+            .effects
+            .iter()
+            .find(|effect| effect.id == effect_id)
+            .and_then(|effect| effect.properties.property(&path))
+            .expect("reapplied Crop property");
+        assert_eq!(property.static_value(), &next_value);
     }
 
     #[test]

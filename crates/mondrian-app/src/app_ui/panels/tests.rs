@@ -3246,6 +3246,52 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
 }
 
 #[test]
+fn crop_definition_projects_four_percent_parameters_into_inspector() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Crop inspector");
+    let tb = sequence.time_base();
+    let mut clip = Clip::new_solid_color(AssetId::new(), Color::WHITE, tt(0, tb), tt(24, tb))
+        .expect("valid solid Clip");
+    let effect = mondrian_effects::EffectNode::with_defaults(EffectType::Crop);
+    let effect_id = effect.id;
+    clip.add_effect_node(effect);
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Crop Clip");
+    state.test_set_sequence(Some(sequence));
+    assert!(state.select_effect_by_id(clip_id, effect_id).is_some());
+
+    let models = AppUiPanelModels::from_app_state(&state);
+    let crop = models
+        .inspector
+        .effects
+        .iter()
+        .find(|effect| effect.effect_id == effect_id)
+        .expect("Crop inspector section");
+    let parameter_ids = crop
+        .properties
+        .iter()
+        .map(|property| property.schema.parameter_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(crop.label, effect_display_name(&EffectType::Crop));
+    assert_eq!(
+        parameter_ids,
+        vec![
+            "mondrian.effect.builtin.crop.left",
+            "mondrian.effect.builtin.crop.top",
+            "mondrian.effect.builtin.crop.right",
+            "mondrian.effect.builtin.crop.bottom",
+        ]
+    );
+    assert!(crop.properties.iter().all(|property| {
+        property.hard_min == Some(0.0)
+            && property.hard_max == Some(100.0)
+            && property.step == Some(0.1)
+            && property.is_animatable
+    }));
+}
+
+#[test]
 fn viewer_and_timeline_share_the_sequence_drop_frame_display_contract() {
     let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
     let mut state = AppState::new();

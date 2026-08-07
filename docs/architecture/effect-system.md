@@ -78,8 +78,9 @@ The schema is executable rather than decorative. `AnimatedProperty` enforces
 finite values, hard-range policy, allowed interpolation, dense channel layout,
 strict keyframe ordering, and stable enum option indices on every mutation and
 when project author state is validated. Soft ranges and steps drive the editor
-from that same schema; UI metadata only owns presentation grouping and spatial
-layout hints. Enum parameters use Hold automation over stable option keys.
+from that same schema; UI metadata owns presentation grouping, Definition order,
+and spatial layout hints. Missing order metadata retains deterministic address
+order for older author data. Enum parameters use Hold automation over stable option keys.
 Resource parameters distinguish unbound, project-asset, external-file, and URI
 intent and require resource-level cache invalidation. LUT selection uses this
 typed resource value rather than a free-form text parameter. LUT processing
@@ -751,6 +752,16 @@ illuminant, or chromatic-adaptation contract and was therefore capable of
 plausible-looking false color. Its persisted author type remains modeled for
 structured diagnosis, but it is not registered as selectable or executable.
 
+Crop is one ordinary built-in Effect, not a second `Clip` geometry model. Its
+four stable, animatable percent parameters evaluate to normalized source-edge
+insets and hard-clear pixel centers outside the remaining rectangle to
+transparent black before the Clip spatial transform. CPU RGBA8, CPU Float32,
+ROI/tiled Float32, and fused GPU Float32 share the complete source-frame
+coordinate rule; a partial ROI never reinterprets its local origin as the
+source origin. The operation is deterministic, stateless, pixel-local, part of
+compiled graph/cache identity, and follows the same authoring, persistence,
+Inspector, Undo/Redo, Preview, and Export Interfaces as every built-in Effect.
+
 `Blend`, `Mask`, `MaskSource`, and ordered `MultiInput` nodes use the same float
 working-frame contract. Mask rasterization produces native float coverage rather
 than quantizing through an 8-bit matte. Its prepared geometry is immutable and
@@ -836,8 +847,9 @@ propagate that error instead of substituting black or unchanged pixels.
 accepts only a compiled single-source unary chain and emits an immutable fused
 point plan without wgpu objects. One preserving scene-linear, log/perceptual,
 display-linear, or display-encoded processing domain is retained as part of the
-plan rather than interpreted by the effects crate. ColorAdjust, Vignette, and Grain
-are supported in source order with a bounded eight-op pass; spatial operations,
+plan rather than interpreted by the effects crate. ColorAdjust, Vignette,
+Grain, and Crop are supported in source order with a bounded eight-op pass;
+neighborhood spatial operations,
 LUT resources, custom processors, and branching graph nodes return typed
 `EffectGpuPlanBlocker` values. This makes capability checks deterministic and
 keeps renderer ownership separate from effect graph semantics.

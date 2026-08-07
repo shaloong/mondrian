@@ -380,6 +380,16 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
         } else if (effect.header.x == 4u) {
             let noise = grain_noise(position) * clamp(effect.params.x, 0.0, 1.0) * 0.18;
             pixel = vec4<f32>(pixel.rgb + vec3<f32>(noise), pixel.a);
+        } else if (effect.header.x == 5u) {
+            let normalized_center = (position + vec2<f32>(0.5)) / uniforms.geometry.zw;
+            let left = clamp(effect.params.x, 0.0, 1.0);
+            let top = clamp(effect.params.y, 0.0, 1.0);
+            let right = 1.0 - clamp(effect.params.z, 0.0, 1.0);
+            let bottom = 1.0 - clamp(effect.params.w, 0.0, 1.0);
+            if (normalized_center.x < left || normalized_center.x >= right ||
+                normalized_center.y < top || normalized_center.y >= bottom) {
+                pixel = vec4<f32>(0.0);
+            }
         }
     }
     return pixel;
@@ -1862,6 +1872,11 @@ fn effect_uniforms(
                 params: [amount, 0.0, 0.0, 0.0],
                 color: [0.0; 4],
             },
+            EffectGpuPointOp::Crop { left, top, right, bottom } => GpuEffectUniform {
+                header: [5, 0, 0, 0],
+                params: [left, top, right, bottom],
+                color: [0.0; 4],
+            },
         };
     }
     uniforms
@@ -2198,6 +2213,12 @@ mod tests {
             working_color_space: WorkingColorSpace::LinearRec2020,
         });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.7, feather: 0.4 });
+        builder.append_unary(EffectRenderOp::Crop {
+            left: 0.25,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.25,
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point chain");
 
@@ -2208,7 +2229,9 @@ mod tests {
         assert_eq!(uniforms[0].color, [0.2627, 0.6780, 0.0593, 0.0]);
         assert_eq!(uniforms[1].header[0], 3);
         assert_eq!(uniforms[1].params, [0.7, 0.4, 0.0, 0.0]);
-        assert!(uniforms[2..].iter().all(|uniform| uniform.header[0] == 0));
+        assert_eq!(uniforms[2].header[0], 5);
+        assert_eq!(uniforms[2].params, [0.25, 0.0, 0.0, 0.25]);
+        assert!(uniforms[3..].iter().all(|uniform| uniform.header[0] == 0));
     }
 
     #[test]
@@ -2390,6 +2413,12 @@ mod tests {
         });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.45, feather: 0.7 });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.1 });
+        builder.append_unary(EffectRenderOp::Crop {
+            left: 0.25,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.25,
+        });
         let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point effects");
         let expected =

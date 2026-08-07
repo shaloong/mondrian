@@ -421,9 +421,11 @@ float-linear compositor, checks HLG decoded codes plus neutral/chromatic
 invariants, compares sRGB→linear Rec.2020 against an independent analytic
 matrix, and proves RGB behind zero Alpha cannot affect the composite. Finally
 it exports one Rec.709 H.264 frame through the production queue, strictly
-probes and reimports it, and compares sampled Program pixels. This is not an
-independent absolute HLG transfer-function oracle and does not close PQ, Log,
-or real-media nesting. Its report remains partial even though the complete
+probes and reimports it, and compares sampled Program pixels. This slice is not
+itself an independent absolute HLG oracle; that qualification is supplied by
+the core 1000-nit BT.2100 oracle and the renderer-wide production HLG/PQ
+absolute-luminance corpus. The slice does not close Camera Log or real-media
+nesting. Its report remains partial even though the complete
 coordinator consumes it as one of seven required stages.
 
 Run the Proxy/Original and Offline Relink slice:
@@ -675,12 +677,22 @@ source mapping through proxy presentation, original-source production export,
 ordinary reimport, physical PTS interval evidence, and adjacent/wrong-direction
 counterfactuals; their manifest purposes are explicit and neither is eligible
 as a color reference.
-Color Media adds real file-backed color/Alpha execution in `500..525`, while
-explicitly retaining the independent absolute HLG/PQ/Log gap. The H.264
+Color Media adds real file-backed color/Alpha execution in `500..525`. Its
+media-chain report does not duplicate the independent HLG/PQ reference gates,
+and Camera Log remains outside this Golden slice. The H.264
 editorial fixtures are not eligible to close
 primary-color or LUT coverage. Stress coverage
 also still lacks 4K60 and broader real-device VFR/Log/multichannel/damaged-media fixtures,
 so `Nightly/Release -Scope All` correctly remains blocked.
+
+The current source-attested Golden v14 supervisor run
+`20260807T140815Z-complete-golden-219ba1df` passed `3/3`. Every pass used a
+distinct run, Project, process log, and complete report; all processes exited
+normally after publishing terminal evidence. The consecutive report is
+`target/validation/runs/20260807T140815Z-complete-golden-219ba1df/complete-golden-consecutive-report.json`.
+This closes the current local complete-Golden obligation only; native CI and
+the separately scoped real-device video/audio qualifications remain independent
+release evidence.
 
 A separate non-ignored Retime Hero seam gate uses the same production
 single-Project workflow driver with internally consistent metadata-only

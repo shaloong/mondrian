@@ -492,6 +492,14 @@ same progress owner, completion lifecycle, quarantined resource envelope, and
 deferred cleanup forward; it must not drop an old frame merely because the UI
 surface changed.
 
+Headless resource coordination samples and applies the App/Preview policy on
+every turn, but renderer-pool reconfiguration occurs only after exact
+completion polling proves the capacity-one submission slot idle. If an ordinary
+queue-ordered output is already visible while its owner awaits callback
+retirement, the turn reports bounded backpressure and retries; it never treats
+that normal owner lifetime as a fatal Adapter error or trims resources beneath
+the submission.
+
 Adapter teardown closes admission and appends one FIFO retirement envelope to
 the existing progress worker; the Window/UI or Headless caller performs no
 poll, join, or cancellation wait. The envelope retains the device, queue,

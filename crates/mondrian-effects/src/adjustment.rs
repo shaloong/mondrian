@@ -207,6 +207,16 @@ pub(crate) fn apply_render_op(
                 );
             }
         }
+        EffectRenderOp::Crop { left, top, right, bottom } => {
+            let Some(bounds) = normalized_crop_bounds(width, height, *left, *top, *right, *bottom)
+            else {
+                return Err(EffectExecutionError::InvalidRenderParameter {
+                    op: "crop",
+                    parameter: "insets",
+                });
+            };
+            apply_crop_rgba8(working, width, bounds);
+        }
         EffectRenderOp::TemporalFrameBlend { .. } => {
             return Err(EffectExecutionError::TemporalFrameProviderRequired);
         }
@@ -274,6 +284,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::ColorAdjust { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Grain { .. }
+        | EffectRenderOp::Crop { .. }
         | EffectRenderOp::TemporalFrameBlend { .. }
         | EffectRenderOp::Lut3D { .. }
         | EffectRenderOp::Custom { .. } => 0,
@@ -472,6 +483,20 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             }
             Ok(true)
         }
+        EffectRenderOp::Crop { left, top, right, bottom } => {
+            let Some(bounds) = normalized_crop_bounds(
+                region.frame_width,
+                region.frame_height,
+                *left,
+                *top,
+                *right,
+                *bottom,
+            ) else {
+                return Ok(false);
+            };
+            apply_crop_rgba_f32_region_controlled(working, region, bounds, checkpoint)?;
+            Ok(true)
+        }
         EffectRenderOp::TemporalFrameBlend { .. } => Ok(false),
         EffectRenderOp::Lut3D { lut, intensity } => {
             lut.apply_rgba_f32_in_place_controlled(working, *intensity, checkpoint)?;
@@ -479,6 +504,68 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
         }
         EffectRenderOp::Custom { .. } => Ok(false),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CropPixelBounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+fn normalized_crop_bounds(
+    width: u32,
+    height: u32,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> Option<CropPixelBounds> {
+    if width == 0 || height == 0 || ![left, top, right, bottom].into_iter().all(f32::is_finite) {
+        return None;
+    }
+    Some(CropPixelBounds {
+        left: left.clamp(0.0, 1.0) * width as f32,
+        top: top.clamp(0.0, 1.0) * height as f32,
+        right: (1.0 - right.clamp(0.0, 1.0)) * width as f32,
+        bottom: (1.0 - bottom.clamp(0.0, 1.0)) * height as f32,
+    })
+}
+
+fn crop_contains(bounds: CropPixelBounds, x: f32, y: f32) -> bool {
+    x >= bounds.left && x < bounds.right && y >= bounds.top && y < bounds.bottom
+}
+
+fn apply_crop_rgba8(pixels: &mut [u8], width: u32, bounds: CropPixelBounds) {
+    let width = width as usize;
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let x = (index % width) as f32 + 0.5;
+        let y = (index / width) as f32 + 0.5;
+        if !crop_contains(bounds, x, y) {
+            pixel.fill(0);
+        }
+    }
+}
+
+fn apply_crop_rgba_f32_region_controlled<E>(
+    pixels: &mut [[f32; 4]],
+    region: EffectRasterRegion,
+    bounds: CropPixelBounds,
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+) -> Result<(), E> {
+    let row_width = region.width as usize;
+    for (local_y, row) in pixels.chunks_exact_mut(row_width).enumerate() {
+        checkpoint()?;
+        let y = region.y as f32 + local_y as f32 + 0.5;
+        for (local_x, pixel) in row.iter_mut().enumerate() {
+            let x = region.x as f32 + local_x as f32 + 0.5;
+            if !crop_contains(bounds, x, y) {
+                *pixel = [0.0; 4];
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn blend_adjustment_result(
@@ -2370,5 +2457,72 @@ mod tests {
         )
         .expect("execute LUT effect");
         assert_eq!(&output, &[0, 0, 255, 91]);
+    }
+
+    #[test]
+    fn crop_rgba8_keeps_only_pixel_centers_inside_source_relative_bounds() {
+        let mut pixels =
+            (0_u8..16).flat_map(|value| [value, value, value, 255]).collect::<Vec<_>>();
+
+        apply_render_op(
+            &mut pixels,
+            4,
+            4,
+            &EffectRenderOp::Crop { left: 0.25, top: 0.25, right: 0.25, bottom: 0.25 },
+            0,
+        )
+        .expect("execute RGBA8 Crop");
+
+        for (index, pixel) in pixels.chunks_exact(4).enumerate() {
+            let x = index % 4;
+            let y = index / 4;
+            if (1..3).contains(&x) && (1..3).contains(&y) {
+                assert_eq!(pixel, &[index as u8, index as u8, index as u8, 255]);
+            } else {
+                assert_eq!(pixel, &[0, 0, 0, 0]);
+            }
+        }
+    }
+
+    #[test]
+    fn crop_partial_region_uses_complete_frame_coordinates() {
+        let source = [
+            [0.2, 0.3, 0.4, 1.0],
+            [0.5, 0.6, 0.7, 1.0],
+            [0.8, 0.9, 1.0, 1.0],
+            [1.1, 1.2, 1.3, 1.0],
+        ];
+        let mut region_pixels = source.to_vec();
+        let supported = apply_render_op_f32_region_controlled(
+            &mut region_pixels,
+            EffectRasterRegion::new(4, 4, 2, 1, 2, 2),
+            &EffectRenderOp::Crop { left: 0.25, top: 0.25, right: 0.25, bottom: 0.25 },
+            0,
+            &mut || Ok::<(), Infallible>(()),
+        )
+        .expect("execute partial-region Crop");
+
+        assert!(supported);
+        assert_eq!(
+            region_pixels,
+            vec![source[0], [0.0; 4], source[2], [0.0; 4]]
+        );
+    }
+
+    #[test]
+    fn crop_rejects_non_finite_insets() {
+        let error = apply_render_op(
+            &mut vec![255, 255, 255, 255],
+            1,
+            1,
+            &EffectRenderOp::Crop { left: f32::NAN, top: 0.0, right: 0.0, bottom: 0.0 },
+            0,
+        )
+        .expect_err("non-finite Crop must fail closed");
+
+        assert!(matches!(
+            error,
+            EffectExecutionError::InvalidRenderParameter { op: "crop", parameter: "insets" }
+        ));
     }
 }

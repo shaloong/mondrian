@@ -4194,6 +4194,36 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{display} apply: {error}"));
         }
 
+        for (pixel_index, (hlg_pixel, pq_pixel)) in
+            hlg.chunks_exact(4).zip(pq.chunks_exact(4)).enumerate()
+        {
+            let hlg_linear = crate::bt2100_hlg_1000_nit_to_display_linear_rgb([
+                f64::from(hlg_pixel[0]),
+                f64::from(hlg_pixel[1]),
+                f64::from(hlg_pixel[2]),
+            ])
+            .expect("production HLG output must be a normalized full-range signal");
+            let pq_linear = crate::bt2100_pq_to_display_linear_rgb([
+                f64::from(pq_pixel[0]),
+                f64::from(pq_pixel[1]),
+                f64::from(pq_pixel[2]),
+            ])
+            .expect("production PQ output must be a normalized full-range signal");
+
+            for (channel, (actual, expected)) in hlg_linear
+                .components_nits()
+                .into_iter()
+                .zip(pq_linear.components_nits())
+                .enumerate()
+            {
+                let tolerance_nits = 0.02_f64.max(expected.abs() * 2.0e-4);
+                assert!(
+                    (actual - expected).abs() <= tolerance_nits,
+                    "HLG/PQ absolute display mismatch at pixel {pixel_index}, channel {channel}: expected {expected} cd/m2 from PQ, got {actual} cd/m2 from HLG (tolerance {tolerance_nits})"
+                );
+            }
+        }
+
         let pq_to_hlg = config
             .processor("Rec.2100-PQ - Display", "Rec.2100-HLG - Display")
             .expect("PQ to HLG display-encoding processor")

@@ -542,6 +542,17 @@ pub enum EffectRenderOp {
     Grain {
         amount: f32,
     },
+    /// Source-relative hard crop expressed as normalized edge insets.
+    ///
+    /// Pixels outside the remaining rectangle become transparent black before
+    /// the Clip spatial transform. Insets are evaluated in the complete source
+    /// frame coordinate system, including tiled/ROI execution.
+    Crop {
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    },
     /// Deterministic finite temporal-sample proof processor.
     ///
     /// The output coverage-correctly mixes the current upstream frame and the
@@ -609,6 +620,13 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Grain { amount } => {
                 formatter.debug_struct("Grain").field("amount", amount).finish()
             }
+            Self::Crop { left, top, right, bottom } => formatter
+                .debug_struct("Crop")
+                .field("left", left)
+                .field("top", top)
+                .field("right", right)
+                .field("bottom", bottom)
+                .finish(),
             Self::TemporalFrameBlend { sample_offset, mix } => formatter
                 .debug_struct("TemporalFrameBlend")
                 .field("sample_offset", sample_offset)
@@ -774,6 +792,13 @@ impl EffectRenderOp {
                 5u8.hash(state);
                 amount.to_bits().hash(state);
             }
+            EffectRenderOp::Crop { left, top, right, bottom } => {
+                9u8.hash(state);
+                left.to_bits().hash(state);
+                top.to_bits().hash(state);
+                right.to_bits().hash(state);
+                bottom.to_bits().hash(state);
+            }
             EffectRenderOp::TemporalFrameBlend { sample_offset, mix } => {
                 8u8.hash(state);
                 sample_offset.hash(state);
@@ -821,6 +846,7 @@ impl EffectRenderOp {
             EffectRenderOp::ColorAdjust { .. } => 1,
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
+            EffectRenderOp::Crop { .. } => 1,
             EffectRenderOp::Lut3D { .. } => 2,
             EffectRenderOp::GaussianBlur { .. } => 4,
             EffectRenderOp::Sharpen { .. } => 4,
@@ -1203,7 +1229,7 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 13] {
+fn builtin_effect_types() -> [EffectType; 14] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
@@ -1211,6 +1237,7 @@ fn builtin_effect_types() -> [EffectType; 13] {
         EffectType::ColorWheel,
         EffectType::Curves,
         EffectType::HueSaturationLightness,
+        EffectType::Crop,
         EffectType::GaussianBlur,
         EffectType::Sharpen,
         EffectType::Vignette,
@@ -1624,6 +1651,26 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(0.01),
             );
         }
+        EffectType::Crop => {
+            for (parameter, label) in [
+                ("left", "左侧"),
+                ("top", "顶部"),
+                ("right", "右侧"),
+                ("bottom", "底部"),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "裁切",
+                    label,
+                    PropertyValue::Float(0.0),
+                    Some(0.0),
+                    Some(100.0),
+                    Some(0.1),
+                );
+            }
+        }
         EffectType::GaussianBlur => {
             define_builtin_property(
                 &mut properties,
@@ -1818,6 +1865,7 @@ fn define_builtin_property(
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_string()),
         supports_spatial: false,
+        display_order: Some(properties.iter().count() as u32),
     };
     properties.define(descriptor);
 }
@@ -1840,6 +1888,7 @@ fn define_builtin_enum_property(
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_owned()),
         supports_spatial: false,
+        display_order: Some(properties.iter().count() as u32),
     };
     properties.define(descriptor);
 }
@@ -1907,6 +1956,7 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
     match (effect_type, parameter) {
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
         (EffectType::HueSaturationLightness, "hue") => ParameterUnit::Degrees,
+        (EffectType::Crop, "left" | "top" | "right" | "bottom") => ParameterUnit::Percent,
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
     }
@@ -1929,6 +1979,7 @@ fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
         | EffectType::Curves
         | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
         EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
+        EffectType::Crop => vec!["变换".to_string()],
         EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
         EffectType::Vignette | EffectType::ChromaticAberration | EffectType::Grain => {
             vec!["风格化".to_string()]
@@ -1973,10 +2024,12 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         topology: EffectGraphTopology::LinearChain,
     };
     match effect_type {
-        EffectType::BasicCorrection | EffectType::Vignette => EffectExecutionContract {
-            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-            ..cpu_linear
-        },
+        EffectType::BasicCorrection | EffectType::Vignette | EffectType::Crop => {
+            EffectExecutionContract {
+                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+                ..cpu_linear
+            }
+        }
         EffectType::Grain => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             determinism: EffectDeterminism::FrameSeeded,
@@ -2106,6 +2159,22 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::Crop => {
+            let left_id = builtin_parameter_id(effect_type, "left");
+            let top_id = builtin_parameter_id(effect_type, "top");
+            let right_id = builtin_parameter_id(effect_type, "right");
+            let bottom_id = builtin_parameter_id(effect_type, "bottom");
+            Some(Arc::new(move |effect, context, graph| {
+                let left = effect.evaluate_f32_parameter(&left_id, context.time, 0.0) / 100.0;
+                let top = effect.evaluate_f32_parameter(&top_id, context.time, 0.0) / 100.0;
+                let right = effect.evaluate_f32_parameter(&right_id, context.time, 0.0) / 100.0;
+                let bottom = effect.evaluate_f32_parameter(&bottom_id, context.time, 0.0) / 100.0;
+                if [left, top, right, bottom].into_iter().any(|inset| inset > 1.0e-6) {
+                    graph.append_unary(EffectRenderOp::Crop { left, top, right, bottom });
+                }
+                Ok(())
+            }))
+        }
         EffectType::GaussianBlur => {
             let radius_id = builtin_parameter_id(effect_type, "radius");
             Some(Arc::new(move |effect, context, graph| {
@@ -2170,6 +2239,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ColorWheel => "色轮",
         EffectType::Curves => "曲线",
         EffectType::HueSaturationLightness => "HSL",
+        EffectType::Crop => "裁切",
         EffectType::GaussianBlur => "模糊",
         EffectType::Sharpen => "锐化",
         EffectType::Vignette => "暗角",
@@ -2374,6 +2444,7 @@ mod tests {
         let expected = [
             EffectType::BasicCorrection,
             EffectType::Lut3D,
+            EffectType::Crop,
             EffectType::GaussianBlur,
             EffectType::Sharpen,
             EffectType::Vignette,
@@ -2401,6 +2472,41 @@ mod tests {
             let definition = effect_definition(&modeled_only).expect("built-in definition");
             assert!(!definition.supports_visual_evaluation());
         }
+    }
+
+    #[test]
+    fn crop_author_parameters_are_animatable_and_compile_to_normalized_insets() {
+        let mut effect =
+            instantiate_effect_node(EffectType::Crop).expect("registered Crop definition");
+        let left_path = EffectType::Crop.property_path("left");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: left_path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.0)),
+            })
+            .expect("set Crop start keyframe");
+        effect
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: left_path,
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(50.0)),
+            })
+            .expect("set Crop end keyframe");
+
+        let graph = build_effect_render_graph(&[effect], tt(5), TEST_WORKING_SPACE)
+            .expect("evaluate animated Crop");
+        let crop = graph.nodes.iter().find_map(|node| match &node.kind {
+            EffectGraphNodeKind::UnaryEffect {
+                op: EffectRenderOp::Crop { left, top, right, bottom },
+                ..
+            }
+            | EffectGraphNodeKind::DomainEffect {
+                op: EffectRenderOp::Crop { left, top, right, bottom },
+                ..
+            } => Some((*left, *top, *right, *bottom)),
+            _ => None,
+        });
+
+        assert_eq!(crop, Some((0.25, 0.0, 0.0, 0.0)));
     }
 
     #[test]

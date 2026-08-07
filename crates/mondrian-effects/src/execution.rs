@@ -1414,6 +1414,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::Vignette { .. } => "vignette",
         EffectRenderOp::ChromaticAberration { .. } => "chromatic_aberration",
         EffectRenderOp::Grain { .. } => "grain",
+        EffectRenderOp::Crop { .. } => "crop",
         EffectRenderOp::TemporalFrameBlend { .. } => "temporal_frame_blend",
         EffectRenderOp::Lut3D { .. } => "lut3d",
         EffectRenderOp::Custom { .. } => "custom",

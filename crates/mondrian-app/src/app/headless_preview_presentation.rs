@@ -156,10 +156,18 @@ pub(crate) fn present_headless_preview_candidate_at(
     // still has to advance native memory observation and apply pressure policy
     // on those turns.
     let viewer_resource_decision = advance_headless_execution_resource_policy(preview, state);
-    gpu.apply_resource_decision(&viewer_resource_decision)?;
     if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
         return Ok(candidate);
     }
+    // Reconfiguration may trim pools still referenced by the capacity-one
+    // submission owner. A pending callback is ordinary bounded pressure, not
+    // an Adapter failure. The App/Preview authorities above have retained the
+    // fresh policy; its current Viewer projection is applied on the first idle
+    // turn, before a replacement submission can be recorded.
+    if gpu.has_submission_in_flight() {
+        return Ok(HeadlessPreviewCandidate::Backpressured);
+    }
+    gpu.apply_resource_decision(&viewer_resource_decision)?;
     // A presentable publication consumes its exact Frame Demand before the
     // GPU callback and later validation probes necessarily finish. Observing
     // the same semantic + physical artifact is not another publication and

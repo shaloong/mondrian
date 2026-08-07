@@ -169,6 +169,14 @@ pub enum ColorScienceError {
         /// Rejected value.
         value: f64,
     },
+    /// A normalized HLG signal component was outside its full-range interval.
+    #[error("normalized BT.2100 HLG component {channel}={value} is outside [0, 1]")]
+    HlgComponentOutOfRange {
+        /// Stable channel name.
+        channel: &'static str,
+        /// Rejected value.
+        value: f64,
+    },
     /// CIEDE2000 arithmetic produced an invalid squared distance.
     #[error("CIEDE2000 produced invalid squared distance {value}")]
     InvalidDeltaESquared {
@@ -199,6 +207,44 @@ pub fn bt2100_pq_to_display_linear_rgb(
     }
     let linear = encoded.map(pq_eotf_nits);
     Bt2100DisplayLinearRgb::new(linear[0], linear[1], linear[2])
+}
+
+/// Decode normalized full-range BT.2100 HLG RGB for the 1000-nit reference display.
+///
+/// This applies the BT.2100 inverse OETF followed by the display OOTF with
+/// system gamma 1.2, zero black level, and BT.2020 scene-luma coefficients.
+/// The fixed display contract deliberately matches Mondrian Standard's current
+/// HLG delivery target; a different peak or black level requires a separately
+/// qualified display contract rather than silently reusing this oracle.
+pub fn bt2100_hlg_1000_nit_to_display_linear_rgb(
+    encoded: [f64; 3],
+) -> Result<Bt2100DisplayLinearRgb, ColorScienceError> {
+    for (channel, value) in [
+        ("red", encoded[0]),
+        ("green", encoded[1]),
+        ("blue", encoded[2]),
+    ] {
+        if !value.is_finite() {
+            return Err(ColorScienceError::NonFiniteComponent {
+                representation: "BT.2100 HLG",
+                component: channel,
+                value,
+            });
+        }
+        if !(0.0..=1.0).contains(&value) {
+            return Err(ColorScienceError::HlgComponentOutOfRange { channel, value });
+        }
+    }
+
+    let scene_linear = encoded.map(hlg_inverse_oetf);
+    let scene_luma = BT2020_LUMA_COEFFICIENTS
+        .into_iter()
+        .zip(scene_linear)
+        .map(|(coefficient, component)| coefficient * component)
+        .sum::<f64>();
+    let ootf_scale = HLG_REFERENCE_PEAK_NITS * scene_luma.powf(HLG_SYSTEM_GAMMA - 1.0);
+    let display_linear = scene_linear.map(|component| component * ootf_scale);
+    Bt2100DisplayLinearRgb::new(display_linear[0], display_linear[1], display_linear[2])
 }
 
 /// Convert absolute-luminance D65 XYZ to display-linear BT.2100 RGB.
@@ -384,6 +430,12 @@ const PQ_M2: f64 = 2523.0 / 32.0;
 const PQ_C1: f64 = 3424.0 / 4096.0;
 const PQ_C2: f64 = 2413.0 / 128.0;
 const PQ_C3: f64 = 2392.0 / 128.0;
+const HLG_OETF_A: f64 = 0.178_832_77;
+const HLG_OETF_B: f64 = 0.284_668_92;
+const HLG_OETF_C: f64 = 0.559_910_73;
+const HLG_SYSTEM_GAMMA: f64 = 1.2;
+const HLG_REFERENCE_PEAK_NITS: f64 = 1000.0;
+const BT2020_LUMA_COEFFICIENTS: [f64; 3] = [0.2627, 0.6780, 0.0593];
 
 const D50_REFERENCE_FROM_SRGB_WHITE: [f64; 3] = multiply_matrix_vector(
     XYZ_D65_TO_D50,
@@ -413,6 +465,14 @@ fn pq_inverse_eotf_non_negative(nits: f64) -> f64 {
     let normalized = nits / 10_000.0;
     let powered = normalized.powf(PQ_M1);
     ((PQ_C1 + PQ_C2 * powered) / (1.0 + PQ_C3 * powered)).powf(PQ_M2)
+}
+
+fn hlg_inverse_oetf(encoded: f64) -> f64 {
+    if encoded <= 0.5 {
+        encoded.powi(2) / 3.0
+    } else {
+        ((encoded - HLG_OETF_C) / HLG_OETF_A).exp().mul_add(1.0, HLG_OETF_B) / 12.0
+    }
 }
 
 fn validate_finite_triplet(
@@ -600,10 +660,45 @@ mod tests {
     }
 
     #[test]
+    fn hlg_reference_display_preserves_normative_breakpoint_white_and_peak() {
+        let black = bt2100_hlg_1000_nit_to_display_linear_rgb([0.0; 3]).expect("HLG black");
+        let breakpoint =
+            bt2100_hlg_1000_nit_to_display_linear_rgb([0.5; 3]).expect("HLG breakpoint");
+        let graphics_white =
+            bt2100_hlg_1000_nit_to_display_linear_rgb([0.75; 3]).expect("HLG graphics white");
+        let peak = bt2100_hlg_1000_nit_to_display_linear_rgb([1.0; 3]).expect("HLG peak");
+
+        assert_eq!(black.components_nits(), [0.0; 3]);
+        for component in breakpoint.components_nits() {
+            assert!((component - 50.697_028_491_100_5).abs() < 1.0e-10);
+        }
+        for component in graphics_white.components_nits() {
+            assert!((component - 203.152_145_353_666).abs() < 1.0e-10);
+        }
+        for component in peak.components_nits() {
+            // BT.2100 publishes the HLG constants to eight decimal places, so
+            // the inverse OETF reaches 1.000000024... rather than exact unity.
+            assert!((component - 1000.0).abs() < 5.0e-5);
+        }
+    }
+
+    #[test]
     fn hdr_color_science_rejects_implicit_clipping_and_non_finite_values() {
         assert!(matches!(
             bt2100_pq_to_display_linear_rgb([1.01, 0.0, 0.0]),
             Err(ColorScienceError::PqComponentOutOfRange { channel: "red", .. })
+        ));
+        assert!(matches!(
+            bt2100_hlg_1000_nit_to_display_linear_rgb([0.0, f64::NAN, 0.0]),
+            Err(ColorScienceError::NonFiniteComponent {
+                representation: "BT.2100 HLG",
+                component: "green",
+                ..
+            })
+        ));
+        assert!(matches!(
+            bt2100_hlg_1000_nit_to_display_linear_rgb([0.0, 0.0, -0.01]),
+            Err(ColorScienceError::HlgComponentOutOfRange { channel: "blue", .. })
         ));
         assert!(matches!(
             CieXyzD65Nits::new(0.0, f64::INFINITY, 0.0),

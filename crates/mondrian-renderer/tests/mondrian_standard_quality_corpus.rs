@@ -1,4 +1,5 @@
 use mondrian_core::{
+    bt2100_hlg_1000_nit_to_display_linear_rgb, bt2100_pq_to_display_linear_rgb,
     ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, MondrianStandardPackageIdentity,
     OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
 };
@@ -190,6 +191,51 @@ fn production_standard_views_satisfy_objective_corpus_invariants() {
         .expect("10-bit neutral gradient");
     for output in STANDARD_OUTPUT_TARGETS {
         assert_ten_bit_gradient_resolution(&corpus, ten_bit, output);
+    }
+}
+
+#[test]
+fn production_hlg_and_pq_outputs_match_in_absolute_display_luminance() {
+    ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
+    let corpus = parse_corpus();
+
+    for case in corpus.cases.iter().filter(|case| case.render_through_standard) {
+        let input = corpus.pixels_for(case);
+        let hlg = render_standard(&input, ColorSpace::Rec2100Hlg);
+        let pq = render_standard(&input, ColorSpace::Rec2100Pq);
+
+        for (pixel_index, (hlg_pixel, pq_pixel)) in hlg.iter().zip(&pq).enumerate() {
+            let hlg_linear = bt2100_hlg_1000_nit_to_display_linear_rgb([
+                f64::from(hlg_pixel[0]),
+                f64::from(hlg_pixel[1]),
+                f64::from(hlg_pixel[2]),
+            ])
+            .unwrap_or_else(|error| {
+                panic!("{} HLG pixel {pixel_index} is invalid: {error}", case.id)
+            });
+            let pq_linear = bt2100_pq_to_display_linear_rgb([
+                f64::from(pq_pixel[0]),
+                f64::from(pq_pixel[1]),
+                f64::from(pq_pixel[2]),
+            ])
+            .unwrap_or_else(|error| {
+                panic!("{} PQ pixel {pixel_index} is invalid: {error}", case.id)
+            });
+
+            for (channel, (actual, expected)) in hlg_linear
+                .components_nits()
+                .into_iter()
+                .zip(pq_linear.components_nits())
+                .enumerate()
+            {
+                let tolerance_nits = 0.02_f64.max(expected.abs() * 2.0e-4);
+                assert!(
+                    (actual - expected).abs() <= tolerance_nits,
+                    "{} HLG/PQ absolute display mismatch at pixel {pixel_index}, channel {channel}: expected {expected} cd/m2 from PQ, got {actual} cd/m2 from HLG (tolerance {tolerance_nits})",
+                    case.id
+                );
+            }
+        }
     }
 }
 

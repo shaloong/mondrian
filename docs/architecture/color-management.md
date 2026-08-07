@@ -158,6 +158,18 @@ reference calculation and PQ absolute-luminance endpoints are regression tests.
 Out-of-gamut negative display-linear values are retained through ITP conversion
 rather than silently clamped.
 
+BT.2100 HLG validation has a separate fixed-display oracle for Mondrian
+Standard's current 1000-nit, zero-black target. It applies the normative inverse
+OETF and the BT.2020-luma OOTF at system gamma 1.2, producing the same explicit
+display-linear cd/m2 type. Normative breakpoint, 203-nit graphics-white and peak
+vectors protect the oracle. The renderer quality corpus sends every renderable
+stimulus through the production HLG and PQ output boundaries, independently
+decodes both signals to absolute BT.2100 RGB, and compares each channel with a
+bounded absolute/relative luminance tolerance. This qualifies the HLG terminal
+encoding without treating HLG/PQ agreement inside OCIO as an independent
+reference. Other display peaks or black levels require a separately qualified
+contract rather than reusing this fixed oracle.
+
 ## Transform providers and output intent
 
 - `ColorEngine::MondrianStandard { package }`: productized policy selecting the
@@ -1063,7 +1075,9 @@ hold, and durable reopen retains typed Track/Clip/Asset identities plus canonica
 hashes. It proves decoded-code, independent sRGB-to-linear-Rec.2020, Alpha
 isolation, production Preview/Export/reimport, and coexistence with earlier
 authoring. It deliberately does not claim an independent absolute HLG
-transfer-function oracle or close PQ/Log.
+transfer-function oracle by itself or close Camera Log. HLG absolute qualification
+is instead owned by the independent core oracle and the renderer-wide Standard
+HLG/PQ luminance corpus described above.
 A separate camera-log golden begins with encoded Sony
 S-Log3/S-Gamut3.Cine bytes, exercises the preview lazy input transform into
 Linear Rec.2020, and compares the resulting Standard sRGB frame pixel-for-pixel

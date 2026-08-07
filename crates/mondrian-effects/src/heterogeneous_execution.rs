@@ -2338,6 +2338,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::TemporalFrameBlend { .. } => 7,
         EffectRenderOp::Lut3D { .. } => 8,
         EffectRenderOp::Custom { .. } => 9,
+        EffectRenderOp::Crop { .. } => 10,
     }
 }
 
@@ -3615,6 +3616,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::ColorAdjust { .. }
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
+            | crate::EffectRenderOp::Crop { .. }
             | crate::EffectRenderOp::Lut3D { .. } => Ok(render_op_f32_scratch_frames(op)),
             crate::EffectRenderOp::TemporalFrameBlend { .. }
             | crate::EffectRenderOp::Custom { .. } => {

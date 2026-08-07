@@ -183,6 +183,11 @@ pub struct AnimatablePropertyUiMetadata {
     pub group_name: Option<String>,
     #[serde(default)]
     pub supports_spatial: bool,
+    /// Definition-owned order within one Inspector group.
+    ///
+    /// `None` preserves deterministic address ordering for older author data.
+    #[serde(default)]
+    pub display_order: Option<u32>,
 }
 
 /// Versioned, stable identity and invalidation contract for one parameter.
@@ -3058,7 +3063,7 @@ impl crate::AuthoringFootprint for AnimatablePropertyUiMetadata {
         &self,
         collector: &mut crate::AuthoringFootprintCollector,
     ) -> std::result::Result<(), crate::AuthoringFootprintError> {
-        let Self { group_name, supports_spatial: _ } = self;
+        let Self { group_name, supports_spatial: _, display_order: _ } = self;
         collector.collect(group_name)
     }
 }
