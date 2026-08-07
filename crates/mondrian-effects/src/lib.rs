@@ -83,9 +83,9 @@ pub use heterogeneous_execution::{
     EffectGraphExecutionRequest, EffectGraphExecutionStep, EffectMaterializationId,
     EffectValueFormat, EffectValueMaterialization, EffectValueResidency,
     HeterogeneousCpuCompletionEvidence, HeterogeneousCpuExecutionStopReason,
-    PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWork,
-    PreparedHeterogeneousEffectWorkError, PreparedHeterogeneousGpuDispatch,
-    PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
+    HeterogeneousCpuTransferEvidence, PreparedHeterogeneousCpuCompletion,
+    PreparedHeterogeneousEffectWork, PreparedHeterogeneousEffectWorkError,
+    PreparedHeterogeneousGpuDispatch, PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
 };
 pub use lut::{
     Lut3D, LutLibrary, LutLibraryEntry, LutPreparationCache, LutPreparationCacheConfig,

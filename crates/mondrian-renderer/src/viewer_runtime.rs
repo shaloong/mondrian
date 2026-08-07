@@ -3312,10 +3312,7 @@ mod tests {
             crate::HeterogeneousGpuSubmissionAuthority::TrustedAdapterAssertion
         );
         assert_eq!(evidence.batch_id(), evidence.recorded().batch_id());
-        assert_eq!(
-            evidence.completed_upload_token(),
-            evidence.recorded().upload_signal()
-        );
+        assert_eq!(evidence.completed_uploads(), evidence.recorded().uploads());
         assert_eq!(
             evidence.completed_output_token(),
             evidence.recorded().output_signal()

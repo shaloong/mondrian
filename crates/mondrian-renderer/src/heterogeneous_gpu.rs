@@ -22,8 +22,9 @@ use mondrian_effects::{
     EffectExecutionTransfer, EffectFrameExtent, EffectGraphExecutionBudget,
     EffectGraphExecutionRequest, EffectGraphExecutionStep, EffectProcessingBackend,
     EffectValueFormat, EffectValueResidency, EffectWorkingPrecision, EffectWorkingPrecisions,
-    HeterogeneousCpuCompletionEvidence, PreparedHeterogeneousCpuCompletion,
-    PreparedHeterogeneousGpuDispatch, PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
+    HeterogeneousCpuCompletionEvidence, HeterogeneousCpuTransferEvidence,
+    PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousGpuDispatch,
+    PreparedHeterogeneousGpuStep, PreparedHeterogeneousGpuSuffix,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -473,8 +474,7 @@ pub struct HeterogeneousGpuRecordedEvidence {
     generation: u64,
     frame_extent: EffectFrameExtent,
     frame_seed: i64,
-    upload_wait: EffectCompletionToken,
-    upload_signal: EffectCompletionToken,
+    uploads: Arc<[HeterogeneousCpuTransferEvidence]>,
     output_signal: EffectCompletionToken,
     gpu_nodes: Arc<[mondrian_effects::EffectGraphNodeId]>,
     upload_bytes: u64,
@@ -510,15 +510,10 @@ impl HeterogeneousGpuRecordedEvidence {
         self.frame_seed
     }
 
-    /// CPU completion token the upload is ordered after.
-    pub const fn upload_wait(&self) -> EffectCompletionToken {
-        self.upload_wait
-    }
-
-    /// Token that remains pending until the recorded upload is submitted and
-    /// completed.
-    pub const fn upload_signal(&self) -> EffectCompletionToken {
-        self.upload_signal
+    /// Exact CPU-frontier materializations and upload token chains recorded in
+    /// this batch.
+    pub fn uploads(&self) -> &[HeterogeneousCpuTransferEvidence] {
+        &self.uploads
     }
 
     /// Final graph token that remains pending until GPU completion.
@@ -806,9 +801,9 @@ impl HeterogeneousGpuCompletedEvidence {
         self.submitted.recorded()
     }
 
-    /// Completed upload token.
-    pub const fn completed_upload_token(&self) -> EffectCompletionToken {
-        self.submitted.recorded.upload_signal
+    /// Completed upload token chains.
+    pub fn completed_uploads(&self) -> &[HeterogeneousCpuTransferEvidence] {
+        &self.submitted.recorded.uploads
     }
 
     /// Completed final graph-output token.
@@ -873,40 +868,61 @@ pub fn record_heterogeneous_gpu_continuation(
 ) -> Result<HeterogeneousGpuRecordedContinuation, HeterogeneousGpuContinuationError> {
     validate_completion(request, &completion)?;
     let batch_id = allocate_heterogeneous_gpu_batch_id()?;
-    let (pixels, execution_plan, gpu_suffix, cpu_evidence) = completion.into_parts();
+    let (boundary_values, execution_plan, gpu_suffix, cpu_evidence) = completion.into_parts();
     let binding = request.binding();
     let recorded_device = gpu_recording_device_demand(&execution_plan, &gpu_suffix)?;
-    let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
-        width: binding.frame_extent().width(),
-        height: binding.frame_extent().height(),
-        color_space: binding.working_color_space(),
-        data: pixels,
-    });
-    let upload_plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
-        resources.ids.allocate()?,
-        &frame,
-        GpuColorFrameTextureFormat::Rgba32Float,
-        "heterogeneous-effect-cpu-prefix",
-    )
-    .map_err(HeterogeneousGpuContinuationError::UploadPlan)?;
-    let uploaded = match resources.resource_pool {
-        Some(pool) => GpuColorFrameUploader::upload_with_pool(
-            resources.device,
-            resources.queue,
-            &upload_plan,
-            pool,
-        ),
-        None => GpuColorFrameUploader::upload(resources.device, resources.queue, &upload_plan),
-    };
-    let uploaded_handle = uploaded.handle().clone();
-    resources
-        .table
-        .insert(uploaded)
-        .map_err(HeterogeneousGpuContinuationError::ResourceTable)?;
+    let mut uploaded_handles = HashMap::with_capacity(boundary_values.len());
+    let upload_result = (|| {
+        for boundary in boundary_values {
+            let (transfer, pixels) = boundary.into_parts();
+            if uploaded_handles.contains_key(&transfer.gpu_materialization()) {
+                return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                    reason: "gpu_frontier_materialization_reused",
+                });
+            }
+            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                width: binding.frame_extent().width(),
+                height: binding.frame_extent().height(),
+                color_space: binding.working_color_space(),
+                data: pixels,
+            });
+            let upload_plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
+                resources.ids.allocate()?,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "heterogeneous-effect-cpu-frontier",
+            )
+            .map_err(HeterogeneousGpuContinuationError::UploadPlan)?;
+            let uploaded = match resources.resource_pool {
+                Some(pool) => GpuColorFrameUploader::upload_with_pool(
+                    resources.device,
+                    resources.queue,
+                    &upload_plan,
+                    pool,
+                ),
+                None => {
+                    GpuColorFrameUploader::upload(resources.device, resources.queue, &upload_plan)
+                }
+            };
+            let uploaded_handle = uploaded.handle().clone();
+            resources
+                .table
+                .insert(uploaded)
+                .map_err(HeterogeneousGpuContinuationError::ResourceTable)?;
+            uploaded_handles.insert(transfer.gpu_materialization(), uploaded_handle);
+        }
+        Ok::<(), HeterogeneousGpuContinuationError>(())
+    })();
+    if let Err(error) = upload_result {
+        for handle in uploaded_handles.into_values() {
+            let _ = resources.table.remove(handle.id());
+        }
+        return Err(error);
+    }
     let (output, retained) = record_gpu_suffix(
         resources,
         &gpu_suffix,
-        uploaded_handle,
+        uploaded_handles,
         binding.frame_seed(),
         binding.working_color_space(),
     )?;
@@ -918,8 +934,7 @@ pub fn record_heterogeneous_gpu_continuation(
             generation: binding.generation(),
             frame_extent: binding.frame_extent(),
             frame_seed: binding.frame_seed(),
-            upload_wait: cpu_evidence.required_transfer_wait(),
-            upload_signal: cpu_evidence.pending_gpu_input_token(),
+            uploads: Arc::from(cpu_evidence.transfers()),
             output_signal: cpu_evidence.pending_output_token(),
             gpu_nodes: gpu_suffix.node_ids().into(),
             upload_bytes: execution_plan.transfer_bytes(),
@@ -938,7 +953,10 @@ pub fn record_heterogeneous_gpu_continuation(
 fn record_gpu_suffix(
     resources: &mut HeterogeneousGpuRecordResources<'_>,
     suffix: &PreparedHeterogeneousGpuSuffix,
-    uploaded_handle: crate::GpuColorFrameHandle,
+    uploaded_handles: HashMap<
+        mondrian_effects::EffectMaterializationId,
+        crate::GpuColorFrameHandle,
+    >,
     frame_seed: i64,
     working_color_space: WorkingColorSpace,
 ) -> Result<
@@ -948,7 +966,7 @@ fn record_gpu_suffix(
     ),
     HeterogeneousGpuContinuationError,
 > {
-    let mut handles = HashMap::from([(suffix.input_materialization(), uploaded_handle)]);
+    let mut handles = uploaded_handles;
     let mut retained = Vec::new();
     let result = (|| {
         for step in suffix.steps() {
@@ -1607,20 +1625,36 @@ fn validate_completion(
     let expected_pixels = u64::from(binding.frame_extent().width())
         .checked_mul(u64::from(binding.frame_extent().height()))
         .ok_or(HeterogeneousGpuContinuationError::InvalidPlan { reason: "pixel_count_overflow" })?;
-    let actual_pixels = u64::try_from(completion.pixels().len()).map_err(|_| {
-        HeterogeneousGpuContinuationError::InvalidPlan { reason: "pixel_count_conversion" }
-    })?;
-    require_plan(expected_pixels == actual_pixels, "cpu_pixel_count")?;
+    require_plan(
+        completion.boundary_values().len() == evidence.transfers().len()
+            && completion.boundary_values().iter().zip(evidence.transfers()).all(
+                |(boundary, transfer)| {
+                    boundary.transfer() == *transfer
+                        && u64::try_from(boundary.pixels().len()) == Ok(expected_pixels)
+                },
+            ),
+        "cpu_frontier_values",
+    )?;
     let upload_bytes =
         expected_pixels
             .checked_mul(16)
             .ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
                 reason: "upload_byte_count_overflow",
             })?;
-    require_plan(plan.transfer_bytes() == upload_bytes, "transfer_byte_count")?;
+    let aggregate_upload_bytes = upload_bytes
+        .checked_mul(u64::try_from(evidence.transfers().len()).map_err(|_| {
+            HeterogeneousGpuContinuationError::InvalidPlan { reason: "transfer_count_conversion" }
+        })?)
+        .ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "aggregate_upload_byte_count_overflow",
+        })?;
+    require_plan(
+        plan.transfer_bytes() == aggregate_upload_bytes,
+        "transfer_byte_count",
+    )?;
     let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(plan, gpu_suffix)?;
     require_plan(
-        requirements.upload_bytes() == upload_bytes,
+        requirements.upload_bytes() == aggregate_upload_bytes,
         "upload_requirement_bytes",
     )?;
     requirements.validate(request.grant())?;
@@ -1637,13 +1671,25 @@ fn gpu_recording_device_demand(
     plan: &mondrian_effects::CompiledEffectValueExecutionPlan,
     suffix: &PreparedHeterogeneousGpuSuffix,
 ) -> Result<GpuRecordingDeviceDemand, HeterogeneousGpuContinuationError> {
-    let input = plan.materialization(suffix.input_materialization()).ok_or(
-        HeterogeneousGpuContinuationError::InvalidPlan {
-            reason: "gpu_input_materialization_missing",
-        },
-    )?;
-    let mut bytes = input.bytes();
-    let mut materializations = 1_u64;
+    let mut bytes = 0_u64;
+    let mut materializations = 0_u64;
+    for input in suffix.input_materializations() {
+        let input =
+            plan.materialization(*input)
+                .ok_or(HeterogeneousGpuContinuationError::InvalidPlan {
+                    reason: "gpu_input_materialization_missing",
+                })?;
+        bytes = bytes.checked_add(input.bytes()).ok_or(
+            HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "gpu_recording_byte_count_overflow",
+            },
+        )?;
+        materializations = materializations.checked_add(1).ok_or(
+            HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "gpu_recording_materialization_count_overflow",
+            },
+        )?;
+    }
     let mut outputs = HashSet::new();
     for step in suffix.steps() {
         let PreparedHeterogeneousGpuStep::Dispatch(dispatch) = step else {
@@ -1703,7 +1749,8 @@ fn validate_token_chain(
 ) -> Result<(), HeterogeneousGpuContinuationError> {
     let mut cpu_nodes = Vec::new();
     let mut gpu_nodes = Vec::new();
-    let mut transfer_seen = false;
+    let mut transfer_count = 0_usize;
+    let mut entered_gpu = false;
     let mut cpu_lane = None;
     let mut gpu_lane = None;
     for step in steps {
@@ -1716,7 +1763,7 @@ fn validate_token_chain(
                 signal,
                 ..
             } => {
-                require_plan(!transfer_seen, "cpu_dispatch_after_transfer")?;
+                require_plan(!entered_gpu, "cpu_dispatch_after_gpu")?;
                 require_plan(
                     *precision == EffectWorkingPrecision::Float32,
                     "cpu_dispatch_precision",
@@ -1729,14 +1776,23 @@ fn validate_token_chain(
                 cpu_nodes.push(*node);
                 let _ = signal;
             }
-            EffectGraphExecutionStep::Transfer { output, from, to, wait, signal, .. } => {
-                require_plan(!transfer_seen, "multiple_transfers")?;
+            EffectGraphExecutionStep::Transfer {
+                input, output, from, to, wait, signal, ..
+            } => {
+                require_plan(!entered_gpu, "transfer_after_gpu")?;
+                let transfer = evidence.transfers().get(transfer_count).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "transfer_evidence_missing",
+                    },
+                )?;
                 require_plan(
-                    *wait == evidence.required_transfer_wait(),
+                    *input == transfer.cpu_materialization()
+                        && *output == transfer.gpu_materialization()
+                        && *wait == transfer.completed_cpu_token(),
                     "transfer_wait_token",
                 )?;
                 require_plan(
-                    *signal == evidence.pending_gpu_input_token(),
+                    *signal == transfer.pending_gpu_input_token(),
                     "transfer_signal_token",
                 )?;
                 require_plan(
@@ -1751,10 +1807,18 @@ fn validate_token_chain(
                 )?;
                 require_plan(cpu_lane == Some(from.lane()), "transfer_cpu_lane")?;
                 require_plan(
-                    *output == gpu_suffix.input_materialization(),
+                    gpu_suffix.input_materializations().get(transfer_count) == Some(output),
                     "transfer_gpu_materialization",
                 )?;
-                transfer_seen = true;
+                transfer_count = transfer_count.checked_add(1).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "transfer_count_overflow",
+                    },
+                )?;
+                require_plan(
+                    gpu_lane.is_none_or(|expected| expected == to.lane()),
+                    "transfer_gpu_lane",
+                )?;
                 gpu_lane = Some(to.lane());
             }
             EffectGraphExecutionStep::Dispatch {
@@ -1766,7 +1830,8 @@ fn validate_token_chain(
                 signal: _,
                 ..
             } => {
-                require_plan(transfer_seen, "gpu_dispatch_before_transfer")?;
+                require_plan(transfer_count > 0, "gpu_dispatch_before_transfer")?;
+                entered_gpu = true;
                 require_plan(
                     *precision == EffectWorkingPrecision::Float32,
                     "gpu_dispatch_precision",
@@ -1782,7 +1847,11 @@ fn validate_token_chain(
             EffectGraphExecutionStep::Release { .. } => {}
         }
     }
-    require_plan(transfer_seen, "missing_cpu_to_gpu_transfer")?;
+    require_plan(
+        transfer_count == evidence.transfers().len()
+            && transfer_count == gpu_suffix.input_materializations().len(),
+        "cpu_to_gpu_transfer_count",
+    )?;
     require_plan(
         cpu_nodes == evidence.completed_cpu_nodes(),
         "completed_cpu_node_order",
@@ -1800,10 +1869,7 @@ fn validate_token_chain(
         output_token == Some(evidence.pending_output_token()),
         "output_completion_token",
     )?;
-    require_plan(
-        evidence.completed_cpu_token() == evidence.required_transfer_wait(),
-        "completed_cpu_transfer_wait_token",
-    )
+    Ok(())
 }
 
 fn validate_gpu_suffix_schedule(
@@ -1811,8 +1877,17 @@ fn validate_gpu_suffix_schedule(
     evidence: &HeterogeneousCpuCompletionEvidence,
     suffix: &PreparedHeterogeneousGpuSuffix,
 ) -> Result<(), HeterogeneousGpuContinuationError> {
-    let mut live = HashSet::from([suffix.input_materialization()]);
-    let mut completed = HashSet::from([evidence.pending_gpu_input_token()]);
+    let mut live = suffix.input_materializations().iter().copied().collect::<HashSet<_>>();
+    let mut completed = evidence
+        .transfers()
+        .iter()
+        .map(|transfer| transfer.pending_gpu_input_token())
+        .collect::<HashSet<_>>();
+    require_plan(
+        live.len() == suffix.input_materializations().len()
+            && completed.len() == evidence.transfers().len(),
+        "gpu_frontier_identity_reused",
+    )?;
     let mut nodes = Vec::new();
     for step in suffix.steps() {
         match step {
@@ -2189,6 +2264,16 @@ mod tests {
         compile_reference_render_graph(builder.finish()).expect("compile GPU identity-copy graph")
     }
 
+    fn gpu_two_value_frontier_graph() -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let blurred = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let sharpened = builder.add_unary_from(source, EffectRenderOp::Sharpen { amount: 0.4 });
+        let output = builder.add_blend(blurred, sharpened, BlendMode::Screen, 0.6);
+        builder.set_current_output(output);
+        compile_reference_render_graph(builder.finish()).expect("compile two-value frontier graph")
+    }
+
     fn test_input() -> Vec<[f32; 4]> {
         (0..EXTENT.width() * EXTENT.height())
             .map(|index| {
@@ -2408,7 +2493,7 @@ mod tests {
         )
         .expect("complete CPU graph reference");
         let token_reference = cpu_completion(Arc::clone(&graph), &input);
-        let expected_upload_token = token_reference.evidence().pending_gpu_input_token();
+        let expected_uploads = token_reference.evidence().transfers().to_vec();
         let expected_output_token = token_reference.evidence().pending_output_token();
         let pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             GpuColorFrameWgpuResourcePoolOptions::default(),
@@ -2429,10 +2514,7 @@ mod tests {
                 )
                 .expect("execute and read back heterogeneous GPU continuation");
 
-            assert_eq!(
-                completed.evidence().completed_upload_token(),
-                expected_upload_token
-            );
+            assert_eq!(completed.evidence().completed_uploads(), expected_uploads);
             assert_eq!(
                 completed.evidence().completed_output_token(),
                 expected_output_token
@@ -2687,6 +2769,99 @@ mod tests {
         );
         for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
             assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
+        }
+        assert!(!runtime.is_poisoned());
+        assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_two_cpu_frontier_uploads_join_once_with_exact_evidence() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping heterogeneous GPU multi-frontier test: no GPU adapter available");
+            return;
+        };
+        let graph = gpu_two_value_frontier_graph();
+        let input = test_input();
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            &input,
+            EXTENT.width(),
+            EXTENT.height(),
+            &graph,
+            FRAME_SEED,
+        )
+        .expect("complete CPU multi-frontier reference");
+        let capability =
+            HeterogeneousGpuExecutionCapability::scene_linear_f32().expect("renderer capability");
+        let prepared = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&graph),
+            capability.environment(),
+            capability.request(EXTENT, generous_graph_budget()),
+        )
+        .expect("prepare two-value CPU frontier");
+        assert_eq!(prepared.cpu_nodes().len(), 2);
+        assert_eq!(prepared.gpu_suffix().input_materializations().len(), 2);
+
+        let frame_bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
+        let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(
+            prepared.plan(),
+            prepared.gpu_suffix(),
+        )
+        .expect("multi-frontier recording requirements");
+        assert_eq!(requirements.upload_bytes(), frame_bytes * 2);
+        assert_eq!(requirements.device_materializations(), 3);
+        assert_eq!(requirements.device_bytes(), frame_bytes * 3);
+        assert!(matches!(
+            requirements.validate(HeterogeneousGpuResourceGrant::new(
+                frame_bytes,
+                requirements.device_bytes(),
+                requirements.device_materializations(),
+                frame_bytes,
+            )),
+            Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
+                kind: HeterogeneousGpuResourceKind::UploadBytes,
+                required,
+                limit,
+            }) if required == frame_bytes * 2 && limit == frame_bytes
+        ));
+
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
+        session.bind_generation(GENERATION);
+        let completion = prepared
+            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .expect("execute two-value CPU frontier");
+        assert_eq!(completion.boundary_values().len(), 2);
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("heterogeneous GPU runtime");
+        let completed = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &ExecutionCancellationToken::new(),
+                gpu_test_deadline(),
+            )
+            .expect("execute multi-frontier GPU join and read back");
+        assert_eq!(completed.evidence().completed_uploads().len(), 2);
+        assert_eq!(
+            completed.evidence().recorded().recorded_device_materializations(),
+            requirements.device_materializations()
+        );
+        assert_eq!(
+            completed.evidence().recorded().recorded_device_bytes(),
+            requirements.device_bytes()
+        );
+        for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
+            for channel in 0..4 {
+                assert!(
+                    (actual[channel] - expected[channel]).abs() <= 1.0e-4,
+                    "channel {channel}: actual={} expected={}",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
         }
         assert!(!runtime.is_poisoned());
         assert!(runtime.table.is_empty());

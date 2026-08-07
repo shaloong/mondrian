@@ -760,7 +760,9 @@ impl ExportJobDiagnostics {
     }
 }
 
-/// Bounded evidence for the most recent completed heterogeneous Effect frame.
+/// Bounded diagnostic summary for the most recent completed heterogeneous
+/// Effect frame. The renderer completion remains the exact token-list
+/// authority.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExportHeterogeneousCompletionEvidence {
     /// Complete compiled Effect graph fingerprint.
@@ -775,8 +777,10 @@ pub struct ExportHeterogeneousCompletionEvidence {
     pub frame_seed: i64,
     /// Exact linear working-space identity proved across CPU and GPU execution.
     pub working_color_space: WorkingColorSpace,
-    /// Upload completion token proved by the renderer.
-    pub completed_upload_token: u32,
+    /// Number of CPU-frontier uploads proved complete by the renderer.
+    pub completed_upload_count: u32,
+    /// Last upload completion token in deterministic transfer order.
+    pub last_completed_upload_token: u32,
     /// Final graph-output completion token proved by the renderer.
     pub completed_output_token: u32,
     /// Raw CPU-to-GPU transfer bytes proved by the graph-value plan.
@@ -791,6 +795,7 @@ impl ExportHeterogeneousCompletionEvidence {
         working_color_space: WorkingColorSpace,
     ) -> Option<Self> {
         let recorded = evidence.recorded();
+        let completed_uploads = evidence.completed_uploads();
         Some(Self {
             graph_fingerprint: recorded.graph_fingerprint(),
             generation: recorded.generation(),
@@ -798,7 +803,8 @@ impl ExportHeterogeneousCompletionEvidence {
             height: recorded.frame_extent().height(),
             frame_seed: recorded.frame_seed(),
             working_color_space,
-            completed_upload_token: evidence.completed_upload_token().get(),
+            completed_upload_count: u32::try_from(completed_uploads.len()).ok()?,
+            last_completed_upload_token: completed_uploads.last()?.pending_gpu_input_token().get(),
             completed_output_token: evidence.completed_output_token().get(),
             upload_bytes: recorded.upload_bytes(),
             readback_bytes: evidence.readback_bytes()?,
@@ -823,7 +829,8 @@ pub struct ExportJobVisualDiagnostics {
     pub heterogeneous_upload_bytes: u64,
     /// Aggregate completed GPU-to-CPU readback bytes.
     pub heterogeneous_readback_bytes: u64,
-    /// Most recent exact completion evidence, bounded to one value.
+    /// Most recent bounded completion summary. Exact upload tokens remain in
+    /// the renderer-owned completion for the live attempt.
     pub last_heterogeneous_completion: Option<ExportHeterogeneousCompletionEvidence>,
 }
 

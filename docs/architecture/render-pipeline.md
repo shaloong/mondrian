@@ -309,14 +309,17 @@ the worker executes this object and never replans it. The underlying work
 consumes the planned CPU materialization DAG when the caller already owns a
 scene-linear CPU Float32 working frame. It moves last-use values, clones only
 live fan-out inputs, executes unary and join nodes through the shared Float32
-primitives, admits the exact live-frame/kernel-scratch peak, and leaves one
-explicit upload pending. Gaussian Blur followed by the exact Basic
+primitives, admits the exact live-frame/kernel-scratch peak, and atomically
+leaves an ordered CPU frontier with one or more explicit uploads pending.
+Gaussian Blur followed by the exact Basic
 Correction/Grain fused GPU point tail remains the spatial gate; a CPU
 fan-out/Blend join followed by one GPU point operation proves that the prefix
 is no longer flattened into a unary chain. A generated MaskSource/Mask join is
 also executable in that prefix: its geometry preparation and raster loop use
 the attempt's checkpoint Seam, and its retained geometry plus maximum row
-scratch are charged beside the live pixel frames. After the single upload, the
+scratch are charged beside the live pixel frames. A second gate keeps Gaussian
+and Sharpen branch results simultaneously live, uploads both exact boundary
+materializations, and joins them once on GPU. After the frontier uploads, the
 prepared GPU suffix consumes the same value plan as explicit dispatch and
 release steps: a shared GPU value can feed two point-operation branches and a
 canonical scene-linear BlendMode join. Authored opacity and the complete
@@ -339,8 +342,7 @@ fold intermediates are charged by that physical derivation, retained through
 submission, and never fabricated as semantic graph values. One-input
 MultiInput uses the same schedule with a distinct bit-preserving texture-copy
 output; upload, copy output, completion token and retirement are all admitted
-before recording. More than one
-backend transfer, GPU Mask,
+before recording. A later backend transition or graph-internal readback, GPU Mask,
 color-domain conversion and temporal/stateful GPU dispatch still fail before
 pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.

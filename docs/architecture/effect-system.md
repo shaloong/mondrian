@@ -304,8 +304,8 @@ replan. A changed extent or batch grant fails before CPU execution.
 `PreparedHeterogeneousEffectWork` then executes the prepared semantics. With a
 caller-supplied scene-linear CPU Float32 working frame it
 executes an exact source-closed CPU DAG prefix directly from the planned
-materialization inputs/outputs, requires one
-explicit CPU-F32→GPU-F32 transfer, and lowers the exact remaining graph-value
+materialization inputs/outputs, atomically publishes every CPU-frontier value
+needed by one or more explicit CPU-F32→GPU-F32 transfers, and lowers the exact remaining graph-value
 tail through `lower_effect_graph_nodes_to_gpu_plan(...)`. The regression tracer
 is real Gaussian Blur on CPU followed by Basic Correction and Grain in the
 fused GPU point plan; a second gate proves source fan-out, independent unary
@@ -324,9 +324,9 @@ execution share one Implementation without flattening the latter's exact stop
 reason. Prepared geometry, maximum row scratch, raster output live-set, and
 kernel scratch are all included in the same checked Session demand; a stop
 returns neither partial pixels nor a completion token.
-Its result carries the CPU pixels, Session generation,
-the immutable graph-value plan, completed CPU token, required upload wait, and
-still-pending GPU-input/output tokens. An Adapter therefore receives the exact
+Its result carries the ordered CPU boundary materializations, Session generation,
+the immutable graph-value plan, each completed CPU token/required upload wait,
+and still-pending GPU-input/output tokens. An Adapter therefore receives the exact
 transfer residency and lifetime steps without replanning. The result
 deliberately contains no whole-graph CPU fallback Interface. Before the CPU
 prefix starts, its GPU grant independently admits upload bytes, physical device
@@ -334,7 +334,7 @@ bytes, physical texture count, and optional readback bytes. Byte limits never
 stand in for resource-count limits.
 Preparation compiles exact CPU materialization use counts, rejects any input
 that is not produced by the source-closed prefix, and proves that the only
-remaining live CPU value is the transfer source. Runtime moves last-use values,
+remaining live CPU values are the ordered transfer frontier. Runtime moves last-use values,
 clones only fan-out values with future consumers, releases join inputs, and
 checks the resulting peak plus Mask geometry/row scratch and Gaussian/Sharpen scratch against the bound
 Effect Execution Session before allocation. Input and fan-out copies observe
@@ -346,8 +346,9 @@ recording requirement and evidence count every one in bytes and resources,
 and terminal failure removes unpublished private outputs. One-input
 MultiInput lowers to a distinct, bit-preserving texture copy so graph-value
 identity and last-use lifetime remain exact without a shader or color-domain
-round trip. GPU Mask,
-multiple transfers, color-domain conversion,
+round trip. Multiple CPU-frontier uploads are supported within this one-way
+CPU-prefix→GPU-suffix shape. GPU Mask, a later backend transition or readback
+inside the graph, color-domain conversion,
 temporal/stateful work, and external lanes remain typed blockers rather than
 being flattened or silently rerun.
 
