@@ -890,7 +890,7 @@ fn derive_implementation_requirements<'a>(
             EffectGraphNodeKind::Blend { base, overlay, .. } => {
                 requirement_for(*base, &requirements)
                     .merge_branches(requirement_for(*overlay, &requirements))
-                    .compose_node(compositing_node_requirements())
+                    .compose_node(gpu_blend_node_requirements())
             }
             EffectGraphNodeKind::Mask { input, mask, .. } => requirement_for(*input, &requirements)
                 .merge_branches(requirement_for(*mask, &requirements))
@@ -969,12 +969,8 @@ fn raw_node_implementation_requirements(
         | EffectGraphNodeKind::DomainEffect { op, .. } => {
             Some(raw_render_op_execution_requirements(op))
         }
-        EffectGraphNodeKind::Blend {
-            blend_mode: mondrian_core::types::BlendMode::Normal,
-            ..
-        } => Some(gpu_normal_blend_node_requirements()),
-        EffectGraphNodeKind::Blend { .. }
-        | EffectGraphNodeKind::Mask { .. }
+        EffectGraphNodeKind::Blend { .. } => Some(gpu_blend_node_requirements()),
+        EffectGraphNodeKind::Mask { .. }
         | EffectGraphNodeKind::MaskSource { .. }
         | EffectGraphNodeKind::MultiInput { .. } => Some(compositing_node_requirements()),
     }
@@ -1437,7 +1433,7 @@ fn compositing_node_requirements() -> EffectImplementationRequirements {
     }
 }
 
-fn gpu_normal_blend_node_requirements() -> EffectImplementationRequirements {
+fn gpu_blend_node_requirements() -> EffectImplementationRequirements {
     EffectImplementationRequirements {
         execution_modes: compositing_node_requirements()
             .execution_modes

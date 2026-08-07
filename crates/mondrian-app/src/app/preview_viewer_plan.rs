@@ -368,9 +368,6 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                     continue;
                 }
                 let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
-                if blend_mode != BlendMode::Normal {
-                    return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-                }
                 let effect_plan = scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
                     .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
@@ -470,11 +467,6 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                     continue;
                 }
                 let blend_mode = layer.blend_mode.unwrap_or(BlendMode::Normal);
-                if blend_mode != BlendMode::Normal {
-                    return Err(PreviewViewerGpuLayerPreparationError::Compositing {
-                        reason: GpuCompositingBlockerReason::UnsupportedBlendMode,
-                    });
-                }
                 let effect_plan = builder
                     .scratch
                     .get_or_lower_effect_gpu_plan(&layer.effect_graph)
@@ -556,11 +548,6 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         prepared_heterogeneous_route: Option<&PreparedHeterogeneousEffectRoute>,
         frame_seed: i64,
     ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
-        if blend_mode != BlendMode::Normal {
-            return Err(PreviewViewerGpuLayerPreparationError::Compositing {
-                reason: GpuCompositingBlockerReason::UnsupportedBlendMode,
-            });
-        }
         let layer_working_color_space = frame.working_color_space().ok_or(
             PreviewViewerGpuLayerPreparationError::Compositing {
                 reason: GpuCompositingBlockerReason::GpuUnavailable,
@@ -581,6 +568,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 native_source: frame.native_source(),
                 heterogeneous_input: None,
                 opacity,
+                blend_mode,
                 transform,
                 effect_plan,
                 frame_seed,
@@ -617,6 +605,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
             native_source: None,
             heterogeneous_input: Some(address),
             opacity,
+            blend_mode,
             transform,
             effect_plan: identity_effect_plan,
             frame_seed,
@@ -724,9 +713,6 @@ fn gpu_media_source(
     working_color_space: WorkingColorSpace,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
-    if blend_mode != BlendMode::Normal {
-        return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-    }
     let layer_working_color_space =
         frame.working_color_space().ok_or(GpuCompositingBlockerReason::GpuUnavailable)?;
     if layer_working_color_space != working_color_space
@@ -743,6 +729,7 @@ fn gpu_media_source(
         native_source: frame.native_source(),
         heterogeneous_input: None,
         opacity,
+        blend_mode,
         transform,
         effect_plan,
         frame_seed,
@@ -753,9 +740,6 @@ fn gpu_solid_source(
     layer: &TimelineSolidColorLayer,
     scratch: &mut TimelineCompositeScratch,
 ) -> Result<ViewerGpuSourceLayer, GpuCompositingBlockerReason> {
-    if layer.blend_mode != BlendMode::Normal {
-        return Err(GpuCompositingBlockerReason::UnsupportedBlendMode);
-    }
     if !is_preview_gpu_transform_supported(layer.transform) {
         return Err(GpuCompositingBlockerReason::UnsupportedTransform);
     }
@@ -936,6 +920,14 @@ mod heterogeneous_tests {
     }
 
     fn media(graph: Arc<CompiledEffectGraph>, identity_salt: u64) -> ResolvedPreviewElement {
+        media_with_blend(graph, identity_salt, BlendMode::Normal)
+    }
+
+    fn media_with_blend(
+        graph: Arc<CompiledEffectGraph>,
+        identity_salt: u64,
+        blend_mode: BlendMode,
+    ) -> ResolvedPreviewElement {
         let prepared_heterogeneous_route = PreparedHeterogeneousEffectRoute::prepare(
             Arc::clone(&graph),
             EffectFrameExtent::new(WIDTH, HEIGHT),
@@ -946,7 +938,7 @@ mod heterogeneous_tests {
         ResolvedPreviewElement::Media {
             frame: working_frame(identity_salt),
             opacity: 1.0,
-            blend_mode: BlendMode::Normal,
+            blend_mode,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_graph: graph,
             prepared_heterogeneous_route,
@@ -955,10 +947,11 @@ mod heterogeneous_tests {
     }
 
     #[test]
-    fn exact_full_gpu_media_stays_on_the_ordinary_path() {
-        let resolved = [media(
+    fn exact_full_gpu_media_preserves_non_normal_blend_on_the_ordinary_path() {
+        let resolved = [media_with_blend(
             identity_compiled_effect_graph().expect("identity graph"),
             1,
+            BlendMode::Screen,
         )];
         let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
             &resolved,
@@ -968,9 +961,14 @@ mod heterogeneous_tests {
         )
         .expect("ordinary Viewer plan");
 
+        let PreparedPreviewViewerGpuLayers::Ordinary { layers } = prepared else {
+            panic!("identity graph must remain on the ordinary Viewer path");
+        };
         assert!(matches!(
-            prepared,
-            PreparedPreviewViewerGpuLayers::Ordinary { ref layers } if layers.len() == 1
+            &layers[..],
+            [ViewerGpuExecutionLayer::Source(
+                ViewerGpuSourceLayer::Media { blend_mode: BlendMode::Screen, .. }
+            )]
         ));
     }
 

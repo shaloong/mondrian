@@ -1656,8 +1656,8 @@ pub struct HeterogeneousCpuCompletionEvidence {
 
 /// One executable GPU DAG dispatch prepared from the unique graph-value plan.
 ///
-/// Point chains are renderer-neutral shader programs. Normal blends retain
-/// their two exact materializations and authored opacity. Other graph-node
+/// Point chains are renderer-neutral shader programs. Blend joins retain
+/// their two exact materializations, authored mode, and opacity. Other graph-node
 /// semantics remain blocked until a production GPU Adapter exists.
 #[derive(Debug, Clone)]
 pub enum PreparedHeterogeneousGpuDispatch {
@@ -1677,8 +1677,8 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Backend-neutral point program.
         plan: Arc<CompiledEffectGpuPlan>,
     },
-    /// Straight-alpha source-over join in scene-linear working space.
-    NormalBlend {
+    /// Canonical straight-alpha BlendMode join in scene-linear working space.
+    Blend {
         /// Exact semantic Blend node.
         node: EffectGraphNodeId,
         /// Base materialization.
@@ -1693,6 +1693,8 @@ pub enum PreparedHeterogeneousGpuDispatch {
         signal: EffectCompletionToken,
         /// Authored straight-alpha opacity.
         opacity: f32,
+        /// Authored BlendMode evaluated by the shared CPU/GPU algebra.
+        blend_mode: BlendMode,
     },
 }
 
@@ -1700,28 +1702,28 @@ impl PreparedHeterogeneousGpuDispatch {
     /// New output materialization.
     pub const fn output(&self) -> EffectMaterializationId {
         match self {
-            Self::PointChain { output, .. } | Self::NormalBlend { output, .. } => *output,
+            Self::PointChain { output, .. } | Self::Blend { output, .. } => *output,
         }
     }
 
     /// Completion dependencies.
     pub fn waits(&self) -> &[EffectCompletionToken] {
         match self {
-            Self::PointChain { waits, .. } | Self::NormalBlend { waits, .. } => waits,
+            Self::PointChain { waits, .. } | Self::Blend { waits, .. } => waits,
         }
     }
 
     /// Completion token produced by this dispatch.
     pub const fn signal(&self) -> EffectCompletionToken {
         match self {
-            Self::PointChain { signal, .. } | Self::NormalBlend { signal, .. } => *signal,
+            Self::PointChain { signal, .. } | Self::Blend { signal, .. } => *signal,
         }
     }
 
     fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
-            Self::NormalBlend { node, .. } => output.push(*node),
+            Self::Blend { node, .. } => output.push(*node),
         }
     }
 
@@ -1731,7 +1733,7 @@ impl PreparedHeterogeneousGpuDispatch {
     ) -> Result<(), E> {
         match self {
             Self::PointChain { input, .. } => visit(*input)?,
-            Self::NormalBlend { base, overlay, .. } => {
+            Self::Blend { base, overlay, .. } => {
                 visit(*base)?;
                 visit(*overlay)?;
             }
@@ -2879,9 +2881,7 @@ fn prepare_gpu_suffix(
                             )?),
                         })
                     }
-                    EffectGraphNodeKind::Blend {
-                        blend_mode: BlendMode::Normal, opacity, ..
-                    } => {
+                    EffectGraphNodeKind::Blend { blend_mode, opacity, .. } => {
                         if inputs.len() != 2 {
                             return Err(
                                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -2889,7 +2889,7 @@ fn prepare_gpu_suffix(
                                 },
                             );
                         }
-                        Ok(PreparedHeterogeneousGpuDispatch::NormalBlend {
+                        Ok(PreparedHeterogeneousGpuDispatch::Blend {
                             node: *node_id,
                             base: inputs[0],
                             overlay: inputs[1],
@@ -2897,6 +2897,7 @@ fn prepare_gpu_suffix(
                             waits: Arc::clone(waits),
                             signal: *signal,
                             opacity: *opacity,
+                            blend_mode: *blend_mode,
                         })
                     }
                     _ => Err(
@@ -4224,7 +4225,7 @@ mod tests {
             },
         );
         let right = builder.add_unary_from(first, EffectRenderOp::Grain { amount: 0.1 });
-        let output = builder.add_blend(left, right, BlendMode::Normal, 0.5);
+        let output = builder.add_blend(left, right, BlendMode::Screen, 0.5);
         builder.set_current_output(output);
         let compiled = compile_reference_render_graph(builder.finish()).expect("DAG graph");
         let work = PreparedHeterogeneousEffectWork::prepare(
@@ -4250,7 +4251,11 @@ mod tests {
             [
                 PreparedHeterogeneousGpuDispatch::PointChain { nodes: left_nodes, .. },
                 PreparedHeterogeneousGpuDispatch::PointChain { nodes: right_nodes, .. },
-                PreparedHeterogeneousGpuDispatch::NormalBlend { node: blend, .. },
+                PreparedHeterogeneousGpuDispatch::Blend {
+                    node: blend,
+                    blend_mode: BlendMode::Screen,
+                    ..
+                },
             ] if left_nodes.as_ref() == [left]
                 && right_nodes.as_ref() == [right]
                 && *blend == output

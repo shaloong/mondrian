@@ -1196,6 +1196,7 @@ impl RenderGpuOutputBoundaryRuntime {
                     &processed,
                     layer.opacity,
                     layer.blend_mode,
+                    layer.frame_seed,
                     request.working_color_space,
                 )
             }

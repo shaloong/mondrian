@@ -304,9 +304,14 @@ tail through `lower_effect_graph_nodes_to_gpu_plan(...)`. The regression tracer
 is real Gaussian Blur on CPU followed by Basic Correction and Grain in the
 fused GPU point plan; a second gate proves source fan-out, independent unary
 branches, a Blend join, exact last-use release, and the joined value entering
-the same GPU tail. Unary, Blend, nonempty MultiInput, and Mask nodes with an
-already materialized matte use the same Float32 pixel primitives as the scalar
-reference. Synthetic `MaskSource` nodes are zero-input CPU DAG values: Path/BVH
+the same GPU tail. The GPU suffix consumes the same planned values and may
+rejoin point-operation branches through any canonical scene-linear BlendMode;
+the shared renderer compositor preserves authored opacity and the complete
+64-bit frame seed used to derive each Dissolve pixel decision. Real-device
+tests compare all canonical modes, alpha/opacity boundaries, channel ties, and
+Dissolve against the CPU Float32 scalar reference. Unary, Blend, nonempty
+MultiInput, and Mask nodes with an already materialized matte use the same
+Float32 pixel primitives as the scalar reference. Synthetic `MaskSource` nodes are zero-input CPU DAG values: Path/BVH
 preparation and full-frame Float32 rasterization consume a generic checkpoint
 Seam, so token-backed temporal execution and deadline-backed heterogeneous
 execution share one Implementation without flattening the latter's exact stop
@@ -324,10 +329,10 @@ remaining live CPU value is the transfer source. Runtime moves last-use values,
 clones only fan-out values with future consumers, releases join inputs, and
 checks the resulting peak plus Mask geometry/row scratch and Gaussian/Sharpen scratch against the bound
 Effect Execution Session before allocation. Input and fan-out copies observe
-the same fixed-size cooperative checkpoints as long-running kernels. GPU DAG
-tails, multiple transfers, color-domain conversion, temporal/stateful work,
-and external lanes remain typed blockers rather than being flattened or
-silently rerun.
+the same fixed-size cooperative checkpoints as long-running kernels. GPU Mask
+and MultiInput joins, multiple transfers, color-domain conversion,
+temporal/stateful work, and external lanes remain typed blockers rather than
+being flattened or silently rerun.
 
 Current CPU RGBA8, CPU Float32, and fused GPU single-frame admission do not
 execute the shallow linear-stage placement. Each scans every retained stage

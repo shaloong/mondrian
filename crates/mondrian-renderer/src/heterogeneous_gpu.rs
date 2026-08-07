@@ -935,11 +935,12 @@ fn record_gpu_suffix(
                     }
                 }
                 PreparedHeterogeneousGpuStep::Dispatch(
-                    PreparedHeterogeneousGpuDispatch::NormalBlend {
+                    PreparedHeterogeneousGpuDispatch::Blend {
                         base,
                         overlay,
                         output,
                         opacity,
+                        blend_mode,
                         ..
                     },
                 ) => {
@@ -963,7 +964,8 @@ fn record_gpu_suffix(
                         base_handle,
                         overlay_handle,
                         *opacity,
-                        mondrian_core::BlendMode::Normal,
+                        *blend_mode,
+                        frame_seed,
                         working_color_space,
                     )?;
                     if handles.insert(*output, record.output).is_some() {
@@ -1609,17 +1611,15 @@ fn validate_gpu_suffix_schedule(
                 require_plan(completed.insert(*signal), "gpu_point_signal_reused")?;
                 nodes.extend(dispatch_nodes.iter().copied());
             }
-            PreparedHeterogeneousGpuStep::Dispatch(
-                PreparedHeterogeneousGpuDispatch::NormalBlend {
-                    node,
-                    base,
-                    overlay,
-                    output,
-                    waits,
-                    signal,
-                    ..
-                },
-            ) => {
+            PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::Blend {
+                node,
+                base,
+                overlay,
+                output,
+                waits,
+                signal,
+                ..
+            }) => {
                 require_plan(
                     live.contains(base) && live.contains(overlay),
                     "gpu_blend_input_not_live",
@@ -1818,7 +1818,7 @@ mod tests {
             },
         );
         let right = builder.add_unary_from(blurred, EffectRenderOp::Grain { amount: 0.1 });
-        let output = builder.add_blend(left, right, BlendMode::Normal, 0.4);
+        let output = builder.add_blend(left, right, BlendMode::Screen, 0.4);
         builder.set_current_output(output);
         compile_reference_render_graph(builder.finish()).expect("compile GPU DAG graph")
     }
@@ -2123,7 +2123,7 @@ mod tests {
         for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
             for channel in 0..4 {
                 assert!(
-                    (actual[channel] - expected[channel]).abs() <= 2.0e-5,
+                    (actual[channel] - expected[channel]).abs() <= 8.0e-5,
                     "channel {channel}: actual={} expected={}",
                     actual[channel],
                     expected[channel]

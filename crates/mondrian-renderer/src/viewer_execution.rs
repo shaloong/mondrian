@@ -69,6 +69,8 @@ pub enum ViewerGpuSourceLayer {
         heterogeneous_input: Option<u32>,
         /// Layer opacity.
         opacity: f32,
+        /// Canonical Timeline blend mode.
+        blend_mode: BlendMode,
         /// Timeline affine transform.
         transform: [f32; 6],
         /// Working-space GPU effect plan.

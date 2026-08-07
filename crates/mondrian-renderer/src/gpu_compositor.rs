@@ -2,7 +2,7 @@
 //!
 //! This module owns the native wgpu path for preview/playback compositing when
 //! a layer stack is simple enough to stay on GPU: affine transforms, fused
-//! pointwise effect graphs, Normal blend mode, and a bounded layer count.
+//! pointwise effect graphs, the canonical BlendMode algebra, and a bounded layer count.
 //! Unsupported layer shapes are rejected with typed blockers so callers can
 //! fall back to the CPU reference compositor without losing diagnostic evidence.
 
@@ -36,7 +36,10 @@ struct CompositeUniforms {
     opacity: f32,
     source_kind: u32,
     effect_count: u32,
-    frame_seed: u32,
+    blend_mode: u32,
+    frame_seed_lo: u32,
+    frame_seed_hi: u32,
+    _padding: vec2<u32>,
     solid_color: vec4<f32>,
     inv_transform0: vec4<f32>,
     inv_transform1: vec4<f32>,
@@ -75,9 +78,157 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
     return out;
 }
 
-fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) -> vec4<f32> {
+fn hash_u32(input: u32) -> u32 {
+    var value = input;
+    value = value ^ (value >> 16u);
+    value = value * 0x7feb352du;
+    value = value ^ (value >> 15u);
+    value = value * 0x846ca68bu;
+    value = value ^ (value >> 16u);
+    return value;
+}
+
+fn effect_graph_dither_seed(pixel_index: u32) -> u32 {
+    return pixel_index ^
+        ((uniforms.frame_seed_lo << 13u) | (uniforms.frame_seed_lo >> 19u)) ^
+        ((uniforms.frame_seed_hi >> 7u) | (uniforms.frame_seed_hi << 25u));
+}
+
+fn blend_lum(color: vec3<f32>) -> f32 {
+    return dot(color, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn clip_blend_color(color: vec3<f32>) -> vec3<f32> {
+    let luminance = blend_lum(color);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (minimum < 0.0) {
+        let factor = luminance / (luminance - minimum);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    if (maximum > 1.0) {
+        let factor = (1.0 - luminance) / (maximum - luminance);
+        return vec3<f32>(luminance) + (color - vec3<f32>(luminance)) * factor;
+    }
+    return color;
+}
+
+fn set_blend_lum(color: vec3<f32>, target_lum: f32) -> vec3<f32> {
+    return clip_blend_color(color + vec3<f32>(target_lum - blend_lum(color)));
+}
+
+fn blend_sat(color: vec3<f32>) -> f32 {
+    return max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
+}
+
+fn set_blend_sat(color: vec3<f32>, target_sat: f32) -> vec3<f32> {
+    var result = vec3<f32>(0.0);
+    let minimum = min(color.r, min(color.g, color.b));
+    let maximum = max(color.r, max(color.g, color.b));
+    if (maximum <= minimum) {
+        return result;
+    }
+    let scale = target_sat / (maximum - minimum);
+    if (color.r <= color.g && color.r <= color.b) {
+        if (color.g <= color.b) {
+            result = vec3<f32>(0.0, (color.g - minimum) * scale, target_sat);
+        } else {
+            result = vec3<f32>(0.0, target_sat, (color.b - minimum) * scale);
+        }
+    } else if (color.g <= color.r && color.g <= color.b) {
+        if (color.r <= color.b) {
+            result = vec3<f32>((color.r - minimum) * scale, 0.0, target_sat);
+        } else {
+            result = vec3<f32>(target_sat, 0.0, (color.b - minimum) * scale);
+        }
+    } else if (color.r <= color.g) {
+        result = vec3<f32>((color.r - minimum) * scale, target_sat, 0.0);
+    } else {
+        result = vec3<f32>(target_sat, (color.g - minimum) * scale, 0.0);
+    }
+    return result;
+}
+
+fn blend_channel(mode: u32, base: f32, blend: f32) -> f32 {
+    if (mode == 2u) { return base * blend; }
+    if (mode == 3u) { return 1.0 - (1.0 - base) * (1.0 - blend); }
+    if (mode == 4u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, base <= 0.5);
+    }
+    if (mode == 5u) { return min(base, blend); }
+    if (mode == 6u) { return max(base, blend); }
+    if (mode == 7u) {
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (1.0 - blend), 0.0, 1.0);
+    }
+    if (mode == 8u) {
+        if (blend <= 0.001) { return 0.0; }
+        return clamp(1.0 - (1.0 - base) / blend, 0.0, 1.0);
+    }
+    if (mode == 9u) {
+        return select(1.0 - 2.0 * (1.0 - base) * (1.0 - blend), 2.0 * base * blend, blend <= 0.5);
+    }
+    if (mode == 10u) {
+        if (blend <= 0.5) { return base - (1.0 - 2.0 * blend) * base * (1.0 - base); }
+        var curved = ((16.0 * base - 12.0) * base + 4.0) * base;
+        if (base > 0.25) { curved = sqrt(base); }
+        return base + (2.0 * blend - 1.0) * (curved - base);
+    }
+    if (mode == 11u) { return abs(base - blend); }
+    if (mode == 12u) { return base + blend - 2.0 * base * blend; }
+    if (mode == 13u) { return clamp(base - blend, 0.0, 1.0); }
+    if (mode == 16u) { return clamp(base + blend - 1.0, 0.0, 1.0); }
+    if (mode == 17u) { return clamp(base + blend, 0.0, 1.0); }
+    if (mode == 18u) {
+        if (blend <= 0.5) {
+            if (blend <= 0.001) { return 0.0; }
+            return clamp(1.0 - (1.0 - base) / (2.0 * blend), 0.0, 1.0);
+        }
+        if (blend >= 0.999) { return 1.0; }
+        return clamp(base / (2.0 * (1.0 - blend)), 0.0, 1.0);
+    }
+    if (mode == 19u) { return clamp(base + 2.0 * blend - 1.0, 0.0, 1.0); }
+    if (mode == 20u) { return select(max(base, 2.0 * (blend - 0.5)), min(base, 2.0 * blend), blend <= 0.5); }
+    if (mode == 21u) { return select(1.0, 0.0, base + blend < 1.0); }
+    if (mode == 22u) {
+        if (blend <= 0.001) { return 1.0; }
+        return clamp(base / blend, 0.0, 1.0);
+    }
+    return blend;
+}
+
+fn blend_rgb(mode: u32, base: vec3<f32>, blend: vec3<f32>) -> vec3<f32> {
+    if (mode == 14u) { return select(base, blend, blend_lum(blend) < blend_lum(base)); }
+    if (mode == 15u) { return select(base, blend, blend_lum(blend) > blend_lum(base)); }
+    if (mode == 23u) { return set_blend_lum(set_blend_sat(blend, blend_sat(base)), blend_lum(base)); }
+    if (mode == 24u) { return set_blend_lum(set_blend_sat(base, blend_sat(blend)), blend_lum(base)); }
+    if (mode == 25u) { return set_blend_lum(blend, blend_lum(base)); }
+    if (mode == 26u) { return set_blend_lum(base, blend_lum(blend)); }
+    return vec3<f32>(
+        blend_channel(mode, base.r, blend.r),
+        blend_channel(mode, base.g, blend.g),
+        blend_channel(mode, base.b, blend.b),
+    );
+}
+
+fn blend_straight_alpha(
+    base_px: vec4<f32>,
+    blend_px: vec4<f32>,
+    requested_opacity: f32,
+    mode: u32,
+    pixel_index: u32,
+) -> vec4<f32> {
+    var opacity = clamp(requested_opacity, 0.0, 1.0);
+    if (opacity <= 0.0001) { return base_px; }
+    var effective_mode = mode;
+    if (mode == 1u) {
+        let threshold = f32(hash_u32(effect_graph_dither_seed(pixel_index))) / 4294967295.0;
+        if (threshold > opacity) { return base_px; }
+        opacity = 1.0;
+        effective_mode = 0u;
+    }
     let base_alpha = clamp(base_px.a, 0.0, 1.0);
-    let blend_alpha = clamp(blend_px.a * clamp(opacity, 0.0, 1.0), 0.0, 1.0);
+    let blend_alpha = clamp(blend_px.a * opacity, 0.0, 1.0);
     if (blend_alpha <= 0.0001) {
         return base_px;
     }
@@ -88,7 +239,8 @@ fn over_straight_alpha(base_px: vec4<f32>, blend_px: vec4<f32>, opacity: f32) ->
     if (out_alpha <= 0.0001) {
         return vec4<f32>(0.0);
     }
-    let premul = blend_px.rgb * blend_alpha + base_px.rgb * base_alpha * (1.0 - blend_alpha);
+    let blended_rgb = blend_rgb(effective_mode, base_px.rgb, blend_px.rgb);
+    let premul = blended_rgb * blend_alpha + base_px.rgb * base_alpha * (1.0 - blend_alpha);
     return vec4<f32>(premul / out_alpha, out_alpha);
 }
 
@@ -131,7 +283,15 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (uniforms.source_kind == 3u || uniforms.source_kind == 4u) {
         return layer_px;
     }
-    return over_straight_alpha(base_px, layer_px, uniforms.opacity);
+    let pixel = vec2<u32>(floor(in.position.xy));
+    let pixel_index = pixel.y * u32(uniforms.geometry.x) + pixel.x;
+    return blend_straight_alpha(
+        base_px,
+        layer_px,
+        uniforms.opacity,
+        uniforms.blend_mode,
+        pixel_index,
+    );
 }
 
 fn source_coordinate(dst_uv: vec2<f32>) -> vec2<f32> {
@@ -167,7 +327,7 @@ fn source_inside(src_center: vec2<f32>) -> bool {
 
 fn grain_noise(position: vec2<f32>) -> f32 {
     var value = u32(position.x) * 1973u + u32(position.y) * 9277u +
-        uniforms.frame_seed * 26699u + 0x68bc21ebu;
+        uniforms.frame_seed_lo * 26699u + 0x68bc21ebu;
     value = value ^ (value << 13u);
     value = value ^ (value >> 17u);
     value = value ^ (value << 5u);
@@ -226,8 +386,6 @@ pub enum GpuCompositingCapability {
 pub enum GpuCompositingBlockerReason {
     /// An effect graph requires CPU execution or has not been lowered to a GPU shader.
     EffectRequiresCpu,
-    /// A blend mode other than Normal is used.
-    UnsupportedBlendMode,
     /// The layer has a transform the GPU compositor cannot sample correctly.
     UnsupportedTransform,
     /// A source frame is not already GPU-resident and uploads were disallowed.
@@ -243,7 +401,6 @@ impl GpuCompositingBlockerReason {
     pub fn code(&self) -> &'static str {
         match self {
             Self::EffectRequiresCpu => "effect_requires_cpu",
-            Self::UnsupportedBlendMode => "unsupported_blend_mode",
             Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
             Self::TooManyLayers => "too_many_layers",
@@ -257,7 +414,6 @@ impl GpuCompositingBlockerReason {
             Self::EffectRequiresCpu => {
                 "Effect graph requires CPU execution or has no GPU shader lowering"
             }
-            Self::UnsupportedBlendMode => "Blend mode not supported by GPU compositor",
             Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
             Self::TooManyLayers => "Too many layers for bounded GPU compositing",
@@ -327,17 +483,11 @@ impl GpuCompositingDiagnostics {
 pub fn evaluate_gpu_compositing_capability(
     layer_count: usize,
     has_any_unsupported_transform: bool,
-    has_any_non_normal_blend_mode: bool,
     all_frames_gpu_resident: bool,
 ) -> GpuCompositingCapability {
     if layer_count > MAX_GPU_COMPOSITE_LAYERS {
         return GpuCompositingCapability::CpuFallback {
             reason: GpuCompositingBlockerReason::TooManyLayers,
-        };
-    }
-    if has_any_non_normal_blend_mode {
-        return GpuCompositingCapability::CpuFallback {
-            reason: GpuCompositingBlockerReason::UnsupportedBlendMode,
         };
     }
     if has_any_unsupported_transform {
@@ -564,7 +714,10 @@ struct GpuCompositeUniforms {
     opacity: f32,
     source_kind: u32,
     effect_count: u32,
-    frame_seed: u32,
+    blend_mode: u32,
+    frame_seed_lo: u32,
+    frame_seed_hi: u32,
+    padding: [u32; 2],
     solid_color: [f32; 4],
     inv_transform0: [f32; 4],
     inv_transform1: [f32; 4],
@@ -903,7 +1056,10 @@ impl GpuFrameCompositor {
                     effect_count: layer
                         .effect_plan
                         .map_or(0, |plan| plan.operations().len() as u32),
-                    frame_seed: layer.frame_seed as u32,
+                    blend_mode: gpu_blend_mode_id(layer.blend_mode),
+                    frame_seed_lo: layer.frame_seed as u32,
+                    frame_seed_hi: (layer.frame_seed >> 32) as u32,
+                    padding: [0; 2],
                     solid_color,
                     inv_transform0: [
                         inv_transform[0],
@@ -978,7 +1134,10 @@ impl GpuFrameCompositor {
                 opacity: 1.0,
                 source_kind: 3,
                 effect_count: plan.operations().len() as u32,
-                frame_seed: frame_seed as u32,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: frame_seed as u32,
+                frame_seed_hi: (frame_seed >> 32) as u32,
+                padding: [0; 2],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1099,7 +1258,10 @@ impl GpuFrameCompositor {
                 opacity: progress,
                 source_kind: 5,
                 effect_count: 0,
-                frame_seed: 0,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: 0,
+                frame_seed_hi: 0,
+                padding: [0; 2],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1144,6 +1306,7 @@ impl GpuFrameCompositor {
         processed: &GpuColorFrameHandle,
         opacity: f32,
         blend_mode: BlendMode,
+        frame_seed: i64,
         working_color_space: mondrian_core::WorkingColorSpace,
     ) -> Result<GpuCompositeRecord, GpuCompositeError> {
         let validation_layers = [
@@ -1191,7 +1354,10 @@ impl GpuFrameCompositor {
                 opacity: opacity.clamp(0.0, 1.0),
                 source_kind: 0,
                 effect_count: 0,
-                frame_seed: 0,
+                blend_mode: gpu_blend_mode_id(blend_mode),
+                frame_seed_lo: frame_seed as u32,
+                frame_seed_hi: (frame_seed >> 32) as u32,
+                padding: [0; 2],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1265,7 +1431,10 @@ impl GpuFrameCompositor {
                 opacity: 1.0,
                 source_kind: 4,
                 effect_count: 0,
-                frame_seed: 0,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: 0,
+                frame_seed_hi: 0,
+                padding: [0; 2],
                 solid_color: [color.r, color.g, color.b, color.a],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1475,6 +1644,38 @@ fn single_layer_gpu_passthrough<'a>(
     preserves_pixels.then_some(handle)
 }
 
+fn gpu_blend_mode_id(mode: BlendMode) -> u32 {
+    match mode {
+        BlendMode::Normal => 0,
+        BlendMode::Dissolve => 1,
+        BlendMode::Multiply => 2,
+        BlendMode::Screen => 3,
+        BlendMode::Overlay => 4,
+        BlendMode::Darken => 5,
+        BlendMode::Lighten => 6,
+        BlendMode::ColorDodge => 7,
+        BlendMode::ColorBurn => 8,
+        BlendMode::HardLight => 9,
+        BlendMode::SoftLight => 10,
+        BlendMode::Difference => 11,
+        BlendMode::Exclusion => 12,
+        BlendMode::Subtract => 13,
+        BlendMode::DarkerColor => 14,
+        BlendMode::LighterColor => 15,
+        BlendMode::LinearBurn => 16,
+        BlendMode::LinearDodge => 17,
+        BlendMode::VividLight => 18,
+        BlendMode::LinearLight => 19,
+        BlendMode::PinLight => 20,
+        BlendMode::HardMix => 21,
+        BlendMode::Divide => 22,
+        BlendMode::Hue => 23,
+        BlendMode::Saturation => 24,
+        BlendMode::Color => 25,
+        BlendMode::Luminosity => 26,
+    }
+}
+
 fn effect_uniforms(
     plan: Option<&CompiledEffectGpuPlan>,
 ) -> [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS] {
@@ -1524,7 +1725,6 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     let capability = evaluate_gpu_compositing_capability(
         contributing_layers.clone().count(),
         contributing_layers.clone().any(|layer| !gpu_transform_supported(layer)),
-        contributing_layers.clone().any(|layer| layer.blend_mode != BlendMode::Normal),
         contributing_layers
             .clone()
             .all(|layer| !matches!(layer.source, GpuCompositeLayerSource::CpuFrame(_))),
@@ -1704,30 +1904,19 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_classifies_single_layer() {
-        let cap = evaluate_gpu_compositing_capability(1, false, false, true);
+        let cap = evaluate_gpu_compositing_capability(1, false, true);
         assert_eq!(cap, GpuCompositingCapability::GpuNative);
     }
 
     #[test]
     fn gpu_compositing_capability_classifies_upload_needed() {
-        let cap = evaluate_gpu_compositing_capability(1, false, false, false);
+        let cap = evaluate_gpu_compositing_capability(1, false, false);
         assert_eq!(cap, GpuCompositingCapability::GpuWithUpload);
     }
 
     #[test]
-    fn gpu_compositing_capability_rejects_non_normal_blend() {
-        let cap = evaluate_gpu_compositing_capability(2, false, true, true);
-        assert!(matches!(
-            cap,
-            GpuCompositingCapability::CpuFallback {
-                reason: GpuCompositingBlockerReason::UnsupportedBlendMode
-            }
-        ));
-    }
-
-    #[test]
     fn gpu_compositing_capability_rejects_unsupported_transform() {
-        let cap = evaluate_gpu_compositing_capability(1, true, false, true);
+        let cap = evaluate_gpu_compositing_capability(1, true, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
@@ -1738,8 +1927,7 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_rejects_too_many_layers() {
-        let cap =
-            evaluate_gpu_compositing_capability(MAX_GPU_COMPOSITE_LAYERS + 1, false, false, true);
+        let cap = evaluate_gpu_compositing_capability(MAX_GPU_COMPOSITE_LAYERS + 1, false, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
@@ -1826,7 +2014,6 @@ mod tests {
     fn gpu_compositing_blocker_codes_are_stable() {
         let reasons = [
             GpuCompositingBlockerReason::EffectRequiresCpu,
-            GpuCompositingBlockerReason::UnsupportedBlendMode,
             GpuCompositingBlockerReason::UnsupportedTransform,
             GpuCompositingBlockerReason::FrameNotGpuResident,
             GpuCompositingBlockerReason::TooManyLayers,
@@ -2110,6 +2297,138 @@ mod tests {
                 report.within_budget,
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn all_gpu_blend_modes_match_cpu_float_reference_with_full_frame_seed() {
+        use mondrian_effects::blend_rgba_f32_pixel_seeded;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping GPU BlendMode parity test: no GPU adapter available");
+            return;
+        };
+        const FRAME_SEED: i64 = 0x1234_5678_9abc_def0_u64 as i64;
+        const OPACITY: f32 = 0.63;
+        let base_data = vec![
+            [0.0, 0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.5, 0.5, 0.5, 0.5],
+            [0.0, 1.0, 1.0, 1.0],
+            [1.0, 0.0, 1.0, 0.25],
+            [1.0, 1.0, 0.0, 0.75],
+            [0.001, 0.999, 0.5, 1.0],
+            [0.999, 0.001, 0.5, 0.001],
+            [0.08, 0.91, 0.21, 0.2],
+            [0.81, 0.39, 0.58, 0.95],
+            [0.25, 0.25, 0.75, 0.4],
+            [0.75, 0.25, 0.25, 0.6],
+            [0.25, 0.75, 0.25, 0.8],
+            [0.2, 0.4, 0.6, 1.0],
+            [0.6, 0.4, 0.2, 0.35],
+            [0.13, 0.87, 0.43, 0.67],
+        ];
+        let overlay_data = vec![
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.5, 0.5, 1.0],
+            [1.0, 0.0, 0.0, 0.9],
+            [0.0, 1.0, 0.0, 0.7],
+            [0.0, 0.0, 1.0, 0.5],
+            [0.999, 0.001, 0.5, 0.3],
+            [0.001, 0.999, 0.5, 1.0],
+            [0.83, 0.17, 0.74, 0.9],
+            [0.22, 0.86, 0.31, 0.35],
+            [0.75, 0.75, 0.25, 0.6],
+            [0.25, 0.75, 0.75, 0.8],
+            [0.75, 0.25, 0.75, 0.4],
+            [0.9, 0.3, 0.1, 0.55],
+            [0.1, 0.3, 0.9, 0.85],
+            [0.87, 0.13, 0.57, 0.73],
+        ];
+        let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: base_data.clone(),
+        });
+        let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: overlay_data.clone(),
+        });
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Dissolve,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorDodge,
+            BlendMode::ColorBurn,
+            BlendMode::HardLight,
+            BlendMode::SoftLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+            BlendMode::Subtract,
+            BlendMode::DarkerColor,
+            BlendMode::LighterColor,
+            BlendMode::LinearBurn,
+            BlendMode::LinearDodge,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+            BlendMode::HardMix,
+            BlendMode::Divide,
+            BlendMode::Hue,
+            BlendMode::Saturation,
+            BlendMode::Color,
+            BlendMode::Luminosity,
+        ];
+
+        for mode in modes {
+            let base_layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&base),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            };
+            let overlay_layer = GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&overlay),
+                opacity: OPACITY,
+                blend_mode: mode,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: FRAME_SEED,
+            };
+            let actual = readback_test_composite(&context, &[base_layer, overlay_layer]);
+            let expected = base_data
+                .iter()
+                .zip(&overlay_data)
+                .enumerate()
+                .map(|(index, (base, overlay))| {
+                    let base =
+                        blend_rgba_f32_pixel_seeded([0.0; 4], *base, 1.0, BlendMode::Normal, 0);
+                    let dither_seed = (index as u32)
+                        ^ (FRAME_SEED as u32).rotate_left(13)
+                        ^ ((FRAME_SEED >> 32) as u32).rotate_right(7);
+                    blend_rgba_f32_pixel_seeded(base, *overlay, OPACITY, mode, dither_seed)
+                })
+                .collect::<Vec<_>>();
+            for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+                for channel in 0..4 {
+                    assert!(
+                        (expected[channel] - actual[channel]).abs() <= 8.0e-5,
+                        "{mode:?} mismatch at pixel {index}, channel {channel}: expected {}, actual {}",
+                        expected[channel],
+                        actual[channel]
+                    );
+                }
+            }
         }
     }
 
@@ -2714,7 +3033,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_composite_request_rejects_unsupported_blend_mode() {
+    fn gpu_composite_request_accepts_canonical_blend_mode() {
         let layer = GpuCompositeLayer {
             source: GpuCompositeLayerSource::SolidColor(Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
             opacity: 1.0,
@@ -2730,14 +3049,7 @@ mod tests {
             layers: &[layer],
         };
 
-        let err = validate_request(&request).expect_err("multiply should be CPU fallback");
-
-        assert_eq!(
-            err,
-            GpuCompositeError::Blocked {
-                reason: GpuCompositingBlockerReason::UnsupportedBlendMode
-            }
-        );
+        validate_request(&request).expect("Multiply is part of the canonical GPU Blend algebra");
     }
 
     #[test]

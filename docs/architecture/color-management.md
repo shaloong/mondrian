@@ -1490,7 +1490,7 @@ its admitted subset and fail closed outside it.
   when HDR correctness cannot be confirmed.
 - **GPU compositing (bounded production subset)** — The `gpu_compositor.rs` module is wired into the
   preview/viewer GPU path for the safe production subset: media-layer affine
-  transforms, procedural-solid affine transforms, Normal blend mode, supported
+  transforms, procedural-solid affine transforms, every canonical BlendMode, supported
   fused working-linear media/solid effect chains, working-linear adjustment
   layers, and at most five executed layers.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
@@ -1500,8 +1500,10 @@ its admitted subset and fail closed outside it.
   accumulator, process it in the same working space, and blend the result back.
   Unsupported layer stacks fail back to the CPU reference compositor with
   structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
-  `UnsupportedBlendMode`, `UnsupportedTransform`, `TooManyLayers`,
-  `GpuUnavailable`).
+  `UnsupportedTransform`, `TooManyLayers`, `GpuUnavailable`). The shared GPU
+  compositor implements the CPU Float32 straight-alpha algebra for every mode;
+  Dissolve carries the complete frame seed and destination pixel identity, and
+  real-device parity covers threshold and non-separable channel-tie inputs.
 - **`FrameNotGpuResident` blocker** — The current preview GPU compositing path
   supports CPU-layer upload into GPU compositing (`GpuWithUpload`) and then keeps
   the composited working frame GPU-resident for OCIO output. This blocker is

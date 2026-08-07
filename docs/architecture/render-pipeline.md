@@ -315,8 +315,11 @@ the attempt's checkpoint Seam, and its retained geometry plus maximum row
 scratch are charged beside the live pixel frames. After the single upload, the
 prepared GPU suffix consumes the same value plan as explicit dispatch and
 release steps: a shared GPU value can feed two point-operation branches and a
-scene-linear Normal Blend join. Linear tails within the fused-operation capacity
-remain one pass; longer tails split into exact admitted point dispatches. The
+canonical scene-linear BlendMode join. Authored opacity and the complete
+64-bit frame seed remain part of the dispatch, so Dissolve derives the same
+per-pixel decision as the CPU Float32 reference. Linear tails within the
+fused-operation capacity remain one pass; longer tails split into exact
+admitted point dispatches. The
 Preview and Export compare the prepared physical recording requirement with
 their frozen GPU grant before CPU prefix execution. The wgpu Adapter repeats
 materialization identity, wait, signal, release and terminal-live-set
@@ -324,7 +327,7 @@ validation before recording, and its real-device test matches the
 complete scalar graph. One command buffer retains every referenced texture
 until exact submission completion, so admission separately charges the
 conservative non-aliasing recording bytes when that exceeds the abstract plan
-peak. More than one backend transfer, GPU Mask/MultiInput/non-Normal joins,
+peak. More than one backend transfer, GPU Mask/MultiInput joins,
 color-domain conversion and temporal/stateful GPU dispatch still fail before
 pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.
@@ -2193,7 +2196,7 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 ### Capability Classification
 
 - **`GpuNative`** — All media sources are GPU-resident, every executed layer
-  uses Normal blend mode and a supported working-linear effect plan, and the
+  uses a canonical BlendMode and a supported working-linear effect plan, and the
   executed stack has ≤5 layers. Native D3D11 media enters through the bounded
   low-copy import backend; procedural and adjustment layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
@@ -2205,7 +2208,6 @@ the renderer contract is covered by `from_gpu_working_frame()`.
   an unplanned CPU input transform inside the app-window render pass.
 - **`CpuFallback`** — GPU compositing not possible. Reason is classified as:
   - `EffectRequiresCpu` — Effect graph needs CPU execution
-  - `UnsupportedBlendMode` — Only Normal is GPU-supported
   - `UnsupportedTransform` — Transform cannot be represented by the GPU compositor
   - `FrameNotGpuResident` — Frame must be uploaded
   - `TooManyLayers` — Exceeds the bounded 5-layer GPU composite stack
@@ -2492,7 +2494,9 @@ and adjustment elements:
 - media and scene-linear procedural-solid layers may use invertible affine
   transforms; external effect-domain solids materialize before their OCIO
   round trip so authored effect/transform order remains unchanged;
-- all executed layers must use `BlendMode::Normal`;
+- all executed layers may use any canonical `BlendMode`; the GPU shader shares
+  the CPU Float32 straight-alpha algebra, and Dissolve consumes the complete
+  frame seed plus destination pixel identity;
 - skipped leading/identity/zero-opacity adjustments do not consume capacity;
   the remaining executed layer count must be ≤5.
 

@@ -165,11 +165,6 @@ pub enum EffectFloatUnsupportedReason {
         /// Stable render-op label for diagnostics.
         op: &'static str,
     },
-    /// The requested blend mode needs a float implementation before it can run here.
-    UnsupportedBlendMode {
-        /// Blend mode that is still legacy-only on the float path.
-        mode: BlendMode,
-    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
