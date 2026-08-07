@@ -8,12 +8,12 @@
 //! states; command recording is never reported as completion.
 
 use crate::{
-    CpuColorFrame, GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
-    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
-    GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
-    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
-    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuCompositeError,
-    GpuContext, GpuFrameCompositor,
+    CpuColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameIdAllocator, GpuColorFrameReadback,
+    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
+    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
+    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions,
+    GpuCompositeError, GpuContext, GpuFrameCompositor,
 };
 use mondrian_core::{ExecutionCancellationToken, WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_effects::{
@@ -414,6 +414,10 @@ pub enum HeterogeneousGpuContinuationError {
     /// GPU frame identity allocation failed.
     #[error(transparent)]
     FrameIdentity(#[from] crate::GpuColorFrameIdAllocationError),
+    /// A distinct GPU copy output handle could not preserve the input frame
+    /// contract.
+    #[error(transparent)]
+    FrameHandle(#[from] crate::GpuColorFrameHandleError),
     /// The compositor could not allocate its process-unique binding identity.
     #[error(transparent)]
     CompositorCreate(#[from] crate::GpuColorFrameBindGroupCacheKeyAllocationError),
@@ -975,6 +979,21 @@ fn record_gpu_suffix(
                     }
                 }
                 PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::Copy { input, output, .. },
+                ) => {
+                    let input_handle = handles.get(input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_copy_input_not_materialized",
+                        },
+                    )?;
+                    let output_handle = record_gpu_identity_copy(resources, input_handle)?;
+                    if handles.insert(*output, output_handle).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
+                PreparedHeterogeneousGpuStep::Dispatch(
                     PreparedHeterogeneousGpuDispatch::Blend {
                         base,
                         overlay,
@@ -1086,6 +1105,56 @@ fn record_gpu_suffix(
             Err(error)
         }
     }
+}
+
+fn record_gpu_identity_copy(
+    resources: &mut HeterogeneousGpuRecordResources<'_>,
+    input: &crate::GpuColorFrameHandle,
+) -> Result<crate::GpuColorFrameHandle, HeterogeneousGpuContinuationError> {
+    let output = crate::GpuColorFrameHandle::new(
+        resources.ids.allocate()?,
+        input.descriptor(),
+        input.texture_format(),
+        "heterogeneous GPU identity copy",
+    )?;
+    let allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+    let output_resource = match resources.resource_pool {
+        Some(pool) => pool.acquire(resources.device, &allocation),
+        None => GpuColorFrameUploader::allocate(resources.device, &allocation),
+    };
+    {
+        let input_resource = resources
+            .table
+            .get(input)
+            .map_err(HeterogeneousGpuContinuationError::ResourceTable)?;
+        resources.encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &output_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            allocation.extent,
+        );
+    }
+    if resources
+        .table
+        .insert(output_resource)
+        .map_err(HeterogeneousGpuContinuationError::ResourceTable)?
+        .is_some()
+    {
+        let _ = resources.table.remove(output.id());
+        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+            reason: "gpu_copy_replaced_existing_resource",
+        });
+    }
+    Ok(output)
 }
 
 fn record_gpu_multi_input(
@@ -1605,6 +1674,7 @@ fn gpu_recording_device_demand(
                 })?
             }
             PreparedHeterogeneousGpuDispatch::PointChain { .. }
+            | PreparedHeterogeneousGpuDispatch::Copy { .. }
             | PreparedHeterogeneousGpuDispatch::Blend { .. } => 1,
         };
         let physical_bytes = materialization.bytes().checked_mul(physical_outputs).ok_or(
@@ -1794,6 +1864,37 @@ fn validate_gpu_suffix_schedule(
                 require_plan(live.insert(*output), "gpu_point_output_already_live")?;
                 require_plan(completed.insert(*signal), "gpu_point_signal_reused")?;
                 nodes.extend(dispatch_nodes.iter().copied());
+            }
+            PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::Copy {
+                node,
+                input,
+                output,
+                waits,
+                signal,
+            }) => {
+                require_plan(live.contains(input), "gpu_copy_input_not_live")?;
+                require_plan(waits.len() == 1, "gpu_copy_wait_arity")?;
+                let input_value = plan.materialization(*input).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_copy_input_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    waits[0] == input_value.completion() && completed.contains(&waits[0]),
+                    "gpu_copy_wait_not_completed",
+                )?;
+                let output_value = plan.materialization(*output).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_copy_output_materialization_missing",
+                    },
+                )?;
+                require_plan(
+                    output_value.completion() == *signal && output_value.value() == *node,
+                    "gpu_copy_output_or_token_mismatch",
+                )?;
+                require_plan(live.insert(*output), "gpu_copy_output_already_live")?;
+                require_plan(completed.insert(*signal), "gpu_copy_signal_reused")?;
+                nodes.push(*node);
             }
             PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::Blend {
                 node,
@@ -2077,6 +2178,15 @@ mod tests {
         let output = builder.add_multi_input(vec![left, middle, right], BlendMode::SoftLight, 0.35);
         builder.set_current_output(output);
         compile_reference_render_graph(builder.finish()).expect("compile GPU MultiInput graph")
+    }
+
+    fn gpu_identity_copy_graph() -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let blurred = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let output = builder.add_multi_input(vec![blurred], BlendMode::Normal, 0.0);
+        builder.set_current_output(output);
+        compile_reference_render_graph(builder.finish()).expect("compile GPU identity-copy graph")
     }
 
     fn test_input() -> Vec<[f32; 4]> {
@@ -2507,6 +2617,76 @@ mod tests {
                     expected[channel]
                 );
             }
+        }
+        assert!(!runtime.is_poisoned());
+        assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_identity_copy_is_bit_exact_and_has_distinct_resource_authority() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping heterogeneous GPU identity-copy test: no GPU adapter available");
+            return;
+        };
+        let graph = gpu_identity_copy_graph();
+        let input = test_input();
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            &input,
+            EXTENT.width(),
+            EXTENT.height(),
+            &graph,
+            FRAME_SEED,
+        )
+        .expect("complete CPU identity-copy reference");
+        let capability =
+            HeterogeneousGpuExecutionCapability::scene_linear_f32().expect("renderer capability");
+        let prepared = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&graph),
+            capability.environment(),
+            capability.request(EXTENT, generous_graph_budget()),
+        )
+        .expect("prepare GPU identity-copy continuation");
+        assert!(matches!(
+            prepared.gpu_suffix().steps().first(),
+            Some(PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::Copy { .. }
+            ))
+        ));
+
+        let frame_bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
+        let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(
+            prepared.plan(),
+            prepared.gpu_suffix(),
+        )
+        .expect("identity-copy recording requirements");
+        assert_eq!(requirements.device_materializations(), 2);
+        assert_eq!(requirements.device_bytes(), frame_bytes * 2);
+
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(8 * 1024 * 1024));
+        session.bind_generation(GENERATION);
+        let completion = prepared
+            .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
+            .expect("execute identity-copy CPU prefix");
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("heterogeneous GPU runtime");
+        let completed = runtime
+            .execute_to_cpu(
+                request(&graph, generous_gpu_grant()),
+                completion,
+                &ExecutionCancellationToken::new(),
+                gpu_test_deadline(),
+            )
+            .expect("execute GPU identity copy and read back");
+        assert_eq!(
+            completed.evidence().recorded().recorded_device_materializations(),
+            requirements.device_materializations()
+        );
+        for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
+            assert_eq!(actual.map(f32::to_bits), expected.map(f32::to_bits));
         }
         assert!(!runtime.is_poisoned());
         assert!(runtime.table.is_empty());

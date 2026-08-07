@@ -337,7 +337,9 @@ physical values separately. Ordered MultiInput GPU joins with at least two
 inputs reuse the same BlendMode pass as binary Blend. Their `N - 2` private
 fold intermediates are charged by that physical derivation, retained through
 submission, and never fabricated as semantic graph values. One-input
-MultiInput remains on CPU pending an exact copy primitive. More than one
+MultiInput uses the same schedule with a distinct bit-preserving texture-copy
+output; upload, copy output, completion token and retirement are all admitted
+before recording. More than one
 backend transfer, GPU Mask,
 color-domain conversion and temporal/stateful GPU dispatch still fail before
 pixel execution. The returned evidence distinguishes completed CPU work from

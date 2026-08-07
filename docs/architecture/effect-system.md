@@ -344,7 +344,9 @@ over the shared straight-alpha BlendMode compositor. An N-input dispatch owns
 `N - 2` private intermediate textures plus its semantic output; the physical
 recording requirement and evidence count every one in bytes and resources,
 and terminal failure removes unpublished private outputs. One-input
-MultiInput remains CPU-only until an exact GPU copy primitive exists. GPU Mask,
+MultiInput lowers to a distinct, bit-preserving texture copy so graph-value
+identity and last-use lifetime remain exact without a shader or color-domain
+round trip. GPU Mask,
 multiple transfers, color-domain conversion,
 temporal/stateful work, and external lanes remain typed blockers rather than
 being flattened or silently rerun.

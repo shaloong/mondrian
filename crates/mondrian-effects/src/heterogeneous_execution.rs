@@ -1678,6 +1678,20 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Backend-neutral point program.
         plan: Arc<CompiledEffectGpuPlan>,
     },
+    /// Bit-preserving materialization copy for an identity-shaped semantic
+    /// node whose output must retain a distinct graph-value lifetime.
+    Copy {
+        /// Exact semantic node represented by the copy.
+        node: EffectGraphNodeId,
+        /// Existing GPU materialization copied by the Adapter.
+        input: EffectMaterializationId,
+        /// New GPU materialization with an independent lifetime.
+        output: EffectMaterializationId,
+        /// Producer-completion dependency.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the copy command.
+        signal: EffectCompletionToken,
+    },
     /// Canonical straight-alpha BlendMode join in scene-linear working space.
     Blend {
         /// Exact semantic Blend node.
@@ -1722,6 +1736,7 @@ impl PreparedHeterogeneousGpuDispatch {
     pub const fn output(&self) -> EffectMaterializationId {
         match self {
             Self::PointChain { output, .. }
+            | Self::Copy { output, .. }
             | Self::Blend { output, .. }
             | Self::MultiInput { output, .. } => *output,
         }
@@ -1731,6 +1746,7 @@ impl PreparedHeterogeneousGpuDispatch {
     pub fn waits(&self) -> &[EffectCompletionToken] {
         match self {
             Self::PointChain { waits, .. }
+            | Self::Copy { waits, .. }
             | Self::Blend { waits, .. }
             | Self::MultiInput { waits, .. } => waits,
         }
@@ -1740,6 +1756,7 @@ impl PreparedHeterogeneousGpuDispatch {
     pub const fn signal(&self) -> EffectCompletionToken {
         match self {
             Self::PointChain { signal, .. }
+            | Self::Copy { signal, .. }
             | Self::Blend { signal, .. }
             | Self::MultiInput { signal, .. } => *signal,
         }
@@ -1748,7 +1765,9 @@ impl PreparedHeterogeneousGpuDispatch {
     fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
-            Self::Blend { node, .. } | Self::MultiInput { node, .. } => output.push(*node),
+            Self::Copy { node, .. } | Self::Blend { node, .. } | Self::MultiInput { node, .. } => {
+                output.push(*node)
+            }
         }
     }
 
@@ -1757,7 +1776,7 @@ impl PreparedHeterogeneousGpuDispatch {
         mut visit: impl FnMut(EffectMaterializationId) -> Result<(), E>,
     ) -> Result<(), E> {
         match self {
-            Self::PointChain { input, .. } => visit(*input)?,
+            Self::PointChain { input, .. } | Self::Copy { input, .. } => visit(*input)?,
             Self::Blend { base, overlay, .. } => {
                 visit(*base)?;
                 visit(*overlay)?;
@@ -2931,22 +2950,29 @@ fn prepare_gpu_suffix(
                         })
                     }
                     EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
-                        if inputs.len() < 2 {
-                            return Err(
+                        match inputs.len() {
+                            0 => Err(
                                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
-                                    reason: "gpu_multi_input_dispatch_requires_two_inputs",
+                                    reason: "gpu_multi_input_dispatch_requires_an_input",
                                 },
-                            );
+                            ),
+                            1 => Ok(PreparedHeterogeneousGpuDispatch::Copy {
+                                node: *node_id,
+                                input: inputs[0],
+                                output: *output,
+                                waits: Arc::clone(waits),
+                                signal: *signal,
+                            }),
+                            _ => Ok(PreparedHeterogeneousGpuDispatch::MultiInput {
+                                node: *node_id,
+                                inputs: Arc::clone(inputs),
+                                output: *output,
+                                waits: Arc::clone(waits),
+                                signal: *signal,
+                                opacity: *opacity,
+                                blend_mode: *blend_mode,
+                            }),
                         }
-                        Ok(PreparedHeterogeneousGpuDispatch::MultiInput {
-                            node: *node_id,
-                            inputs: Arc::clone(inputs),
-                            output: *output,
-                            waits: Arc::clone(waits),
-                            signal: *signal,
-                            opacity: *opacity,
-                            blend_mode: *blend_mode,
-                        })
                     }
                     _ => Err(
                         PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -4396,10 +4422,11 @@ mod tests {
     }
 
     #[test]
-    fn one_input_multi_input_does_not_claim_an_unimplemented_gpu_copy() {
+    fn one_input_multi_input_lowers_to_exact_gpu_materialization_copy() {
         let mut builder = EffectGraphBuilderState::new();
         let source = builder.source();
-        let output = builder.add_multi_input(vec![source], BlendMode::Normal, 1.0);
+        let blurred = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let output = builder.add_multi_input(vec![blurred], BlendMode::Normal, 1.0);
         builder.set_current_output(output);
         let compiled = compile_reference_render_graph(builder.finish()).expect("one-input graph");
         let modes = compiled.node_execution_modes(output).expect("compiled node modes");
@@ -4407,9 +4434,23 @@ mod tests {
             EffectProcessingBackend::Cpu,
             EffectWorkingPrecision::Float32
         ));
-        assert!(!modes.contains(
+        assert!(modes.contains(
             EffectProcessingBackend::Gpu,
             EffectWorkingPrecision::Float32
+        ));
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            Arc::clone(&compiled),
+            &test_environment(),
+            request(EffectFrameExtent::new(8, 8)),
+        )
+        .expect("GPU identity copy suffix");
+        assert_eq!(work.cpu_nodes(), [blurred]);
+        assert_eq!(work.gpu_suffix().node_ids(), [output]);
+        assert!(matches!(
+            work.gpu_suffix().steps().first(),
+            Some(PreparedHeterogeneousGpuStep::Dispatch(
+                PreparedHeterogeneousGpuDispatch::Copy { node, .. }
+            )) if *node == output
         ));
     }
 
