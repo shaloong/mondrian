@@ -444,6 +444,53 @@ fn production_timeline_prepares_heterogeneous_route_before_media_materialization
 }
 
 #[test]
+fn production_timeline_prepares_procedural_solid_heterogeneous_route_without_media() {
+    use mondrian_effects::{EffectNodeExt, EffectType};
+
+    let target = Resolution { width: 64, height: 36 };
+    let mut sequence = solid_sequence(
+        "prepared heterogeneous Solid Color",
+        Color::from_rgba8(40, 90, 180, 192),
+    );
+    sequence.settings.resolution = target;
+    let clip = sequence.video_tracks[0].clips.first_mut().expect("Solid Color Clip");
+    clip.add_effect_node(mondrian_effects::EffectNode::with_defaults(
+        EffectType::GaussianBlur,
+    ));
+    clip.add_effect_node(preview_gpu_only_point_effect("solid-source"));
+
+    let resolution = resolve_preview_timeline(
+        &sequence,
+        &[],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&sequence),
+        &mut |_| panic!("procedural Solid Color must not invoke the media Adapter"),
+        &mut |_| panic!("procedural Solid Color must not invoke title rasterization"),
+    );
+    let resolved = match resolution {
+        PreviewTimelineResolution::Ready(resolved) => resolved,
+        PreviewTimelineResolution::Unavailable { reason } => panic!(
+            "procedural Solid Color must reach the prepared heterogeneous route: {}",
+            reason.detail()
+        ),
+        PreviewTimelineResolution::Empty | PreviewTimelineResolution::Pending { .. } => {
+            panic!("procedural heterogeneous Timeline returned no ready plan")
+        }
+    };
+    let [ResolvedPreviewElement::HeterogeneousSolidColor { prepared_route, .. }] =
+        resolved.plan.elements.as_slice()
+    else {
+        panic!("Solid Color must retain its typed procedural source and frozen route")
+    };
+    assert_eq!(
+        prepared_route.frame_extent(),
+        EffectFrameExtent::new(64, 36)
+    );
+}
+
+#[test]
 fn production_timeline_binds_nested_cpu_materialization_to_parent_heterogeneous_route() {
     use mondrian_effects::{EffectNodeExt, EffectType};
 

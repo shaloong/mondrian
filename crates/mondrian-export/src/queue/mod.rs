@@ -49,22 +49,22 @@ use mondrian_renderer::{
     BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
     CpuSourceColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
     GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
-    HeterogeneousGpuCompletedEvidence, HeterogeneousGpuCompletedFrame,
-    HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
-    HeterogeneousGpuContinuationRuntime, LinearFloatSource, PreparedVisualChildCanvasPolicy,
-    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
-    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
-    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
-    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
-    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
-    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaLayer,
-    TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
+    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
+    HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime, LinearFloatSource,
+    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
+    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
+    PreparedVisualMaterializationContract, PreparedVisualNestedSample, PreparedVisualProgram,
+    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
+    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeColorPathSummary,
+    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
+    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
+    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCrossDissolveLayer,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
+    TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
     TimelineTemporalDemandBatch, TimelineTemporalSource, TimelineTransitionInput,
     TimelineTransitionInputPlan,
 };
@@ -3851,38 +3851,48 @@ fn render_prepared_visual_node_into(
         let input = match element {
             TimelineRenderPlanElement::Media(media) => {
                 if let Some(temporal) = temporal_layers.get(&media.placement) {
-                    &temporal.frame
+                    HeterogeneousCpuPrefixSource::working_frame(temporal.frame.clone())
                 } else {
-                    &decoded_media[route.element_index]
-                        .as_ref()
-                        .ok_or_else(|| {
-                            "heterogeneous media plan was not resolved before Effect execution"
-                                .to_owned()
-                        })?
-                        .frame
+                    HeterogeneousCpuPrefixSource::working_frame(
+                        decoded_media[route.element_index]
+                            .as_ref()
+                            .ok_or_else(|| {
+                                "heterogeneous media plan was not resolved before Effect execution"
+                                    .to_owned()
+                            })?
+                            .frame
+                            .clone(),
+                    )
                 }
             }
             TimelineRenderPlanElement::BasicTitle(_) => {
-                &title_media[route.element_index]
-                    .as_ref()
-                    .ok_or_else(|| {
-                        "heterogeneous Basic Title was not resolved before Effect execution"
-                            .to_owned()
-                    })?
-                    .frame
+                HeterogeneousCpuPrefixSource::working_frame(
+                    title_media[route.element_index]
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "heterogeneous Basic Title was not resolved before Effect execution"
+                                .to_owned()
+                        })?
+                        .frame
+                        .clone(),
+                )
             }
             TimelineRenderPlanElement::NestedSequence(nested) => {
                 if let Some(temporal) = temporal_layers.get(&nested.placement) {
-                    &temporal.frame
+                    HeterogeneousCpuPrefixSource::working_frame(temporal.frame.clone())
                 } else {
-                    nested_media[route.element_index].as_ref().ok_or_else(|| {
-                        "heterogeneous nested Sequence was not resolved before Effect execution"
-                            .to_owned()
-                    })?
+                    HeterogeneousCpuPrefixSource::working_frame(
+                        nested_media[route.element_index].as_ref().ok_or_else(|| {
+                            "heterogeneous nested Sequence was not resolved before Effect execution"
+                                .to_owned()
+                        })?.clone(),
+                    )
                 }
             }
+            TimelineRenderPlanElement::SolidColor(solid) => {
+                HeterogeneousCpuPrefixSource::solid_color(route.route.frame_extent(), solid.color)
+            }
             TimelineRenderPlanElement::Adjustment(_)
-            | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::CrossDissolve(_) => {
                 return Err(format!(
                     "unsupported heterogeneous route escaped preflight at {}",
@@ -5679,6 +5689,28 @@ mod tests {
     }
 
     #[test]
+    fn export_heterogeneous_transition_endpoint_remains_preflight_blocked() {
+        let graph = heterogeneous_cpu_dag_graph();
+        let extent = EffectFrameExtent::new(4, 3);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            78,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        let error = session
+            .select_heterogeneous_route(
+                &graph,
+                ExportHeterogeneousPlacement::TransitionInput,
+                extent,
+            )
+            .expect_err("Export must not borrow Preview endpoint assembly semantics");
+        assert!(matches!(
+            error,
+            ExportHeterogeneousEffectError::UnsupportedPlacement { placement: "transition_input" }
+        ));
+        assert!(session.heterogeneous_route_contracts.is_empty());
+    }
+
+    #[test]
     fn export_heterogeneous_route_admission_is_independent_of_gpu_plan_cache_pressure() {
         let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
         let extent = EffectFrameExtent::new(4, 3);
@@ -5786,7 +5818,7 @@ mod tests {
         let error = session
             .execute_heterogeneous_element(
                 &route,
-                &input,
+                HeterogeneousCpuPrefixSource::working_frame(input.clone()),
                 WorkingColorSpace::LinearRec709,
                 &ExecutionCancellationToken::new(),
             )
@@ -5836,7 +5868,7 @@ mod tests {
         let error = session
             .execute_heterogeneous_element(
                 &route,
-                &input,
+                HeterogeneousCpuPrefixSource::working_frame(input.clone()),
                 WorkingColorSpace::LinearRec709,
                 &cancellation,
             )
@@ -5895,7 +5927,7 @@ mod tests {
         let output = session
             .execute_heterogeneous_element(
                 &route,
-                &input,
+                HeterogeneousCpuPrefixSource::working_frame(input.clone()),
                 WorkingColorSpace::LinearRec709,
                 &ExecutionCancellationToken::new(),
             )
@@ -5924,6 +5956,115 @@ mod tests {
                 .working_color_space,
             WorkingColorSpace::LinearRec709
         );
+    }
+
+    #[test]
+    fn export_procedural_solid_heterogeneous_completion_matches_cpu_reference() {
+        let generation = 76;
+        let extent = EffectFrameExtent::new(4, 3);
+        let frame_seed = 37;
+        let color = mondrian_core::Color { r: 0.2, g: 0.4, b: 0.7, a: 0.75 };
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            generation,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        if session.gpu_output.ensure_ready().is_err() {
+            eprintln!(
+                "skipping Export procedural heterogeneous integration test: no GPU adapter available"
+            );
+            return;
+        }
+        let prepared_route = freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::SolidColor,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        session.composite_scratch.bind_effect_execution_generation(generation);
+        let source = vec![[color.r, color.g, color.b, color.a]; 12];
+        let expected = apply_compiled_effect_graph_rgba_f32(
+            &source,
+            extent.width(),
+            extent.height(),
+            &graph,
+            frame_seed,
+        )
+        .expect("complete procedural CPU reference");
+        let route = PreparedExportHeterogeneousElement {
+            element_index: 0,
+            placement: ExportHeterogeneousPlacement::SolidColor,
+            route: prepared_route,
+            frame_seed,
+        };
+
+        let output = session
+            .execute_heterogeneous_element(
+                &route,
+                HeterogeneousCpuPrefixSource::solid_color(extent, color),
+                WorkingColorSpace::LinearRec709,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect("complete procedural Export heterogeneous route");
+        assert_eq!(output.descriptor().width, extent.width());
+        assert_eq!(output.descriptor().height, extent.height());
+        for (actual, expected) in output.rgba_f32().data.iter().zip(expected.iter()) {
+            for channel in 0..4 {
+                assert!(
+                    (actual[channel] - expected[channel]).abs() <= 2.0e-5,
+                    "channel {channel}: actual={} expected={}",
+                    actual[channel],
+                    expected[channel]
+                );
+            }
+        }
+        assert_eq!(
+            session.visual_diagnostics().heterogeneous_frames_completed,
+            1
+        );
+    }
+
+    #[test]
+    fn export_procedural_solid_rejects_insufficient_source_grant_before_start() {
+        let generation = 77;
+        let extent = EffectFrameExtent::new(4, 3);
+        let graph = heterogeneous_tracer_graph(mondrian_effects::EffectType::BasicCorrection);
+        let mut session = ExportVisualRenderSession::for_reference_generation(
+            generation,
+            service::ExportExecutionResourcePolicy::default(),
+        );
+        let prepared_route = freeze_test_heterogeneous_route(
+            &mut session,
+            &graph,
+            ExportHeterogeneousPlacement::SolidColor,
+            extent,
+        );
+        session.route_contracts_sealed = true;
+        session.resource_policy.effect_working_bytes = 1;
+        let route = PreparedExportHeterogeneousElement {
+            element_index: 0,
+            placement: ExportHeterogeneousPlacement::SolidColor,
+            route: prepared_route,
+            frame_seed: 41,
+        };
+
+        let error = session
+            .execute_heterogeneous_element(
+                &route,
+                HeterogeneousCpuPrefixSource::solid_color(
+                    extent,
+                    mondrian_core::Color { r: 0.2, g: 0.4, b: 0.7, a: 1.0 },
+                ),
+                WorkingColorSpace::LinearRec709,
+                &ExecutionCancellationToken::new(),
+            )
+            .expect_err("procedural source allocation must remain inside its attempt grant");
+        assert!(matches!(
+            error,
+            ExportHeterogeneousEffectError::ProceduralSourceGrantExceeded { limit: 1, .. }
+        ));
+        assert_eq!(session.visual_diagnostics().heterogeneous_frames_started, 0);
     }
 
     struct FakeExecutor {

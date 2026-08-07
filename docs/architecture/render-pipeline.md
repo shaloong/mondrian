@@ -176,10 +176,13 @@ empty homogeneous exact-mode intersection and therefore proves that an
 explicit execution transition is required. A homogeneous CPU-NormalizedU8,
 GPU-only, stateful, temporal, or domain-blocked graph remains unchanged for the
 single compositor admission seam; inability to enter CPU Float32 is not itself
-evidence of heterogeneity. The heterogeneous Adapter presently
-accepts Media, Basic Title, and Nested Sequence placements; Solid Color,
-Adjustment, and Transition inputs remain on a complete CPU route or fail
-preflight as an unsupported placement. A selected heterogeneous route replaces
+evidence of heterogeneity. The heterogeneous Adapter accepts Media, Basic
+Title, Nested Sequence, and procedural Solid Color placements. Media/title/
+nested sources bind an existing typed CPU working frame; Solid Color binds the
+same renderer-owned `HeterogeneousCpuPrefixSource` as exact extent plus authored
+straight-alpha color, and its full raster is allocated only after the attempt
+grant and route contract validate. Adjustment and Transition inputs remain on
+a complete CPU route or fail preflight as an unsupported placement. A selected heterogeneous route replaces
 the element's graph with identity only in the downstream compositor plan, so
 the Effect is neither omitted nor evaluated twice. The rewritten plan must
 still pass ordinary Float32 compositor admission.
@@ -404,16 +407,26 @@ Preview consumes the same prepared heterogeneous work through three distinct
 Modules rather than reproducing Export's offline Session. Pure
 `preview_viewer_plan` lowering first attempts the ordinary complete-GPU Viewer
 plan. Only `EffectRequiresCpu` opens the bounded CPU-working-input heterogeneous
-route for Media, Basic Title, or a parent Nested Clip whose child has already
-materialized through its complete CPU route. This includes those source shapes
-when they are Cross Dissolve endpoints. Generated Solid Color, Adjustment
-accumulator readback, unsupported blend/transform/placement, missing
-CPU-working input, excess layer count, or an invalid batch fails closed.
-Planning performs no pixel work. `preview_visual_execution_task` then submits the addressed
+route for Media, Basic Title, a parent Nested Clip whose child has already
+materialized through its complete CPU route, or a procedural Solid Color. The
+first three bind existing working frames; Solid retains only exact raster and
+color until the validated serial executor materializes it. Existing-frame and
+procedural inputs share the same typed renderer source contract, batch retained
+byte accounting, cancellation checkpoints, GPU continuation binding, and
+working/straight-alpha descriptor. Preview Cross Dissolve endpoints accept both
+existing-frame and procedural Solid sources in the same addressed batch.
+Adjustment accumulator readback, unsupported blend/transform/placement,
+missing CPU-working input, excess layer count, or an invalid batch fails
+closed. Planning performs no pixel work. `preview_visual_execution_task` then submits the addressed
 CPU-prefix batch to its own bounded `FrameWorkBroker` and dedicated serial
 worker. The CPU-prefix grant and no-readback GPU-continuation grant are frozen
 from the same immutable Preview resource decision and travel with that
 attempt.
+
+Export still rejects every heterogeneous Cross Dissolve endpoint during
+preflight. Its offline compositor lowers two endpoint values independently, so
+support requires an Export-owned pair of exact completions and transition
+assembly rather than borrowing Preview's addressed Viewer batch.
 
 The successful worker result deliberately retains a move-only Broker execution
 lease. That lease crosses the App result-pump, Viewer recording, queue

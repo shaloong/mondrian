@@ -353,6 +353,48 @@ impl TimelineCompositeScratch {
         )
     }
 
+    /// Materialize one procedural Solid Color and execute a prepared
+    /// heterogeneous CPU prefix through this owner's Effect Session.
+    ///
+    /// The full raster is allocated only after the caller has validated its
+    /// immutable request/grant. It remains attempt-local and is discarded as
+    /// soon as the CPU frontier completion has retained every required value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
+        &mut self,
+        prepared: &PreparedHeterogeneousEffectWork,
+        generation: u64,
+        extent: mondrian_effects::EffectFrameExtent,
+        color: Color,
+        frame_seed: i64,
+        working_color_space: WorkingColorSpace,
+        checkpoint: impl FnMut() -> Option<HeterogeneousCpuExecutionStopReason>,
+    ) -> Result<PreparedHeterogeneousCpuCompletion, PreparedHeterogeneousEffectWorkError> {
+        let pixel_count = usize::try_from(extent.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(extent.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .ok_or(
+                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                    reason: "procedural_solid_extent_overflow",
+                },
+            )?;
+        let pixel = [color.r, color.g, color.b, color.a];
+        self.solid_fill_f32.resize(pixel_count, pixel);
+        self.solid_fill_f32.fill(pixel);
+        prepared.execute_cpu_prefix_with_checkpoint(
+            &self.effect_execution,
+            generation,
+            &self.solid_fill_f32,
+            frame_seed,
+            working_color_space,
+            checkpoint,
+        )
+    }
+
     /// Apply an owner-scoped OCIO CPU processor residency limit.
     pub fn reconfigure_color_execution(&mut self, processor_capacity: usize) {
         self.color_execution.reconfigure(processor_capacity);

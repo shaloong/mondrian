@@ -41,7 +41,7 @@ pub use heterogeneous_cpu::{
     HeterogeneousCpuPrefixBatchExecutor, HeterogeneousCpuPrefixBatchGrant,
     HeterogeneousCpuPrefixBatchItem, HeterogeneousCpuPrefixBatchOutput,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousCpuPrefixFrameContractViolation,
-    PreparedHeterogeneousEffectRoute,
+    HeterogeneousCpuPrefixSource, PreparedHeterogeneousEffectRoute,
 };
 pub mod viewer_spatial;
 

@@ -196,6 +196,9 @@ pub(crate) fn composite_resolved_preview_working(
             ResolvedPreviewElement::SolidColor(layer) => {
                 working_elements.push(PreviewWorkingElement::SolidColor(layer.clone()));
             }
+            ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
+                working_elements.push(PreviewWorkingElement::SolidColor(layer.clone()));
+            }
             ResolvedPreviewElement::Adjustment(layer) => {
                 working_elements.push(PreviewWorkingElement::Adjustment(layer.clone()));
             }
@@ -316,6 +319,9 @@ fn prepare_transition_input(
         ResolvedPreviewTransitionInput::Transparent => PreviewWorkingTransitionInput::Transparent,
         ResolvedPreviewTransitionInput::SolidColor(solid) => {
             PreviewWorkingTransitionInput::SolidColor(solid.clone())
+        }
+        ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
+            PreviewWorkingTransitionInput::SolidColor(layer.clone())
         }
         ResolvedPreviewTransitionInput::Media {
             frame,

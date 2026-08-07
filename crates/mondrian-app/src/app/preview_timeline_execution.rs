@@ -1342,16 +1342,26 @@ where
                         frame_seed: solid.frame_seed,
                     });
                 } else {
-                    resolved.push(ResolvedPreviewElement::SolidColor(
-                        TimelineSolidColorLayer {
-                            color: solid.color,
-                            opacity: solid.opacity,
-                            blend_mode: solid.blend_mode,
-                            transform: solid.transform,
-                            effect_graph: solid.effect_graph,
-                            frame_seed: solid.frame_seed,
+                    let prepared_route = prepared_preview_heterogeneous_route(
+                        &routes,
+                        solid.placement,
+                        &solid.effect_graph,
+                    )?;
+                    let layer = TimelineSolidColorLayer {
+                        color: solid.color,
+                        opacity: solid.opacity,
+                        blend_mode: solid.blend_mode,
+                        transform: solid.transform,
+                        effect_graph: solid.effect_graph,
+                        frame_seed: solid.frame_seed,
+                    };
+                    resolved.push(match prepared_route {
+                        Some(prepared_route) => ResolvedPreviewElement::HeterogeneousSolidColor {
+                            layer,
+                            prepared_route,
                         },
-                    ));
+                        None => ResolvedPreviewElement::SolidColor(layer),
+                    });
                 }
             }
             TimelineRenderPlanElement::Media(media) => {
@@ -1658,14 +1668,26 @@ where
     Ok(match input {
         TimelineTransitionInputPlan::Transparent => ResolvedPreviewTransitionInput::Transparent,
         TimelineTransitionInputPlan::SolidColor(solid) => {
-            ResolvedPreviewTransitionInput::SolidColor(TimelineSolidColorLayer {
+            let prepared_route = prepared_preview_heterogeneous_route(
+                &routes,
+                solid.placement,
+                &solid.effect_graph,
+            )?;
+            let layer = TimelineSolidColorLayer {
                 color: solid.color,
                 opacity: solid.opacity,
                 blend_mode: solid.blend_mode,
                 transform: solid.transform,
                 effect_graph: solid.effect_graph,
                 frame_seed: solid.frame_seed,
-            })
+            };
+            match prepared_route {
+                Some(prepared_route) => ResolvedPreviewTransitionInput::HeterogeneousSolidColor {
+                    layer,
+                    prepared_route,
+                },
+                None => ResolvedPreviewTransitionInput::SolidColor(layer),
+            }
         }
         TimelineTransitionInputPlan::Media(media) => {
             let asset_id = media.asset_id;

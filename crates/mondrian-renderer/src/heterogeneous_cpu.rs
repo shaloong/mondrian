@@ -10,7 +10,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{Color, WorkingColorSpace};
 use mondrian_effects::{
     CompiledEffectGraph, EffectExecutionSessionConfig, EffectFrameExtent,
     EffectGraphExecutionBudget, HeterogeneousCpuExecutionStopReason,
@@ -143,12 +143,54 @@ impl PreparedHeterogeneousEffectRoute {
     }
 }
 
+/// One immutable source for a heterogeneous CPU prefix.
+///
+/// Decoded, titled, and nested sources bind an already-owned working frame.
+/// Procedural Solid Color sources retain only their exact extent and authored
+/// color until the validated executor begins, so planning never allocates a
+/// full raster merely to discover that the batch grant is insufficient.
+#[derive(Debug, Clone)]
+pub enum HeterogeneousCpuPrefixSource {
+    /// Existing CPU-resident working-linear pixels.
+    WorkingFrame(CpuColorFrame),
+    /// Procedural working-linear Solid Color generated under execution
+    /// authority.
+    SolidColor {
+        /// Exact raster frozen by route preparation.
+        extent: EffectFrameExtent,
+        /// Straight-alpha authored working-domain color.
+        color: Color,
+    },
+}
+
+impl HeterogeneousCpuPrefixSource {
+    /// Bind an existing typed working frame.
+    pub fn working_frame(frame: CpuColorFrame) -> Self {
+        Self::WorkingFrame(frame)
+    }
+
+    /// Bind a procedural Solid Color without allocating its raster.
+    pub const fn solid_color(extent: EffectFrameExtent, color: Color) -> Self {
+        Self::SolidColor { extent, color }
+    }
+
+    fn extent(&self) -> EffectFrameExtent {
+        match self {
+            Self::WorkingFrame(frame) => {
+                let descriptor = frame.descriptor();
+                EffectFrameExtent::new(descriptor.width, descriptor.height)
+            }
+            Self::SolidColor { extent, .. } => *extent,
+        }
+    }
+}
+
 /// One addressable working-linear input to an atomic heterogeneous CPU batch.
 #[derive(Debug, Clone)]
 pub struct HeterogeneousCpuPrefixBatchItem {
     address: u32,
     route: PreparedHeterogeneousEffectRoute,
-    input: CpuColorFrame,
+    source: HeterogeneousCpuPrefixSource,
     working_color_space: WorkingColorSpace,
     frame_seed: i64,
 }
@@ -166,7 +208,26 @@ impl HeterogeneousCpuPrefixBatchItem {
         Self {
             address,
             route,
-            input,
+            source: HeterogeneousCpuPrefixSource::working_frame(input),
+            working_color_space,
+            frame_seed,
+        }
+    }
+
+    /// Bind one compiled graph to a procedural Solid Color source whose raster
+    /// will be allocated only after the complete batch validates.
+    pub fn new_solid_color(
+        address: u32,
+        route: PreparedHeterogeneousEffectRoute,
+        color: Color,
+        working_color_space: WorkingColorSpace,
+        frame_seed: i64,
+    ) -> Self {
+        let extent = route.frame_extent();
+        Self {
+            address,
+            route,
+            source: HeterogeneousCpuPrefixSource::solid_color(extent, color),
             working_color_space,
             frame_seed,
         }
@@ -194,7 +255,20 @@ impl HeterogeneousCpuPrefixBatchItem {
 
     /// Typed CPU frame descriptor.
     pub fn descriptor(&self) -> crate::ColorFrameDescriptor {
-        self.input.descriptor()
+        match &self.source {
+            HeterogeneousCpuPrefixSource::WorkingFrame(frame) => frame.descriptor(),
+            HeterogeneousCpuPrefixSource::SolidColor { extent, .. } => {
+                crate::ColorFrameDescriptor {
+                    width: extent.width(),
+                    height: extent.height(),
+                    color_space: ColorFrameSpace::Working(self.working_color_space),
+                    domain: ColorFrameDomain::Working,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: ColorFrameResidency::Cpu,
+                    alpha: ColorFrameAlpha::StraightCoverage,
+                }
+            }
+        }
     }
 }
 
@@ -424,6 +498,13 @@ pub enum HeterogeneousCpuPrefixBatchError {
         /// Rejected contract dimension.
         violation: HeterogeneousCpuPrefixFrameContractViolation,
     },
+    /// A procedural source carries a non-finite authored color and cannot
+    /// create deterministic working pixels.
+    #[error("heterogeneous CPU-prefix item {address} has a non-finite Solid Color source")]
+    NonFiniteSolidColor {
+        /// Caller address.
+        address: u32,
+    },
     /// The materialized frame no longer matches the pre-decoding route extent.
     #[error(
         "heterogeneous CPU-prefix item {address} extent changed after route preparation: prepared={prepared:?}, actual={actual:?}"
@@ -500,15 +581,29 @@ impl HeterogeneousCpuPrefixBatchExecutor {
         for item in request.items {
             stop_if_requested(&mut checkpoint)?;
             stop_if_requested(&mut checkpoint)?;
-            let completion_result =
-                self.scratch.execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
-                    item.route.work(),
-                    generation,
-                    item.input.rgba_f32().data.as_slice(),
-                    item.frame_seed,
-                    item.working_color_space,
-                    &mut checkpoint,
-                );
+            let completion_result = match item.source {
+                HeterogeneousCpuPrefixSource::WorkingFrame(input) => {
+                    self.scratch.execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
+                        item.route.work(),
+                        generation,
+                        input.rgba_f32().data.as_slice(),
+                        item.frame_seed,
+                        item.working_color_space,
+                        &mut checkpoint,
+                    )
+                }
+                HeterogeneousCpuPrefixSource::SolidColor { extent, color } => {
+                    self.scratch.execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
+                        item.route.work(),
+                        generation,
+                        extent,
+                        color,
+                        item.frame_seed,
+                        item.working_color_space,
+                        &mut checkpoint,
+                    )
+                }
+            };
             let completion = match completion_result {
                 Ok(completion) => completion,
                 Err(PreparedHeterogeneousEffectWorkError::ExecutionStopped { reason, .. }) => {
@@ -558,11 +653,25 @@ fn validate_batch_request(
                 address: item.address,
             });
         }
-        validate_working_frame(item).map_err(|violation| {
-            HeterogeneousCpuPrefixBatchError::FrameContract { address: item.address, violation }
-        })?;
-        let descriptor = item.input.descriptor();
-        let actual_extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
+        match &item.source {
+            HeterogeneousCpuPrefixSource::WorkingFrame(_) => {
+                validate_working_frame(item).map_err(|violation| {
+                    HeterogeneousCpuPrefixBatchError::FrameContract {
+                        address: item.address,
+                        violation,
+                    }
+                })?;
+            }
+            HeterogeneousCpuPrefixSource::SolidColor { color, .. } => {
+                if ![color.r, color.g, color.b, color.a].into_iter().all(f32::is_finite) {
+                    return Err(HeterogeneousCpuPrefixBatchError::NonFiniteSolidColor {
+                        address: item.address,
+                    });
+                }
+            }
+        }
+        let descriptor = item.descriptor();
+        let actual_extent = item.source.extent();
         if item.route.frame_extent() != actual_extent {
             return Err(HeterogeneousCpuPrefixBatchError::PreparedExtentMismatch {
                 address: item.address,
@@ -599,7 +708,10 @@ fn validate_batch_request(
 fn validate_working_frame(
     item: &HeterogeneousCpuPrefixBatchItem,
 ) -> Result<(), HeterogeneousCpuPrefixFrameContractViolation> {
-    let descriptor = item.input.descriptor();
+    let HeterogeneousCpuPrefixSource::WorkingFrame(input) = &item.source else {
+        return Ok(());
+    };
+    let descriptor = input.descriptor();
     if descriptor.domain != ColorFrameDomain::Working {
         return Err(HeterogeneousCpuPrefixFrameContractViolation::Domain {
             actual: descriptor.domain,
@@ -621,7 +733,7 @@ fn validate_working_frame(
             actual: descriptor.color_space,
         });
     }
-    let frame = item.input.rgba_f32();
+    let frame = input.rgba_f32();
     if frame.color_space != item.working_color_space {
         return Err(
             HeterogeneousCpuPrefixFrameContractViolation::PixelColorSpace {
@@ -735,6 +847,14 @@ mod tests {
         )
     }
 
+    fn solid_item(address: u32, color: Color) -> HeterogeneousCpuPrefixBatchItem {
+        let grant = grant();
+        let route =
+            PreparedHeterogeneousEffectRoute::prepare(graph(), EXTENT, grant.graph_execution())
+                .expect("prepare heterogeneous route");
+        HeterogeneousCpuPrefixBatchItem::new_solid_color(address, route, color, WORKING_SPACE, 19)
+    }
+
     fn two_frontier_graph() -> Arc<CompiledEffectGraph> {
         let mut builder = EffectGraphBuilderState::new();
         let source = builder.source();
@@ -836,6 +956,36 @@ mod tests {
         assert!(output.completions().iter().all(|completion| {
             completion.completion().evidence().working_color_space() == WORKING_SPACE
         }));
+    }
+
+    #[test]
+    fn procedural_solid_is_materialized_only_inside_validated_execution() {
+        let source = Color { r: 0.2, g: 0.4, b: 0.6, a: 0.75 };
+        let item = solid_item(5, source);
+        assert_eq!(item.descriptor().width, EXTENT.width());
+        assert_eq!(item.descriptor().height, EXTENT.height());
+
+        let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item]);
+        request
+            .validate()
+            .expect("procedural source must validate without a pixel raster");
+        let output = HeterogeneousCpuPrefixBatchExecutor::default()
+            .execute(request, 17, || None)
+            .expect("executor materializes the procedural source under the frozen grant");
+        assert_eq!(output.completions().len(), 1);
+        assert_eq!(output.completions()[0].address(), 5);
+    }
+
+    #[test]
+    fn non_finite_procedural_solid_fails_before_execution() {
+        let request = HeterogeneousCpuPrefixBatchRequest::new(
+            grant(),
+            vec![solid_item(8, Color { r: f32::NAN, g: 0.0, b: 0.0, a: 1.0 })],
+        );
+        assert!(matches!(
+            request.validate(),
+            Err(HeterogeneousCpuPrefixBatchError::NonFiniteSolidColor { address: 8 })
+        ));
     }
 
     #[test]

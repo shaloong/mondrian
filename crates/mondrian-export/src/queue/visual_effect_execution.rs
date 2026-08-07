@@ -19,10 +19,10 @@ use mondrian_effects::{
 };
 use mondrian_renderer::{
     admit_timeline_render_plan_for_cpu_compositor, ColorFrameAlpha, ColorFrameDomain,
-    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, HeterogeneousGpuContinuationBinding,
-    HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
-    PreparedHeterogeneousEffectRoute, PreparedVisualProgram, TimelineRenderPlan,
-    TimelineRenderPlanElement, TimelineTransitionInputPlan,
+    ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, HeterogeneousCpuPrefixSource,
+    HeterogeneousGpuContinuationBinding, HeterogeneousGpuContinuationRequest,
+    HeterogeneousGpuResourceGrant, PreparedHeterogeneousEffectRoute, PreparedVisualProgram,
+    TimelineRenderPlan, TimelineRenderPlanElement, TimelineTransitionInputPlan,
 };
 use sha2::Digest;
 use sha2::Sha256;
@@ -55,7 +55,10 @@ impl ExportHeterogeneousPlacement {
     }
 
     const fn supports_current_adapter(self) -> bool {
-        matches!(self, Self::Media | Self::BasicTitle | Self::NestedSequence)
+        matches!(
+            self,
+            Self::Media | Self::BasicTitle | Self::NestedSequence | Self::SolidColor
+        )
     }
 
     pub(super) const fn label(self) -> &'static str {
@@ -161,6 +164,10 @@ pub(super) enum ExportHeterogeneousEffectError {
     Canceled { checkpoint: &'static str },
     #[error("renderer could not prepare the identity Effect graph")]
     IdentityUnavailable,
+    #[error(
+        "export procedural heterogeneous source retains {required} bytes; attempt grant permits {limit}"
+    )]
+    ProceduralSourceGrantExceeded { required: u64, limit: u64 },
 }
 
 fn export_heterogeneous_route_contract(
@@ -385,11 +392,25 @@ impl ExportVisualRenderSession {
     pub(super) fn execute_heterogeneous_element(
         &mut self,
         route: &PreparedExportHeterogeneousElement,
-        input: &CpuColorFrame,
+        input: HeterogeneousCpuPrefixSource,
         working_color_space: WorkingColorSpace,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<CpuColorFrame, ExportHeterogeneousEffectError> {
-        let descriptor = input.descriptor();
+        let extent = route.route.frame_extent();
+        let descriptor = match &input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(input) => input.descriptor(),
+            HeterogeneousCpuPrefixSource::SolidColor { .. } => {
+                mondrian_renderer::ColorFrameDescriptor {
+                    width: extent.width(),
+                    height: extent.height(),
+                    color_space: mondrian_renderer::ColorFrameSpace::Working(working_color_space),
+                    domain: ColorFrameDomain::Working,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: ColorFrameResidency::Cpu,
+                    alpha: ColorFrameAlpha::StraightCoverage,
+                }
+            }
+        };
         let contract_valid = descriptor.width > 0
             && descriptor.height > 0
             && descriptor.color_space.working() == Some(working_color_space)
@@ -406,17 +427,39 @@ impl ExportVisualRenderSession {
                 actual: format!("{descriptor:?}"),
             });
         }
-        let extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
-        if route.route.frame_extent() != extent {
+        let actual_extent = EffectFrameExtent::new(descriptor.width, descriptor.height);
+        if extent != actual_extent {
             return Err(ExportHeterogeneousEffectError::FrameContractMismatch {
-                expected: format!(
-                    "prepared heterogeneous extent {:?}",
-                    route.route.frame_extent()
-                ),
-                actual: format!("materialized extent {extent:?}"),
+                expected: format!("prepared heterogeneous extent {:?}", extent),
+                actual: format!("materialized extent {actual_extent:?}"),
             });
         }
         self.validate_exact_route_contract(&route.route, route.placement, extent)?;
+        if matches!(input, HeterogeneousCpuPrefixSource::SolidColor { .. }) {
+            let source_bytes = u64::from(extent.width())
+                .checked_mul(u64::from(extent.height()))
+                .and_then(|pixels| {
+                    pixels.checked_mul(
+                        u64::try_from(std::mem::size_of::<[f32; 4]>()).unwrap_or(u64::MAX),
+                    )
+                })
+                .and_then(|bytes| bytes.checked_add(route.route.cpu_frontier_retained_bytes()))
+                .ok_or(
+                    ExportHeterogeneousEffectError::ProceduralSourceGrantExceeded {
+                        required: u64::MAX,
+                        limit: self.resource_policy.effect_working_bytes as u64,
+                    },
+                )?;
+            let limit = self.resource_policy.effect_working_bytes as u64;
+            if source_bytes > limit {
+                return Err(
+                    ExportHeterogeneousEffectError::ProceduralSourceGrantExceeded {
+                        required: source_bytes,
+                        limit,
+                    },
+                );
+            }
+        }
         let gpu_grant = self.heterogeneous_gpu_grant()?;
         route.route.gpu_recording_requirements().validate(gpu_grant).map_err(|source| {
             ExportHeterogeneousEffectError::GpuContinuation {
@@ -432,34 +475,48 @@ impl ExportVisualRenderSession {
         self.visual_diagnostics.heterogeneous_frames_started =
             self.visual_diagnostics.heterogeneous_frames_started.saturating_add(1);
         let generation = self.effect_execution_generation;
-        let completion = self
-            .composite_scratch
-            .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
-                route.route.prepared_work(),
-                generation,
-                &input.rgba_f32().data,
-                route.frame_seed,
-                working_color_space,
-                || {
-                    cancellation
-                        .is_canceled()
-                        .then_some(mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled)
+        let mut checkpoint = || {
+            cancellation
+                .is_canceled()
+                .then_some(mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled)
+        };
+        let completion = match input {
+            HeterogeneousCpuPrefixSource::WorkingFrame(input) => self
+                .composite_scratch
+                .execute_prepared_heterogeneous_cpu_prefix_with_checkpoint(
+                    route.route.prepared_work(),
+                    generation,
+                    &input.rgba_f32().data,
+                    route.frame_seed,
+                    working_color_space,
+                    &mut checkpoint,
+                ),
+            HeterogeneousCpuPrefixSource::SolidColor { color, .. } => self
+                .composite_scratch
+                .execute_prepared_heterogeneous_solid_cpu_prefix_with_checkpoint(
+                    route.route.prepared_work(),
+                    generation,
+                    extent,
+                    color,
+                    route.frame_seed,
+                    working_color_space,
+                    &mut checkpoint,
+                ),
+        }
+        .map_err(|source| {
+            self.visual_diagnostics.heterogeneous_terminal_failures =
+                self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
+            match source {
+                PreparedHeterogeneousEffectWorkError::ExecutionStopped {
+                    reason: mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled,
+                    ..
+                } => ExportHeterogeneousEffectError::Canceled { checkpoint: "cpu_prefix" },
+                source => ExportHeterogeneousEffectError::CpuPrefix {
+                    placement: route.placement.label(),
+                    source,
                 },
-            )
-            .map_err(|source| {
-                self.visual_diagnostics.heterogeneous_terminal_failures =
-                    self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
-                match source {
-                    PreparedHeterogeneousEffectWorkError::ExecutionStopped {
-                        reason: mondrian_effects::HeterogeneousCpuExecutionStopReason::Canceled,
-                        ..
-                    } => ExportHeterogeneousEffectError::Canceled { checkpoint: "cpu_prefix" },
-                    source => ExportHeterogeneousEffectError::CpuPrefix {
-                        placement: route.placement.label(),
-                        source,
-                    },
-                }
-            })?;
+            }
+        })?;
         if cancellation.is_canceled() {
             self.visual_diagnostics.heterogeneous_terminal_failures =
                 self.visual_diagnostics.heterogeneous_terminal_failures.saturating_add(1);
@@ -601,13 +658,22 @@ pub(super) fn prepare_export_effect_frame_plan(
             }
             TimelineRenderPlanElement::SolidColor(solid) => {
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
-                visual_session
+                if let Some(route) = visual_session
                     .select_heterogeneous_route(
                         &solid.effect_graph,
                         ExportHeterogeneousPlacement::SolidColor,
                         extent,
                     )
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| error.to_string())?
+                {
+                    solid.effect_graph = export_identity_effect_graph(&mut identity)?;
+                    heterogeneous.push(PreparedExportHeterogeneousElement {
+                        element_index,
+                        placement: ExportHeterogeneousPlacement::SolidColor,
+                        route,
+                        frame_seed: solid.frame_seed,
+                    });
+                }
             }
             TimelineRenderPlanElement::Adjustment(adjustment) => {
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);

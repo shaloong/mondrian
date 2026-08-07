@@ -34,6 +34,10 @@ const MAX_PREVIEW_GPU_LAYERS: usize = 5;
 
 pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
+    HeterogeneousSolidColor {
+        layer: TimelineSolidColorLayer,
+        prepared_route: Box<PreparedHeterogeneousEffectRoute>,
+    },
     Adjustment(TimelineAdjustmentLayer),
     Media {
         frame: MediaPreviewFrame,
@@ -54,6 +58,10 @@ pub(crate) enum ResolvedPreviewElement {
 pub(crate) enum ResolvedPreviewTransitionInput {
     Transparent,
     SolidColor(TimelineSolidColorLayer),
+    HeterogeneousSolidColor {
+        layer: TimelineSolidColorLayer,
+        prepared_route: Box<PreparedHeterogeneousEffectRoute>,
+    },
     Media {
         frame: MediaPreviewFrame,
         opacity: f32,
@@ -79,7 +87,9 @@ pub(crate) fn resolved_preview_media_protections(
                 protections.extend(transition_input_protection(left));
                 protections.extend(transition_input_protection(right));
             }
-            ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => {}
+            ResolvedPreviewElement::SolidColor(_)
+            | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+            | ResolvedPreviewElement::Adjustment(_) => {}
         }
     }
     protections
@@ -91,7 +101,8 @@ fn transition_input_protection(
     match input {
         ResolvedPreviewTransitionInput::Media { frame, .. } => frame.residency_protection(),
         ResolvedPreviewTransitionInput::Transparent
-        | ResolvedPreviewTransitionInput::SolidColor(_) => None,
+        | ResolvedPreviewTransitionInput::SolidColor(_)
+        | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => None,
     }
 }
 
@@ -192,6 +203,14 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
                 hash_transform(solid.transform, &mut builder);
                 hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
             }
+            ResolvedPreviewElement::HeterogeneousSolidColor { layer: solid, .. } => {
+                0u8.hash(&mut builder);
+                hash_color(solid.color, &mut builder);
+                solid.opacity.to_bits().hash(&mut builder);
+                solid.blend_mode.hash(&mut builder);
+                hash_transform(solid.transform, &mut builder);
+                hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, &mut builder);
+            }
             ResolvedPreviewElement::Adjustment(adjustment) => {
                 1u8.hash(&mut builder);
                 adjustment.opacity.to_bits().hash(&mut builder);
@@ -235,6 +254,14 @@ fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut im
     match input {
         ResolvedPreviewTransitionInput::Transparent => 0u8.hash(hasher),
         ResolvedPreviewTransitionInput::SolidColor(solid) => {
+            1u8.hash(hasher);
+            hash_color(solid.color, hasher);
+            solid.opacity.to_bits().hash(hasher);
+            solid.blend_mode.hash(hasher);
+            hash_transform(solid.transform, hasher);
+            hash_effect_graph_identity(&solid.effect_graph, solid.frame_seed, hasher);
+        }
+        ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer: solid, .. } => {
             1u8.hash(hasher);
             hash_color(solid.color, hasher);
             solid.opacity.to_bits().hash(hasher);
@@ -306,6 +333,9 @@ pub(crate) fn viewer_preview_plan_allows_cross_call_reuse(
             ResolvedPreviewTransitionInput::SolidColor(layer) => {
                 graph_reusable(&layer.effect_graph)
             }
+            ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
+                graph_reusable(&layer.effect_graph)
+            }
             ResolvedPreviewTransitionInput::Media { frame, effect_graph, .. } => {
                 frame.permits_cross_call_reuse() && graph_reusable(effect_graph)
             }
@@ -314,6 +344,9 @@ pub(crate) fn viewer_preview_plan_allows_cross_call_reuse(
 
     elements.iter().all(|element| match element {
         ResolvedPreviewElement::SolidColor(layer) => graph_reusable(&layer.effect_graph),
+        ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
+            graph_reusable(&layer.effect_graph)
+        }
         ResolvedPreviewElement::Adjustment(layer) => graph_reusable(&layer.effect_graph),
         ResolvedPreviewElement::Media { frame, effect_graph, .. } => {
             frame.permits_cross_call_reuse() && graph_reusable(effect_graph)
@@ -355,6 +388,12 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
                 has_composited_layer |= opacity.clamp(0.0, 1.0) > 0.0;
             }
             ResolvedPreviewElement::SolidColor(layer) => {
+                layers.push(ViewerGpuExecutionLayer::Source(gpu_solid_source(
+                    layer, scratch,
+                )?));
+                has_composited_layer |= layer.opacity.clamp(0.0, 1.0) > 0.0;
+            }
+            ResolvedPreviewElement::HeterogeneousSolidColor { layer, .. } => {
                 layers.push(ViewerGpuExecutionLayer::Source(gpu_solid_source(
                     layer, scratch,
                 )?));
@@ -457,6 +496,15 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
                     gpu_solid_source(layer, builder.scratch).map_err(|reason| {
                         PreviewViewerGpuLayerPreparationError::Compositing { reason }
                     })?,
+                ));
+                has_composited_layer = true;
+            }
+            ResolvedPreviewElement::HeterogeneousSolidColor { layer, prepared_route } => {
+                if !opacity_has_contribution(layer.opacity) {
+                    continue;
+                }
+                layers.push(ViewerGpuExecutionLayer::Source(
+                    builder.solid_source(layer, prepared_route)?,
                 ));
                 has_composited_layer = true;
             }
@@ -613,6 +661,48 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         })
     }
 
+    fn solid_source(
+        &mut self,
+        layer: &TimelineSolidColorLayer,
+        prepared_route: &PreparedHeterogeneousEffectRoute,
+    ) -> Result<ViewerGpuSourceLayer, PreviewViewerGpuLayerPreparationError> {
+        if !is_preview_gpu_transform_supported(layer.transform) {
+            return Err(PreviewViewerGpuLayerPreparationError::Compositing {
+                reason: GpuCompositingBlockerReason::UnsupportedTransform,
+            });
+        }
+        let address = u32::try_from(self.items.len())
+            .map_err(|_| PreviewViewerGpuLayerPreparationError::AddressSpaceExhausted)?;
+        let route = prepared_route.clone();
+        let frame_extent = route.frame_extent();
+        let identity_effect_plan = self.identity_effect_plan()?;
+        self.items.push(HeterogeneousCpuPrefixBatchItem::new_solid_color(
+            address,
+            route,
+            layer.color,
+            self.working_color_space,
+            layer.frame_seed,
+        ));
+        self.continuations.push(PreviewHeterogeneousGpuContinuationMetadata {
+            address,
+            graph_fingerprint: layer.effect_graph.semantic_fingerprint(),
+            frame_extent,
+            frame_seed: layer.frame_seed,
+            working_color_space: self.working_color_space,
+        });
+        Ok(ViewerGpuSourceLayer::Media {
+            frame: None,
+            gpu_source: None,
+            native_source: None,
+            heterogeneous_input: Some(address),
+            opacity: layer.opacity,
+            blend_mode: layer.blend_mode,
+            transform: layer.transform,
+            effect_plan: identity_effect_plan,
+            frame_seed: layer.frame_seed,
+        })
+    }
+
     fn transition_input(
         &mut self,
         input: &ResolvedPreviewTransitionInput,
@@ -632,6 +722,12 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
                 gpu_solid_source(layer, self.scratch).map_err(|reason| {
                     PreviewViewerGpuLayerPreparationError::Compositing { reason }
                 })?
+            }
+            ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, prepared_route } => {
+                if !opacity_has_contribution(layer.opacity) {
+                    return Ok(ViewerGpuTransitionInput::Transparent);
+                }
+                self.solid_source(layer, prepared_route)?
             }
             ResolvedPreviewTransitionInput::Media {
                 frame,
@@ -760,6 +856,9 @@ fn gpu_transition_input(
             return Ok(ViewerGpuTransitionInput::Transparent);
         }
         ResolvedPreviewTransitionInput::SolidColor(layer) => gpu_solid_source(layer, scratch)?,
+        ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
+            gpu_solid_source(layer, scratch)?
+        }
         ResolvedPreviewTransitionInput::Media {
             frame,
             opacity,
@@ -792,6 +891,9 @@ fn transition_input_has_contribution(
     match input {
         ResolvedPreviewTransitionInput::Transparent => false,
         ResolvedPreviewTransitionInput::SolidColor(layer) => layer.opacity.clamp(0.0, 1.0) > 0.0,
+        ResolvedPreviewTransitionInput::HeterogeneousSolidColor { layer, .. } => {
+            layer.opacity.clamp(0.0, 1.0) > 0.0
+        }
         ResolvedPreviewTransitionInput::Media { opacity, .. } => opacity.clamp(0.0, 1.0) > 0.0,
     }
 }
@@ -814,7 +916,9 @@ fn resolved_element_is_degraded(element: &ResolvedPreviewElement) -> bool {
         ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
             transition_input_is_degraded(left) || transition_input_is_degraded(right)
         }
-        ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => false,
+        ResolvedPreviewElement::SolidColor(_)
+        | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+        | ResolvedPreviewElement::Adjustment(_) => false,
     }
 }
 
@@ -842,7 +946,9 @@ pub(crate) fn resolved_preview_decode_execution(
                     }
                 }
             }
-            ResolvedPreviewElement::SolidColor(_) | ResolvedPreviewElement::Adjustment(_) => {}
+            ResolvedPreviewElement::SolidColor(_)
+            | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+            | ResolvedPreviewElement::Adjustment(_) => {}
         }
     }
     summary
@@ -947,6 +1053,26 @@ mod heterogeneous_tests {
         }
     }
 
+    fn solid(graph: Arc<CompiledEffectGraph>) -> ResolvedPreviewElement {
+        let prepared_route = PreparedHeterogeneousEffectRoute::prepare(
+            Arc::clone(&graph),
+            EffectFrameExtent::new(WIDTH, HEIGHT),
+            cpu_grant().graph_execution(),
+        )
+        .expect("prepare Solid Color heterogeneous route");
+        ResolvedPreviewElement::HeterogeneousSolidColor {
+            layer: TimelineSolidColorLayer {
+                color: mondrian_core::Color { r: 0.2, g: 0.4, b: 0.6, a: 0.75 },
+                opacity: 0.8,
+                blend_mode: BlendMode::Screen,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_graph: graph,
+                frame_seed: 31,
+            },
+            prepared_route: Box::new(prepared_route),
+        }
+    }
+
     #[test]
     fn exact_full_gpu_media_preserves_non_normal_blend_on_the_ordinary_path() {
         let resolved = [media_with_blend(
@@ -1017,6 +1143,82 @@ mod heterogeneous_tests {
                 native_source: None,
                 ..
             })
+        ));
+    }
+
+    #[test]
+    fn tracer_solid_produces_a_procedural_cpu_request_without_a_media_payload() {
+        let graph = tracer_graph();
+        let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
+            &[solid(Arc::clone(&graph))],
+            WORKING_SPACE,
+            &mut TimelineCompositeScratch::default(),
+            cpu_grant(),
+        )
+        .expect("heterogeneous Solid Color Viewer plan");
+        let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
+            prepared
+        else {
+            panic!("the procedural tracer must not require a fabricated media frame");
+        };
+
+        assert_eq!(cpu_prefix.items().len(), 1);
+        assert_eq!(cpu_prefix.items()[0].descriptor().width, WIDTH);
+        assert_eq!(cpu_prefix.items()[0].descriptor().height, HEIGHT);
+        assert_eq!(
+            continuations[0].frame_extent,
+            EffectFrameExtent::new(WIDTH, HEIGHT)
+        );
+        assert!(matches!(
+            &layers[..],
+            [ViewerGpuExecutionLayer::Source(
+                ViewerGpuSourceLayer::Media {
+                    heterogeneous_input: Some(0),
+                    frame: None,
+                    gpu_source: None,
+                    native_source: None,
+                    blend_mode: BlendMode::Screen,
+                    ..
+                }
+            )]
+        ));
+    }
+
+    #[test]
+    fn cross_dissolve_procedural_solid_endpoint_uses_the_same_addressed_batch() {
+        let graph = tracer_graph();
+        let ResolvedPreviewElement::HeterogeneousSolidColor { layer, prepared_route } =
+            solid(graph)
+        else {
+            unreachable!("Solid helper must retain its procedural route")
+        };
+        let transition = ResolvedPreviewElement::CrossDissolve {
+            left: Box::new(ResolvedPreviewTransitionInput::HeterogeneousSolidColor {
+                layer,
+                prepared_route,
+            }),
+            right: Box::new(ResolvedPreviewTransitionInput::Transparent),
+            progress: 0.5,
+        };
+        let prepared = prepare_gpu_composite_layers_with_heterogeneous_effects(
+            &[transition],
+            WORKING_SPACE,
+            &mut TimelineCompositeScratch::default(),
+            cpu_grant(),
+        )
+        .expect("procedural Solid Cross Dissolve endpoint");
+        let PreparedPreviewViewerGpuLayers::Heterogeneous { layers, cpu_prefix, continuations } =
+            prepared
+        else {
+            panic!("procedural endpoint requires its prepared CPU prefix");
+        };
+        assert_eq!(cpu_prefix.items().len(), 1);
+        assert_eq!(continuations.len(), 1);
+        assert!(matches!(
+            &layers[..],
+            [ViewerGpuExecutionLayer::CrossDissolve(transition)]
+                if matches!(transition.left, ViewerGpuTransitionInput::Source(_))
+                    && matches!(transition.right, ViewerGpuTransitionInput::Transparent)
         ));
     }
 

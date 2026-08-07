@@ -58,13 +58,13 @@ struct PreparedTimelinePreviewEffectRouteEntry {
 ///
 /// This is deliberately more precise than a generic "heterogeneous supported"
 /// flag: a prepared CPU prefix needs an independently materialized CPU working
-/// frame. A generated Viewer source has no such frame yet, while an Adjustment
-/// would require reading back the already-composited GPU accumulator.
+/// frame. A procedural Solid can be generated under that same execution
+/// authority, while an Adjustment would require reading back the
+/// already-composited GPU accumulator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimelinePreviewEffectSource {
     NodeRasterCpuWorkingFrame,
     NestedCpuWorkingFrame,
-    ViewerGenerated,
     CompositedAccumulator,
 }
 
@@ -80,7 +80,7 @@ impl TimelinePreviewEffectSource {
             Self::NestedCpuWorkingFrame => nested_extent(placement).map(Some).ok_or(
                 TimelinePreviewEffectRouteError::MissingNestedMaterializationExtent { placement },
             ),
-            Self::ViewerGenerated | Self::CompositedAccumulator => Ok(None),
+            Self::CompositedAccumulator => Ok(None),
         }
     }
 }
@@ -271,7 +271,7 @@ fn visit_plan_graphs(
                 visitor(
                     layer.placement,
                     &layer.effect_graph,
-                    TimelinePreviewEffectSource::ViewerGenerated,
+                    TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
                 )?;
             }
             TimelineRenderPlanElement::Adjustment(layer) => {
@@ -325,7 +325,7 @@ fn visit_transition_graph(
             visitor(
                 layer.placement,
                 &layer.effect_graph,
-                TimelinePreviewEffectSource::ViewerGenerated,
+                TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
             )?;
         }
     }
