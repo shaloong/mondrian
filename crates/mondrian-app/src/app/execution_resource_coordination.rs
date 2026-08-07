@@ -1563,6 +1563,7 @@ fn preview_heterogeneous_effect_execution_decision(
         gpu_continuation: HeterogeneousGpuResourceGrant::new(
             effect_working_bytes,
             effect_working_bytes,
+            PREVIEW_HETEROGENEOUS_MAX_MATERIALIZATIONS as u64,
             0,
         ),
     }

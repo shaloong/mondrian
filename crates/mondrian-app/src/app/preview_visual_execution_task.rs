@@ -1112,7 +1112,7 @@ mod tests {
     }
 
     fn gpu_grant() -> HeterogeneousGpuResourceGrant {
-        HeterogeneousGpuResourceGrant::new(8 * 1024 * 1024, 8 * 1024 * 1024, 0)
+        HeterogeneousGpuResourceGrant::new(8 * 1024 * 1024, 8 * 1024 * 1024, 64, 0)
     }
 
     fn item(address: u32) -> HeterogeneousCpuPrefixBatchItem {

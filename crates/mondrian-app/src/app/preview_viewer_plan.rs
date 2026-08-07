@@ -994,8 +994,10 @@ mod heterogeneous_tests {
         assert_eq!(cpu_prefix.items()[0].address(), 0);
         assert_eq!(continuations.len(), 1);
         assert_eq!(continuations[0].address(), 0);
-        let gpu = continuations[0]
-            .gpu_continuation_request(41, HeterogeneousGpuResourceGrant::new(1 << 20, 1 << 20, 0));
+        let gpu = continuations[0].gpu_continuation_request(
+            41,
+            HeterogeneousGpuResourceGrant::new(1 << 20, 1 << 20, 64, 0),
+        );
         assert_eq!(
             gpu.binding().graph_fingerprint(),
             graph.semantic_fingerprint()

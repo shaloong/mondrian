@@ -398,7 +398,12 @@ impl ExportVisualRenderSession {
                 reason: "effect working-byte grant exceeds u64".to_owned(),
             }
         })?;
-        Ok(HeterogeneousGpuResourceGrant::new(bytes, bytes, bytes))
+        Ok(HeterogeneousGpuResourceGrant::new(
+            bytes,
+            bytes,
+            EXPORT_HETEROGENEOUS_MAX_MATERIALIZATIONS as u64,
+            bytes,
+        ))
     }
 
     pub(super) fn prepare_heterogeneous_route(

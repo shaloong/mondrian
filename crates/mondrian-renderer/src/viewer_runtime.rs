@@ -3224,7 +3224,7 @@ mod tests {
                 FRAME_SEED,
                 WORKING_SPACE,
             ),
-            HeterogeneousGpuResourceGrant::new(16 << 20, 16 << 20, 0),
+            HeterogeneousGpuResourceGrant::new(16 << 20, 16 << 20, 64, 0),
         );
         let identity_graph =
             compile_reference_render_graph(EffectGraphBuilderState::new().finish())
@@ -3321,6 +3321,20 @@ mod tests {
             evidence.recorded().output_signal()
         );
         assert_eq!(evidence.recorded().gpu_nodes().len(), 2);
+        let admitted = runtime
+            .active_working_set_diagnostics()
+            .last_admitted
+            .expect("Viewer admitted heterogeneous working set");
+        assert_eq!(
+            admitted.source_preparation.bytes,
+            evidence.recorded().recorded_device_bytes(),
+            "Viewer must admit the Adapter's physical recording bytes"
+        );
+        assert_eq!(
+            admitted.source_preparation.textures,
+            evidence.recorded().recorded_device_materializations(),
+            "Viewer must admit the Adapter's physical recording texture count"
+        );
     }
 
     #[tokio::test]

@@ -292,9 +292,13 @@ materializations, and completion-gated last-use releases directly over that
 graph. A `Release` is a budget barrier that must retire the allocation before
 the Adapter advances to the next step. The planner verifies the terminal live
 set and checked host/device/transfer/count budgets, including the exact peak
-number of simultaneously live device materializations. Viewer active-resource
-admission consumes that count directly; it never divides device bytes by an
-assumed RGBA32F frame size to guess a texture count. The older linear-stage
+number of simultaneously live device materializations. The wgpu
+one-command-buffer Adapter then derives the conservative physical recording
+bytes and texture count, because an abstract release cannot alias an already
+recorded texture before submission. Preview/Export GPU grants and Viewer
+active-resource admission consume those same two physical dimensions; neither
+uses the smaller abstract peak nor divides bytes by an assumed RGBA32F frame
+size to guess a texture count. The older linear-stage
 placement remains only a shallow feasibility diagnostic.
 
 Renderer wraps `PreparedHeterogeneousEffectWork` in one cloneable
@@ -327,7 +331,9 @@ validation before recording, and its real-device test matches the
 complete scalar graph. One command buffer retains every referenced texture
 until exact submission completion, so admission separately charges the
 conservative non-aliasing recording bytes when that exceeds the abstract plan
-peak. More than one backend transfer, GPU Mask/MultiInput joins,
+peak. The same derivation owns both bytes and texture count and is consumed by
+Viewer active-working-set admission; recorded evidence preserves abstract and
+physical values separately. More than one backend transfer, GPU Mask/MultiInput joins,
 color-domain conversion and temporal/stateful GPU dispatch still fail before
 pixel execution. The returned evidence distinguishes completed CPU work from
 pending upload and GPU output tokens.
@@ -900,7 +906,10 @@ bridge pool. The media-owned decoder surface remains under the Frame Store
 native-resource grant instead of being counted twice. Native/GPU/CPU source
 alternatives are summed conservatively because a failed preferred path can
 have created partial resources before its correctness fallback is selected.
-All extent, count, and byte arithmetic is checked.
+For a heterogeneous source, source preparation uses the wgpu Adapter's
+non-aliasing physical recording bytes and texture count, not the semantic
+plan's optimal live-set peak. All extent, count, and byte arithmetic is
+checked.
 
 `ViewerGpuExecutionResourceGrant` therefore contains two unrelated limits:
 the exact-contract pool's idle count/bytes and the pressure-stable maximum

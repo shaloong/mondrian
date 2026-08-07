@@ -279,9 +279,15 @@ compiled value plan separately reports the exact peak count of simultaneously
 live device-resident materializations from that verified live set. This count
 is not inferred from device bytes: mixed precision, non-frame resources, and
 format-specific allocation make byte division an invalid texture-count model.
-Viewer admission consumes the reported count directly. Concrete
-dispatch Adapters additionally admit their implementation-private scratch;
-that storage is not fabricated as a semantic graph value. Color-domain
+Viewer admission consumes the reported count directly only for Adapters whose
+physical recording strategy can realize those lifetimes. The current wgpu
+one-command-buffer Adapter cannot alias a released texture before submission,
+so it derives and admits a second conservative physical demand: uploaded input
+plus every recorded dispatch output, in both bytes and texture count. Preview,
+Export, Viewer admission, and recorded evidence consume this same derivation;
+none may substitute the smaller abstract peak. Concrete dispatch Adapters
+additionally admit their implementation-private scratch; that storage is not
+fabricated as a semantic graph value. Color-domain
 conversions, continuity state, temporal input, and external-processor lanes
 remain typed blockers until their concrete execution Adapters exist.
 The graph-value heterogeneous current-frame planner applies the same boundary:
@@ -322,7 +328,10 @@ Its result carries the CPU pixels, Session generation,
 the immutable graph-value plan, completed CPU token, required upload wait, and
 still-pending GPU-input/output tokens. An Adapter therefore receives the exact
 transfer residency and lifetime steps without replanning. The result
-deliberately contains no whole-graph CPU fallback Interface.
+deliberately contains no whole-graph CPU fallback Interface. Before the CPU
+prefix starts, its GPU grant independently admits upload bytes, physical device
+bytes, physical texture count, and optional readback bytes. Byte limits never
+stand in for resource-count limits.
 Preparation compiles exact CPU materialization use counts, rejects any input
 that is not produced by the source-closed prefix, and proves that the only
 remaining live CPU value is the transfer source. Runtime moves last-use values,

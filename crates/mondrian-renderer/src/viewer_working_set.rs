@@ -8,9 +8,9 @@
 //! monitor, or calibration texture can be created.
 
 use crate::{
-    ColorFrameEncoding, GpuColorFrameTextureFormat, ViewerGpuExecutionLayer,
-    ViewerGpuExecutionRequest, ViewerGpuSourceLayer, ViewerGpuTransitionInput, ViewerSourceRect,
-    GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO,
+    ColorFrameEncoding, GpuColorFrameTextureFormat, HeterogeneousGpuRecordingRequirements,
+    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuSourceLayer,
+    ViewerGpuTransitionInput, ViewerSourceRect, GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO,
 };
 use mondrian_effects::EffectColorDomain;
 use mondrian_media::DecodedVideoSurfaceFormat;
@@ -543,17 +543,23 @@ fn estimate_source(
                         },
                     );
                 }
-                let peak_bytes = plan.peak_device_bytes();
-                // The current heterogeneous Effect execution contract lowers
-                // every live GPU value materialization to exactly one RGBA
-                // texture. Keep the count explicit: if a future representation
-                // introduces planes or auxiliary images, the Effect plan must
-                // expose that physical resource demand instead of reviving a
-                // byte-derived approximation here.
+                let recording = HeterogeneousGpuRecordingRequirements::from_prepared(
+                    plan,
+                    input.completion.gpu_suffix(),
+                )
+                .map_err(|_| {
+                    ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput {
+                        reason: "heterogeneous GPU recording requirements are invalid",
+                    }
+                })?;
+                // wgpu records the continuation into one command buffer. Its
+                // textures cannot alias merely because the abstract value plan
+                // releases a materialization, so Viewer admission must use the
+                // Adapter's physical recording residency in both dimensions.
                 estimate.source_preparation.checked_add(
                     ViewerGpuActiveTextureDemand {
-                        textures: plan.peak_device_materializations(),
-                        bytes: peak_bytes,
+                        textures: recording.device_materializations(),
+                        bytes: recording.device_bytes(),
                     },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;

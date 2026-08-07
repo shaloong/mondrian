@@ -165,19 +165,23 @@ impl HeterogeneousGpuContinuationBinding {
 pub struct HeterogeneousGpuResourceGrant {
     max_upload_bytes: u64,
     max_device_bytes: u64,
+    max_device_materializations: u64,
     max_readback_bytes: u64,
 }
 
 impl HeterogeneousGpuResourceGrant {
-    /// Construct exact upload, live-device, and optional readback limits.
+    /// Construct exact upload-byte, physical-device-byte, physical-texture,
+    /// and optional readback-byte limits.
     pub const fn new(
         max_upload_bytes: u64,
         max_device_bytes: u64,
+        max_device_materializations: u64,
         max_readback_bytes: u64,
     ) -> Self {
         Self {
             max_upload_bytes,
             max_device_bytes,
+            max_device_materializations,
             max_readback_bytes,
         }
     }
@@ -190,6 +194,11 @@ impl HeterogeneousGpuResourceGrant {
     /// Maximum physical device bytes admitted for this Adapter recording.
     pub const fn max_device_bytes(self) -> u64 {
         self.max_device_bytes
+    }
+
+    /// Maximum physical textures retained by this Adapter recording.
+    pub const fn max_device_materializations(self) -> u64 {
+        self.max_device_materializations
     }
 
     /// Maximum padded readback bytes. Zero forbids readback.
@@ -208,6 +217,7 @@ impl HeterogeneousGpuResourceGrant {
 pub struct HeterogeneousGpuRecordingRequirements {
     upload_bytes: u64,
     device_bytes: u64,
+    device_materializations: u64,
 }
 
 impl HeterogeneousGpuRecordingRequirements {
@@ -215,9 +225,13 @@ impl HeterogeneousGpuRecordingRequirements {
         plan: &mondrian_effects::CompiledEffectValueExecutionPlan,
         suffix: &PreparedHeterogeneousGpuSuffix,
     ) -> Result<Self, HeterogeneousGpuContinuationError> {
+        let physical = gpu_recording_device_demand(plan, suffix)?;
         Ok(Self {
             upload_bytes: plan.transfer_bytes(),
-            device_bytes: gpu_recording_device_bytes(plan, suffix)?.max(plan.peak_device_bytes()),
+            device_bytes: physical.bytes.max(plan.peak_device_bytes()),
+            device_materializations: physical
+                .materializations
+                .max(plan.peak_device_materializations()),
         })
     }
 
@@ -230,6 +244,11 @@ impl HeterogeneousGpuRecordingRequirements {
     /// executing the one-submission suffix.
     pub const fn device_bytes(self) -> u64 {
         self.device_bytes
+    }
+
+    /// Conservative physical texture count for the one-submission recording.
+    pub const fn device_materializations(self) -> u64 {
+        self.device_materializations
     }
 
     /// Reject a resource decision before CPU prefix execution begins.
@@ -246,6 +265,11 @@ impl HeterogeneousGpuRecordingRequirements {
             HeterogeneousGpuResourceKind::DeviceBytes,
             self.device_bytes,
             grant.max_device_bytes(),
+        )?;
+        enforce_resource_grant(
+            HeterogeneousGpuResourceKind::DeviceMaterializations,
+            self.device_materializations,
+            grant.max_device_materializations(),
         )
     }
 }
@@ -341,6 +365,8 @@ pub enum HeterogeneousGpuResourceKind {
     UploadBytes,
     /// Plan-proven peak device residency.
     DeviceBytes,
+    /// Physical textures retained by the Adapter recording.
+    DeviceMaterializations,
     /// Padded GPU-to-CPU readback bytes.
     ReadbackBytes,
 }
@@ -380,9 +406,9 @@ pub enum HeterogeneousGpuContinuationError {
     ResourceGrantExceeded {
         /// Rejected resource dimension.
         kind: HeterogeneousGpuResourceKind,
-        /// Required bytes.
+        /// Required amount in the named resource dimension.
         required: u64,
-        /// Granted bytes.
+        /// Granted limit in the named resource dimension.
         limit: u64,
     },
     /// GPU frame identity allocation failed.
@@ -449,7 +475,9 @@ pub struct HeterogeneousGpuRecordedEvidence {
     gpu_nodes: Arc<[mondrian_effects::EffectGraphNodeId]>,
     upload_bytes: u64,
     peak_device_bytes: u64,
+    peak_device_materializations: u64,
     recorded_device_bytes: u64,
+    recorded_device_materializations: u64,
 }
 
 impl HeterogeneousGpuRecordedEvidence {
@@ -509,11 +537,21 @@ impl HeterogeneousGpuRecordedEvidence {
         self.peak_device_bytes
     }
 
+    /// Graph-plan peak live device materializations.
+    pub const fn peak_device_materializations(&self) -> u64 {
+        self.peak_device_materializations
+    }
+
     /// Actual device bytes retained by this one-submission wgpu recording
     /// strategy. This can exceed the abstract plan peak when DAG releases
     /// cannot physically alias textures inside the same command buffer.
     pub const fn recorded_device_bytes(&self) -> u64 {
         self.recorded_device_bytes
+    }
+
+    /// Physical textures retained by this one-submission recording strategy.
+    pub const fn recorded_device_materializations(&self) -> u64 {
+        self.recorded_device_materializations
     }
 }
 
@@ -833,7 +871,7 @@ pub fn record_heterogeneous_gpu_continuation(
     let batch_id = allocate_heterogeneous_gpu_batch_id()?;
     let (pixels, execution_plan, gpu_suffix, cpu_evidence) = completion.into_parts();
     let binding = request.binding();
-    let recorded_device_bytes = gpu_recording_device_bytes(&execution_plan, &gpu_suffix)?;
+    let recorded_device = gpu_recording_device_demand(&execution_plan, &gpu_suffix)?;
     let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
         width: binding.frame_extent().width(),
         height: binding.frame_extent().height(),
@@ -882,7 +920,9 @@ pub fn record_heterogeneous_gpu_continuation(
             gpu_nodes: gpu_suffix.node_ids().into(),
             upload_bytes: execution_plan.transfer_bytes(),
             peak_device_bytes: execution_plan.peak_device_bytes(),
-            recorded_device_bytes,
+            peak_device_materializations: execution_plan.peak_device_materializations(),
+            recorded_device_bytes: recorded_device.bytes,
+            recorded_device_materializations: recorded_device.materializations,
         },
         retained_resources: RetainedGpuResources::new(
             retained,
@@ -1407,16 +1447,22 @@ fn validate_completion(
     validate_gpu_suffix_schedule(plan, evidence, gpu_suffix)
 }
 
-fn gpu_recording_device_bytes(
+struct GpuRecordingDeviceDemand {
+    bytes: u64,
+    materializations: u64,
+}
+
+fn gpu_recording_device_demand(
     plan: &mondrian_effects::CompiledEffectValueExecutionPlan,
     suffix: &PreparedHeterogeneousGpuSuffix,
-) -> Result<u64, HeterogeneousGpuContinuationError> {
+) -> Result<GpuRecordingDeviceDemand, HeterogeneousGpuContinuationError> {
     let input = plan.materialization(suffix.input_materialization()).ok_or(
         HeterogeneousGpuContinuationError::InvalidPlan {
             reason: "gpu_input_materialization_missing",
         },
     )?;
     let mut bytes = input.bytes();
+    let mut materializations = 1_u64;
     let mut outputs = HashSet::new();
     for step in suffix.steps() {
         let PreparedHeterogeneousGpuStep::Dispatch(dispatch) = step else {
@@ -1438,8 +1484,13 @@ fn gpu_recording_device_bytes(
                 reason: "gpu_recording_byte_count_overflow",
             },
         )?;
+        materializations = materializations.checked_add(1).ok_or(
+            HeterogeneousGpuContinuationError::InvalidPlan {
+                reason: "gpu_recording_materialization_count_overflow",
+            },
+        )?;
     }
-    Ok(bytes)
+    Ok(GpuRecordingDeviceDemand { bytes, materializations })
 }
 
 fn validate_token_chain(
@@ -1774,7 +1825,7 @@ mod tests {
     }
 
     fn generous_gpu_grant() -> HeterogeneousGpuResourceGrant {
-        HeterogeneousGpuResourceGrant::new(16 * 1024 * 1024, 16 * 1024 * 1024, 16 * 1024 * 1024)
+        HeterogeneousGpuResourceGrant::new(16 * 1024 * 1024, 16 * 1024 * 1024, 64, 16 * 1024 * 1024)
     }
 
     fn gpu_test_deadline() -> Instant {
@@ -1955,7 +2006,10 @@ mod tests {
                 field: "working_color_space"
             })
         ));
-        let tiny = request(&graph, HeterogeneousGpuResourceGrant::new(1, u64::MAX, 0));
+        let tiny = request(
+            &graph,
+            HeterogeneousGpuResourceGrant::new(1, u64::MAX, u64::MAX, 0),
+        );
         assert!(matches!(
             validate_completion(tiny, &completion),
             Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
@@ -1983,20 +2037,42 @@ mod tests {
         let completion = prepared
             .execute_cpu_prefix_uncancelled(&session, GENERATION, &input, FRAME_SEED, WORKING_SPACE)
             .expect("execute DAG CPU prefix");
-        let abstract_peak = completion.execution_plan().peak_device_bytes();
-        let recording_bytes =
-            gpu_recording_device_bytes(completion.execution_plan(), completion.gpu_suffix())
+        let abstract_peak_bytes = completion.execution_plan().peak_device_bytes();
+        let abstract_peak_materializations =
+            completion.execution_plan().peak_device_materializations();
+        let recording =
+            gpu_recording_device_demand(completion.execution_plan(), completion.gpu_suffix())
                 .expect("recording residency");
-        assert!(recording_bytes > abstract_peak);
-        let abstract_only =
-            HeterogeneousGpuResourceGrant::new(16 * 1024 * 1024, abstract_peak, 16 * 1024 * 1024);
+        assert!(recording.bytes > abstract_peak_bytes);
+        assert!(recording.materializations > abstract_peak_materializations);
+        let abstract_only = HeterogeneousGpuResourceGrant::new(
+            16 * 1024 * 1024,
+            abstract_peak_bytes,
+            u64::MAX,
+            16 * 1024 * 1024,
+        );
         assert!(matches!(
             validate_completion(request(&graph, abstract_only), &completion),
             Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
                 kind: HeterogeneousGpuResourceKind::DeviceBytes,
                 required,
                 limit,
-            }) if required == recording_bytes && limit == abstract_peak
+            }) if required == recording.bytes && limit == abstract_peak_bytes
+        ));
+        let abstract_count_only = HeterogeneousGpuResourceGrant::new(
+            16 * 1024 * 1024,
+            u64::MAX,
+            abstract_peak_materializations,
+            16 * 1024 * 1024,
+        );
+        assert!(matches!(
+            validate_completion(request(&graph, abstract_count_only), &completion),
+            Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
+                kind: HeterogeneousGpuResourceKind::DeviceMaterializations,
+                required,
+                limit,
+            }) if required == recording.materializations
+                && limit == abstract_peak_materializations
         ));
     }
 
@@ -2120,6 +2196,11 @@ mod tests {
                 > completed.evidence().recorded().peak_device_bytes(),
             "the one-submission Adapter grant must expose its conservative non-aliasing residency"
         );
+        assert!(
+            completed.evidence().recorded().recorded_device_materializations()
+                > completed.evidence().recorded().peak_device_materializations(),
+            "the one-submission Adapter grant must expose its physical texture count"
+        );
         for (actual, expected) in completed.frame().rgba_f32().data.iter().zip(expected.iter()) {
             for channel in 0..4 {
                 assert!(
@@ -2148,7 +2229,8 @@ mod tests {
                 .expect("heterogeneous GPU runtime");
         let graph = tracer_graph();
         let input = test_input();
-        let no_readback = HeterogeneousGpuResourceGrant::new(16 * 1024 * 1024, 16 * 1024 * 1024, 0);
+        let no_readback =
+            HeterogeneousGpuResourceGrant::new(16 * 1024 * 1024, 16 * 1024 * 1024, 64, 0);
         let cancellation = ExecutionCancellationToken::new();
 
         let first = match runtime.execute_to_cpu(

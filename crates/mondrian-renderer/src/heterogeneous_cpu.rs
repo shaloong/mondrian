@@ -714,7 +714,7 @@ mod tests {
     fn gpu_recording_grant_is_validated_before_atomic_cpu_execution() {
         let request = HeterogeneousCpuPrefixBatchRequest::new(grant(), vec![item(7)]);
         let error = request
-            .validate_gpu_recording_grant(HeterogeneousGpuResourceGrant::new(1, 1, 0))
+            .validate_gpu_recording_grant(HeterogeneousGpuResourceGrant::new(1, 1, 1, 0))
             .expect_err("GPU authority must be checked before CPU work");
         assert!(matches!(
             error,

@@ -522,7 +522,7 @@ pub struct GpuCompositeLayer<'a> {
     pub source: GpuCompositeLayerSource<'a>,
     /// Straight-alpha layer opacity.
     pub opacity: f32,
-    /// Timeline blend mode. Only `Normal` is accepted by the current GPU path.
+    /// Canonical Timeline blend mode evaluated in scene-linear working space.
     pub blend_mode: BlendMode,
     /// Timeline affine transform. Media and solids accept invertible transforms.
     /// Adjustment layers require identity because they process the destination accumulator.
