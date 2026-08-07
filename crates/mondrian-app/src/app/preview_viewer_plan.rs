@@ -158,11 +158,11 @@ pub(crate) enum PreviewViewerGpuLayerPreparationError {
     IdentityEffectGraphUnavailable,
     #[error("renderer identity Effect graph could not be lowered to GPU")]
     IdentityGpuPlanUnavailable,
-    #[error("heterogeneous media input address space is exhausted")]
+    #[error("heterogeneous CPU-working source address space is exhausted")]
     AddressSpaceExhausted,
-    #[error("heterogeneous media input {address} has no CPU working payload")]
+    #[error("heterogeneous source input {address} has no CPU working payload")]
     MissingCpuWorkingPayload { address: u32 },
-    #[error("heterogeneous media input {address} has no pre-materialization route")]
+    #[error("heterogeneous source input {address} has no pre-materialization route")]
     MissingPreparedRoute { address: u32 },
     #[error("heterogeneous CPU-prefix batch is invalid: {0}")]
     InvalidCpuPrefixBatch(#[from] HeterogeneousCpuPrefixBatchError),
@@ -401,8 +401,9 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
 /// Lower one resolved Viewer plan without executing heterogeneous work.
 ///
 /// Full-GPU lowering is attempted first and remains byte-for-byte the ordinary
-/// path. Only an `EffectRequiresCpu` result opens the explicit media-only
-/// heterogeneous seam. Exact graph-value routes were already prepared by the
+/// path. Only an `EffectRequiresCpu` result opens the explicit CPU-working
+/// source seam used by Media, Basic Title, and materialized parent Nested Clip
+/// inputs. Exact graph-value routes were already prepared by the
 /// renderer-owned Timeline route ledger before source materialization. This
 /// function only binds working pixels, validates the immutable batch, and
 /// creates Viewer placeholders.

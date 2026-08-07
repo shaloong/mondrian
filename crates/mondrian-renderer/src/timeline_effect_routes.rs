@@ -4,9 +4,10 @@
 //! Module. It then prepares the exact Effect route of every remaining
 //! placement without decoding media or touching pixels. The root Sequence may
 //! use either the complete CPU compositor or a complete Viewer Effect route.
-//! Other Viewer compositing constraints remain owned by Viewer lowering.
-//! Nested Sequences currently materialize to CPU working frames and therefore
-//! retain the stricter complete-CPU obligation.
+//! Other Viewer compositing constraints remain owned by Viewer lowering. A
+//! nested child still has to materialize through its complete CPU route, but
+//! that resulting CPU working frame is a valid input to the parent Nested
+//! Clip's own heterogeneous Effect route.
 
 use std::sync::Arc;
 
@@ -53,6 +54,37 @@ struct PreparedTimelinePreviewEffectRouteEntry {
     route: PreparedTimelinePreviewEffectRoute,
 }
 
+/// Physical source shape available before one placement's Effect graph runs.
+///
+/// This is deliberately more precise than a generic "heterogeneous supported"
+/// flag: a prepared CPU prefix needs an independently materialized CPU working
+/// frame. A generated Viewer source has no such frame yet, while an Adjustment
+/// would require reading back the already-composited GPU accumulator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelinePreviewEffectSource {
+    NodeRasterCpuWorkingFrame,
+    NestedCpuWorkingFrame,
+    ViewerGenerated,
+    CompositedAccumulator,
+}
+
+impl TimelinePreviewEffectSource {
+    fn cpu_prefix_extent(
+        self,
+        placement: TimelineClipExecutionRef,
+        node_extent: EffectFrameExtent,
+        nested_extent: &mut impl FnMut(TimelineClipExecutionRef) -> Option<EffectFrameExtent>,
+    ) -> Result<Option<EffectFrameExtent>, TimelinePreviewEffectRouteError> {
+        match self {
+            Self::NodeRasterCpuWorkingFrame => Ok(Some(node_extent)),
+            Self::NestedCpuWorkingFrame => nested_extent(placement).map(Some).ok_or(
+                TimelinePreviewEffectRouteError::MissingNestedMaterializationExtent { placement },
+            ),
+            Self::ViewerGenerated | Self::CompositedAccumulator => Ok(None),
+        }
+    }
+}
+
 /// Immutable per-Sequence route ledger prepared before source
 /// materialization.
 #[derive(Debug, Clone)]
@@ -62,24 +94,31 @@ pub struct PreparedTimelinePreviewEffectRoutes {
 }
 
 impl PreparedTimelinePreviewEffectRoutes {
-    /// Prepare every current-frame graph route under one exact raster and
-    /// heterogeneous graph-planning grant.
+    /// Prepare every current-frame graph route under exact source rasters and
+    /// one heterogeneous graph-planning grant.
+    ///
+    /// `nested_extent` must resolve the canonical current child binding from
+    /// the already-prepared visual closure. It is queried only when a Nested
+    /// placement cannot use the complete GPU route and needs a CPU prefix.
     pub fn prepare(
         plan: &TimelineRenderPlan,
-        extent: EffectFrameExtent,
+        node_extent: EffectFrameExtent,
         heterogeneous_budget: EffectGraphExecutionBudget,
         scratch: &mut TimelineCompositeScratch,
-    ) -> Self {
+        mut nested_extent: impl FnMut(TimelineClipExecutionRef) -> Option<EffectFrameExtent>,
+    ) -> Result<Self, TimelinePreviewEffectRouteError> {
         let cpu_compositor_blocker =
             admit_timeline_render_plan_for_cpu_compositor(plan).err().map(|error| {
                 let detail: Arc<str> = error.to_string().into();
                 detail
             });
         let mut entries = Vec::new();
-        visit_plan_graphs(plan, &mut |placement, graph, heterogeneous_supported| {
+        visit_plan_graphs(plan, &mut |placement, graph, source| {
             let route = if scratch.get_or_lower_effect_gpu_plan(graph).is_ok() {
                 PreparedTimelinePreviewEffectRoute::Gpu
-            } else if heterogeneous_supported {
+            } else if let Some(extent) =
+                source.cpu_prefix_extent(placement, node_extent, &mut nested_extent)?
+            {
                 PreparedHeterogeneousEffectRoute::prepare(
                     Arc::clone(graph),
                     extent,
@@ -95,8 +134,9 @@ impl PreparedTimelinePreviewEffectRoutes {
                 graph_fingerprint: graph.semantic_fingerprint(),
                 route,
             });
-        });
-        Self { entries: entries.into(), cpu_compositor_blocker }
+            Ok(())
+        })?;
+        Ok(Self { entries: entries.into(), cpu_compositor_blocker })
     }
 
     /// Prove that the root Sequence has one complete Effect execution route.
@@ -175,6 +215,13 @@ pub enum TimelinePreviewEffectRouteError {
         /// Canonical CPU admission diagnostic.
         cpu_blocker: Arc<str>,
     },
+    /// The canonical closure did not expose the current child raster needed by
+    /// a parent Nested Clip's CPU prefix.
+    #[error("Timeline Effect route has no nested materialization extent for {placement:?}")]
+    MissingNestedMaterializationExtent {
+        /// Parent placement whose exact child binding is missing.
+        placement: TimelineClipExecutionRef,
+    },
     /// Materialization requested a placement absent from the prepared ledger.
     #[error("Timeline Effect route ledger has no placement {placement:?}")]
     MissingPlacement {
@@ -191,50 +238,96 @@ pub enum TimelinePreviewEffectRouteError {
 
 fn visit_plan_graphs(
     plan: &TimelineRenderPlan,
-    visitor: &mut impl FnMut(TimelineClipExecutionRef, &Arc<CompiledEffectGraph>, bool),
-) {
+    visitor: &mut impl FnMut(
+        TimelineClipExecutionRef,
+        &Arc<CompiledEffectGraph>,
+        TimelinePreviewEffectSource,
+    ) -> Result<(), TimelinePreviewEffectRouteError>,
+) -> Result<(), TimelinePreviewEffectRouteError> {
     for element in &plan.elements {
         match element {
             TimelineRenderPlanElement::Media(layer) => {
-                visitor(layer.placement, &layer.effect_graph, true);
+                visitor(
+                    layer.placement,
+                    &layer.effect_graph,
+                    TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+                )?;
             }
             TimelineRenderPlanElement::BasicTitle(layer) => {
-                visitor(layer.placement, &layer.effect_graph, true);
+                visitor(
+                    layer.placement,
+                    &layer.effect_graph,
+                    TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+                )?;
             }
             TimelineRenderPlanElement::NestedSequence(layer) => {
-                visitor(layer.placement, &layer.effect_graph, false);
+                visitor(
+                    layer.placement,
+                    &layer.effect_graph,
+                    TimelinePreviewEffectSource::NestedCpuWorkingFrame,
+                )?;
             }
             TimelineRenderPlanElement::SolidColor(layer) => {
-                visitor(layer.placement, &layer.effect_graph, false);
+                visitor(
+                    layer.placement,
+                    &layer.effect_graph,
+                    TimelinePreviewEffectSource::ViewerGenerated,
+                )?;
             }
             TimelineRenderPlanElement::Adjustment(layer) => {
-                visitor(layer.placement, &layer.effect_graph, false);
+                visitor(
+                    layer.placement,
+                    &layer.effect_graph,
+                    TimelinePreviewEffectSource::CompositedAccumulator,
+                )?;
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
-                visit_transition_graph(&transition.left, visitor);
-                visit_transition_graph(&transition.right, visitor);
+                visit_transition_graph(&transition.left, visitor)?;
+                visit_transition_graph(&transition.right, visitor)?;
             }
         }
     }
+    Ok(())
 }
 
 fn visit_transition_graph(
     input: &TimelineTransitionInputPlan,
-    visitor: &mut impl FnMut(TimelineClipExecutionRef, &Arc<CompiledEffectGraph>, bool),
-) {
+    visitor: &mut impl FnMut(
+        TimelineClipExecutionRef,
+        &Arc<CompiledEffectGraph>,
+        TimelinePreviewEffectSource,
+    ) -> Result<(), TimelinePreviewEffectRouteError>,
+) -> Result<(), TimelinePreviewEffectRouteError> {
     match input {
         TimelineTransitionInputPlan::Transparent => {}
         TimelineTransitionInputPlan::Media(layer) => {
-            visitor(layer.placement, &layer.effect_graph, true);
+            visitor(
+                layer.placement,
+                &layer.effect_graph,
+                TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+            )?;
         }
         TimelineTransitionInputPlan::BasicTitle(layer) => {
-            visitor(layer.placement, &layer.effect_graph, true);
+            visitor(
+                layer.placement,
+                &layer.effect_graph,
+                TimelinePreviewEffectSource::NodeRasterCpuWorkingFrame,
+            )?;
         }
         TimelineTransitionInputPlan::NestedSequence(layer) => {
-            visitor(layer.placement, &layer.effect_graph, false);
+            visitor(
+                layer.placement,
+                &layer.effect_graph,
+                TimelinePreviewEffectSource::NestedCpuWorkingFrame,
+            )?;
         }
         TimelineTransitionInputPlan::SolidColor(layer) => {
-            visitor(layer.placement, &layer.effect_graph, false);
+            visitor(
+                layer.placement,
+                &layer.effect_graph,
+                TimelinePreviewEffectSource::ViewerGenerated,
+            )?;
         }
     }
+    Ok(())
 }

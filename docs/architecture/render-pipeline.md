@@ -220,17 +220,23 @@ it.
 Preview performs that same dynamic evaluation before its canonical
 media-demand collector can publish a decode request and before a
 generated-source Adapter runs. The renderer prepares an immutable
-`PreparedTimelinePreviewEffectRoutes` ledger for every Sequence node. The root
-must prove either one complete CPU compositor route or one complete Viewer
-Effect route in which every placement is full-GPU or carries an exact prepared
-CPU-F32→GPU-F32 route. A non-root node must still prove the complete CPU route
-because nested Preview currently materializes the child into a CPU working
-frame. Media demand derives `cpu_working_required` from that frozen placement
-entry, not from a second lowering attempt. Blend, projected geometry, layer
-count, and actual GPU resource admission remain later typed Viewer proofs;
-this ledger does not overclaim them. Unsupported Effect-route mixtures and
-non-CPU nested nodes fail before decode instead of claiming an Adapter that the
-materializer does not own.
+`PreparedTimelinePreviewEffectRoutes` ledger for every Sequence node only after
+the canonical closure has frozen all child bindings. The generic closure
+`try_map_payload` Seam finalizes consumer evidence atomically while it can still
+read each exact child node; it does not re-walk raw Sequences or reinterpret
+nested time. The root must prove either one complete CPU compositor route or
+one complete Viewer Effect route in which every placement is full-GPU or
+carries an exact prepared CPU-F32→GPU-F32 route. A non-root node must still
+prove the complete CPU route because nested Preview materializes that child
+into a CPU working frame. That exact child raster, rather than the parent
+canvas, is then the CPU input extent for the parent Nested Clip's own
+heterogeneous Effect route. A missing current child binding or extent fails
+route preparation. Media demand derives `cpu_working_required` from the same
+frozen placement entry, not from a second lowering attempt. Blend, projected
+geometry, layer count, and actual GPU resource admission remain later typed
+Viewer proofs; this ledger does not overclaim them. Unsupported Effect-route
+mixtures and non-CPU child nodes fail before decode instead of claiming an
+Adapter that the materializer does not own.
 
 Preview prefetch/preroll walks the already-prepared closure's nodes, and
 Window/Headless materialization resolves only typed child bindings. The App
@@ -397,10 +403,13 @@ perform this Export-owned execution.
 Preview consumes the same prepared heterogeneous work through three distinct
 Modules rather than reproducing Export's offline Session. Pure
 `preview_viewer_plan` lowering first attempts the ordinary complete-GPU Viewer
-plan. Only `EffectRequiresCpu` opens the bounded media-input heterogeneous
-route; unsupported blend/transform/placement, missing CPU-working input,
-excess layer count, or an invalid batch fails closed. Planning performs no
-pixel work. `preview_visual_execution_task` then submits the addressed
+plan. Only `EffectRequiresCpu` opens the bounded CPU-working-input heterogeneous
+route for Media, Basic Title, or a parent Nested Clip whose child has already
+materialized through its complete CPU route. This includes those source shapes
+when they are Cross Dissolve endpoints. Generated Solid Color, Adjustment
+accumulator readback, unsupported blend/transform/placement, missing
+CPU-working input, excess layer count, or an invalid batch fails closed.
+Planning performs no pixel work. `preview_visual_execution_task` then submits the addressed
 CPU-prefix batch to its own bounded `FrameWorkBroker` and dedicated serial
 worker. The CPU-prefix grant and no-readback GPU-continuation grant are frozen
 from the same immutable Preview resource decision and travel with that

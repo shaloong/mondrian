@@ -66,7 +66,9 @@ pub struct PreparedVisualNestedInstanceStep {
 ///
 /// The renderer fixes the plan and temporal demand set before the node enters
 /// the recursive closure. `payload` lets Preview and Export retain their own
-/// execution-admission evidence without interpreting nesting a second time.
+/// execution-admission evidence. Evidence that depends on exact child bindings
+/// is finalized atomically through [`PreparedVisualFrameClosure::try_map_payload`]
+/// after canonical recursion, without interpreting nesting a second time.
 #[derive(Debug)]
 pub struct PreparedVisualFrameEvaluation<T> {
     plan: TimelineRenderPlan,
@@ -98,6 +100,14 @@ impl<T> PreparedVisualFrameEvaluation<T> {
     /// Consumer-owned execution evidence.
     pub const fn payload(&self) -> &T {
         &self.payload
+    }
+
+    fn with_payload<U>(self, payload: U) -> PreparedVisualFrameEvaluation<U> {
+        PreparedVisualFrameEvaluation {
+            plan: self.plan,
+            temporal_batches: self.temporal_batches,
+            payload,
+        }
     }
 }
 
@@ -320,6 +330,24 @@ impl<T> PreparedVisualFrameNode<T> {
             .get(&PreparedVisualNestedBindingKey { placement, sample })
             .copied()
     }
+
+    fn with_payload<U>(self, payload: U) -> PreparedVisualFrameNode<U> {
+        PreparedVisualFrameNode {
+            id: self.id,
+            program: self.program,
+            sequence_id: self.sequence_id,
+            sequence_revision: self.sequence_revision,
+            frame: self.frame,
+            time: self.time,
+            materialization: self.materialization,
+            execution_resolution: self.execution_resolution,
+            color_context: self.color_context,
+            instance_path: self.instance_path,
+            evaluation: self.evaluation.with_payload(payload),
+            bindings: self.bindings,
+            binding_index: self.binding_index,
+        }
+    }
 }
 
 /// Immutable recursive closure consumed by Preview or Export materialization.
@@ -354,6 +382,27 @@ impl<T> PreparedVisualFrameClosure<T> {
     /// Deterministic pre-order node sequence.
     pub fn nodes(&self) -> &[PreparedVisualFrameNode<T>] {
         &self.nodes
+    }
+
+    /// Replace every consumer payload after the complete recursive closure and
+    /// all exact child bindings have been frozen.
+    ///
+    /// The mapper may inspect this immutable closure to derive evidence that
+    /// depends on canonical child identity or materialization raster. Mapping
+    /// is all-or-nothing: an error returns no partially transformed closure.
+    pub fn try_map_payload<U, E>(
+        self,
+        mut map: impl FnMut(&PreparedVisualFrameNode<T>, &PreparedVisualFrameClosure<T>) -> Result<U, E>,
+    ) -> Result<PreparedVisualFrameClosure<U>, E> {
+        let mapped =
+            self.nodes.iter().map(|node| map(node, &self)).collect::<Result<Vec<_>, E>>()?;
+        let nodes = self
+            .nodes
+            .into_iter()
+            .zip(mapped)
+            .map(|(node, payload)| node.with_payload(payload))
+            .collect();
+        Ok(PreparedVisualFrameClosure { root: self.root, nodes })
     }
 
     /// Conservatively bound the active CPU bytes required while materializing
@@ -419,7 +468,9 @@ struct NestedDemand {
 /// `evaluate` receives no raw Sequence and may only lower the already prepared
 /// Program for the exact frame, execution raster, color context, and normalized
 /// authored Preview scale supplied here. It may attach consumer-specific
-/// route/admission evidence, but must not recurse. Nested lookup and every
+/// evidence that is local to this node, but must not recurse. Evidence that
+/// needs canonical child bindings is finalized later through
+/// [`PreparedVisualFrameClosure::try_map_payload`]. Nested lookup and every
 /// child request are issued only by this function.
 pub fn prepare_visual_frame_closure<T>(
     request: PreparedVisualFrameClosureRequest<'_>,
@@ -1573,6 +1624,54 @@ mod tests {
             closure.node(first_child).expect("first child").instance_path(),
             closure.node(second_child).expect("second child").instance_path()
         );
+    }
+
+    #[test]
+    fn payload_finalization_reads_only_frozen_child_bindings_and_rasters() {
+        let mut child = Sequence::new("payload child");
+        child.settings.resolution = Resolution { width: 640, height: 360 };
+        child.settings.preview.resolution_scale = 0.5;
+        let mut root = Sequence::new("payload root");
+        let duration = frame_time(24, root.time_base());
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    TimelineTime::ZERO,
+                    duration,
+                    Some("payload child".to_owned()),
+                )
+                .expect("nested placement"),
+            )
+            .expect("add nested placement");
+
+        let closure = prepare_direct_closure(
+            &root,
+            std::slice::from_ref(&child),
+            0,
+            Resolution { width: 1920, height: 1080 },
+            PreparedVisualChildCanvasPolicy::preview_scaled(2).expect("Preview policy"),
+        )
+        .expect("prepared closure");
+        let mapped = closure
+            .try_map_payload(|node, closure| {
+                Ok::<_, ()>(
+                    node.bindings()
+                        .iter()
+                        .map(|binding| {
+                            closure
+                                .node(binding.child())
+                                .expect("frozen child binding")
+                                .execution_resolution()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .expect("map closure payloads");
+
+        let root_payload = mapped.node(mapped.root()).expect("root node").evaluation().payload();
+        assert_eq!(root_payload, &[Resolution { width: 160, height: 90 }]);
+        assert!(mapped.nodes()[1].evaluation().payload().is_empty());
     }
 
     #[test]

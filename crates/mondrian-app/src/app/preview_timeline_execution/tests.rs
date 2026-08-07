@@ -91,6 +91,47 @@ fn temporal_sample_effect(sample_offset: TimelineTime) -> mondrian_effects::Effe
     mondrian_effects::EffectNode::new(effect_type)
 }
 
+fn preview_gpu_only_point_effect(label: &str) -> mondrian_effects::EffectNode {
+    use mondrian_core::WorkingColorSpace;
+    use mondrian_effects::{
+        register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
+        EffectExecutionContract, EffectExecutionModes, EffectGraphTopology, EffectNode,
+        EffectRenderOp, EffectResourceLifetime, EffectRoiPropagation, EffectStateModel,
+        EffectTemporalInputExtent, EffectType,
+    };
+
+    let effect_type =
+        EffectType::Plugin(format!("test.preview.gpu-only.{label}.{}", AssetId::new()));
+    register_effect_definition(
+        EffectDefinition::new(
+            effect_type.key(),
+            "Preview GPU-only point Effect",
+            Default::default(),
+            EffectColorDomainContract::SCENE_LINEAR,
+        )
+        .with_execution_contract(EffectExecutionContract {
+            execution_modes: EffectExecutionModes::GPU_F32,
+            determinism: EffectDeterminism::Deterministic,
+            state_model: EffectStateModel::Stateless,
+            temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+            roi_propagation: EffectRoiPropagation::PixelLocal,
+            resource_lifetime: EffectResourceLifetime::Frame,
+            topology: EffectGraphTopology::LinearChain,
+        })
+        .with_graph_builder(Arc::new(|_, _, graph| {
+            graph.append_unary(EffectRenderOp::ColorAdjust {
+                exposure: 0.25,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: WorkingColorSpace::LinearRec709,
+            });
+            Ok(())
+        })),
+    )
+    .expect("register Preview GPU-only point Effect");
+    EffectNode::new(effect_type)
+}
+
 fn temporal_media_sequence() -> (Sequence, AssetId, mondrian_core::ClipId) {
     let mut sequence = Sequence::new("Preview temporal media");
     sequence.settings.frame_rate = Rational::new(30, 1);
@@ -400,6 +441,128 @@ fn production_timeline_prepares_heterogeneous_route_before_media_materialization
         resolved.plan.elements.as_slice(),
         [ResolvedPreviewElement::Media { prepared_heterogeneous_route: Some(_), .. }]
     ));
+}
+
+#[test]
+fn production_timeline_binds_nested_cpu_materialization_to_parent_heterogeneous_route() {
+    use mondrian_effects::{EffectNodeExt, EffectType};
+
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let target = Resolution { width: 64, height: 36 };
+    let mut child = solid_sequence(
+        "nested heterogeneous child",
+        Color::from_rgba8(40, 90, 180, 255),
+    );
+    child.settings.resolution = target;
+    let child_id = child.id;
+
+    let mut parent = Sequence::new("nested heterogeneous parent");
+    parent.settings.resolution = target;
+    let time_base = parent.time_base();
+    let mut nested = Clip::new_nested_sequence(
+        child_id,
+        TimelineTime::ZERO,
+        tt(24, time_base),
+        Some("nested heterogeneous child".to_owned()),
+    )
+    .expect("nested Clip");
+    nested.add_effect_node(mondrian_effects::EffectNode::with_defaults(
+        EffectType::GaussianBlur,
+    ));
+    nested.add_effect_node(preview_gpu_only_point_effect("nested-parent"));
+    parent.video_tracks[0].add_clip(nested).expect("insert nested Clip");
+
+    let resolution = resolve_preview_timeline(
+        &parent,
+        &[child],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&parent),
+        &mut |_| panic!("solid nested child must not request media"),
+        &mut |_| panic!("solid nested child must not request title rasterization"),
+    );
+    let resolved = match resolution {
+        PreviewTimelineResolution::Ready(resolved) => resolved,
+        PreviewTimelineResolution::Unavailable { reason } => panic!(
+            "nested CPU materialization must reach the parent heterogeneous route: {}",
+            reason.detail()
+        ),
+        PreviewTimelineResolution::Empty | PreviewTimelineResolution::Pending { .. } => {
+            panic!("nested heterogeneous Timeline returned no ready plan")
+        }
+    };
+    let [ResolvedPreviewElement::Media {
+        frame, prepared_heterogeneous_route: Some(route), ..
+    }] = resolved.plan.elements.as_slice()
+    else {
+        panic!("nested placement must bind its materialized frame to the frozen parent route")
+    };
+    assert_eq!(
+        route.frame_extent(),
+        EffectFrameExtent::new(frame.width(), frame.height()),
+        "the parent route must bind the exact child materialization raster"
+    );
+}
+
+#[test]
+fn nested_child_still_requires_a_complete_cpu_materialization_route() {
+    use mondrian_effects::{EffectNodeExt, EffectType};
+
+    let target = Resolution { width: 64, height: 36 };
+    let mut child = Sequence::new("nested heterogeneous child blocker");
+    child.settings.resolution = target;
+    let child_time_base = child.time_base();
+    let mut child_media = Clip::new(AssetId::new(), TimelineTime::ZERO, tt(24, child_time_base))
+        .expect("child media Clip");
+    child_media.add_effect_node(mondrian_effects::EffectNode::with_defaults(
+        EffectType::GaussianBlur,
+    ));
+    child_media.add_effect_node(preview_gpu_only_point_effect("nested-child-blocker"));
+    child.video_tracks[0].add_clip(child_media).expect("insert child media Clip");
+    let child_id = child.id;
+
+    let mut parent = Sequence::new("nested heterogeneous child blocker parent");
+    parent.settings.resolution = target;
+    let parent_time_base = parent.time_base();
+    parent.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(
+                child_id,
+                TimelineTime::ZERO,
+                tt(24, parent_time_base),
+                Some("nested heterogeneous child blocker".to_owned()),
+            )
+            .expect("nested Clip"),
+        )
+        .expect("insert nested Clip");
+
+    let mut media_called = false;
+    let resolution = resolve_preview_timeline(
+        &parent,
+        &[child],
+        0,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&parent),
+        &mut |_| {
+            media_called = true;
+            PreviewTimelineMediaFrame::Pending
+        },
+        &mut |_| panic!("media-only nested child must not request title rasterization"),
+    );
+    let PreviewTimelineResolution::Unavailable { reason } = resolution else {
+        panic!("a heterogeneous child cannot masquerade as a CPU materialization route")
+    };
+    assert_eq!(
+        reason.stage(),
+        crate::app::preview_unavailability::PreviewOutputStage::TimelineEvaluation
+    );
+    assert!(reason.detail().contains("cannot materialize through the CPU Adapter"));
+    assert!(
+        !media_called,
+        "nested route admission must fail before the child media Adapter"
+    );
 }
 
 #[test]

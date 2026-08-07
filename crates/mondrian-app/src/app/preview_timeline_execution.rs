@@ -554,10 +554,7 @@ impl<'a> PreviewTimelineGraph<'a> {
         frame: i64,
         target_resolution: Resolution,
         normalized_preview_resolution_scale: f32,
-    ) -> Result<
-        PreparedVisualFrameEvaluation<PreparedTimelinePreviewEffectRoutes>,
-        PreviewUnavailability,
-    > {
+    ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
         let extent = EffectFrameExtent::new(target_resolution.width, target_resolution.height);
         let prepared = self
             .scratch
@@ -602,16 +599,10 @@ impl<'a> PreviewTimelineGraph<'a> {
                 )
             })?;
         let (execution_plan, temporal_batches) = prepared.into_parts();
-        let routes = PreparedTimelinePreviewEffectRoutes::prepare(
-            &execution_plan,
-            extent,
-            self.heterogeneous_graph_budget,
-            &mut self.scratch.borrow_mut(),
-        );
         Ok(PreparedVisualFrameEvaluation::new(
             execution_plan,
             temporal_batches,
-            routes,
+            (),
         ))
     }
 }
@@ -1156,6 +1147,33 @@ fn prepare_preview_frame_closure(
     .map_err(|error| {
         PreviewUnavailability::blocked(PreviewOutputStage::TimelineEvaluation, error.to_string())
     })?;
+    let mut scratch = graph.scratch.borrow_mut();
+    let closure = closure
+        .try_map_payload(|node, closure| {
+            let node_resolution = node.execution_resolution();
+            PreparedTimelinePreviewEffectRoutes::prepare(
+                node.evaluation().plan(),
+                EffectFrameExtent::new(node_resolution.width, node_resolution.height),
+                graph.heterogeneous_graph_budget,
+                &mut scratch,
+                |placement| {
+                    let child =
+                        node.nested_child(placement, PreparedVisualNestedSample::Current)?;
+                    let child_resolution = closure.node(child)?.execution_resolution();
+                    Some(EffectFrameExtent::new(
+                        child_resolution.width,
+                        child_resolution.height,
+                    ))
+                },
+            )
+        })
+        .map_err(|error| {
+            PreviewUnavailability::blocked(
+                PreviewOutputStage::TimelineEvaluation,
+                error.to_string(),
+            )
+        })?;
+    drop(scratch);
     let root = closure.root();
     for node in closure.nodes() {
         let admission = if node.id() == root {
