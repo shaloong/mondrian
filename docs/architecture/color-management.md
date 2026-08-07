@@ -578,7 +578,8 @@ are also distinct: `EncodedRgbaF32Frame` carries nonlinear boundary samples,
 while `WorkingRgbaF32Frame` is reserved for linear-light pixels and carries a
 `WorkingColorSpace` identity.
 
-`ColorFrameDescriptor` stores `ColorFrameSpace::{Color, Working, Device}` plus
+`ColorFrameDescriptor` stores `ColorFrameSpace::{Color, Working, Device,
+NonColorData}` plus
 `ColorFrameAlpha::{StraightCoverage, PremultipliedCoverage, Opaque}`. Frame
 domain validation and OCIO processor planning therefore share the same role
 distinction instead of inferring it from transfer characteristics, and no
@@ -589,7 +590,10 @@ display-calibration and output stages reject premultiplied input rather than
 processing associated RGB as color.
 
 Renderer stages must carry typed color-frame metadata. `CpuColorFrame` is the
-CPU-resident linear working-frame contract; GPU frames expose the same
+CPU-resident Float32 Working-color contract and exposes no generic-domain
+constructor. The renderer Adapter uses a distinct internal `CpuAlphaMaskFrame`
+with no color-space identity for Mask frontier uploads; neither payload can be
+mislabelled as the other. GPU frames expose the same
 domain/encoding/residency/color-space/alpha descriptor. RGBA8 is a boundary
 format, not an intermediate color-management contract.
 Timeline compositing must therefore prefer direct float/linear operations for
@@ -604,11 +608,16 @@ transform. Their float implementation preserves extended RGB values; spatial
 sampling uses premultiplied alpha internally, and LUT sampling does not turn its
 normalized lookup domain into an implicit clamp of the working frame. Custom
 processors without a declared float ABI must remain diagnosed legacy boundaries
-rather than silently changing color domain. Built-in blend, mask, mask-source,
-and multi-input graph nodes stay in the same float working domain; mask coverage
-is generated as float alpha and never passes through an implicit 8-bit matte.
-These CPU contracts do not remove GPU residency blockers until equivalent GPU
-graph execution exists.
+rather than silently changing color domain. Built-in blend and multi-input graph
+nodes stay in the float working domain. Mask coverage is generated as Float32
+alpha and never passes through an implicit 8-bit matte. A heterogeneous transfer
+preserves that value as `ColorFrameSpace::NonColorData` plus
+`ColorFrameDomain::AlphaMask`; OCIO and ordinary RGB effects reject it. The
+production GPU Mask pass consumes this typed matte beside a scene-linear Working
+frame, changes only straight alpha, and has real-device parity with the CPU
+reference for every MaskOp and inversion state. GPU frame construction rejects
+either half of an incoherent `NonColorData/AlphaMask` pairing before resource
+publication.
 
 The app UI presentation surface is also part of the color contract. Mondrian
 targets wgpu 30 or newer for presentation because surface color space selection

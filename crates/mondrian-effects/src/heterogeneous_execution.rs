@@ -1658,6 +1658,7 @@ pub struct HeterogeneousCpuCompletionEvidence {
 pub struct HeterogeneousCpuTransferEvidence {
     cpu_materialization: EffectMaterializationId,
     gpu_materialization: EffectMaterializationId,
+    format: EffectValueFormat,
     completed_cpu_token: EffectCompletionToken,
     pending_gpu_input_token: EffectCompletionToken,
 }
@@ -1671,6 +1672,11 @@ impl HeterogeneousCpuTransferEvidence {
     /// GPU-resident materialization that only the exact upload may publish.
     pub const fn gpu_materialization(self) -> EffectMaterializationId {
         self.gpu_materialization
+    }
+
+    /// Exact non-converting value format carried across the transfer.
+    pub const fn format(self) -> EffectValueFormat {
+        self.format
     }
 
     /// CPU producer token that the upload must wait for.
@@ -1759,6 +1765,25 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Authored BlendMode evaluated by the shared CPU/GPU algebra.
         blend_mode: BlendMode,
     },
+    /// Apply one scalar alpha-mask materialization to a scene-linear input.
+    Mask {
+        /// Exact semantic Mask node.
+        node: EffectGraphNodeId,
+        /// Scene-linear input materialization whose RGB is preserved.
+        input: EffectMaterializationId,
+        /// AlphaMask-domain materialization sampled from its alpha channel.
+        mask: EffectMaterializationId,
+        /// New scene-linear materialization with updated straight alpha.
+        output: EffectMaterializationId,
+        /// Both producer-completion dependencies in input/mask order.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the Mask dispatch.
+        signal: EffectCompletionToken,
+        /// Whether the sampled matte is inverted before applying the operation.
+        invert: bool,
+        /// Canonical authored alpha combination operation.
+        mask_op: crate::mask::MaskOp,
+    },
 }
 
 impl PreparedHeterogeneousGpuDispatch {
@@ -1768,7 +1793,8 @@ impl PreparedHeterogeneousGpuDispatch {
             Self::PointChain { output, .. }
             | Self::Copy { output, .. }
             | Self::Blend { output, .. }
-            | Self::MultiInput { output, .. } => *output,
+            | Self::MultiInput { output, .. }
+            | Self::Mask { output, .. } => *output,
         }
     }
 
@@ -1778,7 +1804,8 @@ impl PreparedHeterogeneousGpuDispatch {
             Self::PointChain { waits, .. }
             | Self::Copy { waits, .. }
             | Self::Blend { waits, .. }
-            | Self::MultiInput { waits, .. } => waits,
+            | Self::MultiInput { waits, .. }
+            | Self::Mask { waits, .. } => waits,
         }
     }
 
@@ -1788,16 +1815,18 @@ impl PreparedHeterogeneousGpuDispatch {
             Self::PointChain { signal, .. }
             | Self::Copy { signal, .. }
             | Self::Blend { signal, .. }
-            | Self::MultiInput { signal, .. } => *signal,
+            | Self::MultiInput { signal, .. }
+            | Self::Mask { signal, .. } => *signal,
         }
     }
 
     fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
-            Self::Copy { node, .. } | Self::Blend { node, .. } | Self::MultiInput { node, .. } => {
-                output.push(*node)
-            }
+            Self::Copy { node, .. }
+            | Self::Blend { node, .. }
+            | Self::MultiInput { node, .. }
+            | Self::Mask { node, .. } => output.push(*node),
         }
     }
 
@@ -1815,6 +1844,10 @@ impl PreparedHeterogeneousGpuDispatch {
                 for input in inputs.iter().copied() {
                     visit(input)?;
                 }
+            }
+            Self::Mask { input, mask, .. } => {
+                visit(*input)?;
+                visit(*mask)?;
             }
         }
         Ok(())
@@ -2180,6 +2213,7 @@ impl PreparedHeterogeneousEffectWork {
                 } if !entered_gpu
                     && from.format.precision == EffectWorkingPrecision::Float32
                     && to.format.precision == EffectWorkingPrecision::Float32
+                    && from.format == to.format
                     && lane_by_id(environment, from.lane)
                         .is_some_and(|lane| lane.backend() == EffectProcessingBackend::Cpu)
                     && lane_by_id(environment, to.lane)
@@ -2188,6 +2222,7 @@ impl PreparedHeterogeneousEffectWork {
                     transfers.push(HeterogeneousCpuTransferEvidence {
                         cpu_materialization: *input,
                         gpu_materialization: *output,
+                        format: from.format,
                         completed_cpu_token: *wait,
                         pending_gpu_input_token: *signal,
                     });
@@ -2242,6 +2277,8 @@ impl PreparedHeterogeneousEffectWork {
             if cpu_completion.completion != transfer.completed_cpu_token
                 || gpu_input.completion != transfer.pending_gpu_input_token
                 || gpu_input.value != cpu_completion.value
+                || cpu_completion.residency.format != transfer.format
+                || gpu_input.residency.format != transfer.format
                 || !cpu_materialization_set.insert(transfer.cpu_materialization)
                 || !gpu_materialization_set.insert(transfer.gpu_materialization)
             {
@@ -3030,6 +3067,55 @@ fn prepare_gpu_suffix(
                             blend_mode: *blend_mode,
                         })
                     }
+                    EffectGraphNodeKind::Mask { invert, mask_op, .. } => {
+                        if inputs.len() != 2 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_mask_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        let input_format = plan
+                            .materialization(inputs[0])
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let mask_format = plan
+                            .materialization(inputs[1])
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let output_format = plan
+                            .materialization(*output)
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let scene_linear = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                        );
+                        let alpha_mask = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::AlphaMask,
+                        );
+                        if input_format != Some(scene_linear)
+                            || mask_format != Some(alpha_mask)
+                            || output_format != Some(scene_linear)
+                        {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_mask_dispatch_domain_mismatch",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::Mask {
+                            node: *node_id,
+                            input: inputs[0],
+                            mask: inputs[1],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            invert: *invert,
+                            mask_op: *mask_op,
+                        })
+                    }
                     EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
                         match inputs.len() {
                             0 => Err(
@@ -3549,6 +3635,30 @@ mod tests {
         .expect("prepare CPU-Mask/GPU-tail program")
         .evaluate(TimelineTime::ZERO)
         .expect("compile CPU-Mask/GPU-tail graph")
+    }
+
+    fn cpu_mask_source_to_gpu_mask_graph(
+        invert: bool,
+        mask_op: MaskOp,
+    ) -> Arc<CompiledEffectGraph> {
+        let mut graph = EffectGraphBuilderState::new();
+        let source = graph.source();
+        let filtered = graph.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let mask = graph.add_mask_source(
+            MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            0.0,
+            0.0,
+            0.35,
+        );
+        let output = graph.add_mask(filtered, mask, invert, mask_op);
+        graph.set_current_output(output);
+        compile_reference_render_graph(graph.finish()).expect("compile GPU Mask graph")
     }
 
     fn lifetime_partition_graph(
@@ -4339,6 +4449,64 @@ mod tests {
             }
         ));
         assert_eq!(checkpoints, 8);
+    }
+
+    #[test]
+    fn prepares_cpu_mask_source_as_alpha_frontier_for_gpu_mask() {
+        let extent = EffectFrameExtent::new(4, 3);
+        let work = PreparedHeterogeneousEffectWork::prepare(
+            cpu_mask_source_to_gpu_mask_graph(true, MaskOp::Difference),
+            &test_environment(),
+            request(extent),
+        )
+        .expect("prepare CPU MaskSource to GPU Mask route");
+        assert_eq!(work.cpu_nodes().len(), 2);
+        assert_eq!(work.gpu_suffix().node_ids().len(), 1);
+        assert!(matches!(
+            work.gpu_suffix().steps().iter().find_map(|step| match step {
+                PreparedHeterogeneousGpuStep::Dispatch(dispatch) => Some(dispatch),
+                PreparedHeterogeneousGpuStep::Release { .. } => None,
+            }),
+            Some(PreparedHeterogeneousGpuDispatch::Mask {
+                invert: true,
+                mask_op: MaskOp::Difference,
+                ..
+            })
+        ));
+
+        let input = vec![[0.2, 0.4, 0.6, 0.8]; 12];
+        let mut session =
+            EffectExecutionSession::new(EffectExecutionSessionConfig::uncached(1024 * 1024));
+        session.bind_generation(73);
+        let completion = work
+            .execute_cpu_prefix_uncancelled(
+                &session,
+                73,
+                &input,
+                5,
+                WorkingColorSpace::LinearRec2020,
+            )
+            .expect("execute CPU MaskSource frontier");
+        let formats = completion
+            .evidence()
+            .transfers()
+            .iter()
+            .map(|transfer| transfer.format())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            formats,
+            HashSet::from([
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                ),
+                EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::AlphaMask,
+                ),
+            ])
+        );
+        assert_eq!(completion.boundary_values().len(), 2);
     }
 
     #[test]

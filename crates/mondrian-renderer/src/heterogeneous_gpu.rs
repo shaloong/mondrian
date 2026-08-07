@@ -2,18 +2,19 @@
 //!
 //! This Module consumes the exact handoff produced by
 //! [`mondrian_effects::PreparedHeterogeneousCpuCompletion`]. It validates the
-//! caller binding and graph-value token chain, uploads the completed CPU value,
+//! caller binding and graph-value token chain, uploads the completed CPU frontier,
 //! and records only the already-lowered GPU suffix. Recording, queue
 //! submission, GPU completion, and optional CPU readback are distinct evidence
 //! states; command recording is never reported as completion.
 
 use crate::{
-    CpuColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
-    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions,
-    GpuCompositeError, GpuContext, GpuFrameCompositor,
+    color_frame::CpuAlphaMaskFrame, CpuColorFrame, GpuColorFrameAllocationPlan,
+    GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
+    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
+    GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
+    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuCompositeError,
+    GpuContext, GpuFrameCompositor,
 };
 use mondrian_core::{ExecutionCancellationToken, WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_effects::{
@@ -880,18 +881,37 @@ pub fn record_heterogeneous_gpu_continuation(
                     reason: "gpu_frontier_materialization_reused",
                 });
             }
-            let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
-                width: binding.frame_extent().width(),
-                height: binding.frame_extent().height(),
-                color_space: binding.working_color_space(),
-                data: pixels,
-            });
-            let upload_plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
-                resources.ids.allocate()?,
-                &frame,
-                GpuColorFrameTextureFormat::Rgba32Float,
-                "heterogeneous-effect-cpu-frontier",
-            )
+            let width = binding.frame_extent().width();
+            let height = binding.frame_extent().height();
+            let upload_plan = match transfer.format().domain() {
+                EffectColorDomain::SceneLinearRgb => {
+                    let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+                        width,
+                        height,
+                        color_space: binding.working_color_space(),
+                        data: pixels,
+                    });
+                    GpuColorFrameUploadPlan::from_cpu_color_frame(
+                        resources.ids.allocate()?,
+                        &frame,
+                        GpuColorFrameTextureFormat::Rgba32Float,
+                        "heterogeneous-effect-cpu-frontier",
+                    )
+                }
+                EffectColorDomain::AlphaMask => {
+                    let frame = CpuAlphaMaskFrame::new(width, height, pixels);
+                    GpuColorFrameUploadPlan::from_cpu_alpha_mask_frame(
+                        resources.ids.allocate()?,
+                        &frame,
+                        "heterogeneous-effect-alpha-mask-frontier",
+                    )
+                }
+                domain => {
+                    return Err(HeterogeneousGpuContinuationError::UnsupportedEffectDomain {
+                        domain,
+                    });
+                }
+            }
             .map_err(HeterogeneousGpuContinuationError::UploadPlan)?;
             let uploaded = match resources.resource_pool {
                 Some(pool) => GpuColorFrameUploader::upload_with_pool(
@@ -1080,6 +1100,45 @@ fn record_gpu_suffix(
                     )?;
                     retained.extend(scratch);
                     if handles.insert(*output, output_handle).is_some() {
+                        return Err(HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_dispatch_replaced_materialization",
+                        });
+                    }
+                }
+                PreparedHeterogeneousGpuStep::Dispatch(
+                    PreparedHeterogeneousGpuDispatch::Mask {
+                        input,
+                        mask,
+                        output,
+                        invert,
+                        mask_op,
+                        ..
+                    },
+                ) => {
+                    let input_handle = handles.get(input).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_mask_input_not_materialized",
+                        },
+                    )?;
+                    let mask_handle = handles.get(mask).ok_or(
+                        HeterogeneousGpuContinuationError::InvalidPlan {
+                            reason: "gpu_mask_matte_not_materialized",
+                        },
+                    )?;
+                    let record = resources.compositor.record_alpha_mask_pass(
+                        resources.device,
+                        resources.queue,
+                        resources.encoder,
+                        resources.ids,
+                        resources.table,
+                        resources.resource_pool.map(Arc::as_ref),
+                        input_handle,
+                        mask_handle,
+                        *invert,
+                        *mask_op,
+                        working_color_space,
+                    )?;
+                    if handles.insert(*output, record.output).is_some() {
                         return Err(HeterogeneousGpuContinuationError::InvalidPlan {
                             reason: "gpu_dispatch_replaced_materialization",
                         });
@@ -1721,7 +1780,8 @@ fn gpu_recording_device_demand(
             }
             PreparedHeterogeneousGpuDispatch::PointChain { .. }
             | PreparedHeterogeneousGpuDispatch::Copy { .. }
-            | PreparedHeterogeneousGpuDispatch::Blend { .. } => 1,
+            | PreparedHeterogeneousGpuDispatch::Blend { .. }
+            | PreparedHeterogeneousGpuDispatch::Mask { .. } => 1,
         };
         let physical_bytes = materialization.bytes().checked_mul(physical_outputs).ok_or(
             HeterogeneousGpuContinuationError::InvalidPlan {
@@ -1796,13 +1856,16 @@ fn validate_token_chain(
                     "transfer_signal_token",
                 )?;
                 require_plan(
-                    from.format().precision() == EffectWorkingPrecision::Float32
-                        && to.format().precision() == EffectWorkingPrecision::Float32,
-                    "transfer_precision",
+                    from.format() == transfer.format()
+                        && to.format() == transfer.format()
+                        && transfer.format().precision() == EffectWorkingPrecision::Float32,
+                    "transfer_format",
                 )?;
                 require_plan(
-                    from.format().domain() == EffectColorDomain::SceneLinearRgb
-                        && to.format().domain() == EffectColorDomain::SceneLinearRgb,
+                    matches!(
+                        transfer.format().domain(),
+                        EffectColorDomain::SceneLinearRgb | EffectColorDomain::AlphaMask
+                    ),
                     "transfer_domain",
                 )?;
                 require_plan(cpu_lane == Some(from.lane()), "transfer_cpu_lane")?;
@@ -2014,6 +2077,60 @@ fn validate_gpu_suffix_schedule(
                 require_plan(completed.insert(*signal), "gpu_blend_signal_reused")?;
                 nodes.push(*node);
             }
+            PreparedHeterogeneousGpuStep::Dispatch(PreparedHeterogeneousGpuDispatch::Mask {
+                node,
+                input,
+                mask,
+                output,
+                waits,
+                signal,
+                ..
+            }) => {
+                require_plan(
+                    live.contains(input) && live.contains(mask),
+                    "gpu_mask_input_not_live",
+                )?;
+                require_plan(
+                    waits.len() == 2 && waits.iter().all(|wait| completed.contains(wait)),
+                    "gpu_mask_wait_not_completed",
+                )?;
+                let input_value = plan.materialization(*input).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_mask_input_materialization_missing",
+                    },
+                )?;
+                let mask_value = plan.materialization(*mask).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_mask_matte_materialization_missing",
+                    },
+                )?;
+                let output_value = plan.materialization(*output).ok_or(
+                    HeterogeneousGpuContinuationError::InvalidPlan {
+                        reason: "gpu_mask_output_materialization_missing",
+                    },
+                )?;
+                let scene_linear = EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::SceneLinearRgb,
+                );
+                let alpha_mask = EffectValueFormat::new(
+                    EffectWorkingPrecision::Float32,
+                    EffectColorDomain::AlphaMask,
+                );
+                require_plan(
+                    input_value.completion() == waits[0]
+                        && mask_value.completion() == waits[1]
+                        && output_value.completion() == *signal
+                        && output_value.value() == *node
+                        && input_value.residency().format() == scene_linear
+                        && mask_value.residency().format() == alpha_mask
+                        && output_value.residency().format() == scene_linear,
+                    "gpu_mask_value_domain_or_token_mismatch",
+                )?;
+                require_plan(live.insert(*output), "gpu_mask_output_already_live")?;
+                require_plan(completed.insert(*signal), "gpu_mask_signal_reused")?;
+                nodes.push(*node);
+            }
             PreparedHeterogeneousGpuStep::Dispatch(
                 PreparedHeterogeneousGpuDispatch::MultiInput {
                     node,
@@ -2159,7 +2276,8 @@ mod tests {
     use mondrian_effects::{
         apply_compiled_effect_graph_rgba_f32, compile_reference_render_graph, CompiledEffectGraph,
         EffectExecutionSession, EffectExecutionSessionConfig, EffectGraphBuilderState,
-        EffectNodeExt, EffectRenderOp, PreparedEffectProgram, PreparedHeterogeneousEffectWork,
+        EffectNodeExt, EffectRenderOp, MaskOp, MaskShape, PreparedEffectProgram,
+        PreparedHeterogeneousEffectWork,
     };
 
     const GENERATION: u64 = 17;
@@ -2272,6 +2390,27 @@ mod tests {
         let output = builder.add_blend(blurred, sharpened, BlendMode::Screen, 0.6);
         builder.set_current_output(output);
         compile_reference_render_graph(builder.finish()).expect("compile two-value frontier graph")
+    }
+
+    fn gpu_mask_graph(invert: bool, mask_op: MaskOp) -> Arc<CompiledEffectGraph> {
+        let mut builder = EffectGraphBuilderState::new();
+        let source = builder.source();
+        let filtered = builder.add_unary_from(source, EffectRenderOp::GaussianBlur { radius: 1.0 });
+        let mask = builder.add_mask_source(
+            MaskShape::Rectangle {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                corner_radius: 0.0,
+            },
+            0.0,
+            0.0,
+            0.35,
+        );
+        let output = builder.add_mask(filtered, mask, invert, mask_op);
+        builder.set_current_output(output);
+        compile_reference_render_graph(builder.finish()).expect("compile GPU Mask graph")
     }
 
     fn test_input() -> Vec<[f32; 4]> {
@@ -2865,6 +3004,125 @@ mod tests {
         }
         assert!(!runtime.is_poisoned());
         assert!(runtime.table.is_empty());
+    }
+
+    #[tokio::test]
+    async fn real_wgpu_cpu_mask_source_frontier_matches_all_gpu_mask_operations() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping heterogeneous GPU Mask test: no GPU adapter available");
+            return;
+        };
+        let input = test_input();
+        let mut runtime = HeterogeneousGpuContinuationRuntime::new(
+            context,
+            GpuColorFrameWgpuResourcePoolOptions::default(),
+        )
+        .expect("heterogeneous GPU runtime");
+
+        for mask_op in [
+            MaskOp::Add,
+            MaskOp::Subtract,
+            MaskOp::Intersect,
+            MaskOp::Difference,
+        ] {
+            for invert in [false, true] {
+                let graph = gpu_mask_graph(invert, mask_op);
+                let expected = apply_compiled_effect_graph_rgba_f32(
+                    &input,
+                    EXTENT.width(),
+                    EXTENT.height(),
+                    &graph,
+                    FRAME_SEED,
+                )
+                .expect("complete CPU GPU-Mask reference");
+                let capability = HeterogeneousGpuExecutionCapability::scene_linear_f32()
+                    .expect("renderer capability");
+                let prepared = PreparedHeterogeneousEffectWork::prepare(
+                    Arc::clone(&graph),
+                    capability.environment(),
+                    capability.request(EXTENT, generous_graph_budget()),
+                )
+                .expect("prepare CPU MaskSource to GPU Mask route");
+                assert_eq!(prepared.cpu_nodes().len(), 2);
+                assert_eq!(prepared.gpu_suffix().input_materializations().len(), 2);
+                let frame_bytes = u64::from(EXTENT.width()) * u64::from(EXTENT.height()) * 16;
+                let requirements = HeterogeneousGpuRecordingRequirements::from_prepared(
+                    prepared.plan(),
+                    prepared.gpu_suffix(),
+                )
+                .expect("GPU Mask recording requirements");
+                assert_eq!(requirements.upload_bytes(), frame_bytes * 2);
+                assert_eq!(requirements.device_materializations(), 3);
+                assert_eq!(requirements.device_bytes(), frame_bytes * 3);
+                assert!(matches!(
+                    requirements.validate(HeterogeneousGpuResourceGrant::new(
+                        requirements.upload_bytes(),
+                        requirements.device_bytes(),
+                        2,
+                        frame_bytes,
+                    )),
+                    Err(HeterogeneousGpuContinuationError::ResourceGrantExceeded {
+                        kind: HeterogeneousGpuResourceKind::DeviceMaterializations,
+                        required: 3,
+                        limit: 2,
+                    })
+                ));
+                assert!(matches!(
+                    prepared.gpu_suffix().steps().iter().find_map(|step| match step {
+                        PreparedHeterogeneousGpuStep::Dispatch(dispatch) => Some(dispatch),
+                        PreparedHeterogeneousGpuStep::Release { .. } => None,
+                    }),
+                    Some(PreparedHeterogeneousGpuDispatch::Mask {
+                        invert: actual_invert,
+                        mask_op: actual_op,
+                        ..
+                    }) if *actual_invert == invert && *actual_op == mask_op
+                ));
+                let mut session = EffectExecutionSession::new(
+                    EffectExecutionSessionConfig::uncached(8 * 1024 * 1024),
+                );
+                session.bind_generation(GENERATION);
+                let completion = prepared
+                    .execute_cpu_prefix_uncancelled(
+                        &session,
+                        GENERATION,
+                        &input,
+                        FRAME_SEED,
+                        WORKING_SPACE,
+                    )
+                    .expect("execute CPU MaskSource frontier");
+                assert!(completion.evidence().transfers().iter().any(|transfer| {
+                    transfer.format().domain() == EffectColorDomain::AlphaMask
+                }));
+                let completed = runtime
+                    .execute_to_cpu(
+                        request(&graph, generous_gpu_grant()),
+                        completion,
+                        &ExecutionCancellationToken::new(),
+                        gpu_test_deadline(),
+                    )
+                    .expect("execute GPU Mask and read back");
+                assert_eq!(completed.evidence().completed_uploads().len(), 2);
+                assert_eq!(
+                    completed.frame().descriptor().domain,
+                    crate::ColorFrameDomain::Working
+                );
+                for (actual, expected) in
+                    completed.frame().rgba_f32().data.iter().zip(expected.iter())
+                {
+                    for channel in 0..4 {
+                        assert!(
+                            (actual[channel] - expected[channel]).abs() <= 1.0e-4,
+                            "{mask_op:?} invert={invert} channel {channel}: actual={} expected={}",
+                            actual[channel],
+                            expected[channel]
+                        );
+                    }
+                }
+                assert!(runtime.table.is_empty());
+            }
+        }
+        assert!(!runtime.is_poisoned());
     }
 
     #[tokio::test]

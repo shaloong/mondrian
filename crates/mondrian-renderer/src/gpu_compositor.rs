@@ -18,7 +18,7 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::types::{BlendMode, Color};
 use mondrian_effects::{
-    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MAX_FUSED_GPU_EFFECT_OPS,
+    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp, MAX_FUSED_GPU_EFFECT_OPS,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,8 @@ struct CompositeUniforms {
     blend_mode: u32,
     frame_seed_lo: u32,
     frame_seed_hi: u32,
-    _padding: vec2<u32>,
+    mask_op: u32,
+    mask_invert: u32,
     solid_color: vec4<f32>,
     inv_transform0: vec4<f32>,
     inv_transform1: vec4<f32>,
@@ -260,12 +261,33 @@ fn cross_dissolve_straight_alpha(
     return vec4<f32>(premul / out_alpha, out_alpha);
 }
 
+fn apply_alpha_mask(source_px: vec4<f32>, mask_px: vec4<f32>) -> vec4<f32> {
+    var matte = clamp(mask_px.a, 0.0, 1.0);
+    if (uniforms.mask_invert != 0u) {
+        matte = 1.0 - matte;
+    }
+    let source_alpha = clamp(source_px.a, 0.0, 1.0);
+    var output_alpha = source_alpha * matte;
+    if (uniforms.mask_op == 1u) {
+        output_alpha = source_alpha * (1.0 - matte);
+    } else if (uniforms.mask_op == 2u) {
+        output_alpha = min(source_alpha, matte);
+    } else if (uniforms.mask_op == 3u) {
+        output_alpha = abs(source_alpha - matte);
+    }
+    return vec4<f32>(source_px.rgb, output_alpha);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
     if (uniforms.source_kind == 5u) {
         let right_px = textureSample(layer_tex, linear_sampler, in.uv);
         return cross_dissolve_straight_alpha(base_px, right_px, uniforms.opacity);
+    }
+    if (uniforms.source_kind == 6u) {
+        let mask_px = textureSample(layer_tex, linear_sampler, in.uv);
+        return apply_alpha_mask(base_px, mask_px);
     }
     let source_position = source_coordinate(in.uv);
     var layer_px: vec4<f32>;
@@ -653,6 +675,12 @@ pub enum GpuCompositeError {
         /// Unsupported input texture format.
         texture_format: GpuColorFrameTextureFormat,
     },
+    /// Alpha-mask execution requires RGBA32F source and mask textures.
+    #[error("GPU alpha-mask pass requires RGBA32F textures, got {texture_format:?}")]
+    AlphaMaskTextureFormatUnsupported {
+        /// Unsupported source or mask texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
     /// The bounded per-frame uniform arena was not reset after ordered submission.
     #[error("GPU compositor uniform arena exhausted at {capacity} slots")]
     UniformArenaExhausted {
@@ -717,7 +745,7 @@ struct GpuCompositeUniforms {
     blend_mode: u32,
     frame_seed_lo: u32,
     frame_seed_hi: u32,
-    padding: [u32; 2],
+    mask_controls: [u32; 2],
     solid_color: [f32; 4],
     inv_transform0: [f32; 4],
     inv_transform1: [f32; 4],
@@ -1059,7 +1087,7 @@ impl GpuFrameCompositor {
                     blend_mode: gpu_blend_mode_id(layer.blend_mode),
                     frame_seed_lo: layer.frame_seed as u32,
                     frame_seed_hi: (layer.frame_seed >> 32) as u32,
-                    padding: [0; 2],
+                    mask_controls: [0; 2],
                     solid_color,
                     inv_transform0: [
                         inv_transform[0],
@@ -1137,7 +1165,7 @@ impl GpuFrameCompositor {
                 blend_mode: gpu_blend_mode_id(BlendMode::Normal),
                 frame_seed_lo: frame_seed as u32,
                 frame_seed_hi: (frame_seed >> 32) as u32,
-                padding: [0; 2],
+                mask_controls: [0; 2],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1261,7 +1289,7 @@ impl GpuFrameCompositor {
                 blend_mode: gpu_blend_mode_id(BlendMode::Normal),
                 frame_seed_lo: 0,
                 frame_seed_hi: 0,
-                padding: [0; 2],
+                mask_controls: [0; 2],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1357,7 +1385,77 @@ impl GpuFrameCompositor {
                 blend_mode: gpu_blend_mode_id(blend_mode),
                 frame_seed_lo: frame_seed as u32,
                 frame_seed_hi: (frame_seed >> 32) as u32,
-                padding: [0; 2],
+                mask_controls: [0; 2],
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                ],
+                effects: effect_uniforms(None),
+            },
+        )?;
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                gpu_native_composites: 1,
+                gpu_composited_pixels: u64::from(descriptor.width)
+                    .saturating_mul(u64::from(descriptor.height)),
+                ..GpuCompositingDiagnostics::default()
+            },
+        })
+    }
+
+    /// Apply one AlphaMask-domain texture to a scene-linear working frame.
+    ///
+    /// RGB samples pass through unchanged by the Mask algebra; only straight
+    /// coverage alpha is recomputed with the canonical MaskOp formula.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_alpha_mask_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        mask: &GpuColorFrameHandle,
+        invert: bool,
+        mask_op: MaskOp,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_alpha_mask_inputs(input, mask, working_color_space)?;
+        let descriptor = input.descriptor();
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let mask_resource = table.get(mask).map_err(GpuCompositeError::ResourceTable)?;
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-alpha-mask-output",
+            resource_pool,
+        )?;
+        self.record_layer_pass(
+            device,
+            queue,
+            encoder,
+            GpuCompositeTextureBinding::Resource(input_resource.resource()),
+            &output_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(mask_resource.resource()),
+            GpuCompositeUniforms {
+                opacity: 1.0,
+                source_kind: 6,
+                effect_count: 0,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: 0,
+                frame_seed_hi: 0,
+                mask_controls: [gpu_mask_op_id(mask_op), u32::from(invert)],
                 solid_color: [0.0; 4],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1434,7 +1532,7 @@ impl GpuFrameCompositor {
                 blend_mode: gpu_blend_mode_id(BlendMode::Normal),
                 frame_seed_lo: 0,
                 frame_seed_hi: 0,
-                padding: [0; 2],
+                mask_controls: [0; 2],
                 solid_color: [color.r, color.g, color.b, color.a],
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
@@ -1619,6 +1717,62 @@ fn validate_point_effect_input(
         });
     }
     Ok(())
+}
+
+fn validate_alpha_mask_inputs(
+    input: &GpuColorFrameHandle,
+    mask: &GpuColorFrameHandle,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> Result<(), GpuCompositeError> {
+    let input_actual = input.descriptor();
+    let input_expected = ColorFrameDescriptor {
+        width: input_actual.width,
+        height: input_actual.height,
+        color_space: working_color_space.into(),
+        domain: ColorFrameDomain::Working,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    require_straight_compatible_alpha(input_actual.alpha)?;
+    if input_actual != input_expected {
+        return Err(GpuCompositeError::SourceDescriptorMismatch {
+            expected: input_expected,
+            actual: input_actual,
+        });
+    }
+    let mask_actual = mask.descriptor();
+    let mask_expected = ColorFrameDescriptor {
+        width: input_actual.width,
+        height: input_actual.height,
+        color_space: crate::ColorFrameSpace::NonColorData,
+        domain: ColorFrameDomain::AlphaMask,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    require_straight_compatible_alpha(mask_actual.alpha)?;
+    if mask_actual != mask_expected {
+        return Err(GpuCompositeError::SourceDescriptorMismatch {
+            expected: mask_expected,
+            actual: mask_actual,
+        });
+    }
+    for texture_format in [input.texture_format(), mask.texture_format()] {
+        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
+        }
+    }
+    Ok(())
+}
+
+const fn gpu_mask_op_id(mask_op: MaskOp) -> u32 {
+    match mask_op {
+        MaskOp::Add => 0,
+        MaskOp::Subtract => 1,
+        MaskOp::Intersect => 2,
+        MaskOp::Difference => 3,
+    }
 }
 
 fn single_layer_gpu_passthrough<'a>(

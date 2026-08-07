@@ -22,6 +22,8 @@ pub enum ColorFrameDomain {
     Working,
     /// Color-managed intermediate pixels prepared for an effect's declared domain.
     Effect,
+    /// Non-color scalar alpha/mask values stored in the alpha channel.
+    AlphaMask,
     /// Presentation pixels after a display/view transform.
     Display,
     /// Delivery pixels after export/output transforms.
@@ -93,6 +95,8 @@ pub enum ColorFrameSpace {
     Working(WorkingColorSpace),
     /// Monitor-device RGB identity after ICC calibration.
     Device(DisplayCalibrationKey),
+    /// Non-color data that must never enter a color transform.
+    NonColorData,
 }
 
 impl ColorFrameSpace {
@@ -100,14 +104,14 @@ impl ColorFrameSpace {
     pub const fn color(self) -> Option<ColorSpace> {
         match self {
             Self::Color(space) => Some(space),
-            Self::Working(_) | Self::Device(_) => None,
+            Self::Working(_) | Self::Device(_) | Self::NonColorData => None,
         }
     }
 
     /// Return the linear identity, if this is a working frame.
     pub const fn working(self) -> Option<WorkingColorSpace> {
         match self {
-            Self::Color(_) | Self::Device(_) => None,
+            Self::Color(_) | Self::Device(_) | Self::NonColorData => None,
             Self::Working(space) => Some(space),
         }
     }
@@ -154,6 +158,15 @@ impl ColorFrameDescriptor {
     pub fn with_residency(mut self, residency: ColorFrameResidency) -> Self {
         self.residency = residency;
         self
+    }
+
+    /// Whether non-color space identity and non-color frame role agree.
+    pub const fn has_coherent_space_domain(self) -> bool {
+        matches!(
+            (self.color_space, self.domain),
+            (ColorFrameSpace::NonColorData, ColorFrameDomain::AlphaMask)
+        ) || (!matches!(self.color_space, ColorFrameSpace::NonColorData)
+            && !matches!(self.domain, ColorFrameDomain::AlphaMask))
     }
 }
 
@@ -315,6 +328,12 @@ impl GpuColorFrameHandle {
         if descriptor.residency != ColorFrameResidency::Gpu {
             return Err(GpuColorFrameHandleError::CpuResidentDescriptor);
         }
+        if !descriptor.has_coherent_space_domain() {
+            return Err(GpuColorFrameHandleError::IncoherentSpaceDomain {
+                space: descriptor.color_space,
+                domain: descriptor.domain,
+            });
+        }
         if descriptor.width == 0 || descriptor.height == 0 {
             return Err(GpuColorFrameHandleError::EmptyExtent {
                 width: descriptor.width,
@@ -374,6 +393,14 @@ pub enum GpuColorFrameHandleError {
     /// The descriptor does not describe a GPU-resident frame.
     #[error("GPU color frame handle requires a GPU-resident descriptor")]
     CpuResidentDescriptor,
+    /// Non-color space identity must pair exactly with a non-color frame role.
+    #[error("GPU color frame has incoherent space {space:?} and domain {domain:?}")]
+    IncoherentSpaceDomain {
+        /// Rejected sample-space identity.
+        space: ColorFrameSpace,
+        /// Rejected render-graph role.
+        domain: ColorFrameDomain,
+    },
     /// The descriptor has an empty pixel extent.
     #[error("GPU color frame handle requires a non-empty extent, got {width}x{height}")]
     EmptyExtent {
@@ -1176,6 +1203,7 @@ enum GpuColorFrameUploadPayload {
     Bytes(Arc<Vec<u8>>),
     Float32(Arc<Vec<f32>>),
     WorkingRgba32(Arc<WorkingRgbaF32Frame>),
+    AlphaMaskRgba32(Arc<Vec<[f32; 4]>>),
 }
 
 impl GpuColorFrameUploadPayload {
@@ -1184,6 +1212,7 @@ impl GpuColorFrameUploadPayload {
             Self::Bytes(bytes) => bytes.as_slice(),
             Self::Float32(samples) => bytemuck::cast_slice(samples.as_slice()),
             Self::WorkingRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
+            Self::AlphaMaskRgba32(samples) => bytemuck::cast_slice(samples.as_slice()),
         }
     }
 }
@@ -1208,6 +1237,27 @@ impl GpuColorFrameUploadPlan {
         Self::new(
             handle,
             GpuColorFrameUploadPayload::WorkingRgba32(frame.rgba_f32_shared()),
+        )
+    }
+
+    /// Build an upload plan for one renderer-internal non-color alpha matte.
+    pub(crate) fn from_cpu_alpha_mask_frame(
+        id: GpuColorFrameId,
+        frame: &CpuAlphaMaskFrame,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        let descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        validate_cpu_pixel_count(descriptor, frame.samples.len())?;
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            label,
+        )
+        .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::AlphaMaskRgba32(Arc::clone(&frame.samples)),
         )
     }
 
@@ -2550,6 +2600,35 @@ pub enum GpuColorFrameResourceTableError {
     },
 }
 
+/// Renderer-internal CPU alpha matte awaiting typed GPU upload.
+///
+/// This stays distinct from [`CpuColorFrame`]: its samples have no color-space
+/// identity and may only become an `AlphaMask + NonColorData` resource.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CpuAlphaMaskFrame {
+    width: u32,
+    height: u32,
+    samples: Arc<Vec<[f32; 4]>>,
+}
+
+impl CpuAlphaMaskFrame {
+    pub(crate) fn new(width: u32, height: u32, samples: Vec<[f32; 4]>) -> Self {
+        Self { width, height, samples: Arc::new(samples) }
+    }
+
+    const fn descriptor(&self) -> ColorFrameDescriptor {
+        ColorFrameDescriptor {
+            width: self.width,
+            height: self.height,
+            color_space: ColorFrameSpace::NonColorData,
+            domain: ColorFrameDomain::AlphaMask,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+            alpha: ColorFrameAlpha::StraightCoverage,
+        }
+    }
+}
+
 /// CPU-resident linear floating-point frame with a typed color contract.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CpuColorFrame {
@@ -2560,16 +2639,11 @@ pub struct CpuColorFrame {
 impl CpuColorFrame {
     /// Wrap a linear-light frame as a working-space render-graph frame.
     pub fn working(frame: WorkingRgbaF32Frame) -> Self {
-        Self::linear(frame, ColorFrameDomain::Working)
-    }
-
-    /// Wrap a linear-light frame with an explicit render-graph domain.
-    pub fn linear(frame: WorkingRgbaF32Frame, domain: ColorFrameDomain) -> Self {
         let descriptor = ColorFrameDescriptor {
             width: frame.width,
             height: frame.height,
             color_space: ColorFrameSpace::Working(frame.color_space),
-            domain,
+            domain: ColorFrameDomain::Working,
             encoding: ColorFrameEncoding::LinearFloat,
             residency: ColorFrameResidency::Cpu,
             alpha: ColorFrameAlpha::StraightCoverage,
@@ -4108,6 +4182,51 @@ mod tests {
             panic!("CPU working upload should retain the shared frame payload");
         };
         assert!(Arc::ptr_eq(payload, &frame.frame));
+    }
+
+    #[test]
+    fn alpha_mask_upload_retains_non_color_domain_identity() {
+        let frame =
+            CpuAlphaMaskFrame::new(2, 1, vec![[0.0, 0.0, 0.0, 0.25], [0.0, 0.0, 0.0, 0.75]]);
+        assert_eq!(frame.descriptor().domain, ColorFrameDomain::AlphaMask);
+        assert_eq!(
+            frame.descriptor().color_space,
+            ColorFrameSpace::NonColorData
+        );
+        assert_eq!(frame.descriptor().color_space.color(), None);
+        assert_eq!(frame.descriptor().color_space.working(), None);
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_alpha_mask_frame(
+            GpuColorFrameId::from_raw(205),
+            &frame,
+            "alpha-mask-upload",
+        )
+        .expect("alpha-mask upload plan");
+        assert_eq!(
+            plan.handle.descriptor(),
+            frame.descriptor().with_residency(ColorFrameResidency::Gpu)
+        );
+
+        for incoherent in [
+            ColorFrameDescriptor {
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                ..plan.handle.descriptor()
+            },
+            ColorFrameDescriptor {
+                domain: ColorFrameDomain::Working,
+                ..plan.handle.descriptor()
+            },
+        ] {
+            assert!(matches!(
+                GpuColorFrameHandle::new(
+                    GpuColorFrameId::from_raw(206),
+                    incoherent,
+                    GpuColorFrameTextureFormat::Rgba32Float,
+                    "incoherent-alpha-mask",
+                ),
+                Err(GpuColorFrameHandleError::IncoherentSpaceDomain { .. })
+            ));
+        }
     }
 
     #[test]

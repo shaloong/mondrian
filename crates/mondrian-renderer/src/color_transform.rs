@@ -618,6 +618,14 @@ impl CpuColorTransformExecutor {
                     "linear source frame cannot carry a monitor-device identity",
                 ));
             }
+            ColorFrameSpace::NonColorData => {
+                return Err(RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::InputToWorking,
+                    descriptor,
+                    output_descriptor,
+                    "non-color data cannot enter an input color transform",
+                ));
+            }
         };
         session
             .convert_identity_float_for_renderer(
@@ -1218,7 +1226,7 @@ fn frame_space_identity(space: ColorFrameSpace) -> Option<OcioColorSpaceIdentity
     match space {
         ColorFrameSpace::Color(space) => Some(OcioColorSpaceIdentity::Color(space)),
         ColorFrameSpace::Working(space) => Some(OcioColorSpaceIdentity::Working(space)),
-        ColorFrameSpace::Device(_) => None,
+        ColorFrameSpace::Device(_) | ColorFrameSpace::NonColorData => None,
     }
 }
 

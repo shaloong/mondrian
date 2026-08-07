@@ -326,8 +326,9 @@ kernel scratch are all included in the same checked Session demand; a stop
 returns neither partial pixels nor a completion token.
 Its result carries the ordered CPU boundary materializations, Session generation,
 the immutable graph-value plan, each completed CPU token/required upload wait,
-and still-pending GPU-input/output tokens. An Adapter therefore receives the exact
-transfer residency and lifetime steps without replanning. The result
+each exact `EffectValueFormat`, and still-pending GPU-input/output tokens. An
+Adapter therefore receives the exact transfer residency and lifetime steps
+without replanning. The result
 deliberately contains no whole-graph CPU fallback Interface. Before the CPU
 prefix starts, its GPU grant independently admits upload bytes, physical device
 bytes, physical texture count, and optional readback bytes. Byte limits never
@@ -347,9 +348,12 @@ and terminal failure removes unpublished private outputs. One-input
 MultiInput lowers to a distinct, bit-preserving texture copy so graph-value
 identity and last-use lifetime remain exact without a shader or color-domain
 round trip. Multiple CPU-frontier uploads are supported within this one-way
-CPU-prefix→GPU-suffix shape. GPU Mask, a later backend transition or readback
-inside the graph, color-domain conversion,
-temporal/stateful work, and external lanes remain typed blockers rather than
+CPU-prefix→GPU-suffix shape. `MaskSource` remains a cancellable CPU raster;
+its `AlphaMask` frontier is transferred without an RGB reinterpretation and a
+GPU `Mask` dispatch applies Add/Subtract/Intersect/Difference plus inversion
+while preserving scene-linear RGB. A later backend transition or readback
+inside the graph, color-domain conversion beyond these non-converting typed
+transfers, temporal/stateful work, and external lanes remain typed blockers rather than
 being flattened or silently rerun.
 
 Current CPU RGBA8, CPU Float32, and fused GPU single-frame admission do not

@@ -320,15 +320,20 @@ the attempt's checkpoint Seam, and its retained geometry plus maximum row
 scratch are charged beside the live pixel frames. A second gate keeps Gaussian
 and Sharpen branch results simultaneously live, uploads both exact boundary
 materializations, and joins them once on GPU. After the frontier uploads, the
-prepared GPU suffix consumes the same value plan as explicit dispatch and
+Adapter preserves each transfer's exact value format: scene-linear frames
+remain `Working`, while MaskSource rasters become `NonColorData/AlphaMask`
+resources that color transforms reject. The GPU Mask pass consumes one of each,
+implements every canonical MaskOp plus inversion, changes only straight alpha,
+and has real-wgpu parity with the CPU Float32 graph for all eight combinations.
+The prepared GPU suffix consumes the same value plan as explicit dispatch and
 release steps: a shared GPU value can feed two point-operation branches and a
 canonical scene-linear BlendMode join. Authored opacity and the complete
 64-bit frame seed remain part of the dispatch, so Dissolve derives the same
 per-pixel decision as the CPU Float32 reference. Linear tails within the
 fused-operation capacity remain one pass; longer tails split into exact
-admitted point dispatches. The
-Preview and Export compare the prepared physical recording requirement with
-their frozen GPU grant before CPU prefix execution. The wgpu Adapter repeats
+admitted point dispatches. Preview and Export compare the prepared physical
+recording requirement with their frozen GPU grant before CPU prefix execution.
+The wgpu Adapter repeats
 materialization identity, wait, signal, release and terminal-live-set
 validation before recording, and its real-device test matches the
 complete scalar graph. One command buffer retains every referenced texture
@@ -342,10 +347,11 @@ fold intermediates are charged by that physical derivation, retained through
 submission, and never fabricated as semantic graph values. One-input
 MultiInput uses the same schedule with a distinct bit-preserving texture-copy
 output; upload, copy output, completion token and retirement are all admitted
-before recording. A later backend transition or graph-internal readback, GPU Mask,
-color-domain conversion and temporal/stateful GPU dispatch still fail before
-pixel execution. The returned evidence distinguishes completed CPU work from
-pending upload and GPU output tokens.
+before recording. A later backend transition or graph-internal readback,
+color-domain conversion beyond explicitly typed non-converting transfers, and
+temporal/stateful GPU dispatch still fail before pixel execution. The returned
+evidence distinguishes completed CPU work from pending upload and GPU output
+tokens.
 
 Export submits that route through its job-local
 `ExportVisualRenderSession`. The same Session owns the retained Effect

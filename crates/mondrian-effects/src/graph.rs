@@ -894,7 +894,7 @@ fn derive_implementation_requirements<'a>(
             }
             EffectGraphNodeKind::Mask { input, mask, .. } => requirement_for(*input, &requirements)
                 .merge_branches(requirement_for(*mask, &requirements))
-                .compose_node(compositing_node_requirements()),
+                .compose_node(gpu_mask_node_requirements()),
             EffectGraphNodeKind::MaskSource { .. } => compositing_node_requirements(),
             EffectGraphNodeKind::MultiInput { inputs, .. } => inputs
                 .iter()
@@ -973,9 +973,10 @@ fn raw_node_implementation_requirements(
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => {
             Some(gpu_blend_node_requirements())
         }
-        EffectGraphNodeKind::Mask { .. }
-        | EffectGraphNodeKind::MaskSource { .. }
-        | EffectGraphNodeKind::MultiInput { .. } => Some(compositing_node_requirements()),
+        EffectGraphNodeKind::Mask { .. } => Some(gpu_mask_node_requirements()),
+        EffectGraphNodeKind::MaskSource { .. } | EffectGraphNodeKind::MultiInput { .. } => {
+            Some(compositing_node_requirements())
+        }
     }
 }
 
@@ -1456,6 +1457,15 @@ fn compositing_node_requirements() -> EffectImplementationRequirements {
 }
 
 fn gpu_blend_node_requirements() -> EffectImplementationRequirements {
+    EffectImplementationRequirements {
+        execution_modes: compositing_node_requirements()
+            .execution_modes
+            .union(EffectExecutionModes::GPU_F32),
+        ..compositing_node_requirements()
+    }
+}
+
+fn gpu_mask_node_requirements() -> EffectImplementationRequirements {
     EffectImplementationRequirements {
         execution_modes: compositing_node_requirements()
             .execution_modes
@@ -2165,7 +2175,7 @@ fn shape_variant_hash(shape: &crate::mask::MaskShape, state: &mut impl std::hash
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::EffectTemporalSpan;
+    use crate::{EffectProcessingBackend, EffectTemporalSpan, EffectWorkingPrecision};
 
     #[test]
     fn signed_temporal_sample_offsets_derive_exact_directional_extents() {
@@ -2725,7 +2735,21 @@ mod tests {
         };
 
         let compiled = compile_reference_render_graph(graph).expect("compile");
-        // Verify the graph was compiled (non-zero cost).
-        assert!(compiled.graph.nodes.len() == 3);
+        assert_eq!(compiled.graph.nodes.len(), 3);
+        let source_modes =
+            compiled.node_execution_modes(EffectGraphNodeId(1)).expect("MaskSource modes");
+        assert!(source_modes.contains(
+            EffectProcessingBackend::Cpu,
+            EffectWorkingPrecision::Float32
+        ));
+        assert!(!source_modes.contains(
+            EffectProcessingBackend::Gpu,
+            EffectWorkingPrecision::Float32
+        ));
+        let mask_modes = compiled.node_execution_modes(EffectGraphNodeId(2)).expect("Mask modes");
+        assert!(mask_modes.contains(
+            EffectProcessingBackend::Gpu,
+            EffectWorkingPrecision::Float32
+        ));
     }
 }
