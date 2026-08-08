@@ -1773,12 +1773,8 @@ mod tests {
                 "yuv420p",
                 "-color_range",
                 "tv",
-                "-color_primaries",
-                "bt709",
-                "-color_trc",
-                "iec61966-2-1",
-                "-colorspace",
-                "bt709",
+                "-x264-params",
+                "colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709",
             ])
             .arg(&path)
             .status()
@@ -1840,7 +1836,7 @@ mod tests {
                 "-colorspace",
                 "bt2020nc",
                 "-x265-params",
-                "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+                "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
             ])
             .arg(&path)
             .output()

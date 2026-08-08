@@ -1402,9 +1402,15 @@ fn publication_lock_path(authority_root: &Path, identity: ProjectPathIdentity) -
 fn ensure_runtime_parent_directory(runtime_parent: &Path) -> Result<(), String> {
     let runtime_parent = std::path::absolute(runtime_parent)
         .map_err(|error| format!("failed to normalize Project runtime parent: {error}"))?;
+    // lstat of the target returns ENOTDIR when an existing ancestor is a
+    // regular file; resolve the nearest existing direct ancestor first so
+    // every chain collision carries the stable classification.
     let created_chain = match fs::symlink_metadata(&runtime_parent) {
         Ok(_) => false,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.kind() == std::io::ErrorKind::NotADirectory =>
+        {
             let anchor = trusted_runtime_parent_anchor(&runtime_parent)?;
             ensure_durable_directory_chain(&anchor, &runtime_parent).map_err(|error| {
                 format!(
@@ -2510,6 +2516,13 @@ mod tests {
         let alias_parent = base.join("alias");
         fs::create_dir_all(&real_parent).expect("create real publication parent");
         symlink(&real_parent, &alias_parent).expect("create publication parent alias");
+        // A pre-existing runtime parent must already carry the durable
+        // ownership marker, exactly as a Mondrian-initialized directory does.
+        fs::write(
+            base.join(PROJECT_RUNTIME_PARENT_MARKER),
+            PROJECT_RUNTIME_PARENT_MARKER_BYTES,
+        )
+        .expect("write runtime parent marker");
         let real_target = real_parent.join("project.mdp");
         let alias_target = alias_parent.join("project.mdp");
         assert_eq!(
@@ -2541,6 +2554,11 @@ mod tests {
         fs::create_dir_all(&first_parent).expect("create first publication parent");
         fs::create_dir_all(&second_parent).expect("create second publication parent");
         symlink(&first_parent, &alias_parent).expect("create publication parent alias");
+        fs::write(
+            base.join(PROJECT_RUNTIME_PARENT_MARKER),
+            PROJECT_RUNTIME_PARENT_MARKER_BYTES,
+        )
+        .expect("write runtime parent marker");
         let alias_target = alias_parent.join("project.mdp");
         let lease = claim_project_runtime_under(&base, &alias_target, ProjectId::new())
             .expect("claim aliased publication authority");

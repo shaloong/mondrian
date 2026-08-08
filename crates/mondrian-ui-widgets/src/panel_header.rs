@@ -18,8 +18,8 @@ const EMBEDDED_FILTER_TOP_PADDING: f32 = 8.0;
 
 /// Panel header chrome with optional title, subtitle, and filter input zone.
 ///
-/// When `show_text` is `false` (via [`with_embedded`] or
-/// [`set_embedded`]), title/subtitle text is skipped — useful when the panel
+/// When `show_text` is `false` (via [`Self::with_embedded`] or
+/// [`Self::set_embedded`]), title/subtitle text is skipped — useful when the panel
 /// is hosted inside a dock whose tab bar already shows the title.
 #[derive(Debug, Clone)]
 pub struct PanelHeader {

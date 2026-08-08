@@ -694,7 +694,10 @@ impl AppState {
         let target_file = super::ensure_project_extension(target_file);
         let publication = match fs::symlink_metadata(&target_file) {
             Ok(_) => ProjectArchivePublication::ReplaceExisting,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::NotADirectory =>
+            {
                 ProjectArchivePublication::CreateNew
             }
             Err(error) => {

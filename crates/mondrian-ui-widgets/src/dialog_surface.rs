@@ -103,7 +103,7 @@ impl DialogSurface {
         self.paint_card(card, ctx);
     }
 
-    /// Paint scrim + shadow only (no card fill). Call [`paint_card`] after
+    /// Paint scrim + shadow only (no card fill). Call [`Self::paint_card`] after
     /// any content that should sit between shadow and card surface.
     pub fn paint_chrome(&self, bounds: Rect, card: Rect, ctx: &mut PaintContext) {
         let visual = DialogSurfaceVisualTokens::from_theme(ctx.theme);

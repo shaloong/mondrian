@@ -331,6 +331,9 @@ fn create_only_rejects_an_existing_output_but_explicit_overwrite_is_frozen() {
 
 #[test]
 fn admission_is_bounded_and_reserves_normalized_active_output_paths() {
+    // The relative fixture routes resolve against the test process CWD, so
+    // make sure the relative parent exists on every runner.
+    std::fs::create_dir_all("target").expect("create relative output parent");
     let backend = GateExecutor::new([]);
     let queue = RenderQueue::new_with_executor(backend.clone());
     queue

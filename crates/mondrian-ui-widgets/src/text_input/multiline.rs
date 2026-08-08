@@ -157,7 +157,7 @@ impl MultilineTextEditState {
     }
 
     /// Drop the selection without moving the cursor. After this call,
-    /// [`selection`] returns `None`.
+    /// [`Self::selection`] returns `None`.
     pub fn clear_selection(&mut self) {
         self.selection_anchor = None;
     }

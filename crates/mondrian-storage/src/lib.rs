@@ -278,6 +278,7 @@ impl From<std::io::Error> for DirectoryPublicationFailure {
 struct ObjectIdentity {
     device: u64,
     inode: u64,
+    birth_time: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -955,12 +956,17 @@ fn open_direct_exclusive_file(path: &Path) -> std::io::Result<File> {
 
 #[cfg(unix)]
 fn identity_for_open_file(file: &File, kind: ObjectKind) -> anyhow::Result<ObjectIdentity> {
-    identity_from_metadata(&file.metadata()?, kind)
+    let identity = identity_from_metadata(&file.metadata()?, kind)?;
+    Ok(ObjectIdentity {
+        birth_time: birth_time_for_open_file(file),
+        ..identity
+    })
 }
 
 #[cfg(unix)]
 fn identity_for_path(path: &Path, kind: ObjectKind) -> anyhow::Result<ObjectIdentity> {
-    identity_from_metadata(&fs::symlink_metadata(path)?, kind)
+    let identity = identity_from_metadata(&fs::symlink_metadata(path)?, kind)?;
+    Ok(ObjectIdentity { birth_time: birth_time_for_path(path), ..identity })
 }
 
 #[cfg(unix)]
@@ -977,7 +983,115 @@ fn identity_from_metadata(
         "object has the wrong filesystem type"
     );
     anyhow::ensure!(metadata.nlink() > 0, "object is no longer linked");
-    Ok(ObjectIdentity { device: metadata.dev(), inode: metadata.ino() })
+    Ok(ObjectIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        birth_time: None,
+    })
+}
+
+/// Prove object birth (creation) when the platform exposes it.
+///
+/// POSIX inode numbers are recycled immediately after deletion, so
+/// (device, inode) alone cannot reject a delete+recreate replacement on the
+/// reserved staging path. The birth instant never changes for the life of an
+/// object and cannot be rewritten through the file API, which closes the
+/// reuse window on filesystems that report it.
+#[cfg(target_os = "linux")]
+fn birth_time_for_open_file(file: &File) -> Option<(i64, i64)> {
+    use std::os::unix::io::AsRawFd;
+    let mut buffer = std::mem::MaybeUninit::<libc::statx>::uninit();
+    // SAFETY: the descriptor is live, the empty path selects the descriptor
+    // itself, and the buffer is valid for a complete statx write.
+    let result = unsafe {
+        libc::statx(
+            file.as_raw_fd(),
+            c"".as_ptr(),
+            libc::AT_EMPTY_PATH,
+            libc::STATX_BTIME,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: statx succeeded; the kernel initialized the reported mask.
+    let statx = unsafe { buffer.assume_init() };
+    if statx.stx_mask & libc::STATX_BTIME == 0 {
+        return None;
+    }
+    Some((statx.stx_btime.tv_sec, statx.stx_btime.tv_nsec.into()))
+}
+
+/// Path-based counterpart of [`birth_time_for_open_file`].
+#[cfg(target_os = "linux")]
+fn birth_time_for_path(path: &Path) -> Option<(i64, i64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut buffer = std::mem::MaybeUninit::<libc::statx>::uninit();
+    // SAFETY: the C string is NUL-terminated and live; the buffer is valid.
+    let result = unsafe {
+        libc::statx(
+            libc::AT_FDCWD,
+            path.as_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+            libc::STATX_BTIME,
+            buffer.as_mut_ptr(),
+        )
+    };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: statx succeeded; the kernel initialized the reported mask.
+    let statx = unsafe { buffer.assume_init() };
+    if statx.stx_mask & libc::STATX_BTIME == 0 {
+        return None;
+    }
+    Some((statx.stx_btime.tv_sec, statx.stx_btime.tv_nsec.into()))
+}
+
+/// Darwin exposes object birth through the ordinary stat family.
+#[cfg(target_os = "macos")]
+fn birth_time_for_open_file(file: &File) -> Option<(i64, i64)> {
+    use std::os::unix::io::AsRawFd;
+    let mut buffer = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the descriptor is live and the buffer is valid for stat.
+    let result = unsafe { libc::fstat(file.as_raw_fd(), buffer.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: fstat succeeded.
+    let stat = unsafe { buffer.assume_init() };
+    Some((stat.st_birthtime, stat.st_birthtime_nsec))
+}
+
+/// Path-based counterpart of [`birth_time_for_open_file`].
+#[cfg(target_os = "macos")]
+fn birth_time_for_path(path: &Path) -> Option<(i64, i64)> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut buffer = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: the C string is NUL-terminated and live; the buffer is valid.
+    let result = unsafe { libc::lstat(path.as_ptr(), buffer.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+    // SAFETY: lstat succeeded.
+    let stat = unsafe { buffer.assume_init() };
+    Some((stat.st_birthtime, stat.st_birthtime_nsec))
+}
+
+/// Platforms without a proven birth-time source report no birth instant; the
+/// (device, inode) identity still applies there.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn birth_time_for_open_file(_file: &File) -> Option<(i64, i64)> {
+    None
+}
+
+/// Platforms without a proven birth-time source report no birth instant.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+fn birth_time_for_path(_path: &Path) -> Option<(i64, i64)> {
+    None
 }
 
 #[cfg(windows)]

@@ -225,14 +225,49 @@ pub(crate) fn apply_export_video_signal_args(
     }
 }
 
-/// Write authored static HDR metadata through the libx265 encoder contract.
+/// Emit encoder-native color signaling for the H.264/H.265 VUI.
 ///
-/// Validation must reject other encoders before this boundary is reached.
-pub(crate) fn apply_h265_hdr_metadata_args(
+/// FFmpeg 8 no longer maps the container-level `-color_primaries` and
+/// `-color_trc` options into the x264/x265 bitstream, which would otherwise
+/// ship delivery files without primaries or transfer tags. The encoder-native
+/// `colorprim`/`transfer`/`colormatrix` keys are the contract that reaches
+/// the bitstream on every supported FFmpeg; the container-level flags remain
+/// alongside for non-VUI encoders and for the MP4 `colr` box.
+pub(crate) fn apply_encoder_signal_params(
     cmd: &mut Command,
+    codec: &VideoCodecConfig,
     settings: &SequenceSettings,
+    delivery: &ResolvedExportDeliveryContract,
 ) -> Result<(), String> {
-    cmd.arg("-x265-params").arg(h265_hdr_metadata_params(settings)?);
+    let contract = ExportVideoSignalContract::resolve(settings, delivery);
+    let Some(tags) = contract.color_space.ffmpeg_tags() else {
+        return Ok(());
+    };
+    let Some(matrix) = contract.yuv_matrix else {
+        return Ok(());
+    };
+    let vui = format!(
+        "colorprim={}:transfer={}:colormatrix={}",
+        tags.color_primaries,
+        tags.color_trc,
+        matrix.tag_name()
+    );
+    match codec {
+        VideoCodecConfig::H264 { .. } => {
+            cmd.arg("-x264-params").arg(vui);
+        }
+        VideoCodecConfig::Hevc { .. } => {
+            let mut params = vui;
+            if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
+                params.push(':');
+                params.push_str(&h265_hdr_metadata_params(settings)?);
+            }
+            cmd.arg("-x265-params").arg(params);
+        }
+        VideoCodecConfig::Av1 { .. }
+        | VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::Gif { .. } => {}
+    }
     Ok(())
 }
 
@@ -335,32 +370,5 @@ pub(crate) fn container_format(container: &Container) -> &'static str {
         Container::Gif => "gif",
         Container::Mxf => "mxf",
         Container::Webm => "webm",
-    }
-}
-
-#[cfg(test)]
-mod hdr_metadata_tests {
-    use super::*;
-    use mondrian_core::{VideoContentLightMetadata, VideoMasteringDisplayMetadata};
-
-    #[test]
-    fn h265_hdr_metadata_is_one_atomic_encoder_parameter() {
-        let mut settings = SequenceSettings::default();
-        settings.delivery.hdr_mastering_display =
-            Some(VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
-        settings.delivery.hdr_content_light =
-            Some(VideoContentLightMetadata::rec2100_1000_nit_reference());
-        let mut command = Command::new("ffmpeg");
-
-        apply_h265_hdr_metadata_args(&mut command, &settings).expect("valid static HDR metadata");
-
-        let args = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(args.len(), 2);
-        assert_eq!(args[0], "-x265-params");
-        assert!(args[1].starts_with("master-display="));
-        assert!(args[1].contains(":max-cll="));
     }
 }

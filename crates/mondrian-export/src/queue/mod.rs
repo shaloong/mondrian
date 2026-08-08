@@ -2167,14 +2167,12 @@ fn execute_timeline_export(
 
         apply_video_codec_args(&mut cmd, &job.config.preset.video);
         apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
-        if timeline
-            .sequence
-            .settings
-            .delivery
-            .static_hdr_metadata_policy
-            .writes_authored_metadata()
-            && let Err(err) = apply_h265_hdr_metadata_args(&mut cmd, &timeline.sequence.settings)
-        {
+        if let Err(err) = apply_encoder_signal_params(
+            &mut cmd,
+            &job.config.preset.video,
+            &timeline.sequence.settings,
+            &delivery,
+        ) {
             return JobExecutionResult::Failed(err);
         }
         if !matches!(&audio_input, TimelineAudioInput::Disabled) {
@@ -9882,6 +9880,67 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-color_primaries", "bt2020"]));
         assert!(args.windows(2).any(|pair| pair == ["-color_trc", "smpte2084"]));
         assert!(args.windows(2).any(|pair| pair == ["-colorspace", "bt2020nc"]));
+    }
+
+    #[test]
+    fn encoder_signal_params_write_vui_tags_and_merge_hdr_metadata() {
+        let mut settings = SequenceSettings::default();
+        settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
+        settings.delivery.hdr_mastering_display =
+            Some(mondrian_core::VideoMasteringDisplayMetadata::rec2100_1000_nit_reference());
+        settings.delivery.hdr_content_light =
+            Some(mondrian_core::VideoContentLightMetadata::rec2100_1000_nit_reference());
+        settings.delivery.static_hdr_metadata_policy = StaticHdrMetadataPolicy::WriteAuthored;
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p10le",
+        );
+        delivery.color_target.color_space = ColorSpace::Rec2100Pq;
+
+        let mut cmd = Command::new("ffmpeg");
+        apply_encoder_signal_params(
+            &mut cmd,
+            &crate::preset::VideoCodecConfig::Hevc {
+                profile: crate::preset::HevcProfile::Main10,
+                rate_control: VideoRateControl::constant_quality(20),
+            },
+            &settings,
+            &delivery,
+        )
+        .expect("valid encoder signal params");
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-x265-params");
+        assert!(
+            args[1].contains("colorprim=bt2020"),
+            "VUI primaries must reach the bitstream"
+        );
+        assert!(args[1].contains("transfer=smpte2084"));
+        assert!(args[1].contains("colormatrix=bt2020nc"));
+        assert!(args[1].contains("master-display="));
+        assert!(args[1].contains(":max-cll="));
+
+        let mut cmd = Command::new("ffmpeg");
+        apply_encoder_signal_params(
+            &mut cmd,
+            &crate::preset::VideoCodecConfig::H264 {
+                profile: crate::preset::H264Profile::High,
+                rate_control: VideoRateControl::constant_quality(20),
+            },
+            &settings,
+            &delivery,
+        )
+        .expect("valid encoder signal params");
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            vec![
+                "-x264-params",
+                "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"
+            ]
+        );
     }
 
     #[test]
