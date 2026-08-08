@@ -875,6 +875,32 @@ Revision exactly once and is one Undo step. The old local overlap option is
 named `ClipOverlapMode::PushForward`; it is deliberately not presented as
 Insert Edit.
 
+### Cut and Overwrite Edits
+
+Split, Roll, Slip, Slide, and edge Trim are owned by the `cut_edit` Module as
+typed requests over exact `TimelineTime`; the App Adapter lowers frame-grid
+pointer gestures once at its seam and never reimplements the arithmetic. Split
+keeps the left identity and forks fresh placement-local identities for the
+right fragment, clears the fragments' inner fades so a razor cut can never
+leave a dangling half-fade at the cut, and clears the right fragment's link
+group so multi-member regrouping stays an explicit caller decision. Roll
+selects the nearest executable adjacent cut and clamps it by exact source
+availability and a caller-declared positive minimum duration. Slip shifts only
+the source window and rejects Adjustment Layers with a typed
+`AdjustmentLayerSlip` because they have no bounded source. Slide requires
+exactly adjacent neighbours on both sides. Edge Trim is a pure preparation
+function returning `None` for a no-op; the two-phase gesture prepares against
+live state and commits the prepared replacement inside one transaction.
+
+Overlap admission for drops, moves, and paste lives in the `overwrite_edit`
+Module. `ClipOverlapMode::Overwrite` subtracts the merged focus ranges from
+every non-focus Clip, forking a fresh identity only for a right-hand survivor
+of a middle cut and clearing link groups on cut fragments; `PushForward`
+shifts later content without cutting it. These functions mutate only the
+detached authoring candidate and never touch playback, persistence, or media
+state; all of them advance Author Generation exactly once through the ordinary
+transaction seam.
+
 Direct Asset placement is a separate closed Product intent because it does not
 open program time. Its payload contains `AssetId`, stable `TrackId`, and one
 explicit `FramePosition`. The `timeline_asset_placement` Module checked-converts
