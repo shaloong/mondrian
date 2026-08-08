@@ -1856,7 +1856,7 @@ fn map_video_codec_profile(profile: ffmpeg::codec::Profile) -> VideoCodecProfile
 fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> ChannelLayout {
     if layout.is_empty() {
         ChannelLayout::Unspecified(reported_channels)
-    } else if layout.0.order != ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE {
+    } else if !native_channel_order(&layout) {
         ChannelLayout::Unsupported(reported_channels)
     } else {
         exact_signal_layout_from_ffmpeg_mask(layout.bits(), reported_channels).map_or(
@@ -1864,6 +1864,20 @@ fn map_channel_layout(layout: ffmpeg::ChannelLayout, reported_channels: u8) -> C
             ChannelLayout::Exact,
         )
     }
+}
+
+/// Whether the layout uses native channel-order semantics. ffmpeg-next
+/// exposes the structured order only on the FFmpeg 7.0+ ABI; legacy bitmask
+/// layouts are implicitly native order.
+#[cfg(mondrian_ffmpeg_7_0)]
+fn native_channel_order(layout: &ffmpeg::ChannelLayout) -> bool {
+    layout.0.order == ffmpeg::ffi::AVChannelOrder::AV_CHANNEL_ORDER_NATIVE
+}
+
+/// Legacy bitmask layouts carry no non-native order by construction.
+#[cfg(not(mondrian_ffmpeg_7_0))]
+fn native_channel_order(_layout: &ffmpeg::ChannelLayout) -> bool {
+    true
 }
 
 fn exact_signal_layout_from_ffmpeg_mask(

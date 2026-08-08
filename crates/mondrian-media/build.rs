@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_0)");
     println!("cargo:rustc-check-cfg=cfg(mondrian_ffmpeg_7_1)");
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-env-changed=FFMPEG_INCLUDE_DIR");
@@ -16,22 +17,20 @@ fn main() {
     println!("cargo:rerun-if-env-changed=VCPKGRS_TRIPLET");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
 
-    if libavcodec_at_least_7_1() {
-        println!("cargo:rustc-cfg=mondrian_ffmpeg_7_1");
-    }
-}
-
-fn libavcodec_at_least_7_1() -> bool {
     match detect_libavcodec_version() {
         Some((major, minor)) => {
-            // FFmpeg 7.1 ships libavcodec 61.19.
-            major > 61 || (major == 61 && minor >= 19)
+            // FFmpeg 7.0 ships libavcodec 61.3; 7.1 ships 61.19.
+            if major > 61 || (major == 61 && minor >= 3) {
+                println!("cargo:rustc-cfg=mondrian_ffmpeg_7_0");
+            }
+            if major > 61 || (major == 61 && minor >= 19) {
+                println!("cargo:rustc-cfg=mondrian_ffmpeg_7_1");
+            }
         }
         None => {
             println!(
                 "cargo:warning=libavcodec version undetectable; assuming the oldest supported FFmpeg surface (6.1). Set FFMPEG_DIR, FFMPEG_INCLUDE_DIR, VCPKG_ROOT, or PKG_CONFIG_PATH so the media build can expose the full header surface."
             );
-            false
         }
     }
 }
