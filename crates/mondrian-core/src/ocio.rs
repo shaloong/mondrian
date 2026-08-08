@@ -184,13 +184,13 @@ const MONDRIAN_STANDARD_SDR_V2_REC2020_TRANSFORM_NAME: &str = "Mondrian Standard
 const MONDRIAN_STANDARD_HDR_1000_VIEW_NAME: &str = "Mondrian Standard HDR 1000 nits v1";
 const MONDRIAN_STANDARD_SDR_LUT_NAME: &str = "mondrian_standard_sdr_rec709_v1.cube";
 const MONDRIAN_STANDARD_SDR_LUT_SHA256: &str =
-    "02f4d185608daa67fda01a1a48529bbc1533c8afdc826cde5c78f2eb5bb1b839";
+    "e707a36f3e90ee79bc342332febf91334c02ce3974cac700ece00ca9d4507491";
 const MONDRIAN_STANDARD_SDR_LUT: &str =
     include_str!("../assets/ocio/mondrian_standard_sdr_rec709_v1.cube");
 const MONDRIAN_STANDARD_SDR_LUT_EDGE: usize = 57;
 const MONDRIAN_STANDARD_HDR_1000_LUT_NAME: &str = "mondrian_standard_hdr_1000_p3_v1.cube";
 const MONDRIAN_STANDARD_HDR_1000_LUT_SHA256: &str =
-    "80238cf1ed300a377d8c3b30bd3d05f23e7e2065b7e973ea62a5ee0e4f7a8a79";
+    "4422eb9a8d3ecc16836d241287b171758e2f2db202934d9ff51865543dd360c0";
 const MONDRIAN_STANDARD_HDR_1000_LUT: &str =
     include_str!("../assets/ocio/mondrian_standard_hdr_1000_p3_v1.cube");
 const MONDRIAN_STANDARD_HDR_1000_LUT_EDGE: usize = 57;

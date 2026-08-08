@@ -8,7 +8,7 @@ The vendored file is renamed but otherwise byte-for-byte identical to
 `luts/AgX_Base_sRGB.cube` at that commit:
 
 - Source Git blob: `5a02c49ef3926aec6cb4712b2421865c62908d59`
-- SHA-256: `02f4d185608daa67fda01a1a48529bbc1533c8afdc826cde5c78f2eb5bb1b839`
+- SHA-256: `e707a36f3e90ee79bc342332febf91334c02ce3974cac700ece00ca9d4507491`
 - Authored input domain: FilmLight E-Gamut, log2 allocation from -10 to +15 stops
 - LUT edge: 57
 - Interpolation used by Mondrian: tetrahedral

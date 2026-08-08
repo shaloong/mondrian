@@ -554,10 +554,10 @@ pub enum MondrianStandardConfigDigest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MondrianStandardPackageDigest {
     /// Digest of Standard v2's config plus every embedded resource.
-    #[serde(rename = "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881")]
+    #[serde(rename = "45736bd0c826cc79e377365dea26fd73deca1fbf498a7304d409ac65d8f1781d")]
     V2,
     /// Digest of Standard v3's config, segmented SDR graph, and HDR resource.
-    #[serde(rename = "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61")]
+    #[serde(rename = "524147a2a4f18668b8927686e5662d88abf1d65433a2617d8e102112d10ff081")]
     V3,
 }
 
@@ -1081,10 +1081,10 @@ impl MondrianStandardPackageIdentity {
     pub const fn package_sha256(self) -> &'static str {
         match self.package_sha256 {
             MondrianStandardPackageDigest::V2 => {
-                "3f8bd02e4c79f081c9c09fba3053161c4af14de6effcf6d76b78e2339b9c2881"
+                "45736bd0c826cc79e377365dea26fd73deca1fbf498a7304d409ac65d8f1781d"
             }
             MondrianStandardPackageDigest::V3 => {
-                "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61"
+                "524147a2a4f18668b8927686e5662d88abf1d65433a2617d8e102112d10ff081"
             }
         }
     }

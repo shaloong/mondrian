@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "corpus_id": "mondrian-standard-quality-v1",
-  "package_sha256": "462bea568f3babcd76030fd219a54dcde8a6fa2acece31e20883a9ba98501e61",
+  "package_sha256": "524147a2a4f18668b8927686e5662d88abf1d65433a2617d8e102112d10ff081",
   "required_categories": [
     "color_checker",
     "grayscale",

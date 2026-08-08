@@ -9,7 +9,7 @@ The vendored file is renamed but otherwise byte-for-byte identical to
 declared CRLF checkout normalization:
 
 - Source Git blob: `a4a561478a5ae40d4cc94eaf8c31d07bf51046e3`
-- SHA-256: `80238cf1ed300a377d8c3b30bd3d05f23e7e2065b7e973ea62a5ee0e4f7a8a79`
+- SHA-256: `4422eb9a8d3ecc16836d241287b171758e2f2db202934d9ff51865543dd360c0`
 - Authored input domain: FilmLight E-Gamut, log2 allocation from -10 to +15 stops
 - Authored output: Rec.2100 HLG, 1000-nit peak, 100-nit reference white,
   P3-D65 gamut limit
