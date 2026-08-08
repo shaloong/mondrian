@@ -19,7 +19,6 @@ members = [
     "crates/mondrian-ui-theme",
     "crates/mondrian-platform-core",
     "crates/mondrian-platform",
-    "crates/mondrian-editor-ui",
     "crates/mondrian-ui-renderer",
     "crates/mondrian-ui-layout",
     "crates/mondrian-ui-events",
@@ -58,7 +57,6 @@ mondrian-ui-core      = { path = "crates/mondrian-ui-core" }
 mondrian-ui-theme     = { path = "crates/mondrian-ui-theme" }
 mondrian-platform-core = { path = "crates/mondrian-platform-core" }
 mondrian-platform     = { path = "crates/mondrian-platform" }
-mondrian-editor-ui    = { path = "crates/mondrian-editor-ui" }
 mondrian-ui-renderer  = { path = "crates/mondrian-ui-renderer" }
 mondrian-ui-layout    = { path = "crates/mondrian-ui-layout" }
 mondrian-ui-events    = { path = "crates/mondrian-ui-events" }

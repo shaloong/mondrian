@@ -260,7 +260,7 @@ impl Color {
     pub const WHITE: Self = Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 };
     pub const TRANSPARENT: Self = Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
 
-    pub fn from_hex(hex: u32) -> Self {
+    pub const fn from_hex(hex: u32) -> Self {
         let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
         let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
         let b = (hex & 0xFF) as f32 / 255.0;

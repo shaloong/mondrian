@@ -38,11 +38,8 @@ UI 扩展遵循以下原则：
 ### 3.1 预期使用方式
 
 ```rust
-// 规划中的 API 示意 —— 尚未可用
-use mondrian_editor_ui::{
-    PanelBuildContext, PanelDefinition, PanelLocation,
-};
-
+// 规划中的 API 示意 —— 尚未可用；宿主扩展 crate 尚不存在，
+// 正式名称与类型以后续插件平台合同为准
 struct MyPluginPanel {
     // 面板状态
 }
@@ -74,8 +71,6 @@ impl PanelDefinition for MyPluginPanel {
 
 ```rust
 // 规划中的 API 示意 —— 尚未可用
-use mondrian_editor_ui::MenuExtension;
-
 fn register_menu_items() -> Vec<MenuExtension> {
     vec![
         MenuExtension::new("Tools > My Plugin > Do Thing")
@@ -89,8 +84,6 @@ fn register_menu_items() -> Vec<MenuExtension> {
 
 ```rust
 // 规划中的 API 示意 —— 尚未可用
-use mondrian_editor_ui::ToolbarButton;
-
 fn register_toolbar_buttons() -> Vec<ToolbarButton> {
     vec![
         ToolbarButton::new("my_tool")

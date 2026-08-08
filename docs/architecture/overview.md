@@ -14,7 +14,6 @@ mondrian-app
   -> mondrian-project
   -> mondrian-playback
   -> mondrian-audio
-  -> mondrian-editor-ui
   -> mondrian-ui-* crates
   -> mondrian-assets / mondrian-timeline / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
 
@@ -42,7 +41,6 @@ foundation:
   Exact retime intents carry typed Clip IDs and time values; the App Adapter
   owns dependency/lock/link-group admission and Timeline owns atomic map
   replacement.
-- `mondrian-editor-ui`: product-level panel/workspace descriptors. It should define editor UI concepts, not render widgets.
 - `mondrian-platform-core`: narrow platform service traits and native-fact result
   types, including stable per-user state-directory discovery. It makes no OS
   calls and owns no product filesystem namespace or persistence policy.

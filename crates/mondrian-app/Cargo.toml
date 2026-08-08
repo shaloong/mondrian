@@ -65,7 +65,6 @@ mondrian-editor-state = { workspace = true }
 mondrian-ui-core      = { workspace = true }
 mondrian-ui-theme     = { workspace = true }
 mondrian-platform     = { workspace = true }
-mondrian-editor-ui    = { workspace = true }
 mondrian-ui-renderer  = { workspace = true }
 mondrian-ui-layout    = { workspace = true }
 mondrian-ui-events    = { workspace = true }

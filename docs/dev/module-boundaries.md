@@ -13,7 +13,7 @@
 
 ```text
 app
-  depends on editor-state/editor-ui/platform/ui-*/assets/timeline/media/effects/renderer/export
+  depends on editor-state/platform/ui-*/assets/timeline/media/effects/renderer/export
     depends on core and narrower peer crates
       depends on no higher Mondrian crate
 ```

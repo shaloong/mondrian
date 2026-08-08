@@ -13,6 +13,10 @@ use mondrian_timeline::{
 };
 use std::collections::BTreeSet;
 
+/// Product default content color for newly authored Solid Color clips.
+pub(crate) const DEFAULT_SOLID_COLOR_CLIP_COLOR: mondrian_core::Color =
+    mondrian_core::Color::from_hex(0x808080);
+
 impl AppState {
     /// Whether one exact Asset Insert can execute against current author state.
     pub fn can_insert_asset_from_product_action(
@@ -313,12 +317,9 @@ fn create_asset_clip(
         AssetKind::Video => Clip::new(asset_id, position, duration),
         AssetKind::StillImage => Clip::new_still_image(asset_id, position, duration),
         AssetKind::AdjustmentLayer => Clip::new_adjustment_layer(asset_id, position, duration),
-        AssetKind::SolidColor => Clip::new_solid_color(
-            asset_id,
-            mondrian_core::Color::from_hex(0x808080),
-            position,
-            duration,
-        ),
+        AssetKind::SolidColor => {
+            Clip::new_solid_color(asset_id, DEFAULT_SOLID_COLOR_CLIP_COLOR, position, duration)
+        }
         AssetKind::Audio => Err(insert_error(
             "audio-only Assets cannot create a video placement",
         )),

@@ -761,7 +761,7 @@ impl AppState {
             track_id,
             timeline_frame,
             overlap_mode,
-            Color::from_hex(0x808080),
+            super::timeline_insert::DEFAULT_SOLID_COLOR_CLIP_COLOR,
         )
     }
 
@@ -1691,7 +1691,7 @@ impl AppState {
                 } else if dragging.kind == AssetKind::SolidColor {
                     Clip::new_solid_color(
                         dragging.asset_id,
-                        Color::from_hex(0x808080),
+                        super::timeline_insert::DEFAULT_SOLID_COLOR_CLIP_COLOR,
                         start_time,
                         duration,
                     )?
