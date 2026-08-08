@@ -208,7 +208,20 @@ jobs:
           
           # Reconcile the complete product runtime: linked decoders plus the
           # ffmpeg/ffprobe tools and every software encoder exposed by Export.
-          & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse
+          # Upstream asset hosts (code.videolan.org) time out occasionally;
+          # retry the install because vcpkg resumes from its downloads cache.
+          $install = {
+            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse
+          }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & $install
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) {
+              Write-Host "vcpkg install attempt $attempt failed; retrying after $($attempt * 20)s"
+              Start-Sleep -Seconds ($attempt * 20)
+            }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg ffmpeg install failed after 3 attempts" }
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

@@ -464,7 +464,16 @@ mod tests {
         let clip = encoder.clips.first().expect("text should be clipped to the fill rect");
         let (_, text_position, text_width) =
             encoder.text_boxes.first().expect("tooltip should draw a text box");
-        assert_eq!(*clip, *fill);
+        // The clip rect is derived from platform font metrics; compare
+        // geometrically so a float artifact in text measurement cannot break
+        // the "text clipped to the fill" invariant.
+        assert!(
+            (clip.x - fill.x).abs() < 0.001
+                && (clip.y - fill.y).abs() < 0.001
+                && (clip.width - fill.width).abs() < 0.001
+                && (clip.height - fill.height).abs() < 0.001,
+            "tooltip clip rect must match the fill rect: clip={clip:?} fill={fill:?}"
+        );
         assert!(text_position.x >= fill.x + HORIZONTAL_PADDING - 0.1);
         assert!(text_position.y >= fill.y + VERTICAL_PADDING - 0.1);
         assert!(

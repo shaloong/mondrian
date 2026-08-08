@@ -1431,7 +1431,9 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid-UTF-8 names at the filesystem boundary, so the
+    // guarded state cannot be created on macOS; ext4 admits arbitrary bytes.
+    #[cfg(target_os = "linux")]
     #[test]
     fn proxy_identity_preserves_non_utf8_native_path_units() {
         use std::os::unix::ffi::OsStringExt;
