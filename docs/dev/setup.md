@@ -23,11 +23,14 @@ Mondrian depends on:
 
 On Windows, install a toolchain capable of building native Rust crates and use
 `vcpkg install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows"
---recurse`. This is the product profile: `zlib` closes PNG/OpenEXR decode,
-`ffmpeg`/`ffprobe` provide supervised CLI adapters, and the explicit encoder
-features match Export's current software backends. A default
-`ffmpeg:x64-windows` install is not a supported Mondrian runtime. Ensure those
-development libraries and tools are discoverable by the build. The vcpkg
+--recurse --overlay-ports=vcpkg-overlay`. This is the product profile: `zlib`
+closes PNG/OpenEXR decode, `ffmpeg`/`ffprobe` provide supervised CLI adapters,
+and the explicit encoder features match Export's current software backends.
+The repository's `vcpkg-overlay` port builds `x265` with `HIGH_BIT_DEPTH=ON`;
+without it the stock port ships an 8-bit-only encoder and HEVC Main10 exports
+silently downgrade to 8-bit. A default `ffmpeg:x64-windows` install is not a
+supported Mondrian runtime. Ensure those development libraries and tools are
+discoverable by the build. The vcpkg
 install also provisions `pkgconf`; the bundled OCIO build invokes a
 `pkg-config` executable to resolve its own install metadata, so either set
 `PKG_CONFIG` to `tools\pkgconf\pkgconf.exe` or place a `pkg-config.exe` copy

@@ -185,7 +185,7 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
           restore-keys: |
             ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-
             ${{ runner.os }}-vcpkg-ffmpeg-
@@ -211,7 +211,7 @@ jobs:
           # Upstream asset hosts (code.videolan.org) time out occasionally;
           # retry the install because vcpkg resumes from its downloads cache.
           $install = {
-            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse
+            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
           }
           for ($attempt = 1; $attempt -le 3; $attempt++) {
             & $install
