@@ -245,6 +245,18 @@ overrides and reject non-empty override lists until typed execution exists.
 Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
 and external LUT changes fail closed during deserialization or config validation.
 
+> **Identity stability rule (corrected at M1):** a persisted package identity
+> may cover only contractual bytes — config text, assembly manifest, and
+> embedded resources. Engine-derived processor cache IDs are build-local
+> execution facts and must never enter a persisted identity; the Mondrian
+> Standard V2/V3 digests were re-based onto contractual bytes for exactly this
+> reason. The Custom OCIO route/output fingerprint still includes processor
+> cache IDs and therefore cannot yet roundtrip one Custom-OCIO project across
+> different engine builds; re-basing that fingerprint onto contractual content
+> is M2 color work (tracked in the ROADMAP color matrix), and until then a
+> Custom-OCIO project reopened on a different build fails closed at identity
+> validation rather than silently reinterpreting its color science.
+
 When the UI selects only a Custom `.ocio` file,
 `ProjectColorEnvironment::custom_ocio` validates the complete set of Sequence
 working/output pairs, then `ColorEngine::custom_ocio_for_outputs` scans the
