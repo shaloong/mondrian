@@ -2011,8 +2011,22 @@ mod tests {
         assert!(first.change_stamp.is_some());
 
         thread::sleep(Duration::from_millis(2));
-        fs::write(&path, b"BBBB").expect("replace same-length source bytes");
-        let second = MediaFileFingerprint::capture(&path);
+        // Filesystem timestamp granularity varies by platform and mount
+        // options; keep rewriting until the revision evidence rotates or the
+        // deadline proves it cannot.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let second = loop {
+            fs::write(&path, b"BBBB").expect("replace same-length source bytes");
+            let candidate = MediaFileFingerprint::capture(&path);
+            if candidate != first {
+                break candidate;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "filesystem change stamp never rotated"
+            );
+            thread::sleep(Duration::from_millis(10));
+        };
 
         assert!(second.authorizes_reuse());
         assert_eq!(first.len, second.len);

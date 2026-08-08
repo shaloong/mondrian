@@ -616,15 +616,19 @@ fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
     assert_eq!(plan.probe.frame_residency, DecodedFrameResidency::CpuRgba);
     assert!(!plan.probe.hardware_decode_active);
     assert!(!plan.probe.zero_copy_active);
+    let expected_adapter_available = match plan.ffmpeg_codec_config.hw_pixel_format {
+        Some(
+            crate::decoder::HwAccelPixelFormat::D3D12 | crate::decoder::HwAccelPixelFormat::D3D11,
+        ) => {
+            cfg!(target_os = "windows")
+        }
+        Some(crate::decoder::HwAccelPixelFormat::VideoToolbox) => cfg!(target_os = "macos"),
+        Some(crate::decoder::HwAccelPixelFormat::Vaapi) => cfg!(target_os = "linux"),
+        _ => false,
+    };
     assert_eq!(
         plan.probe.decoder_adapter_available,
-        matches!(
-            plan.ffmpeg_codec_config.hw_pixel_format,
-            Some(
-                crate::decoder::HwAccelPixelFormat::D3D12
-                    | crate::decoder::HwAccelPixelFormat::D3D11
-            )
-        )
+        expected_adapter_available
     );
 }
 

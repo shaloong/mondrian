@@ -3754,7 +3754,6 @@ mod tests {
         assert!(summary.contains("camera_profile=S-Log3 / S-Gamut3.Cine"));
         assert!(summary.contains("MasteringDisplayMetadata(bytes=88,payload=master_display"));
     }
-
     #[test]
     fn media_probe_reads_static_hdr_metadata_from_first_decoded_frame() {
         let path = std::env::temp_dir().join(format!(
@@ -3786,7 +3785,7 @@ mod tests {
                 "-colorspace",
                 "bt2020nc",
                 "-x265-params",
-                "master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
+                "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400",
             ])
             .arg(&path)
             .output()
