@@ -106,7 +106,7 @@ impl MetalNativeVideoImportBackend {
             formats,
         )
         .with_renderer_backend_label("wgpu Metal VideoToolbox CVPixelBuffer + OCIO");
-        let plane_adapter = MetalNativeYuvPlaneAdapter { cache, support };
+        let plane_adapter = MetalNativeYuvPlaneAdapter { cache: CvMetalTextureCacheHandle(cache), support };
         Ok(Self {
             inner: DirectNativeVideoImportBackend::new(plane_adapter, device, queue, resource_pool)
                 .map_err(|error| MetalNativeVideoImportBackendCreateError::Direct {
@@ -144,8 +144,31 @@ impl GpuNativeDecodedFrameImportBackend for MetalNativeVideoImportBackend {
 }
 
 struct MetalNativeYuvPlaneAdapter {
-    cache: CFRetained<CVMetalTextureCache>,
+    cache: CvMetalTextureCacheHandle,
     support: GpuNativeDecodedFrameImportSupport,
+}
+
+/// One retained CoreVideo texture cache that may cross execution threads.
+///
+/// CoreVideo objects are reference-counted with thread-safe retain/release,
+/// and `CVMetalTextureCacheCreateTextureFromImage` may be called from any
+/// thread. The wrapper exists only because objc2-core-video conservatively
+/// marks `CVMetalTextureCache` `!Send`/`!Sync`; the operations Mondrian
+/// performs through it are thread-safe by CoreVideo contract.
+struct CvMetalTextureCacheHandle(CFRetained<CVMetalTextureCache>);
+
+// SAFETY: retain/release and cache-to-texture creation are thread-safe
+// CoreVideo operations; no other access is reachable through this type.
+unsafe impl Send for CvMetalTextureCacheHandle {}
+// SAFETY: See the Send implementation; access always goes through the
+// thread-safe CoreVideo entry points.
+unsafe impl Sync for CvMetalTextureCacheHandle {}
+
+impl std::ops::Deref for CvMetalTextureCacheHandle {
+    type Target = CVMetalTextureCache;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 
 /// Carries one retained CoreVideo texture into the wgpu HAL drop callback.
