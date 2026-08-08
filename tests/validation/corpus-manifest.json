@@ -6,7 +6,7 @@
       "id": "mondrian-standard-quality-v1",
       "path": "color/metadata/mondrian-standard-quality-corpus-v1.json",
       "availability": "committed",
-      "sha256": "61a780d20f7b17706168e1ba0f605f8819400d321dbd98e9881412de01ebe7f2",
+      "sha256": "3e78a4a0a2cb72540f8bcaea8d1219f29641489a27634dcf90ddcdcb1bd8a4b8",
       "size_bytes": 6951,
       "provenance": {
         "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause",

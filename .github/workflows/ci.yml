@@ -80,7 +80,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev libdbus-1-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 运行 clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
@@ -108,7 +108,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev libdbus-1-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 编译 workspace（验证 MSRV 兼容性）
         run: cargo build --workspace --exclude mondrian-app
@@ -167,7 +167,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev libdbus-1-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       # ── macOS ─────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (macOS)
@@ -286,7 +286,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev libdbus-1-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 运行完整 app 产品测试
         run: cargo test -p mondrian-app --all-targets
@@ -321,7 +321,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev libdbus-1-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 构建文档
         run: cargo doc --workspace --no-deps --exclude mondrian-app

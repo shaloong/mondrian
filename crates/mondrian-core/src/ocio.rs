@@ -683,7 +683,7 @@ fn validate_mondrian_default_ocio_contract_text(
             )]));
         }
     };
-    let package_sha256 = match mondrian_default_package_sha256(config_text, &config, contract) {
+    let package_sha256 = match mondrian_default_package_sha256(config_text, contract) {
         Ok(digest) => digest,
         Err(err) => return Err(MondrianDefaultOcioValidationError::new(vec![err])),
     };
@@ -747,9 +747,15 @@ fn finish_sha256_hex(digest: Sha256) -> String {
     encoded
 }
 
+/// Compute the platform-stable package digest.
+///
+/// The digest covers only contractual bytes: config text, the assembly
+/// manifest, and every embedded resource. Engine-derived processor cache IDs
+/// are deliberately excluded — they are build-local execution facts, and a
+/// persisted cross-platform identity must not depend on them. Processor
+/// executability is proven separately by the contract validation report.
 fn mondrian_default_package_sha256(
     config_text: &str,
-    config: &Config,
     contract: MondrianDefaultOcioContract,
 ) -> Result<String, String> {
     let mut digest = Sha256::new();
@@ -780,7 +786,6 @@ fn mondrian_default_package_sha256(
         digest.update(bytes);
         digest.update([0]);
     }
-    update_mondrian_default_processor_fingerprint(&mut digest, config, contract)?;
     let digest = digest.finalize();
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(digest.len() * 2);
@@ -789,90 +794,6 @@ fn mondrian_default_package_sha256(
         encoded.push(HEX[(byte & 0x0f) as usize] as char);
     }
     Ok(encoded)
-}
-
-fn update_mondrian_default_processor_fingerprint(
-    digest: &mut Sha256,
-    config: &Config,
-    contract: MondrianDefaultOcioContract,
-) -> Result<(), String> {
-    let working_name = ocio_working_color_space_name(contract.working_space);
-
-    for mapped in contract.color_spaces {
-        let source_name = ocio_color_space_name(mapped.color_space);
-        update_processor_fingerprint(
-            digest,
-            &format!("colorspace:{source_name}->{working_name}"),
-            config.processor(source_name, working_name).map_err(|err| {
-                format!(
-                    "embedded Mondrian OCIO package could not build semantic fingerprint processor '{source_name}->{working_name}': {err}"
-                )
-            })?,
-        )?;
-        update_processor_fingerprint(
-            digest,
-            &format!("colorspace:{working_name}->{source_name}"),
-            config.processor(working_name, source_name).map_err(|err| {
-                format!(
-                    "embedded Mondrian OCIO package could not build semantic fingerprint processor '{working_name}->{source_name}': {err}"
-                )
-            })?,
-        )?;
-    }
-
-    for display_view in contract.display_views {
-        update_processor_fingerprint(
-            digest,
-            &format!(
-                "display:{working_name}->{}/{}",
-                display_view.display, display_view.view
-            ),
-            config
-                .processor_display(
-                    working_name,
-                    display_view.display,
-                    display_view.view,
-                    ocio_rs::TransformDirection::Forward,
-                )
-                .map_err(|err| {
-                    format!(
-                        "embedded Mondrian OCIO package could not build semantic fingerprint display processor '{working_name}->{}/{}': {err}",
-                        display_view.display, display_view.view
-                    )
-                })?,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn update_processor_fingerprint(
-    digest: &mut Sha256,
-    label: &str,
-    processor: ocio_rs::Processor,
-) -> Result<(), String> {
-    update_fingerprint_field(digest, "processor", label);
-    let processor_cache_id = processor.cache_id().ok_or_else(|| {
-        format!("embedded Mondrian OCIO processor '{label}' has no semantic cache-id")
-    })?;
-    update_fingerprint_field(digest, "processor-cache-id", &processor_cache_id);
-
-    let cpu = processor.default_cpu_processor().map_err(|err| {
-        format!("embedded Mondrian OCIO processor '{label}' has no CPU implementation: {err}")
-    })?;
-    let cpu_cache_id = cpu.cache_id().ok_or_else(|| {
-        format!("embedded Mondrian OCIO CPU processor '{label}' has no semantic cache-id")
-    })?;
-    update_fingerprint_field(digest, "cpu-cache-id", &cpu_cache_id);
-
-    let gpu = processor.default_gpu_processor().map_err(|err| {
-        format!("embedded Mondrian OCIO processor '{label}' has no GPU implementation: {err}")
-    })?;
-    let gpu_cache_id = gpu.cache_id().ok_or_else(|| {
-        format!("embedded Mondrian OCIO GPU processor '{label}' has no semantic cache-id")
-    })?;
-    update_fingerprint_field(digest, "gpu-cache-id", &gpu_cache_id);
-    Ok(())
 }
 
 fn update_fingerprint_field(digest: &mut Sha256, kind: &str, value: &str) {
@@ -1901,7 +1822,7 @@ fn init_mondrian_standard_ocio_locked(
             )
         })?;
     let actual_package_digest =
-        mondrian_default_package_sha256(MONDRIAN_DEFAULT_OCIO_CONFIG, &config, contract)?;
+        mondrian_default_package_sha256(MONDRIAN_DEFAULT_OCIO_CONFIG, contract)?;
     if actual_package_digest != contract.package_sha256 {
         return Err(format!(
             "embedded Mondrian OCIO package '{}' failed integrity validation: expected SHA-256 '{}', got '{}'",

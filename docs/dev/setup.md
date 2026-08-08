@@ -39,12 +39,12 @@ On Debian/Ubuntu, install the same native surface used by CI:
 sudo apt-get install -y --no-install-recommends \
   ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
   libavdevice-dev libswscale-dev libswresample-dev \
-  libasound2-dev libdbus-1-dev pkg-config
+  libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 ```
 
-`libdbus-1-dev` is required because screen capture for the eyedropper (`xcap`)
-uses the XDG portal D-Bus API on Linux; it is a functional dependency, not an
-optional convenience.
+`libdbus-1-dev` and `libxcb1-dev` are required because screen capture for
+the eyedropper (`xcap`) uses the XDG portal D-Bus API and XCB on Linux; they
+are functional dependencies, not optional conveniences.
 
 On macOS, use `brew install ffmpeg pkg-config`.
 

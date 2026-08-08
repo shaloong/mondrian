@@ -1597,10 +1597,13 @@ mod tests {
     #[test]
     fn hardware_backends_map_to_ffmpeg_device_types() {
         assert_eq!(HwAccelBackend::None.to_ffmpeg_device_type(), None);
+        #[cfg(mondrian_ffmpeg_7_1)]
         assert_eq!(
             HwAccelBackend::D3D12VA.to_ffmpeg_device_type(),
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA)
         );
+        #[cfg(not(mondrian_ffmpeg_7_1))]
+        assert_eq!(HwAccelBackend::D3D12VA.to_ffmpeg_device_type(), None);
         assert_eq!(
             HwAccelBackend::D3D11VA.to_ffmpeg_device_type(),
             Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA)
