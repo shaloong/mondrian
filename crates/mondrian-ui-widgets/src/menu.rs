@@ -1587,7 +1587,14 @@ mod tests {
         d.layout(Rect::new(0.0, 0.0, 120.0, 28.0));
         d.open = true;
 
-        assert!(d.menu_rect().width > 300.0);
+        // The popup must track the long item's measurement rather than the
+        // short trigger label; absolute pixel thresholds are font-dependent.
+        let trigger_width = d.measure(LayoutConstraint::LOOSE).width;
+        assert!(
+            d.menu_rect().width > trigger_width,
+            "popup width {} must exceed the trigger label width {trigger_width}",
+            d.menu_rect().width
+        );
     }
 
     #[test]

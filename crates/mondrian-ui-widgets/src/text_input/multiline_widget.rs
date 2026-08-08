@@ -1323,6 +1323,18 @@ mod tests {
     use mondrian_ui_core::widget::EventRequests;
     use std::cell::RefCell;
 
+    /// The platform's primary shortcut modifier: Control on Windows/Linux,
+    /// Command on macOS, matching the production keymap.
+    fn primary_modifiers() -> Modifiers {
+        let mut modifiers = Modifiers::default();
+        if cfg!(target_os = "macos") {
+            modifiers.meta = true;
+        } else {
+            modifiers.ctrl = true;
+        }
+        modifiers
+    }
+
     // ── TextUndoStack ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1588,7 +1600,7 @@ mod tests {
         };
         // Copy in read-only mode should succeed
         let result = widget.event(
-            &UiEvent::KeyDown { key: KeyCode::C, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::C, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert_eq!(result, EventResult::Handled);
@@ -1871,7 +1883,7 @@ mod tests {
 
         // Undo
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Z, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::Z, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert_eq!(widget.text(), "hello");
@@ -1904,7 +1916,7 @@ mod tests {
 
         // Undo
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Z, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::Z, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert_eq!(widget.text(), "hello");
@@ -2029,7 +2041,7 @@ mod tests {
         };
 
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::Home, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert_eq!(widget.edit.cursor(), TextPosition::new(0, 0));
@@ -2471,7 +2483,7 @@ mod tests {
         };
 
         widget.event(
-            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert!(widget.edit.selection().is_some());
@@ -2642,7 +2654,7 @@ mod tests {
         };
 
         let result = widget.event(
-            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::ctrl() },
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: primary_modifiers() },
             &mut ctx,
         );
         assert_eq!(result, EventResult::Ignored);

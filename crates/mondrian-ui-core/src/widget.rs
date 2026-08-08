@@ -355,7 +355,7 @@ pub trait DrawCommandEncoder {
 
     /// Draw a filled rectangle with per-corner radii.
     ///
-    /// The default implementation falls back to [`draw_rect`] with the
+    /// The default implementation falls back to [`Self::draw_rect`] with the
     /// maximum corner radius.
     fn draw_rect_radii(&mut self, bounds: Rect, color: mondrian_core::Color, radii: CornerRadii) {
         self.draw_rect(bounds, color, radii.max_radius());
