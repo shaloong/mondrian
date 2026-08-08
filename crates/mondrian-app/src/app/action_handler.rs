@@ -24,7 +24,6 @@ use crate::app::proxy_generation::{
     resolve_app_state_proxy_color_contract, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
 };
 use crate::app::selection::resolve_track_selection;
-use crate::app::timeline_editing::{find_clip, find_clip_mut, find_clip_track_lock};
 use crate::app::timeline_position::lower_nearest_sequence_frame;
 #[cfg(test)]
 use crate::app::SelectedClipRef;
@@ -849,7 +848,7 @@ impl AppState {
         let timeline_time = self.current_timeline_time()?.unwrap_or(TimelineTime::ZERO);
         let destination_time = self
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|sequence| sequence.find_clip(selection.clip_id))
             .map(|clip| clip.clamped_visual_author_time(timeline_time))
             .transpose()?
             .ok_or_else(|| missing_clip_error("paste_animation_keyframes", selection.clip_id))?;
@@ -908,7 +907,8 @@ impl AppState {
             let Some(seq) = self.active_sequence() else {
                 return Err(missing_sequence_error("trim_clip_source"));
             };
-            let clip = find_clip(seq, clip_id)
+            let clip = seq
+                .find_clip(clip_id)
                 .ok_or_else(|| missing_clip_error("trim_clip_source", clip_id))?;
             source_trim_target_time(clip, edge, source_time)?
                 .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
@@ -925,14 +925,16 @@ impl AppState {
         let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error(step_id));
         };
-        let (track_id, is_video_track, _) = find_clip_track_lock(seq, clip_id)
+        let location = seq
+            .clip_track_location(clip_id)
             .ok_or_else(|| missing_clip_error(step_id, clip_id))?;
-        let frame = find_clip(seq, clip_id)
+        let frame = seq
+            .find_clip(clip_id)
             .ok_or_else(|| missing_clip_error(step_id, clip_id))?
             .position
             .to_frame_position(seq.settings.frame_rate, FrameRounding::Nearest)?
             .frame;
-        Ok((track_id, is_video_track, frame))
+        Ok((location.track_id, location.is_video_track, frame))
     }
 
     fn select_from_action(
@@ -1644,7 +1646,8 @@ impl AppState {
             let sequence = self
                 .active_sequence()
                 .ok_or_else(|| missing_sequence_error("visual_effect_set_parameter_value"))?;
-            let clip = find_clip(sequence, clip_id)
+            let clip = sequence
+                .find_clip(clip_id)
                 .ok_or_else(|| missing_clip_error("visual_effect_set_parameter_value", clip_id))?;
             let end = clip.end_position()?;
             let author_time = clip.timeline_to_clip_time(current_time.clamp(clip.position, end))?;
@@ -1664,7 +1667,7 @@ impl AppState {
         };
         let _sequence_id =
             self.commit_sequence_edit(sequence_id, "调整特效属性", |sequence| {
-                let clip = find_clip_mut(sequence, clip_id).ok_or_else(|| {
+                let clip = sequence.find_clip_mut(clip_id).ok_or_else(|| {
                     missing_clip_error("visual_effect_set_parameter_value", clip_id)
                 })?;
                 let effect =
@@ -1684,11 +1687,11 @@ impl AppState {
         let Some(seq) = self.active_sequence() else {
             return Err(missing_sequence_error(step_id));
         };
-        let Some((track_id, _, is_locked)) = find_clip_track_lock(seq, clip_id) else {
+        let Some(location) = seq.clip_track_location(clip_id) else {
             return Err(missing_clip_error(step_id, clip_id));
         };
-        if is_locked {
-            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        if location.is_locked {
+            return Err(MondrianError::TrackLocked { track_id: location.track_id.to_string() });
         }
         Ok(())
     }
@@ -2114,7 +2117,7 @@ mod tests {
     ) -> AnimationParameterAddress {
         let clip = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, clip_id))
+            .and_then(|sequence| sequence.find_clip(clip_id))
             .expect("clip");
         clip.intrinsic_parameter_bag()
             .address_for_path(path)
@@ -2150,7 +2153,7 @@ mod tests {
         let property = opacity_property_selection(state, clip_id);
         let keyframe_id = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, clip_id))
+            .and_then(|sequence| sequence.find_clip(clip_id))
             .and_then(|clip| {
                 let bag = clip.transform.to_property_bag();
                 bag.property_by_address(&property.property)
@@ -6906,7 +6909,7 @@ mod tests {
         let selection = state.primary_selected_clip().expect("selected Basic Title");
         let initial_text = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|sequence| sequence.find_clip(selection.clip_id))
             .and_then(|clip| clip.content.basic_title())
             .expect("Basic Title author state")
             .evaluate(TimelineTime::ZERO)
@@ -6915,7 +6918,7 @@ mod tests {
         assert_eq!(initial_text, "标题");
         let text_parameter = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|sequence| sequence.find_clip(selection.clip_id))
             .expect("Basic Title Clip")
             .intrinsic_parameter_bag()
             .address_for_path(mondrian_core::BasicTitle::TEXT_PATH)
@@ -6931,7 +6934,7 @@ mod tests {
 
         let edited_text = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|sequence| sequence.find_clip(selection.clip_id))
             .and_then(|clip| clip.content.basic_title())
             .expect("edited Basic Title")
             .evaluate(TimelineTime::ZERO)
@@ -6942,7 +6945,7 @@ mod tests {
         assert!(state.undo_timeline().expect("undo property edit"));
         let restored_text = state
             .active_sequence()
-            .and_then(|sequence| find_clip(sequence, selection.clip_id))
+            .and_then(|sequence| sequence.find_clip(selection.clip_id))
             .and_then(|clip| clip.content.basic_title())
             .expect("restored Basic Title")
             .evaluate(TimelineTime::ZERO)

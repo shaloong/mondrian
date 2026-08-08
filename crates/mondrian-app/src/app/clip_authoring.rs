@@ -45,7 +45,8 @@ impl AppState {
             .active_sequence_id()
             .ok_or_else(|| clip_authoring_error("clip_set_enabled", "no active Sequence"))?;
         self.commit_sequence_edit(sequence_id, "切换片段启用状态", |sequence| {
-            let clip = find_clip_mut(sequence, clip_id)
+            let clip = sequence
+                .find_clip_mut(clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
             clip.is_disabled = !enabled;
             Ok(())
@@ -77,7 +78,8 @@ impl AppState {
             .active_sequence_id()
             .ok_or_else(|| clip_authoring_error("clip_set_solid_color", "no active Sequence"))?;
         self.commit_sequence_edit(sequence_id, "调整片段颜色", |sequence| {
-            let clip = find_clip_mut(sequence, clip_id)
+            let clip = sequence
+                .find_clip_mut(clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
             if !clip.set_solid_color(color)? {
                 return Err(clip_authoring_error(
@@ -107,7 +109,8 @@ impl AppState {
         }
         let clip_id = payload.clip_id;
         self.commit_sequence_edit(prepared.sequence_id, "调整片段属性", move |sequence| {
-            let clip = find_clip_mut(sequence, clip_id)
+            let clip = sequence
+                .find_clip_mut(clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
             for mutation in prepared.mutations {
                 clip.apply_property_mutation(mutation)?;
@@ -194,20 +197,20 @@ fn authorable_clip<'a>(
     let sequence = state
         .active_sequence()
         .ok_or_else(|| clip_authoring_error(step_id, "no active Sequence"))?;
-    let Some((track_id, is_video_track, is_locked)) = find_clip_track_lock(sequence, clip_id)
-    else {
+    let Some(location) = sequence.clip_track_location(clip_id) else {
         return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
     };
-    if require_video && !is_video_track {
+    if require_video && !location.is_video_track {
         return Err(clip_authoring_error(
             step_id,
             "visual Clip authoring requires a video Clip",
         ));
     }
-    if is_locked {
-        return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+    if location.is_locked {
+        return Err(MondrianError::TrackLocked { track_id: location.track_id.to_string() });
     }
-    let clip = find_clip(sequence, clip_id)
+    let clip = sequence
+        .find_clip(clip_id)
         .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
     Ok((sequence, clip))
 }

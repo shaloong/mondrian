@@ -100,6 +100,22 @@ pub fn clip_selection_unit(sequence: &Sequence, clip_id: ClipId) -> Option<Vec<C
     )
 }
 
+/// Expand a Clip selection set in place so it contains the complete selection
+/// unit of every member.
+///
+/// Unknown identities are ignored; the operation never removes members.
+pub fn expand_clip_selection_units(
+    sequence: &Sequence,
+    clip_ids: &mut std::collections::HashSet<ClipId>,
+) {
+    let selected = clip_ids.iter().copied().collect::<Vec<_>>();
+    for clip_id in selected {
+        if let Some(unit) = clip_selection_unit(sequence, clip_id) {
+            clip_ids.extend(unit);
+        }
+    }
+}
+
 /// Validate and describe one Clip Link Group edit without mutating author state.
 pub fn assess_clip_link_edit(
     sequence: &Sequence,

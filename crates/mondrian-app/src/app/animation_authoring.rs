@@ -6,7 +6,7 @@
 //! Transaction. Widgets never replace an entire curve or infer author identity
 //! from point order.
 
-use super::{find_clip, find_clip_track_lock, AppState, SelectedClipRef};
+use super::{AppState, SelectedClipRef};
 use mondrian_core::automation::{
     AnimationParameterAddress, InterpolationType, Keyframe, PropertyMutation, PropertyValue,
     PropertyValueType,
@@ -113,19 +113,26 @@ fn numeric_curve_target(
     clip_id: mondrian_core::ClipId,
 ) -> Result<(SelectedClipRef, &mondrian_timeline::Clip)> {
     let sequence = state.active_sequence().ok_or_else(|| curve_error("no active Sequence"))?;
-    let Some((track_id, is_video_track, is_locked)) = find_clip_track_lock(sequence, clip_id)
-    else {
+    let Some(location) = sequence.clip_track_location(clip_id) else {
         return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
     };
-    if !is_video_track {
+    if !location.is_video_track {
         return Err(curve_error("visual Clip automation requires a video Clip"));
     }
-    if is_locked {
-        return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+    if location.is_locked {
+        return Err(MondrianError::TrackLocked { track_id: location.track_id.to_string() });
     }
-    let clip = find_clip(sequence, clip_id)
+    let clip = sequence
+        .find_clip(clip_id)
         .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-    Ok((SelectedClipRef { track_id, is_video_track, clip_id }, clip))
+    Ok((
+        SelectedClipRef {
+            track_id: location.track_id,
+            is_video_track: location.is_video_track,
+            clip_id,
+        },
+        clip,
+    ))
 }
 
 fn prepare_curve_edit(

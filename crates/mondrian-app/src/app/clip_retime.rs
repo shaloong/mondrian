@@ -5,10 +5,10 @@ use std::{collections::HashMap, time::Duration};
 use mondrian_assets::AssetKind;
 use mondrian_core::{timeline_data::ClipContent, ClipId, MondrianError, TimeScale, TimelineTime};
 use mondrian_timeline::{
-    apply_clip_constant_retime, ClipConstantRetime, ClipConstantRetimeRequest, Sequence,
+    apply_clip_constant_retime, clip_selection_unit, ClipConstantRetime, ClipConstantRetimeRequest,
+    Sequence,
 };
 
-use super::timeline_editing::{clip_link_group_member_ids, find_clip, find_clip_track_lock};
 use super::video_transitions::validate_retimed_transition_handles_with_extents;
 use super::AppState;
 
@@ -30,15 +30,16 @@ impl AppState {
         }
         let before = self.active_sequence().ok_or_else(no_active_sequence)?;
         let clip_ids = if include_linked {
-            clip_link_group_member_ids(before, clip_id)
+            clip_selection_unit(before, clip_id).unwrap_or_default()
         } else {
-            find_clip(before, clip_id)
+            before
+                .find_clip(clip_id)
                 .map(|_| vec![clip_id])
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?
         };
         validate_retime_content(before, &clip_ids, false)?;
         if clip_ids.iter().all(|clip_id| {
-            find_clip(before, *clip_id).is_some_and(|clip| clip.source_time_scale() == rate)
+            before.find_clip(*clip_id).is_some_and(|clip| clip.source_time_scale() == rate)
         }) {
             return Ok(false);
         }
@@ -90,9 +91,10 @@ impl AppState {
         sequence_time: mondrian_core::FramePosition,
     ) -> mondrian_core::Result<bool> {
         let before = self.active_sequence().ok_or_else(no_active_sequence)?;
-        let (_, is_video, _) = find_clip_track_lock(before, clip_id)
+        let location = before
+            .clip_track_location(clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-        if !is_video {
+        if !location.is_video_track {
             return Err(retime_error(
                 "freeze frame requires a Clip on a video Track",
             ));
@@ -104,7 +106,8 @@ impl AppState {
             ));
         }
         let sequence_time = TimelineTime::from_frame_position(sequence_time)?;
-        let current = find_clip(before, clip_id)
+        let current = before
+            .find_clip(clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
         if current.source_time_scale().numerator() == 0
             && current.source_origin() == current.timeline_to_source_time(sequence_time)?
@@ -153,11 +156,16 @@ impl AppState {
     ) -> mondrian_core::Result<HashMap<ClipId, TimelineTime>> {
         let mut extents = HashMap::with_capacity(clip_ids.len());
         for clip_id in clip_ids {
-            let clip = find_clip(sequence, *clip_id)
+            let clip = sequence
+                .find_clip(*clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-            let (_, is_video, _) = find_clip_track_lock(sequence, *clip_id)
+            let location = sequence
+                .clip_track_location(*clip_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-            extents.insert(*clip_id, self.known_retime_source_duration(clip, is_video)?);
+            extents.insert(
+                *clip_id,
+                self.known_retime_source_duration(clip, location.is_video_track)?,
+            );
         }
         Ok(extents)
     }
@@ -223,7 +231,8 @@ fn validate_retimed_clip_extents(
     source_extents: &HashMap<ClipId, TimelineTime>,
 ) -> mondrian_core::Result<()> {
     for clip_id in clip_ids {
-        let clip = find_clip(sequence, *clip_id)
+        let clip = sequence
+            .find_clip(*clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
         let extent = source_extents
             .get(clip_id)
@@ -280,7 +289,8 @@ fn validate_retime_content(
     freeze: bool,
 ) -> mondrian_core::Result<()> {
     for clip_id in clip_ids {
-        let clip = find_clip(sequence, *clip_id)
+        let clip = sequence
+            .find_clip(*clip_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
         match clip.content {
             ClipContent::Media { .. } | ClipContent::NestedSequence { .. } => {}
@@ -386,11 +396,11 @@ mod tests {
             .expect("linked retime");
         let sequence = state.active_sequence().expect("Sequence");
         assert_eq!(
-            find_clip(sequence, video_id).expect("video").source_time_scale(),
+            sequence.find_clip(video_id).expect("video").source_time_scale(),
             TimeScale::new(2, 1).expect("2x")
         );
         assert_eq!(
-            find_clip(sequence, audio_id).expect("audio").source_time_scale(),
+            sequence.find_clip(audio_id).expect("audio").source_time_scale(),
             TimeScale::new(2, 1).expect("2x")
         );
 
@@ -403,7 +413,7 @@ mod tests {
             .expect("linked reverse retime");
         let sequence = state.active_sequence().expect("Sequence");
         for clip_id in [video_id, audio_id] {
-            let clip = find_clip(sequence, clip_id).expect("linked Clip");
+            let clip = sequence.find_clip(clip_id).expect("linked Clip");
             assert_eq!(clip.source_origin(), frame_time(40, time_base));
             assert_eq!(
                 clip.source_time_scale(),
@@ -415,7 +425,7 @@ mod tests {
             .dispatch_action(hold_action(video_id, FramePosition::new(5, time_base)))
             .expect("freeze");
         let sequence = state.active_sequence().expect("Sequence");
-        let video = find_clip(sequence, video_id).expect("video");
+        let video = sequence.find_clip(video_id).expect("video");
         assert_eq!(video.source_origin(), frame_time(30, time_base));
         assert_eq!(video.source_time_scale(), TimeScale::ZERO);
         assert_eq!(
@@ -423,13 +433,16 @@ mod tests {
             mondrian_core::SourceSamplingBoundary::StrictPredecessor
         );
         assert_eq!(
-            find_clip(sequence, audio_id).expect("audio").source_time_scale(),
+            sequence.find_clip(audio_id).expect("audio").source_time_scale(),
             TimeScale::new(-2, 1).expect("reverse 2x")
         );
 
         assert!(state.undo_timeline().expect("undo"));
         assert_eq!(
-            find_clip(state.active_sequence().expect("Sequence"), video_id)
+            state
+                .active_sequence()
+                .expect("Sequence")
+                .find_clip(video_id)
                 .expect("video")
                 .source_time_scale(),
             TimeScale::new(-2, 1).expect("reverse 2x")
@@ -492,11 +505,11 @@ mod tests {
 
         let sequence = state.active_sequence().expect("Sequence");
         assert_eq!(
-            find_clip(sequence, video_id).expect("video").source_time_scale(),
+            sequence.find_clip(video_id).expect("video").source_time_scale(),
             TimeScale::ONE
         );
         assert_eq!(
-            find_clip(sequence, audio_id).expect("audio").source_time_scale(),
+            sequence.find_clip(audio_id).expect("audio").source_time_scale(),
             TimeScale::ONE
         );
         assert_eq!(
@@ -530,12 +543,12 @@ mod tests {
             ))
             .is_err());
         assert_eq!(
-            find_clip(
-                unresolved_state.active_sequence().expect("Sequence"),
-                unresolved_clip_id
-            )
-            .expect("unresolved Clip")
-            .source_time_scale(),
+            unresolved_state
+                .active_sequence()
+                .expect("Sequence")
+                .find_clip(unresolved_clip_id)
+                .expect("unresolved Clip")
+                .source_time_scale(),
             TimeScale::ONE
         );
         assert_eq!(
@@ -588,7 +601,10 @@ mod tests {
             .is_err());
 
         assert_eq!(
-            find_clip(state.active_sequence().expect("Sequence"), left_id)
+            state
+                .active_sequence()
+                .expect("Sequence")
+                .find_clip(left_id)
                 .expect("left")
                 .source_time_scale(),
             TimeScale::ONE

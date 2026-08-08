@@ -6,8 +6,7 @@
 //! both aggregates through one Project Author Transaction.
 
 use super::product_action::TimelinePrecomposeSelectionPayload;
-use super::timeline_editing::expand_clip_link_groups;
-use super::AppState;
+use super::{expand_clip_selection_units, AppState};
 use mondrian_core::{
     AudioTransitionId, ClipId, ClipLinkGroupId, MondrianError, TimelineTime, TimelineTimeRange,
     VideoTransitionId,
@@ -234,7 +233,7 @@ fn prepare_precompose_plan(
     if selected_ids.is_empty() {
         return Err(precompose_error("没有选中的片段"));
     }
-    expand_clip_link_groups(sequence, &mut selected_ids);
+    expand_clip_selection_units(sequence, &mut selected_ids);
 
     let mut min_time = None;
     let mut max_time = TimelineTime::ZERO;

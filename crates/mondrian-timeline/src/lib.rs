@@ -18,8 +18,10 @@ pub mod audio_routing_edit;
 pub mod clip;
 mod clip_fragment;
 pub mod clip_linking;
+mod cut_edit;
 pub mod insert_edit;
 pub mod keyframe;
+pub mod overwrite_edit;
 pub mod range_edit;
 pub mod retime;
 pub mod sequence;
@@ -63,10 +65,18 @@ pub use audio_routing_edit::{
 };
 pub use clip::{
     ActiveClip, Clip, ClipKind, ClipSourceTimeMap, EffectRelativePlacement, MaskRelativePlacement,
+    TrimEdge,
 };
 pub use clip_linking::{
-    apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, ClipLinkEditAssessment,
-    ClipLinkEditError, ClipLinkEditKind, ClipLinkEditOutcome, ClipLinkEditRequest,
+    apply_clip_link_edit, assess_clip_link_edit, clip_selection_unit, expand_clip_selection_units,
+    ClipLinkEditAssessment, ClipLinkEditError, ClipLinkEditKind, ClipLinkEditOutcome,
+    ClipLinkEditRequest,
+};
+pub use cut_edit::{
+    apply_roll_edit, apply_slide_edit, apply_slip_edit, apply_split_edit, assess_roll_edit,
+    assess_slide_edit, assess_slip_edit, assess_split_edit, prepare_trimmed_clip_at_time,
+    CutEditError, RollEditOutcome, RollEditRequest, SlideEditOutcome, SlideEditRequest,
+    SlipEditOutcome, SlipEditRequest, SplitEditOutcome, SplitEditRequest,
 };
 pub use insert_edit::{
     apply_insert_edit, InsertAutomationPolicy, InsertEditError, InsertEditOutcome,
@@ -74,6 +84,11 @@ pub use insert_edit::{
     InsertTransitionPolicy,
 };
 pub use keyframe::{InterpolationType, Keyframe, KeyframeTrack};
+pub use overwrite_edit::{
+    apply_overwrite_conflicts, apply_sequence_track_conflicts_for_focus_group,
+    apply_track_conflicts_for_focus_group, resolve_track_conflicts, resolve_track_overlaps,
+    subtract_overwrite_range_from_clip, ClipOverlapMode,
+};
 pub use range_edit::{
     apply_range_edit, assess_range_edit, RangeEditAutomationPolicy, RangeEditError, RangeEditKind,
     RangeEditOutcome, RangeEditRequest, RangeEditSplitOutcome, RangeEditTimelineStatePolicy,
@@ -84,9 +99,9 @@ pub use retime::{
     ClipConstantRetimeRequest,
 };
 pub use sequence::{
-    AudioChannelLayout, AudioDisplayFormat, EditingMode, FieldOrder, PixelAspectRatio,
-    PreviewRenderFormat, Sequence, SequenceAuthorContractCertificate, SequenceCollection,
-    SequencePreset, SequencePreviewSettings, SequenceRole, SequenceSettings,
+    AudioChannelLayout, AudioDisplayFormat, ClipTrackLocation, EditingMode, FieldOrder,
+    PixelAspectRatio, PreviewRenderFormat, Sequence, SequenceAuthorContractCertificate,
+    SequenceCollection, SequencePreset, SequenceRole, SequenceSettings,
 };
 pub use sequence_dependency::SequenceDependencyCertificate;
 pub use track::TrackRelativePlacement;

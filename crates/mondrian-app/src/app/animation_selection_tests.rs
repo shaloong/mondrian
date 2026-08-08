@@ -30,7 +30,7 @@ fn clip_ref(track_id: TrackId, clip_id: ClipId) -> SelectedClipRef {
 fn property_address(state: &AppState, clip_id: ClipId, path: &str) -> AnimationParameterAddress {
     state
         .active_sequence()
-        .and_then(|sequence| find_clip(sequence, clip_id))
+        .and_then(|sequence| sequence.find_clip(clip_id))
         .and_then(|clip| clip.property_bag().ok())
         .and_then(|bag| bag.address_for_path(path))
         .expect("property address")
@@ -45,7 +45,7 @@ fn key_selection(
     let property = property_address(state, clip_id, path);
     let keyframe_id = state
         .active_sequence()
-        .and_then(|sequence| find_clip(sequence, clip_id))
+        .and_then(|sequence| sequence.find_clip(clip_id))
         .and_then(|clip| clip.property_bag().ok())
         .and_then(|bag| {
             bag.property_by_address(&property)

@@ -16,7 +16,7 @@ impl AppState {
     pub fn active_animation_property_path(&self, clip_id: ClipId) -> Option<String> {
         let address = self.active_animation_property_address(clip_id)?;
         let sequence = self.active_sequence()?;
-        let clip = find_clip(sequence, clip_id)?;
+        let clip = sequence.find_clip(clip_id)?;
         clip.property_bag()
             .ok()?
             .property_by_address(address)
@@ -346,16 +346,14 @@ impl AppState {
         interpretation: mondrian_timeline::clip::MediaInterpretation,
     ) -> mondrian_core::Result<bool> {
         let changed = self.commit_active_sequence_edit("解释素材", |seq| {
-            let Some((track_id, _is_video, is_locked)) =
-                find_clip_track_lock(seq, selection.clip_id)
-            else {
+            let Some(location) = seq.clip_track_location(selection.clip_id) else {
                 return Err(mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),
                 });
             };
-            if is_locked {
+            if location.is_locked {
                 return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: track_id.to_string(),
+                    track_id: location.track_id.to_string(),
                 });
             }
 
@@ -464,16 +462,14 @@ impl AppState {
             return Ok(false);
         }
         let _sequence_id = self.commit_active_sequence_edit(description, |seq| {
-            let Some((track_id, _is_video, is_locked)) =
-                find_clip_track_lock(seq, selection.clip_id)
-            else {
+            let Some(location) = seq.clip_track_location(selection.clip_id) else {
                 return Err(mondrian_core::MondrianError::ClipNotFound {
                     clip_id: selection.clip_id.to_string(),
                 });
             };
-            if is_locked {
+            if location.is_locked {
                 return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: track_id.to_string(),
+                    track_id: location.track_id.to_string(),
                 });
             }
 
@@ -507,7 +503,7 @@ impl AppState {
         let description = format!("添加{}", effect_type.display_name());
         let (_sequence_id, effect_id) =
             self.commit_active_sequence_edit(description, move |seq| {
-                let clip = find_clip_mut(seq, clip_id).ok_or_else(|| {
+                let clip = seq.find_clip_mut(clip_id).ok_or_else(|| {
                     mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
                 })?;
                 let effect_id = clip.add_effect_node(effect);
@@ -534,7 +530,7 @@ impl AppState {
             return Ok(false);
         }
         let _sequence_id = self.commit_active_sequence_edit("切换特效启用状态", |seq| {
-            let clip = find_clip_mut(seq, clip_id).ok_or_else(|| {
+            let clip = seq.find_clip_mut(clip_id).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
             })?;
             clip.set_effect_enabled(effect_id, enabled)?;
@@ -557,7 +553,7 @@ impl AppState {
             });
         }
         let _sequence_id = self.commit_active_sequence_edit("删除特效", |seq| {
-            let clip = find_clip_mut(seq, clip_id).ok_or_else(|| {
+            let clip = seq.find_clip_mut(clip_id).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
             })?;
             clip.remove_effect(effect_id)?;
@@ -578,7 +574,7 @@ impl AppState {
             return Ok(false);
         }
         let _sequence_id = self.commit_active_sequence_edit("调整特效顺序", |seq| {
-            let clip = find_clip_mut(seq, clip_id).ok_or_else(|| {
+            let clip = seq.find_clip_mut(clip_id).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
             })?;
             clip.reorder_effect_relative(effect_id, placement)?;
@@ -605,18 +601,21 @@ fn authorable_visual_effect_clip<'a>(
     clip_id: ClipId,
     step_id: &str,
 ) -> mondrian_core::Result<&'a Clip> {
-    let Some((track_id, is_video, is_locked)) = find_clip_track_lock(sequence, clip_id) else {
-        return Err(mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
-    };
-    if !is_video {
+    let location = sequence.clip_track_location(clip_id).ok_or_else(|| {
+        mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
+    })?;
+    if !location.is_video_track {
         return Err(mondrian_core::MondrianError::WorkflowStepFailed {
             step_id: step_id.to_owned(),
             reason: "visual Effects require a video Clip".to_owned(),
         });
     }
-    if is_locked {
-        return Err(mondrian_core::MondrianError::TrackLocked { track_id: track_id.to_string() });
+    if location.is_locked {
+        return Err(mondrian_core::MondrianError::TrackLocked {
+            track_id: location.track_id.to_string(),
+        });
     }
-    find_clip(sequence, clip_id)
+    sequence
+        .find_clip(clip_id)
         .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() })
 }

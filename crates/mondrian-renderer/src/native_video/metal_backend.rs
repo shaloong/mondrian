@@ -164,6 +164,16 @@ unsafe impl Send for CvMetalTextureReleaseGuard {}
 // SAFETY: See the Send implementation; no shared access is ever exposed.
 unsafe impl Sync for CvMetalTextureReleaseGuard {}
 
+impl CvMetalTextureReleaseGuard {
+    /// Release the retained CoreVideo texture reference.
+    ///
+    /// A by-value method keeps closure capture on the whole guard, so the
+    /// thread-safety wrapper cannot be bypassed by precise field capture.
+    fn release(self) {
+        drop(self.texture);
+    }
+}
+
 impl DirectNativeYuvPlaneAdapter for MetalNativeYuvPlaneAdapter {
     fn support(&self) -> &GpuNativeDecodedFrameImportSupport {
         &self.support
@@ -305,7 +315,7 @@ fn wrap_plane(
             1,
             1,
             wgpu::hal::CopyExtent { width: width_u32, height: height_u32, depth: 1 },
-            Some(Box::new(move || drop(release_guard.texture))),
+            Some(Box::new(move || release_guard.release())),
         )
     };
     drop(hal_device);

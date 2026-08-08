@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::app::timeline_editing::{
-    apply_track_conflicts_for_focus_group, clip_link_group_member_ids, compact_sequence_references,
-    find_clip, find_clip_track_lock,
-};
+use super::{apply_track_conflicts_for_focus_group, clip_selection_unit};
 
 impl AppState {
     /// Whether `Copy` can place animation keyframes or timeline clips on the app clipboard.
@@ -24,8 +21,8 @@ impl AppState {
         let can_paste_animation = self.has_animation_clipboard()
             && self.primary_selected_clip().is_some_and(|selection| {
                 self.active_sequence()
-                    .and_then(|seq| find_clip_track_lock(seq, selection.clip_id))
-                    .is_some_and(|(_, _, is_locked)| !is_locked)
+                    .and_then(|seq| seq.clip_track_location(selection.clip_id))
+                    .is_some_and(|location| !location.is_locked)
             });
         let can_paste_clips = self.active_sequence().is_some_and(|seq| {
             self.clip_clipboard.as_ref().is_some_and(|clipboard| {
@@ -318,7 +315,7 @@ impl AppState {
                     ClipOverlapMode::Overwrite,
                 )?;
             }
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             let pasted_count = pasted_selection.len();
             Ok(pasted_count)
         })?;
@@ -347,7 +344,7 @@ fn collect_clip_clipboard_entries(
         if seen.insert(*clip_id) {
             ids.push(*clip_id);
         }
-        for member in clip_link_group_member_ids(seq, *clip_id) {
+        for member in clip_selection_unit(seq, *clip_id).unwrap_or_default() {
             if seen.insert(member) {
                 ids.push(member);
             }
@@ -356,16 +353,18 @@ fn collect_clip_clipboard_entries(
 
     let anchor = ids
         .iter()
-        .filter_map(|clip_id| find_clip(seq, *clip_id).map(|clip| clip.position))
+        .filter_map(|clip_id| seq.find_clip(*clip_id).map(|clip| clip.position))
         .min()
         .unwrap_or(TimelineTime::ZERO);
     let mut entries = Vec::with_capacity(ids.len());
     for clip_id in ids {
-        let (track_id, is_video_track, _) =
-            find_clip_track_lock(seq, clip_id).ok_or_else(|| {
-                mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
-            })?;
-        let clip = find_clip(seq, clip_id)
+        let location = seq.clip_track_location(clip_id).ok_or_else(|| {
+            mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
+        })?;
+        let track_id = location.track_id;
+        let is_video_track = location.is_video_track;
+        let clip = seq
+            .find_clip(clip_id)
             .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
                 clip_id: clip_id.to_string(),
             })?

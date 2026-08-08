@@ -7,14 +7,12 @@
 
 use super::product_action::{TimelineSelectionEdit, TimelineTrimPayloadEdge};
 use super::selection::resolve_clip_selection;
-use super::timeline_editing::{
-    can_roll_cut_for_clip, find_clip, find_clip_track_lock, set_clip_disabled,
-};
+
 use super::AppState;
-use mondrian_core::{ClipId, MondrianError};
+use mondrian_core::{ClipId, FramePosition, MondrianError, TimelineTime};
 use mondrian_timeline::{
-    apply_clip_link_edit, assess_clip_link_edit, clip::TrimEdge, ClipLinkEditKind,
-    ClipLinkEditRequest,
+    apply_clip_link_edit, assess_clip_link_edit, assess_roll_edit, clip::TrimEdge,
+    ClipLinkEditKind, ClipLinkEditRequest, RollEditRequest,
 };
 
 impl AppState {
@@ -166,7 +164,16 @@ impl AppState {
         };
         let target_frame = self.current_frame();
         let sequence = self.active_sequence().ok_or_else(|| selection_edit_error("当前无序列"))?;
-        if !can_roll_cut_for_clip(sequence, *clip_id, target_frame)? {
+        let time_base = sequence.time_base();
+        let target =
+            TimelineTime::from_frame_position(FramePosition::new(target_frame, time_base))?;
+        let minimum_duration = TimelineTime::from_frame_position(FramePosition::new(1, time_base))?;
+        let movable = assess_roll_edit(
+            sequence,
+            &RollEditRequest { clip_id: *clip_id, target, minimum_duration },
+        )
+        .map_err(mondrian_core::MondrianError::from)?;
+        if !movable {
             return Err(selection_not_executed(
                 "未找到可滚动切点，或播放头不在可滚动范围",
             ));
@@ -190,12 +197,14 @@ impl AppState {
         let sequence = self.active_sequence().ok_or_else(|| selection_edit_error("当前无序列"))?;
         let mut would_change = false;
         for clip_id in &clip_ids {
-            let (_, _, locked) = find_clip_track_lock(sequence, *clip_id)
+            let location = sequence
+                .clip_track_location(*clip_id)
                 .ok_or_else(|| selection_edit_error(format!("Clip 不存在: {clip_id}")))?;
-            if locked {
+            if location.is_locked {
                 return Err(selection_not_executed("选择包含锁定 Track 上的 Clip"));
             }
-            let clip = find_clip(sequence, *clip_id)
+            let clip = sequence
+                .find_clip(*clip_id)
                 .ok_or_else(|| selection_edit_error(format!("Clip 不存在: {clip_id}")))?;
             would_change |= clip.is_disabled == enabled;
         }
@@ -209,15 +218,16 @@ impl AppState {
         let clip_ids = self.prepare_selected_clips_enabled(enabled)?;
         self.commit_active_sequence_edit("切换片段启用状态", |sequence| {
             for clip_id in &clip_ids {
-                let (_, _, locked) = find_clip_track_lock(sequence, *clip_id)
+                let location = sequence
+                    .clip_track_location(*clip_id)
                     .ok_or_else(|| selection_edit_error(format!("Clip 不存在: {clip_id}")))?;
-                if locked {
+                if location.is_locked {
                     return Err(selection_edit_error("选择包含锁定 Track 上的 Clip"));
                 }
             }
             let changed = clip_ids
                 .iter()
-                .filter(|clip_id| set_clip_disabled(sequence, **clip_id, !enabled))
+                .filter(|clip_id| sequence.set_clip_disabled(**clip_id, !enabled))
                 .count();
             if changed == 0 {
                 return Err(selection_not_executed("所选 Clip 已具有请求的启用状态"));
@@ -383,8 +393,8 @@ mod tests {
             .expect("trim linked selection");
 
         let sequence = state.active_sequence().expect("sequence");
-        let video = find_clip(sequence, video_id).expect("video");
-        let audio = find_clip(sequence, audio_id).expect("audio");
+        let video = sequence.find_clip(video_id).expect("video");
+        let audio = sequence.find_clip(audio_id).expect("audio");
         assert_eq!(video.position, tt(5, time_base));
         assert_eq!(
             audio.position,
@@ -405,11 +415,11 @@ mod tests {
         assert!(state.undo_timeline().expect("undo linked selection Trim"));
         let sequence = state.active_sequence().expect("sequence after Undo");
         assert_eq!(
-            find_clip(sequence, video_id).expect("video").position,
+            sequence.find_clip(video_id).expect("video").position,
             TimelineTime::ZERO
         );
         assert_eq!(
-            find_clip(sequence, audio_id).expect("audio").position,
+            sequence.find_clip(audio_id).expect("audio").position,
             sample_offset
         );
         assert!(!state.can_undo_action());

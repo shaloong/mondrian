@@ -1124,6 +1124,19 @@ impl SequencePreset {
 }
 
 /// Mondrian 时间线序列
+/// Typed Track placement facts for one located Clip identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClipTrackLocation {
+    /// Owning Track identity.
+    pub track_id: TrackId,
+    /// Whether the owning Track is a video Track.
+    pub is_video_track: bool,
+    /// Owning Track index within its kind.
+    pub track_index: usize,
+    /// Whether the owning Track is locked.
+    pub is_locked: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sequence {
@@ -1531,6 +1544,144 @@ impl Sequence {
 
     pub fn video_track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
         self.video_tracks.iter_mut().find(|track| track.id == id)
+    }
+
+    /// Locate one Clip by identity across every video Track first, then every
+    /// audio Track, in canonical Track order.
+    pub fn find_clip(&self, clip_id: ClipId) -> Option<&crate::clip::Clip> {
+        self.video_tracks
+            .iter()
+            .chain(&self.audio_tracks)
+            .find_map(|track| track.clips.iter().find(|clip| clip.id == clip_id))
+    }
+
+    /// Mutable counterpart of [`Self::find_clip`].
+    pub fn find_clip_mut(&mut self, clip_id: ClipId) -> Option<&mut crate::clip::Clip> {
+        self.video_tracks
+            .iter_mut()
+            .chain(&mut self.audio_tracks)
+            .find_map(|track| track.clips.iter_mut().find(|clip| clip.id == clip_id))
+    }
+
+    /// Typed Track placement facts for one Clip identity.
+    pub fn clip_track_location(&self, clip_id: ClipId) -> Option<ClipTrackLocation> {
+        for (index, track) in self.video_tracks.iter().enumerate() {
+            if track.clips.iter().any(|clip| clip.id == clip_id) {
+                return Some(ClipTrackLocation {
+                    track_id: track.id,
+                    is_video_track: true,
+                    track_index: index,
+                    is_locked: track.is_locked,
+                });
+            }
+        }
+        for (index, track) in self.audio_tracks.iter().enumerate() {
+            if track.clips.iter().any(|clip| clip.id == clip_id) {
+                return Some(ClipTrackLocation {
+                    track_id: track.id,
+                    is_video_track: false,
+                    track_index: index,
+                    is_locked: track.is_locked,
+                });
+            }
+        }
+        None
+    }
+
+    /// Remove one Clip from whichever Track owns it.
+    pub fn remove_clip_anywhere(&mut self, clip_id: ClipId) -> Option<crate::clip::Clip> {
+        for track in &mut self.video_tracks {
+            if let Some(clip) = track.remove_clip(clip_id) {
+                return Some(clip);
+            }
+        }
+        for track in &mut self.audio_tracks {
+            if let Some(clip) = track.remove_clip(clip_id) {
+                return Some(clip);
+            }
+        }
+        None
+    }
+
+    /// Set one Clip's disabled presentation flag. Returns whether state changed.
+    pub fn set_clip_disabled(&mut self, clip_id: ClipId, disabled: bool) -> bool {
+        let Some(clip) = self.find_clip_mut(clip_id) else {
+            return false;
+        };
+        if clip.is_disabled == disabled {
+            return false;
+        }
+        clip.is_disabled = disabled;
+        true
+    }
+
+    /// Set one Clip's exact placement position. Returns whether state changed.
+    ///
+    /// The caller owns any evaluation-grid lowering; this method stores the
+    /// exact author time it is given.
+    pub fn set_clip_position(&mut self, clip_id: ClipId, position: TimelineTime) -> bool {
+        let Some(clip) = self.find_clip_mut(clip_id) else {
+            return false;
+        };
+        if clip.position == position {
+            return false;
+        }
+        clip.position = position;
+        true
+    }
+
+    /// Move one Clip to a target Track index at an exact position.
+    ///
+    /// Same-Track moves update the position in place. Cross-Track moves detach
+    /// the Clip and push it onto the target Track; the caller owns subsequent
+    /// conflict resolution and structural compaction.
+    pub fn move_clip_to_track_at_time(
+        &mut self,
+        is_video_track: bool,
+        clip_id: ClipId,
+        target_track_index: usize,
+        target_position: TimelineTime,
+    ) -> bool {
+        let Some(location) = self.clip_track_location(clip_id) else {
+            return false;
+        };
+        if location.is_video_track != is_video_track {
+            return false;
+        }
+        let tracks = if is_video_track {
+            &mut self.video_tracks
+        } else {
+            &mut self.audio_tracks
+        };
+        if target_track_index >= tracks.len() {
+            return false;
+        }
+        let source_track_index = location.track_index;
+        if source_track_index == target_track_index {
+            let Some(clip) =
+                tracks[source_track_index].clips.iter_mut().find(|clip| clip.id == clip_id)
+            else {
+                return false;
+            };
+            clip.position = target_position;
+            return true;
+        }
+        let Some(clip_index) =
+            tracks[source_track_index].clips.iter().position(|clip| clip.id == clip_id)
+        else {
+            return false;
+        };
+        let mut clip = tracks[source_track_index].clips.remove(clip_index);
+        clip.position = target_position;
+        tracks[target_track_index].clips.push(clip);
+        true
+    }
+
+    /// Grow audio Tracks until `index` is a valid audio Track index.
+    pub fn ensure_audio_track_index(&mut self, index: usize) {
+        while self.audio_tracks.len() <= index {
+            self.add_audio_track();
+        }
     }
 
     pub fn audio_track_mut(&mut self, id: TrackId) -> Option<&mut Track> {
@@ -4709,5 +4860,119 @@ mod tests {
                 Some((expected_display.to_owned(), expected_view.to_owned()))
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod clip_mutation_tests {
+    use super::*;
+    use crate::clip::Clip;
+    use mondrian_core::{AssetId, FramePosition, Rational};
+
+    fn at(tb: Rational, frame: i64) -> TimelineTime {
+        TimelineTime::from_frame_position(FramePosition::new(frame, tb)).expect("test time")
+    }
+
+    fn sequence_with_two_video_clips() -> (Sequence, ClipId, ClipId) {
+        let mut sequence = Sequence::new("mutation-tests");
+        let tb = sequence.time_base();
+        let first = Clip::new(AssetId::new(), at(tb, 0), at(tb, 10)).expect("Clip");
+        let second = Clip::new(AssetId::new(), at(tb, 10), at(tb, 10)).expect("Clip");
+        let first_id = first.id;
+        let second_id = second.id;
+        sequence.video_tracks[0].clips.push(first);
+        sequence.video_tracks[0].clips.push(second);
+        (sequence, first_id, second_id)
+    }
+
+    #[test]
+    fn find_and_locate_clips_across_track_kinds() {
+        let (mut sequence, first_id, second_id) = sequence_with_two_video_clips();
+        let tb = sequence.time_base();
+        let audio_clip = Clip::new(AssetId::new(), at(tb, 0), at(tb, 5)).expect("Clip");
+        let audio_id = audio_clip.id;
+        sequence.audio_tracks[0].clips.push(audio_clip);
+
+        assert_eq!(
+            sequence.find_clip(first_id).map(|clip| clip.id),
+            Some(first_id)
+        );
+        assert_eq!(
+            sequence.find_clip(audio_id).map(|clip| clip.id),
+            Some(audio_id)
+        );
+        assert!(sequence.find_clip(ClipId::new()).is_none());
+
+        let video_location = sequence.clip_track_location(second_id).expect("video location");
+        assert!(video_location.is_video_track);
+        assert_eq!(video_location.track_index, 0);
+        assert!(!video_location.is_locked);
+        let audio_location = sequence.clip_track_location(audio_id).expect("audio location");
+        assert!(!audio_location.is_video_track);
+
+        sequence.find_clip_mut(first_id).expect("mut").is_disabled = true;
+        assert!(sequence.find_clip(first_id).expect("readback").is_disabled);
+    }
+
+    #[test]
+    fn remove_disable_and_reposition_clips() {
+        let (mut sequence, first_id, second_id) = sequence_with_two_video_clips();
+        let tb = sequence.time_base();
+
+        assert!(sequence.set_clip_disabled(first_id, true));
+        assert!(
+            !sequence.set_clip_disabled(first_id, true),
+            "no-op reports unchanged"
+        );
+        assert!(sequence.find_clip(first_id).expect("Clip").is_disabled);
+
+        assert!(sequence.set_clip_position(second_id, at(tb, 20)));
+        assert!(!sequence.set_clip_position(second_id, at(tb, 20)));
+        assert_eq!(
+            sequence.find_clip(second_id).expect("Clip").position,
+            at(tb, 20)
+        );
+
+        let removed = sequence.remove_clip_anywhere(first_id).expect("removed");
+        assert_eq!(removed.id, first_id);
+        assert!(sequence.find_clip(first_id).is_none());
+        assert!(sequence.remove_clip_anywhere(first_id).is_none());
+    }
+
+    #[test]
+    fn move_clip_between_tracks_at_time() {
+        let (mut sequence, first_id, _second_id) = sequence_with_two_video_clips();
+        let tb = sequence.time_base();
+        sequence.add_video_track();
+
+        assert!(sequence.move_clip_to_track_at_time(true, first_id, 1, at(tb, 40)));
+        let location = sequence.clip_track_location(first_id).expect("new location");
+        assert_eq!(location.track_index, 1);
+        assert_eq!(
+            sequence.find_clip(first_id).expect("Clip").position,
+            at(tb, 40)
+        );
+        assert!(sequence.video_tracks[0].clips.len() == 1);
+
+        // Same-Track move updates the position in place.
+        assert!(sequence.move_clip_to_track_at_time(true, first_id, 1, at(tb, 45)));
+        assert_eq!(
+            sequence.find_clip(first_id).expect("Clip").position,
+            at(tb, 45)
+        );
+
+        // Out-of-range targets and kind mismatches are rejected without mutation.
+        assert!(!sequence.move_clip_to_track_at_time(true, first_id, 9, at(tb, 0)));
+        assert!(!sequence.move_clip_to_track_at_time(false, first_id, 0, at(tb, 0)));
+    }
+
+    #[test]
+    fn ensure_audio_track_index_grows_only_as_needed() {
+        let mut sequence = Sequence::new("audio-track-tests");
+        let existing = sequence.audio_tracks.len();
+        sequence.ensure_audio_track_index(existing + 1);
+        assert_eq!(sequence.audio_tracks.len(), existing + 2);
+        sequence.ensure_audio_track_index(0);
+        assert_eq!(sequence.audio_tracks.len(), existing + 2);
     }
 }

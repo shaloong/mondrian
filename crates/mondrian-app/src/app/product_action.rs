@@ -32,8 +32,7 @@ use mondrian_timeline::{
 use serde::{Deserialize, Serialize};
 
 use super::exporting::TimelineExportRequest;
-use super::timeline_editing::clip_link_group_member_ids;
-use super::{AppState, CrashRecoveryCandidate};
+use super::{clip_selection_unit, AppState, CrashRecoveryCandidate};
 
 /// External custom-action namespace for Timeline product operations.
 pub const TIMELINE_NAMESPACE: &str = "ui.timeline";
@@ -2237,7 +2236,7 @@ impl<'a> ProductActionAvailability<'a> {
                     return false;
                 }
                 let clip_ids = if payload.include_linked {
-                    clip_link_group_member_ids(sequence, payload.clip_id)
+                    clip_selection_unit(sequence, payload.clip_id).unwrap_or_default()
                 } else {
                     vec![payload.clip_id]
                 };

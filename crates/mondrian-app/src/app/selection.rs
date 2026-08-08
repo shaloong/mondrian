@@ -28,6 +28,33 @@ pub struct SelectedClipRef {
     pub clip_id: ClipId,
 }
 
+/// Find the Clip addressed by a selection, restricted to the selection's
+/// Track kind. After cross-Track moves the Clip may sit on a different Track
+/// than the selection's stored `track_id`, so the kind filter is the only
+/// stable part of the address.
+pub(crate) fn find_clip_by_selection(
+    sequence: &Sequence,
+    selection: SelectedClipRef,
+) -> Option<&mondrian_timeline::Clip> {
+    let location = sequence.clip_track_location(selection.clip_id)?;
+    if location.is_video_track != selection.is_video_track {
+        return None;
+    }
+    sequence.find_clip(selection.clip_id)
+}
+
+/// Mutable counterpart of [`find_clip_by_selection`].
+pub(crate) fn find_clip_mut_by_selection(
+    sequence: &mut Sequence,
+    selection: SelectedClipRef,
+) -> Option<&mut mondrian_timeline::Clip> {
+    let location = sequence.clip_track_location(selection.clip_id)?;
+    if location.is_video_track != selection.is_video_track {
+        return None;
+    }
+    sequence.find_clip_mut(selection.clip_id)
+}
+
 /// UI-agnostic reference to a selected timeline track in the active sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SelectedTrackRef {

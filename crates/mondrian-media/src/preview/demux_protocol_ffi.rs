@@ -5,9 +5,9 @@ use ffmpeg_next as ffmpeg;
 use std::io;
 
 macro_rules! decode_ffi_enum {
-    ($value:expr, $label:literal, $($variant:path),+ $(,)?) => {{
+    ($value:expr, $label:literal, $($(#[$meta:meta])* $variant:path),+ $(,)?) => {{
         match $value {
-            $(value if value == $variant as i32 => Ok($variant),)+
+            $($(#[$meta])* value if value == $variant as i32 => Ok($variant),)+
             value => Err(invalid_data(format!("invalid {} value {value}", $label))),
         }
     }};
@@ -109,8 +109,11 @@ pub(super) fn decode_color_space(value: i32) -> io::Result<ffmpeg::ffi::AVColorS
         AVCOL_SPC_CHROMA_DERIVED_NCL,
         AVCOL_SPC_CHROMA_DERIVED_CL,
         AVCOL_SPC_ICTCP,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AVCOL_SPC_IPT_C2,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AVCOL_SPC_YCGCO_RE,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AVCOL_SPC_YCGCO_RO,
     )
 }
@@ -166,11 +169,17 @@ pub(super) fn decode_side_data_type(value: i32) -> io::Result<ffmpeg::ffi::AVPac
         AV_PKT_DATA_ICC_PROFILE,
         AV_PKT_DATA_DOVI_CONF,
         AV_PKT_DATA_S12M_TIMECODE,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_DYNAMIC_HDR10_PLUS,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_IAMF_MIX_GAIN_PARAM,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_IAMF_DEMIXING_INFO_PARAM,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_IAMF_RECON_GAIN_INFO_PARAM,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_FRAME_CROPPING,
         AV_PKT_DATA_LCEVC,
     )

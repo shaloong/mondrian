@@ -34,7 +34,7 @@ use mondrian_playback::{
     PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, PreviewResolutionScale,
     TransportState, VideoPrerollObservation,
 };
-use mondrian_timeline::clip::{Clip, TrimEdge};
+use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{
     ProgramColorContext, Sequence, SequenceCollection, SequenceSettings,
 };
@@ -45,7 +45,6 @@ use project_persistence::{
 };
 pub(crate) use project_recovery::discover_crash_recovery_candidates;
 pub use project_recovery::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
-use serde::{Deserialize, Serialize};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;
@@ -165,7 +164,6 @@ pub mod thumbnail_service;
 mod timeline_asset_placement;
 mod timeline_clip_gesture;
 mod timeline_commands;
-mod timeline_editing;
 mod timeline_insert;
 mod timeline_position;
 mod timeline_precompose;
@@ -199,11 +197,20 @@ use proxy_generation::{
     ProxyGenerationDiagnostics, ProxyGenerationOrigin, ProxyGenerationRequestOutcome,
     ProxyGenerationService,
 };
+pub(crate) use selection::{find_clip_by_selection, find_clip_mut_by_selection};
 pub use selection::{
     ClipSelectionMode, SelectedClipRef, SelectedEffectRef, SelectedTrackRef,
     SelectedVideoTransitionRef,
 };
-use timeline_editing::*;
+// Timeline edit algorithms live in mondrian-timeline; the App Adapter keeps
+// gesture, selection, and frame-grid policy on top of them.
+pub(crate) use mondrian_timeline::{
+    apply_roll_edit, apply_sequence_track_conflicts_for_focus_group, apply_slide_edit,
+    apply_slip_edit, apply_split_edit, apply_track_conflicts_for_focus_group, clip_selection_unit,
+    expand_clip_selection_units, prepare_trimmed_clip_at_time, resolve_track_conflicts,
+    resolve_track_overlaps, CutEditError, RollEditRequest, SlideEditRequest, SlipEditRequest,
+    SplitEditRequest,
+};
 pub use video_transitions::VideoTransitionHandleState;
 
 #[derive(Debug, Clone)]
@@ -311,12 +318,7 @@ pub struct StatusLogEntry {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum ClipOverlapMode {
-    #[default]
-    Overwrite,
-    PushForward,
-}
+pub use mondrian_timeline::ClipOverlapMode;
 
 // ─────────────────────────────────────────────
 //  AppState — 单向数据流中心

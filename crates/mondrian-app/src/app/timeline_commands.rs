@@ -16,6 +16,46 @@ fn sequence_frame_from_time(
     Ok(time.to_frame_position(frame_rate, FrameRounding::Nearest)?.frame)
 }
 
+/// Estimate the Clip's total source extent on the Sequence evaluation grid
+/// from its Asset probe evidence, when the library can prove one.
+fn estimate_asset_total_source_frames(
+    library: &AssetLibrary,
+    clip: &Clip,
+    time_base: Rational,
+) -> Option<i64> {
+    if clip.is_adjustment_layer() {
+        return None;
+    }
+
+    let asset_id = clip.media_asset_id()?;
+    let asset = match library.get_asset(asset_id) {
+        Ok(Some(asset)) => asset,
+        Ok(None) => return None,
+        Err(err) => {
+            tracing::debug!("读取素材时长失败 {}: {}", asset_id, err);
+            return None;
+        }
+    };
+
+    let media_probe = asset.media_probe()?;
+    let frames_from_stream = media_probe.estimated_frames().map(|v| v as i64).filter(|v| *v > 0);
+    if frames_from_stream.is_some() {
+        return frames_from_stream;
+    }
+
+    let duration_secs = media_probe.duration.as_secs_f64();
+    if duration_secs <= 0.0 {
+        return None;
+    }
+
+    let frame_duration_secs = time_base.to_f64();
+    if frame_duration_secs <= f64::EPSILON {
+        return None;
+    }
+
+    Some((duration_secs / frame_duration_secs).ceil() as i64)
+}
+
 fn sequence_is_nested_reference(sequences: &[Sequence], sequence_id: SequenceId) -> bool {
     sequences.iter().any(|sequence| {
         sequence
@@ -814,7 +854,7 @@ impl AppState {
                 })?;
                 track.add_clip(clip)?;
                 resolve_track_conflicts(track, clip_id, overlap_mode)?;
-                compact_sequence_references(seq);
+                seq.compact_structural_references();
                 let sequence_id = seq.id;
                 Ok((sequence_id, clip_id))
             })?;
@@ -830,7 +870,7 @@ impl AppState {
             } else {
                 seq.remove_audio_track(track_id)?;
             }
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(())
         })?;
 
@@ -886,7 +926,7 @@ impl AppState {
                     seq.remove_audio_track(*track_id)?;
                 }
             }
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(())
         })?;
 
@@ -1043,25 +1083,25 @@ impl AppState {
         };
         self.commit_sequence_edit(sequence_id, action, |seq| {
             let mut clip_ids: HashSet<ClipId> = selections.iter().map(|(_, _, id)| *id).collect();
-            expand_clip_link_groups(seq, &mut clip_ids);
+            expand_clip_selection_units(seq, &mut clip_ids);
 
             if clip_ids.is_empty() {
                 return Ok(0);
             }
 
             for clip_id in &clip_ids {
-                if let Some((track_id, _is_video, is_locked)) = find_clip_track_lock(seq, *clip_id)
-                    && is_locked
+                if let Some(location) = seq.clip_track_location(*clip_id)
+                    && location.is_locked
                 {
                     return Err(mondrian_core::MondrianError::TrackLocked {
-                        track_id: track_id.to_string(),
+                        track_id: location.track_id.to_string(),
                     });
                 }
             }
 
             let mut changed_count = 0usize;
             for clip_id in clip_ids {
-                if set_clip_disabled(seq, clip_id, disabled) {
+                if seq.set_clip_disabled(clip_id, disabled) {
                     changed_count += 1;
                 }
             }
@@ -1070,7 +1110,7 @@ impl AppState {
                 return Ok(0);
             }
 
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(changed_count)
         })
     }
@@ -1088,31 +1128,33 @@ impl AppState {
             }
         })?;
         self.commit_sequence_edit(sequence_id, "删除片段", |seq| {
-            let group_members = clip_link_group_member_ids(seq, clip_id);
+            let group_members = clip_selection_unit(seq, clip_id).unwrap_or_default();
             if group_members.is_empty() {
                 return Err(mondrian_core::MondrianError::ClipNotFound {
                     clip_id: clip_id.to_string(),
                 });
             }
-            let location = find_clip_track_lock(seq, clip_id).ok_or_else(|| {
+            let location = seq.clip_track_location(clip_id).ok_or_else(|| {
                 mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
             })?;
-            if location.0 != track_id || location.1 != is_video_track {
+            if location.track_id != track_id || location.is_video_track != is_video_track {
                 return Err(mondrian_core::MondrianError::ClipNotFound {
                     clip_id: clip_id.to_string(),
                 });
             }
             for member in &group_members {
-                if let Some((member_track, _, true)) = find_clip_track_lock(seq, *member) {
+                if let Some(member_location) = seq.clip_track_location(*member)
+                    && member_location.is_locked
+                {
                     return Err(mondrian_core::MondrianError::TrackLocked {
-                        track_id: member_track.to_string(),
+                        track_id: member_location.track_id.to_string(),
                     });
                 }
             }
             for member in group_members {
-                let _ = remove_clip_from_sequence(seq, member);
+                let _ = seq.remove_clip_anywhere(member);
             }
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(())
         })?;
         self.event_bus.publish(AppEvent::ClipRemoved { sequence_id, clip_id });
@@ -1138,14 +1180,17 @@ impl AppState {
             let mut removed_count = 0usize;
             let mut selected_ids: HashSet<ClipId> =
                 selections.iter().map(|(_, _, id)| *id).collect();
-            expand_clip_link_groups(seq, &mut selected_ids);
+            expand_clip_selection_units(seq, &mut selected_ids);
 
             let mut by_track: HashMap<(TrackId, bool), HashSet<ClipId>> = HashMap::new();
             for clip_id in &selected_ids {
-                let Some((track_id, is_video, _)) = find_clip_track_lock(seq, *clip_id) else {
+                let Some(location) = seq.clip_track_location(*clip_id) else {
                     continue;
                 };
-                by_track.entry((track_id, is_video)).or_default().insert(*clip_id);
+                by_track
+                    .entry((location.track_id, location.is_video_track))
+                    .or_default()
+                    .insert(*clip_id);
             }
 
             for ((track_id, is_video), clip_ids) in by_track {
@@ -1192,7 +1237,7 @@ impl AppState {
                 resolve_track_overlaps(track)?;
             }
 
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(removed_count)
         })
     }
@@ -1368,11 +1413,16 @@ impl AppState {
             }
         })?;
         self.commit_sequence_edit(sequence_id, "滚动修剪", |seq| {
-            let changed = roll_cut_for_clip_internal(seq, clip_id, target_frame)?;
-            if !changed {
+            let time_base = seq.time_base();
+            let target = sequence_time_from_frame(target_frame, time_base)?;
+            let minimum_duration = sequence_time_from_frame(1, time_base)?;
+            let outcome =
+                apply_roll_edit(seq, &RollEditRequest { clip_id, target, minimum_duration })
+                    .map_err(mondrian_core::MondrianError::from)?;
+            if outcome.is_none() {
                 return Ok(false);
             }
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(true)
         })
     }
@@ -1401,17 +1451,36 @@ impl AppState {
         })?;
         self.commit_sequence_edit(sequence_id, "滑移片段", |seq| {
             let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
-            expand_clip_link_groups(seq, &mut targets);
+            expand_clip_selection_units(seq, &mut targets);
+            let time_base = seq.time_base();
+            let delta = sequence_time_from_frame(delta_frames, time_base)?;
             let mut changed_count = 0usize;
 
             for clip_id in targets {
-                match slip_clip_internal(seq, library.as_ref(), clip_id, delta_frames) {
-                    Ok(true) => {
+                let estimated_total_source_extent = {
+                    let Some(clip) = seq.find_clip(clip_id) else {
+                        continue;
+                    };
+                    estimate_asset_total_source_frames(library.as_ref(), clip, time_base)
+                        .map(|frames| sequence_time_from_frame(frames, time_base))
+                        .transpose()?
+                };
+                match apply_slip_edit(
+                    seq,
+                    &SlipEditRequest { clip_id, delta, estimated_total_source_extent },
+                ) {
+                    Ok(Some(_)) => {
                         changed_count += 1;
                     }
-                    Ok(false) => {}
-                    Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
-                    Err(err) => return Err(err),
+                    Ok(None) => {}
+                    Err(CutEditError::UnknownClip { .. }) => continue,
+                    Err(CutEditError::AdjustmentLayerSlip) => {
+                        return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                            step_id: "slip_clip".to_owned(),
+                            reason: "调整图层不支持 slip".to_owned(),
+                        });
+                    }
+                    Err(error) => return Err(mondrian_core::MondrianError::from(error)),
                 }
             }
 
@@ -1419,7 +1488,7 @@ impl AppState {
                 return Ok(0);
             }
 
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(changed_count)
         })
     }
@@ -1441,17 +1510,21 @@ impl AppState {
         })?;
         self.commit_sequence_edit(sequence_id, "滑动片段", |seq| {
             let mut targets = clip_ids.iter().copied().collect::<HashSet<_>>();
-            expand_clip_link_groups(seq, &mut targets);
+            expand_clip_selection_units(seq, &mut targets);
+            let time_base = seq.time_base();
+            let delta = sequence_time_from_frame(delta_frames, time_base)?;
+            let minimum_duration = sequence_time_from_frame(1, time_base)?;
             let mut changed_count = 0usize;
 
             for clip_id in targets {
-                match slide_clip_internal(seq, clip_id, delta_frames) {
-                    Ok(true) => {
+                match apply_slide_edit(seq, &SlideEditRequest { clip_id, delta, minimum_duration })
+                {
+                    Ok(Some(_)) => {
                         changed_count += 1;
                     }
-                    Ok(false) => {}
-                    Err(mondrian_core::MondrianError::ClipNotFound { .. }) => continue,
-                    Err(err) => return Err(err),
+                    Ok(None) => {}
+                    Err(CutEditError::UnknownClip { .. }) => continue,
+                    Err(error) => return Err(mondrian_core::MondrianError::from(error)),
                 }
             }
 
@@ -1459,7 +1532,7 @@ impl AppState {
                 return Ok(0);
             }
 
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(changed_count)
         })
     }
@@ -1555,44 +1628,48 @@ impl AppState {
         clip_id: ClipId,
         split_frame: i64,
     ) -> mondrian_core::Result<Option<SplitClipOutcome>> {
-        let Some((actual_track_id, actual_is_video, _)) = find_clip_track_lock(seq, clip_id) else {
+        let Some(location) = seq.clip_track_location(clip_id) else {
             return Err(mondrian_core::MondrianError::ClipNotFound {
                 clip_id: clip_id.to_string(),
             });
         };
-        if actual_track_id != track_id || actual_is_video != is_video_track {
+        if location.track_id != track_id || location.is_video_track != is_video_track {
             return Err(mondrian_core::MondrianError::ClipNotFound {
                 clip_id: clip_id.to_string(),
             });
         }
-        let members = clip_link_group_member_ids(seq, clip_id);
+        let members = clip_selection_unit(seq, clip_id).unwrap_or_default();
         for member in &members {
-            if let Some((member_track, _, true)) = find_clip_track_lock(seq, *member) {
+            if let Some(member_location) = seq.clip_track_location(*member)
+                && member_location.is_locked
+            {
                 return Err(mondrian_core::MondrianError::TrackLocked {
-                    track_id: member_track.to_string(),
+                    track_id: member_location.track_id.to_string(),
                 });
             }
         }
 
-        let time_base = seq.time_base();
+        let split_time = sequence_time_from_frame(split_frame, seq.time_base())?;
         let mut split_members = Vec::new();
         for member in members {
-            if let Some(result) = split_clip_anywhere(seq, member, split_frame, time_base) {
-                split_members.push(SplitClipMemberOutcome {
+            match apply_split_edit(seq, &SplitEditRequest { clip_id: member, at: split_time }) {
+                Ok(outcome) => split_members.push(SplitClipMemberOutcome {
                     left_clip_id: member,
-                    right_clip_id: result.right_clip_id,
-                });
+                    right_clip_id: outcome.right_clip_id,
+                }),
+                Err(CutEditError::SplitOutOfRange) => {}
+                Err(error) => return Err(mondrian_core::MondrianError::from(error)),
             }
         }
         if split_members.len() >= 2 {
             let right_group = ClipLinkGroupId::new();
             for member in &split_members {
-                if let Some(right) = find_clip_mut(seq, member.right_clip_id) {
+                if let Some(right) = seq.find_clip_mut(member.right_clip_id) {
                     right.link_group = Some(right_group);
                 }
             }
         }
-        compact_sequence_references(seq);
+        seq.compact_structural_references();
         let Some(primary_index) =
             split_members.iter().position(|member| member.left_clip_id == clip_id)
         else {
@@ -1744,7 +1821,7 @@ impl AppState {
                                 track_id: track_id.to_string(),
                             },
                         )?;
-                    ensure_audio_track_index(seq, target_video_index);
+                    seq.ensure_audio_track_index(target_video_index);
                     if let Some(audio_track_id) =
                         seq.audio_tracks.get(target_video_index).map(|track| track.id)
                     {
@@ -1761,7 +1838,7 @@ impl AppState {
                         resolve_track_conflicts(audio_track, audio_clip_id, overlap_mode)?;
                     }
                 }
-                compact_sequence_references(seq);
+                seq.compact_structural_references();
 
                 Ok((clip_id, start_frame))
             })?;
@@ -1829,7 +1906,7 @@ impl AppState {
                     mondrian_core::MondrianError::TrackNotFound { track_id: track_id.to_string() }
                 })?;
                 resolve_track_conflicts(track, clip_id, overlap_mode)?;
-                compact_sequence_references(seq);
+                seq.compact_structural_references();
 
                 Ok((clip_id, start_frame))
             })?;
@@ -1865,11 +1942,12 @@ impl AppState {
                 anchor_frames.entry(*clip_id).or_insert(*start_frame);
             }
             let mut member_ids = anchor_frames.keys().copied().collect::<HashSet<_>>();
-            expand_clip_link_groups(seq, &mut member_ids);
+            expand_clip_selection_units(seq, &mut member_ids);
 
             let mut target_positions = Vec::<(ClipId, i64)>::with_capacity(member_ids.len());
             for clip_id in member_ids {
-                let current_frame = find_clip(seq, clip_id)
+                let current_frame = seq
+                    .find_clip(clip_id)
                     .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
                         clip_id: clip_id.to_string(),
                     })?
@@ -1878,13 +1956,12 @@ impl AppState {
                     .frame;
                 let start_frame = anchor_frames.get(&clip_id).copied().unwrap_or(current_frame);
 
-                let (track_id, _is_video, is_locked) = find_clip_track_lock(seq, clip_id)
-                    .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
-                        clip_id: clip_id.to_string(),
-                    })?;
-                if is_locked {
+                let location = seq.clip_track_location(clip_id).ok_or_else(|| {
+                    mondrian_core::MondrianError::ClipNotFound { clip_id: clip_id.to_string() }
+                })?;
+                if location.is_locked {
                     return Err(mondrian_core::MondrianError::TrackLocked {
-                        track_id: track_id.to_string(),
+                        track_id: location.track_id.to_string(),
                     });
                 }
 
@@ -1902,9 +1979,11 @@ impl AppState {
                 return Ok(0);
             }
 
+            let time_base = seq.time_base();
             let mut changed_count = 0usize;
             for (clip_id, target_frame) in &target_positions {
-                if set_clip_position(seq, *clip_id, *target_frame) {
+                let position = sequence_time_from_frame((*target_frame).max(0), time_base)?;
+                if seq.set_clip_position(*clip_id, position) {
                     changed_count += 1;
                 }
             }
@@ -1915,7 +1994,7 @@ impl AppState {
             let focus_ids: HashSet<ClipId> = target_positions.iter().map(|(id, _)| *id).collect();
             apply_sequence_track_conflicts_for_focus_group(seq, &focus_ids, overlap_mode)?;
 
-            compact_sequence_references(seq);
+            seq.compact_structural_references();
             Ok(changed_count)
         })
     }

@@ -8,13 +8,11 @@
 use super::product_action::{
     TimelineMoveClipPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
-use super::timeline_editing::{
-    apply_sequence_track_conflicts_for_focus_group, clip_link_group_member_ids,
-    compact_sequence_references, find_clip, find_clip_track_index, find_clip_track_lock,
-    move_existing_clip_to_track_index_at_time, prepare_trimmed_clip_at_time,
-};
 use super::timeline_position::lower_nearest_sequence_frame;
-use super::{AppState, ClipOverlapMode};
+use super::{
+    apply_sequence_track_conflicts_for_focus_group, clip_selection_unit,
+    prepare_trimmed_clip_at_time, AppState, ClipOverlapMode,
+};
 use mondrian_core::{ClipId, FramePosition, MondrianError, TimelineTime, TrackId};
 use mondrian_timeline::{clip::TrimEdge, Clip, Sequence};
 use std::collections::{HashMap, HashSet};
@@ -201,13 +199,14 @@ fn prepare_clip_move_to_frame(
             "Timeline position must be non-negative",
         ));
     }
-    let (source_track_id, source_is_video, source_locked) = find_clip_track_lock(sequence, clip_id)
+    let source_location = sequence
+        .clip_track_location(clip_id)
         .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
-    if source_locked {
-        return Err(MondrianError::TrackLocked { track_id: source_track_id.to_string() });
+    if source_location.is_locked {
+        return Err(MondrianError::TrackLocked { track_id: source_location.track_id.to_string() });
     }
-    let source_track_index = find_clip_track_index(sequence, source_is_video, clip_id)
-        .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
+    let source_is_video = source_location.is_video_track;
+    let source_track_index = source_location.track_index;
     let (target_is_video, target_track_index) = resolve_track_index(sequence, target_track_id)?;
     if source_is_video != target_is_video {
         return Err(workflow_error(
@@ -220,28 +219,31 @@ fn prepare_clip_move_to_frame(
         return Err(MondrianError::TrackLocked { track_id: target_track.id.to_string() });
     }
 
-    let primary = find_clip(sequence, clip_id)
+    let primary = sequence
+        .find_clip(clip_id)
         .ok_or_else(|| MondrianError::ClipNotFound { clip_id: clip_id.to_string() })?;
     let primary_target =
         TimelineTime::from_frame_position(FramePosition::new(target_frame, sequence.time_base()))?;
     let time_delta = primary_target.checked_sub(primary.position)?;
     let track_delta = (target_track_index as i128) - (source_track_index as i128);
 
-    let members = clip_link_group_member_ids(sequence, clip_id);
+    let members = clip_selection_unit(sequence, clip_id).unwrap_or_default();
     if members.is_empty() {
         return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
     }
     let mut moves = Vec::with_capacity(members.len());
     let mut changed = false;
     for member in members {
-        let (member_track_id, member_is_video, member_locked) =
-            find_clip_track_lock(sequence, member)
-                .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member.to_string() })?;
-        if member_locked {
-            return Err(MondrianError::TrackLocked { track_id: member_track_id.to_string() });
-        }
-        let member_source_index = find_clip_track_index(sequence, member_is_video, member)
+        let member_location = sequence
+            .clip_track_location(member)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member.to_string() })?;
+        if member_location.is_locked {
+            return Err(MondrianError::TrackLocked {
+                track_id: member_location.track_id.to_string(),
+            });
+        }
+        let member_is_video = member_location.is_video_track;
+        let member_source_index = member_location.track_index;
         let track_count = if member_is_video {
             sequence.video_tracks.len()
         } else {
@@ -262,15 +264,16 @@ fn prepare_clip_move_to_frame(
                 track_id: member_target_track.id.to_string(),
             });
         }
-        let member_position = find_clip(sequence, member)
+        let member_position = sequence
+            .find_clip(member)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member.to_string() })?
             .position;
         let member_target_position = member_position.checked_add(time_delta)?;
         if member_target_position.is_negative() {
             return Err(workflow_error(MOVE_STEP, "移动会使链接组成员越过序列零点"));
         }
-        changed |=
-            member_track_id != member_target_track.id || member_position != member_target_position;
+        changed |= member_location.track_id != member_target_track.id
+            || member_position != member_target_position;
         moves.push(PreparedClipPlacementMove {
             clip_id: member,
             is_video_track: member_is_video,
@@ -301,8 +304,7 @@ fn apply_prepared_clip_move(
                 "prepared Clip move Track kind changed before commit",
             ));
         }
-        if !move_existing_clip_to_track_index_at_time(
-            sequence,
+        if !sequence.move_clip_to_track_at_time(
             movement.is_video_track,
             movement.clip_id,
             target_index,
@@ -312,7 +314,7 @@ fn apply_prepared_clip_move(
         }
     }
     apply_sequence_track_conflicts_for_focus_group(sequence, &plan.focus_ids, overlap_mode)?;
-    compact_sequence_references(sequence);
+    sequence.compact_structural_references();
     Ok(())
 }
 
@@ -335,7 +337,7 @@ fn prepare_bulk_trim_to_frame(
     let mut roots = Vec::with_capacity(clip_ids.len());
     let mut seen_roots = HashSet::with_capacity(clip_ids.len());
     for clip_id in clip_ids {
-        if find_clip(sequence, *clip_id).is_none() {
+        if sequence.find_clip(*clip_id).is_none() {
             return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
         }
         if seen_roots.insert(*clip_id) {
@@ -349,14 +351,16 @@ fn prepare_bulk_trim_to_frame(
         if claimed_members.contains(&root_id) {
             continue;
         }
-        let root = find_clip(sequence, root_id)
+        let root = sequence
+            .find_clip(root_id)
             .ok_or_else(|| MondrianError::ClipNotFound { clip_id: root_id.to_string() })?;
         let requested_delta = target.checked_sub(clip_edge_time(root, edge)?)?;
-        let member_ids = clip_link_group_member_ids(sequence, root_id);
+        let member_ids = clip_selection_unit(sequence, root_id).unwrap_or_default();
         let mut minimum_delta: Option<TimelineTime> = None;
         let mut maximum_delta: Option<TimelineTime> = None;
         for member_id in &member_ids {
-            let member = find_clip(sequence, *member_id)
+            let member = sequence
+                .find_clip(*member_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member_id.to_string() })?;
             let (member_minimum, member_maximum) =
                 trim_delta_bounds(member, edge, minimum_duration)?;
@@ -370,7 +374,8 @@ fn prepare_bulk_trim_to_frame(
             delta = delta.min(maximum_delta);
         }
         for member_id in member_ids {
-            let member = find_clip(sequence, member_id)
+            let member = sequence
+                .find_clip(member_id)
                 .ok_or_else(|| MondrianError::ClipNotFound { clip_id: member_id.to_string() })?;
             let member_target = clip_edge_time(member, edge)?.checked_add(delta)?;
             claimed_members.insert(member_id);
@@ -453,7 +458,7 @@ fn apply_prepared_bulk_trim(
     for track in sequence.video_tracks.iter_mut().chain(&mut sequence.audio_tracks) {
         track.clips.sort_by_key(|clip| clip.position);
     }
-    compact_sequence_references(sequence);
+    sequence.compact_structural_references();
     Ok(())
 }
 

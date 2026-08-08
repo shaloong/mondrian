@@ -8,6 +8,7 @@ use mondrian_timeline::sequence::{
     ColorWorkflow, DeliveryBitDepth, FieldOrder, PixelAspectRatio, VideoRange,
 };
 use mondrian_timeline::TrackRelativePlacement;
+use mondrian_timeline::TrimEdge;
 
 fn create_state_with_sequence() -> AppState {
     let mut state = AppState::new();
@@ -1160,15 +1161,15 @@ fn delta_move_expands_a_three_member_link_group_atomically() {
     assert_eq!(changed, 3);
     let sequence = state.active_sequence().expect("sequence");
     assert_eq!(
-        find_clip(sequence, first_id).expect("first").position,
+        sequence.find_clip(first_id).expect("first").position,
         tt(7, tb)
     );
     assert_eq!(
-        find_clip(sequence, second_id).expect("second").position,
+        sequence.find_clip(second_id).expect("second").position,
         tt(12, tb)
     );
     assert_eq!(
-        find_clip(sequence, audio_id).expect("audio").position,
+        sequence.find_clip(audio_id).expect("audio").position,
         tt(7, tb)
     );
 }
@@ -1370,7 +1371,7 @@ fn removing_track_prunes_stale_app_selection() {
     state.selection.selected_mask = Some((MaskId::new(), removed_clip_id, removed_track_id));
     let opacity_property = state
         .active_sequence()
-        .and_then(|sequence| find_clip(sequence, removed_clip_id))
+        .and_then(|sequence| sequence.find_clip(removed_clip_id))
         .and_then(|clip| {
             clip.transform.to_property_bag().address_for_path(Transform2D::OPACITY_PATH)
         })
@@ -2029,11 +2030,11 @@ fn linked_move_preserves_exact_subframe_offsets() {
 
     let sequence = state.active_sequence().expect("sequence");
     assert_eq!(
-        find_clip(sequence, video_id).expect("video Clip").position,
+        sequence.find_clip(video_id).expect("video Clip").position,
         tt(5, tb)
     );
     assert_eq!(
-        find_clip(sequence, audio_id).expect("audio Clip").position,
+        sequence.find_clip(audio_id).expect("audio Clip").position,
         tt(5, tb).checked_add(sample_offset).expect("offset target")
     );
 }
@@ -2068,15 +2069,16 @@ fn bulk_trim_preserves_exact_offset_link_edges() {
 
     let sequence = state.active_sequence().expect("sequence");
     assert_eq!(
-        find_clip(sequence, video_id).expect("video Clip").duration,
+        sequence.find_clip(video_id).expect("video Clip").duration,
         tt(5, tb)
     );
     assert_eq!(
-        find_clip(sequence, audio_id).expect("audio Clip").duration,
+        sequence.find_clip(audio_id).expect("audio Clip").duration,
         tt(5, tb)
     );
     assert_eq!(
-        find_clip(sequence, audio_id)
+        sequence
+            .find_clip(audio_id)
             .expect("audio Clip")
             .end_position()
             .expect("audio end"),
@@ -2087,10 +2089,10 @@ fn bulk_trim_preserves_exact_offset_link_edges() {
     assert!(state.undo_timeline().expect("undo linked Trim"));
     let sequence = state.active_sequence().expect("sequence after Undo");
     assert_eq!(
-        find_clip(sequence, video_id).expect("restored video Clip").duration,
+        sequence.find_clip(video_id).expect("restored video Clip").duration,
         tt(10, tb)
     );
-    let restored_audio = find_clip(sequence, audio_id).expect("restored audio Clip");
+    let restored_audio = sequence.find_clip(audio_id).expect("restored audio Clip");
     assert_eq!(restored_audio.position, sample_offset);
     assert_eq!(restored_audio.duration, tt(10, tb));
 }
@@ -2124,8 +2126,8 @@ fn bulk_trim_uses_the_complete_link_groups_common_delta_limit() {
     assert_eq!(changed, 2);
 
     let sequence = state.active_sequence().expect("sequence");
-    let video = find_clip(sequence, video_id).expect("video Clip");
-    let audio = find_clip(sequence, audio_id).expect("audio Clip");
+    let video = sequence.find_clip(video_id).expect("video Clip");
+    let audio = sequence.find_clip(audio_id).expect("audio Clip");
     assert_eq!(video.duration, tt(8, tb));
     assert_eq!(audio.duration, tt(1, tb));
     assert_eq!(
@@ -2199,7 +2201,10 @@ fn bulk_trim_rejects_stale_or_locked_link_members_atomically() {
         .trim_clips_bulk_to_frame(&[video_id, ClipId::new()], TrimEdge::Out, 5)
         .expect_err("one stale identity must reject the complete trim");
     assert_eq!(
-        find_clip(state.active_sequence().expect("sequence"), video_id)
+        state
+            .active_sequence()
+            .expect("sequence")
+            .find_clip(video_id)
             .expect("video Clip")
             .duration,
         tt(10, tb)
@@ -2211,11 +2216,11 @@ fn bulk_trim_rejects_stale_or_locked_link_members_atomically() {
         .expect_err("one locked Link Group member must reject the complete trim");
     let sequence = state.active_sequence().expect("sequence");
     assert_eq!(
-        find_clip(sequence, video_id).expect("video Clip").duration,
+        sequence.find_clip(video_id).expect("video Clip").duration,
         tt(10, tb)
     );
     assert_eq!(
-        find_clip(sequence, audio_id).expect("audio Clip").duration,
+        sequence.find_clip(audio_id).expect("audio Clip").duration,
         tt(10, tb)
     );
     assert!(!state.can_undo_action());
