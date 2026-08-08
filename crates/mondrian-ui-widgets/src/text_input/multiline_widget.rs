@@ -1335,6 +1335,13 @@ mod tests {
         modifiers
     }
 
+    /// Redo adds Shift to the primary modifier on every platform.
+    fn redo_modifiers() -> Modifiers {
+        let mut modifiers = primary_modifiers();
+        modifiers.shift = true;
+        modifiers
+    }
+
     // ── TextUndoStack ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1921,12 +1928,9 @@ mod tests {
         );
         assert_eq!(widget.text(), "hello");
 
-        // Redo (Ctrl+Shift+Z on Windows)
+        // Redo is primary+Shift: Command on macOS, Control elsewhere.
         widget.event(
-            &UiEvent::KeyDown {
-                key: KeyCode::Z,
-                modifiers: Modifiers { ctrl: true, shift: true, alt: false, meta: false },
-            },
+            &UiEvent::KeyDown { key: KeyCode::Z, modifiers: redo_modifiers() },
             &mut ctx,
         );
         assert_eq!(widget.text(), "hellox");
