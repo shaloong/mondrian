@@ -27,7 +27,11 @@ On Windows, install a toolchain capable of building native Rust crates and use
 `ffmpeg`/`ffprobe` provide supervised CLI adapters, and the explicit encoder
 features match Export's current software backends. A default
 `ffmpeg:x64-windows` install is not a supported Mondrian runtime. Ensure those
-development libraries and tools are discoverable by the build.
+development libraries and tools are discoverable by the build. The vcpkg
+install also provisions `pkgconf`; the bundled OCIO build invokes a
+`pkg-config` executable to resolve its own install metadata, so either set
+`PKG_CONFIG` to `tools\pkgconf\pkgconf.exe` or place a `pkg-config.exe` copy
+on `PATH`.
 
 On Debian/Ubuntu, install the same native surface used by CI:
 

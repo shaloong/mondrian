@@ -147,7 +147,7 @@ walkdir          = "2"
 tempfile         = "3"
 
 # ---- 颜色管理 ----
-ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", tag = "v0.2.1", features = ["bundled"] }
+ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "9b7837cfdcb94a9710009b4b9a098f2c8a304e15", features = ["bundled"] }
 
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

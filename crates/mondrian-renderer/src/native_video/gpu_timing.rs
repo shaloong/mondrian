@@ -5,10 +5,14 @@
 //! timestamp lifecycle; the semantically fixed Viewer suffix timestamps cannot
 //! describe this work.
 
+#[cfg(target_os = "windows")]
 use crate::profile::gpu_timestamp_query_device_features;
+#[cfg(target_os = "windows")]
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+#[cfg(target_os = "windows")]
 const NATIVE_IMPORT_TIMESTAMP_COUNT: u32 = 3;
+#[cfg(target_os = "windows")]
 const NATIVE_IMPORT_TIMESTAMP_READBACK_BYTES: u64 =
     NATIVE_IMPORT_TIMESTAMP_COUNT as u64 * wgpu::QUERY_SIZE as u64;
 
@@ -212,6 +216,7 @@ impl NativeVideoImportGpuTimingDiagnostics {
 }
 
 #[derive(Debug)]
+#[cfg(target_os = "windows")]
 pub(super) struct NativeVideoImportGpuTimingProbe {
     candidate_token: Option<NativeVideoImportCandidateToken>,
     import_token: Option<NativeVideoImportToken>,
@@ -220,6 +225,7 @@ pub(super) struct NativeVideoImportGpuTimingProbe {
 }
 
 #[derive(Debug)]
+#[cfg(target_os = "windows")]
 enum NativeVideoImportGpuTimingProbeDisposition {
     Recording(NativeVideoImportGpuTimestampToken),
     Missing,
@@ -227,12 +233,14 @@ enum NativeVideoImportGpuTimingProbeDisposition {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "windows")]
 enum NativeVideoImportCandidateSampleDisposition {
     Scheduled,
     Missing,
     Dropped,
 }
 
+#[cfg(target_os = "windows")]
 pub(super) struct NativeVideoImportGpuTimingRuntime {
     ring: Option<NativeVideoImportGpuTimestampRing>,
     capability_supported: bool,
@@ -246,6 +254,7 @@ pub(super) struct NativeVideoImportGpuTimingRuntime {
     completed: Vec<NativeVideoImportGpuTimingSample>,
 }
 
+#[cfg(target_os = "windows")]
 struct NativeVideoImportActiveCandidate {
     token: NativeVideoImportCandidateToken,
     submitted_imports: u64,
@@ -254,6 +263,7 @@ struct NativeVideoImportActiveCandidate {
     dropped_samples: u64,
 }
 
+#[cfg(target_os = "windows")]
 impl NativeVideoImportActiveCandidate {
     const fn new(token: NativeVideoImportCandidateToken) -> Self {
         Self {
@@ -282,6 +292,7 @@ impl NativeVideoImportActiveCandidate {
     }
 }
 
+#[cfg(target_os = "windows")]
 impl NativeVideoImportGpuTimingRuntime {
     pub(super) fn new(
         device: &wgpu::Device,
@@ -647,6 +658,7 @@ impl NativeVideoImportGpuTimingRuntime {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn activated_capacity(
     capability_supported: bool,
     policy: NativeVideoImportGpuTimingPolicy,
@@ -674,6 +686,7 @@ fn activated_capacity(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn allocate_token(next: &mut u64) -> Option<u64> {
     let token = *next;
     let successor = token.checked_add(1)?;
@@ -682,29 +695,34 @@ fn allocate_token(next: &mut u64) -> Option<u64> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(target_os = "windows")]
 struct NativeVideoImportGpuTimestampToken {
     id: u64,
     slot: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "windows")]
 struct NativeVideoImportGpuTimestampMetadata {
     candidate_token: NativeVideoImportCandidateToken,
     import_token: NativeVideoImportToken,
     decode_fence_ready_at_admission: Option<bool>,
 }
 
+#[cfg(target_os = "windows")]
 enum NativeVideoImportGpuTimestampAdmission {
     Recording(NativeVideoImportGpuTimestampToken),
     Dropped,
 }
 
 #[derive(Debug, Clone, Copy)]
+#[cfg(target_os = "windows")]
 enum NativeVideoImportGpuTimestampMarker {
     AfterYuv,
     AfterInputColor,
 }
 
+#[cfg(target_os = "windows")]
 impl NativeVideoImportGpuTimestampMarker {
     const fn query_index(self) -> u32 {
         match self {
@@ -714,17 +732,20 @@ impl NativeVideoImportGpuTimestampMarker {
     }
 }
 
+#[cfg(target_os = "windows")]
 struct NativeVideoImportGpuTimestampRing {
     slots: Vec<NativeVideoImportGpuTimestampSlot>,
     completed: Vec<NativeVideoImportGpuTimingSample>,
     next_id: u64,
 }
 
+#[cfg(target_os = "windows")]
 struct NativeVideoImportGpuTimestampSlot {
     timer: NativeVideoImportGpuTimestampTimer,
     state: NativeVideoImportGpuTimestampSlotState,
 }
 
+#[cfg(target_os = "windows")]
 enum NativeVideoImportGpuTimestampSlotState {
     Free,
     Recording {
@@ -738,6 +759,7 @@ enum NativeVideoImportGpuTimestampSlotState {
     },
 }
 
+#[cfg(target_os = "windows")]
 impl NativeVideoImportGpuTimestampRing {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, capacity: usize) -> Self {
         debug_assert!(capacity > 0);
@@ -933,6 +955,7 @@ impl NativeVideoImportGpuTimestampRing {
     }
 }
 
+#[cfg(target_os = "windows")]
 struct NativeVideoImportGpuTimestampTimer {
     query_set: wgpu::QuerySet,
     resolve_buffer: wgpu::Buffer,
@@ -940,6 +963,7 @@ struct NativeVideoImportGpuTimestampTimer {
     timestamp_period_ns: f64,
 }
 
+#[cfg(target_os = "windows")]
 impl NativeVideoImportGpuTimestampTimer {
     fn new(device: &wgpu::Device, queue: &wgpu::Queue, slot: usize) -> Self {
         let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -1044,6 +1068,7 @@ impl NativeVideoImportGpuTimestampTimer {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn timestamp_elapsed_us(start: u64, end: u64, timestamp_period_ns: f64) -> Result<u64, String> {
     let ticks = end.checked_sub(start).ok_or_else(|| {
         format!("native-import GPU timestamp counter regressed from {start} to {end}")
@@ -1052,7 +1077,7 @@ fn timestamp_elapsed_us(start: u64, end: u64, timestamp_period_ns: f64) -> Resul
     Ok(elapsed_us.min(u64::MAX as f64) as u64)
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
 

@@ -36,6 +36,10 @@ pub struct NativeVideoImportCpuTimings {
 }
 
 impl NativeVideoImportCpuTimings {
+    /// Accumulate per-stage attribution across the bridge sub-executions of
+    /// one import. Currently only the D3D12 backend splits an import into
+    /// separately measured bridge stages.
+    #[cfg(target_os = "windows")]
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.source_validation_us =
             self.source_validation_us.saturating_add(other.source_validation_us);
@@ -51,7 +55,7 @@ impl NativeVideoImportCpuTimings {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "windows"))]
 mod timing_tests {
     use super::NativeVideoImportCpuTimings;
 

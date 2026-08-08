@@ -14,14 +14,16 @@ use mondrian_media::{
     PreviewNativeDecodedFrame,
 };
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+use crate::execute_native_decoded_frame_import;
 #[cfg(target_os = "windows")]
 use crate::D3D12NativeVideoImportBackend;
+#[cfg(target_os = "windows")]
+use crate::GpuNativeDecodedFrameImportBackend;
 #[cfg(target_os = "macos")]
 use crate::MetalNativeVideoImportBackend;
 #[cfg(target_os = "linux")]
 use crate::VulkanNativeVideoImportBackend;
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
-use crate::{execute_native_decoded_frame_import, GpuNativeDecodedFrameImportBackend};
 use crate::{
     CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,

@@ -147,11 +147,11 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
             .resource::<FfmpegNativeDecodedFrameResource>()
             .ok_or_else(|| rejected("VA-API frame has no retained FFmpeg resource".to_owned()))?;
         let drm_frame = resource.drm_prime_frame().map_err(|error| rejected(error.to_string()))?;
-        let planes = validate_drm_layout(&drm_frame, plan.source_texture_format)?;
+        let planes = validate_drm_layout(drm_frame, plan.source_texture_format)?;
         let (luma_format, chroma_format) = plane_formats(plan.source_texture_format);
         let luma = import_plane(
             device,
-            &drm_frame,
+            drm_frame,
             planes[0],
             native_frame.width,
             native_frame.height,
@@ -160,7 +160,7 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
         )?;
         let chroma = import_plane(
             device,
-            &drm_frame,
+            drm_frame,
             planes[1],
             native_frame.width.div_ceil(2),
             native_frame.height.div_ceil(2),

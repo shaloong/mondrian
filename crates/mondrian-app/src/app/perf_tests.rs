@@ -84,10 +84,9 @@ use mondrian_media::{
     probe_media_info, MediaInfo, PreviewDecodeAccessMode, PreviewDecodeExecutionStage,
     PreviewDecodeStageDurations, VideoColorDiagnostic, VideoColorDiagnosticIssueAggregate,
 };
-use mondrian_platform::{
-    PlaybackThreadScheduling, PlaybackThreadSchedulingStatus, ProcessMemoryProbe,
-    SystemPlatformService,
-};
+#[cfg(target_os = "windows")]
+use mondrian_platform::PlaybackThreadSchedulingStatus;
+use mondrian_platform::{PlaybackThreadScheduling, ProcessMemoryProbe, SystemPlatformService};
 use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{

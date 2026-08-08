@@ -78,26 +78,26 @@ pub(crate) fn display_icc_profile(
 }
 
 pub(crate) fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
-    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        if let Ok(evidence) = cached_wayland_evidence(target) {
-            let active_hdr =
-                evidence.transfer_function.as_deref().is_some_and(is_hdr_transfer_function);
-            return DisplayHdrProbeResult::found(
-                DisplayProbeBackend::WaylandColorManagementV1,
-                evidence.display_name,
-                DisplayHdrProbeDetails {
-                    hdr_supported: active_hdr.then_some(true),
-                    hdr_enabled: Some(active_hdr),
-                    wide_color_active: evidence.wide_color_active,
-                    force_disabled: Some(false),
-                    active_transfer_function: evidence.transfer_function,
-                    sdr_reference_white_nits: evidence.reference_white_nits,
-                    min_luminance_millinits: evidence.min_luminance_millinits,
-                    max_luminance_nits: evidence.max_luminance_nits,
-                    ..DisplayHdrProbeDetails::default()
-                },
-            );
-        }
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && let Ok(evidence) = cached_wayland_evidence(target)
+    {
+        let active_hdr =
+            evidence.transfer_function.as_deref().is_some_and(is_hdr_transfer_function);
+        return DisplayHdrProbeResult::found(
+            DisplayProbeBackend::WaylandColorManagementV1,
+            evidence.display_name,
+            DisplayHdrProbeDetails {
+                hdr_supported: active_hdr.then_some(true),
+                hdr_enabled: Some(active_hdr),
+                wide_color_active: evidence.wide_color_active,
+                force_disabled: Some(false),
+                active_transfer_function: evidence.transfer_function,
+                sdr_reference_white_nits: evidence.reference_white_nits,
+                min_luminance_millinits: evidence.min_luminance_millinits,
+                max_luminance_nits: evidence.max_luminance_nits,
+                ..DisplayHdrProbeDetails::default()
+            },
+        );
     }
 
     match drm_hdr_state(target) {
@@ -300,12 +300,12 @@ fn cached_wayland_evidence(
 ) -> Result<WaylandDisplayEvidence, String> {
     static CACHE: OnceLock<Mutex<Option<WaylandCacheEntry>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((cached_target, timestamp, result)) = guard.as_ref() {
-            if *cached_target == target && timestamp.elapsed() < Duration::from_millis(500) {
-                return result.clone();
-            }
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some((cached_target, timestamp, result)) = guard.as_ref()
+        && *cached_target == target
+        && timestamp.elapsed() < Duration::from_millis(500)
+    {
+        return result.clone();
     }
 
     let result = wayland_evidence(target);

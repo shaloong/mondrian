@@ -226,10 +226,9 @@ impl GpuContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        native_video_adapter_priority, native_video_texture_device_features,
-        ocio_lut_filtering_device_features,
-    };
+    #[cfg(target_os = "windows")]
+    use super::native_video_adapter_priority;
+    use super::{native_video_texture_device_features, ocio_lut_filtering_device_features};
 
     #[test]
     fn ocio_lut_filtering_feature_is_requested_only_when_supported() {
