@@ -369,7 +369,7 @@ impl ViewerNativeVideoImportRuntime {
             return backend.gpu_timing_diagnostics();
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        if self.support.available {
+        if self.support.renderer_backend_ready {
             return NativeVideoImportGpuTimingDiagnostics::inactive(
                 false,
                 "native-import GPU timestamp attribution is not implemented for this backend",

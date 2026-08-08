@@ -185,6 +185,10 @@ pub use native_video::{
     GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO, NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
     NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION,
 };
+#[cfg(target_os = "macos")]
+pub use native_video::{MetalNativeVideoImportBackend, MetalNativeVideoImportBackendCreateError};
+#[cfg(target_os = "linux")]
+pub use native_video::{VulkanNativeVideoImportBackend, VulkanNativeVideoImportBackendCreateError};
 pub use ocio_gpu::{
     OcioGpuBindingContract, OcioGpuBindingContractValidationError,
     OcioGpuFullscreenWrapperContract, OcioGpuGeneratedProgramContract,

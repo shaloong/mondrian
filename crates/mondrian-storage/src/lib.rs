@@ -453,6 +453,7 @@ impl OwnedPublicationFile {
                     )),
                 }
             }
+            #[cfg(windows)]
             AtomicPublicationOutcome::PublishedDurabilityUnconfirmed { disposition, source } => {
                 self.apply_disposition(disposition);
                 Err(FilePublicationFailure::DurabilityUnconfirmed(
@@ -463,6 +464,7 @@ impl OwnedPublicationFile {
                     },
                 ))
             }
+            #[cfg(windows)]
             AtomicPublicationOutcome::NamespaceIndeterminate { retained_new_path, source } => {
                 self.owns_path = false;
                 Err(FilePublicationFailure::NamespaceIndeterminate(
@@ -810,10 +812,18 @@ enum SourceDisposition {
 #[derive(Debug)]
 enum AtomicPublicationOutcome {
     Published(SourceDisposition),
+    /// The platform move primitive reported an error yet the new object is
+    /// visible at the target. POSIX `rename`/`link` are atomic: a failed call
+    /// proves an unchanged namespace, so this outcome is only reachable where
+    /// the primitive is weaker (`MoveFileExW`).
+    #[cfg(windows)]
     PublishedDurabilityUnconfirmed {
         disposition: SourceDisposition,
         source: std::io::Error,
     },
+    /// The platform move primitive cannot prove the resulting namespace. POSIX
+    /// `rename`/`link` cannot reach this state for the same atomicity reason.
+    #[cfg(windows)]
     NamespaceIndeterminate {
         retained_new_path: Option<PathBuf>,
         source: std::io::Error,

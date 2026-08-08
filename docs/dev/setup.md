@@ -29,6 +29,21 @@ features match Export's current software backends. A default
 `ffmpeg:x64-windows` install is not a supported Mondrian runtime. Ensure those
 development libraries and tools are discoverable by the build.
 
+On Debian/Ubuntu, install the same native surface used by CI:
+
+```bash
+sudo apt-get install -y --no-install-recommends \
+  ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+  libavdevice-dev libswscale-dev libswresample-dev \
+  libasound2-dev libdbus-1-dev pkg-config
+```
+
+`libdbus-1-dev` is required because screen capture for the eyedropper (`xcap`)
+uses the XDG portal D-Bus API on Linux; it is a functional dependency, not an
+optional convenience.
+
+On macOS, use `brew install ffmpeg pkg-config`.
+
 ## Optional Tools
 
 - `cargo-nextest` for faster test runs

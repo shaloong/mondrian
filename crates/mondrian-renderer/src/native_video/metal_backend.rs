@@ -148,6 +148,22 @@ struct MetalNativeYuvPlaneAdapter {
     support: GpuNativeDecodedFrameImportSupport,
 }
 
+/// Carries one retained CoreVideo texture into the wgpu HAL drop callback.
+///
+/// The HAL may invoke its drop callback on the thread that destroys the
+/// texture, which is not necessarily the thread that created the CoreVideo
+/// object. CoreVideo reference counting is thread-safe and this wrapper's only
+/// reachable operation is the final release, so transferring it is sound.
+struct CvMetalTextureReleaseGuard {
+    texture: CFRetained<CVMetalTexture>,
+}
+
+// SAFETY: The wrapper exposes no operation other than dropping the retained
+// CoreVideo object, and CoreVideo retain/release is thread-safe.
+unsafe impl Send for CvMetalTextureReleaseGuard {}
+// SAFETY: See the Send implementation; no shared access is ever exposed.
+unsafe impl Sync for CvMetalTextureReleaseGuard {}
+
 impl DirectNativeYuvPlaneAdapter for MetalNativeYuvPlaneAdapter {
     fn support(&self) -> &GpuNativeDecodedFrameImportSupport {
         &self.support
@@ -280,6 +296,7 @@ fn wrap_plane(
     // reference; wgpu never destroys the external MTLTexture itself.
     let hal_device = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }
         .ok_or_else(|| rejected("wgpu Metal HAL device disappeared".to_owned()))?;
+    let release_guard = CvMetalTextureReleaseGuard { texture: cv_texture };
     let hal_texture = unsafe {
         wgpu::hal::metal::Device::texture_from_raw(
             metal_texture,
@@ -288,7 +305,7 @@ fn wrap_plane(
             1,
             1,
             wgpu::hal::CopyExtent { width: width_u32, height: height_u32, depth: 1 },
-            Some(Box::new(move || drop(cv_texture))),
+            Some(Box::new(move || drop(release_guard.texture))),
         )
     };
     drop(hal_device);
