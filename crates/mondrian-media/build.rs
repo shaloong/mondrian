@@ -27,7 +27,12 @@ fn libavcodec_at_least_7_1() -> bool {
             // FFmpeg 7.1 ships libavcodec 61.19.
             major > 61 || (major == 61 && minor >= 19)
         }
-        None => false,
+        None => {
+            println!(
+                "cargo:warning=libavcodec version undetectable; assuming the oldest supported FFmpeg surface (6.1). Set FFMPEG_DIR, FFMPEG_INCLUDE_DIR, VCPKG_ROOT, or PKG_CONFIG_PATH so the media build can expose the full header surface."
+            );
+            false
+        }
     }
 }
 
@@ -74,9 +79,13 @@ fn candidate_include_dirs() -> Vec<PathBuf> {
 }
 
 fn parse_version_header(include_dir: &std::path::Path) -> Option<(u32, u32)> {
-    let text = std::fs::read_to_string(include_dir.join("libavcodec").join("version.h")).ok()?;
-    let major = parse_define(&text, "LIBAVCODEC_VERSION_MAJOR")?;
+    let avcodec_dir = include_dir.join("libavcodec");
+    let text = std::fs::read_to_string(avcodec_dir.join("version.h")).ok()?;
     let minor = parse_define(&text, "LIBAVCODEC_VERSION_MINOR")?;
+    let major = parse_define(&text, "LIBAVCODEC_VERSION_MAJOR").or_else(|| {
+        let major_text = std::fs::read_to_string(avcodec_dir.join("version_major.h")).ok()?;
+        parse_define(&major_text, "LIBAVCODEC_VERSION_MAJOR")
+    })?;
     Some((major, minor))
 }
 

@@ -234,6 +234,7 @@ impl FfmpegNativeDecodedFrameResource {
     }
 
     /// Borrow FFmpeg's D3D12 resource and decode-completion fence ABI.
+    #[cfg(mondrian_ffmpeg_7_1)]
     pub fn d3d12_texture(
         &self,
     ) -> std::result::Result<FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResourceError> {
@@ -452,6 +453,7 @@ fn decoded_handle_kind_from_hardware_pixel(
     use ffmpeg::util::format::pixel::Pixel;
 
     match pixel_format {
+        #[cfg(mondrian_ffmpeg_7_1)]
         Pixel::D3D12 => Some(DecodedGpuFrameHandleKind::D3D12Resource),
         Pixel::D3D11 | Pixel::D3D11VA_VLD => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
         Pixel::DXVA2_VLD => Some(DecodedGpuFrameHandleKind::Dxva2Surface),
@@ -483,6 +485,7 @@ pub(super) fn parse_ffmpeg_d3d11_texture(
 }
 
 #[repr(C)]
+#[cfg(mondrian_ffmpeg_7_1)]
 pub(super) struct FfmpegAvD3D12VaSyncContext {
     pub(super) fence: *mut c_void,
     pub(super) event: *mut c_void,
@@ -490,11 +493,13 @@ pub(super) struct FfmpegAvD3D12VaSyncContext {
 }
 
 #[repr(C)]
+#[cfg(mondrian_ffmpeg_7_1)]
 pub(super) struct FfmpegAvD3D12VaFrame {
     pub(super) texture: *mut c_void,
     pub(super) sync_ctx: FfmpegAvD3D12VaSyncContext,
 }
 
+#[cfg(mondrian_ffmpeg_7_1)]
 fn parse_ffmpeg_d3d12_texture(
     frame: NonNull<ffmpeg::ffi::AVFrame>,
     pixel_format: ffmpeg::util::format::pixel::Pixel,

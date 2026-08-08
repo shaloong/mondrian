@@ -9,8 +9,7 @@ use super::{
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
     resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
     select_decoded_temporal_candidate, temporal_selection_is_approximate, DecodedRgbaFrameContract,
-    DecodedTemporalCandidate, DecodedTemporalExtent, FfmpegAvD3D12VaFrame,
-    FfmpegAvD3D12VaSyncContext, FfmpegNativeDecodedFrameResource,
+    DecodedTemporalCandidate, DecodedTemporalExtent, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp, MediaFileFingerprint,
     MediaFileObjectIdentity, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
     PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeCancellation,
@@ -33,6 +32,8 @@ use super::{
     PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
+#[cfg(mondrian_ffmpeg_7_1)]
+use super::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
@@ -405,6 +406,7 @@ fn synthetic_d3d11_frame(
     frame
 }
 
+#[cfg(mondrian_ffmpeg_7_1)]
 fn synthetic_d3d12_frame(
     software_format: ffmpeg::ffi::AVPixelFormat,
 ) -> ffmpeg::util::frame::video::Video {
@@ -1971,6 +1973,7 @@ fn ffmpeg_native_resource_retains_d3d11_surface_buffer_and_abi_view() {
     assert_eq!(view.array_slice(), 3);
 }
 
+#[cfg(mondrian_ffmpeg_7_1)]
 #[test]
 fn ffmpeg_native_resource_retains_d3d12_resource_and_fence_abi() {
     let mut frame = ffmpeg::util::frame::video::Video::empty();
@@ -2249,6 +2252,7 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
     assert_eq!(plan.native_decode_fallback, None);
 }
 
+#[cfg(mondrian_ffmpeg_7_1)]
 #[test]
 fn explicit_d3d12_p010_frame_materializes_native_with_decode_fence() {
     let decoded = synthetic_d3d12_frame(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE);

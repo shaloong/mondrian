@@ -385,10 +385,20 @@ fn materialize_native_decoded_frame(
 ) -> std::result::Result<PreviewNativeDecodedFrame, PreviewNativeFrameMaterializationError> {
     use ffmpeg::util::format::pixel::Pixel;
 
-    if !matches!(
+    let is_hardware_pixel = matches!(
         decoded.format(),
-        Pixel::D3D12 | Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI
-    ) {
+        Pixel::D3D11 | Pixel::VIDEOTOOLBOX | Pixel::VAAPI
+    ) || {
+        #[cfg(mondrian_ffmpeg_7_1)]
+        {
+            decoded.format() == Pixel::D3D12
+        }
+        #[cfg(not(mondrian_ffmpeg_7_1))]
+        {
+            false
+        }
+    };
+    if !is_hardware_pixel {
         return Err(
             PreviewNativeFrameMaterializationError::UnsupportedHardwarePixelFormat {
                 pixel_format: decoded.format(),
@@ -403,6 +413,7 @@ fn materialize_native_decoded_frame(
         session_output_lease,
     )?;
     match decoded.format() {
+        #[cfg(mondrian_ffmpeg_7_1)]
         Pixel::D3D12 => {
             resource.d3d12_texture()?;
         }

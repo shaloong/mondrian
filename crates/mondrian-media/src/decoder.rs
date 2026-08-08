@@ -802,8 +802,11 @@ impl HwAccelPixelFormat {
     }
 
     fn from_ffmpeg(format: ffmpeg::ffi::AVPixelFormat) -> Self {
+        #[cfg(mondrian_ffmpeg_7_1)]
+        if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12 {
+            return Self::D3D12;
+        }
         match format {
-            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12 => Self::D3D12,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 => Self::D3D11,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD => Self::D3D11VA,
             ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD => Self::Dxva2,
@@ -817,7 +820,10 @@ impl HwAccelPixelFormat {
 
     pub(crate) fn to_ffmpeg(self) -> Option<ffmpeg::ffi::AVPixelFormat> {
         match self {
+            #[cfg(mondrian_ffmpeg_7_1)]
             Self::D3D12 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12),
+            #[cfg(not(mondrian_ffmpeg_7_1))]
+            Self::D3D12 => None,
             Self::D3D11 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11),
             Self::D3D11VA => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD),
             Self::Dxva2 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD),
@@ -1344,7 +1350,10 @@ impl HwAccelBackend {
         match self {
             Self::None => None,
             Self::Cuda => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA),
+            #[cfg(mondrian_ffmpeg_7_1)]
             Self::D3D12VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA),
+            #[cfg(not(mondrian_ffmpeg_7_1))]
+            Self::D3D12VA => None,
             Self::D3D11VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA),
             Self::Dxva2 => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2),
             Self::VideoToolbox => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX),

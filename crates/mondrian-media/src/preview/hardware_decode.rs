@@ -462,10 +462,13 @@ pub(super) unsafe extern "C" fn preview_hardware_decode_get_format(
 
 pub(super) fn preview_hardware_frame_format(format: ffmpeg::util::format::pixel::Pixel) -> bool {
     let format: ffmpeg::ffi::AVPixelFormat = format.into();
+    #[cfg(mondrian_ffmpeg_7_1)]
+    if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12 {
+        return true;
+    }
     matches!(
         format,
-        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12
-            | ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11
             | ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD
             | ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD
             | ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX

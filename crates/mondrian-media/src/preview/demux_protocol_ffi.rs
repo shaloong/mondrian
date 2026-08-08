@@ -181,6 +181,7 @@ pub(super) fn decode_side_data_type(value: i32) -> io::Result<ffmpeg::ffi::AVPac
         AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT,
         #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_FRAME_CROPPING,
+        #[cfg(mondrian_ffmpeg_7_1)]
         AV_PKT_DATA_LCEVC,
     )
 }

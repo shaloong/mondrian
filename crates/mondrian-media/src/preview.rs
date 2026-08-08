@@ -121,7 +121,9 @@ use frame_materialization::{
     PreviewNativeFrameMaterializationError,
 };
 #[cfg(test)]
-use native_frame::{parse_ffmpeg_d3d11_texture, FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
+use native_frame::parse_ffmpeg_d3d11_texture;
+#[cfg(all(test, mondrian_ffmpeg_7_1))]
+use native_frame::{FfmpegAvD3D12VaFrame, FfmpegAvD3D12VaSyncContext};
 pub use native_frame::{
     FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
     FfmpegNativeDecodedFrameResourceError, PreviewNativeDecodedFrame,

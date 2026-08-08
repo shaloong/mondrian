@@ -1946,7 +1946,10 @@ mod tests {
             .expect("snapshotted long-path asset");
 
         assert_eq!(stored_name, "Long path");
-        assert_eq!(library.database_path(), root.join("index.db"));
+        // Compare canonical forms: the TEMP directory may arrive as an 8.3
+        // short path while the library stores the resolved long form.
+        let canonical_root = ordinary_canonical_path(&root).expect("canonical long-path root");
+        assert_eq!(library.database_path(), canonical_root.join("index.db"));
         assert!(!snapshot_hint.exists());
         for suffix in ["-journal", "-wal", "-shm"] {
             assert!(
@@ -2010,7 +2013,9 @@ mod tests {
         assert_eq!(normalized.path(), canonical_path);
     }
 
-    #[cfg(unix)]
+    // APFS rejects invalid-UTF-8 names at the filesystem boundary, so the
+    // guarded state cannot be created on macOS; ext4 admits arbitrary bytes.
+    #[cfg(target_os = "linux")]
     #[test]
     fn probe_candidate_rejects_a_path_the_utf8_schema_cannot_represent() {
         use std::ffi::OsString;
