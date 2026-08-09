@@ -1694,17 +1694,10 @@ mod persistence_lifecycle_tests {
     }
 
     fn discovered_candidate(project_file: &Path, autosave_file: &Path) -> CrashRecoveryCandidate {
-        let canonical_autosave = mondrian_assets::canonical_native_path(autosave_file).ok();
         discover_crash_recovery_candidates()
             .into_iter()
             .find(|candidate| {
-                candidate.project_file == project_file
-                    && canonical_autosave.as_ref().is_some_and(|published| {
-                        mondrian_assets::canonical_native_path(&candidate.autosave_file)
-                            .ok()
-                            .as_ref()
-                            == Some(published)
-                    })
+                candidate.project_file == project_file && candidate.autosave_file == autosave_file
             })
             .expect("exact recovery candidate")
     }
@@ -2013,12 +2006,11 @@ mod persistence_lifecycle_tests {
         assert_eq!(opened.project_id(), project_id);
         assert_eq!(opened.project_file(), copy_file);
         assert_ne!(copy_runtime, source_runtime);
-        let expected_copy_runtime = mondrian_assets::canonical_native_path(
-            &project_runtime_root_for_project(&copy_file, project_id)
-                .expect("derive copy paired root"),
-        )
-        .expect("canonical copy paired root");
-        assert_eq!(copy_runtime, expected_copy_runtime);
+        assert_eq!(
+            copy_runtime,
+            project_runtime_root_for_project(&copy_file, project_id)
+                .expect("derive copy paired root")
+        );
         assert!(
             retained_source_library.database_path().is_file(),
             "the retired source generation remains immutable while external Arcs exist"
