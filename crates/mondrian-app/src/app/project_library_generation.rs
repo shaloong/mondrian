@@ -131,7 +131,9 @@ impl RetiredProjectLibraryGeneration {
         let runtime_root = lease.runtime_root();
         let database_path = library.database_path();
         let root = database_path.parent()?.to_path_buf();
-        if root.parent() != Some(runtime_root) || !is_managed_library_directory(&root) {
+        if !library_directory_belongs_to_runtime(runtime_root, &root)
+            || !is_managed_library_directory(&root)
+        {
             return None;
         }
         let runtime_root = runtime_root.to_path_buf();
@@ -212,7 +214,7 @@ pub(super) fn sweep_orphaned_project_libraries(
         let mut opened = open_project_libraries();
         opened.retain(|path, library| {
             let live = library.strong_count() != 0;
-            if live && path.parent() == Some(lease.runtime_root()) {
+            if live && library_directory_belongs_to_runtime(lease.runtime_root(), path) {
                 protected.insert(path.clone());
             }
             live
@@ -224,7 +226,12 @@ pub(super) fn sweep_orphaned_project_libraries(
         let entry =
             entry.map_err(|error| format!("failed to inspect Project runtime entry: {error}"))?;
         let path = entry.path();
-        if protected.contains(&path) || !is_managed_library_directory(&path) {
+        let canonical_path =
+            mondrian_assets::canonical_native_path(&path).unwrap_or_else(|_| path.clone());
+        if protected.contains(&path)
+            || protected.contains(&canonical_path)
+            || !is_managed_library_directory(&path)
+        {
             continue;
         }
         let file_type = entry
@@ -255,8 +262,9 @@ pub(super) fn protected_project_library_paths(
         .collect::<Vec<_>>();
     if let Some(active) = active {
         let database_path = active.database_path();
-        if let Some(root) =
-            database_path.parent().filter(|root| root.parent() == Some(runtime_root))
+        if let Some(root) = database_path
+            .parent()
+            .filter(|root| library_directory_belongs_to_runtime(runtime_root, root))
         {
             protected.push(root.to_path_buf());
         }
@@ -272,6 +280,22 @@ fn is_managed_library_directory(path: &Path) -> bool {
         || name.starts_with(LIBRARY_GENERATION_PREFIX)
         || name.starts_with(LEGACY_LIBRARY_STAGING_PREFIX)
         || name.starts_with(LEGACY_LIBRARY_BACKUP_PREFIX)
+}
+
+/// Whether `library_root` is a direct child of the leased runtime root.
+///
+/// `AssetLibrary` freezes its root through the ordinary canonical boundary
+/// (resolving symlinks on Unix, dropping the physical-I/O prefix on Windows)
+/// while the lease keeps the caller-supplied spelling. Compare the lease root
+/// through that same boundary so neither side can disagree about identity.
+fn library_directory_belongs_to_runtime(runtime_root: &Path, library_root: &Path) -> bool {
+    match (
+        library_root.parent(),
+        mondrian_assets::canonical_native_path(runtime_root),
+    ) {
+        (Some(parent), Ok(resolved)) => parent == resolved.as_path(),
+        _ => false,
+    }
 }
 
 fn open_project_libraries() -> MutexGuard<'static, HashMap<PathBuf, Weak<AssetLibrary>>> {

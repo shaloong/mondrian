@@ -17,7 +17,6 @@
 //! Every retained kernel handle is revalidated against its namespace entry
 //! before mutation, so Unix unlink-and-replace cannot silently split authority.
 
-use mondrian_assets::canonical_native_path;
 use mondrian_core::ProjectId;
 #[cfg(not(test))]
 use mondrian_platform::{SystemPlatformService, UserStateDirectory};
@@ -992,7 +991,6 @@ fn claim_project_runtime_under_with_authority_and_logical(
     };
 
     ensure_durable_runtime_root(base, &runtime_root)?;
-    let runtime_root = canonical_runtime_root(&runtime_root)?;
 
     let session_lock = ExclusiveNamespaceLock::acquire(
         session_lock_path(&runtime_root),
@@ -1049,7 +1047,6 @@ fn acquire_existing_project_runtime_unlocked(
 ) -> Result<Arc<ProjectRuntimeLease>, String> {
     validate_runtime_root_directory(runtime_root)?;
     ensure_runtime_authority_directory(authority_root)?;
-    let runtime_root = canonical_runtime_root(runtime_root)?;
     let absolute_target = absolute_project_file(publication_target)?;
     let publication_identity = ProjectPathIdentity::from_absolute_project_file(&absolute_target)?;
     let logical_authority = match existing_logical_authority {
@@ -1348,19 +1345,6 @@ fn validate_direct_runtime_child(runtime_root: &Path, child: &Path) -> Result<()
         return Err("Project runtime mutation target is not a permitted direct child".to_owned());
     }
     Ok(())
-}
-
-/// Freeze one existing runtime root into the ordinary canonical namespace.
-///
-/// A lease must keep one spelling for its filesystem authority; payload
-/// libraries independently canonicalize their root, so comparing the lease
-/// root against a library path would otherwise diverge through symlinks
-/// (macOS `/var`) or physical-I/O prefixes (Windows `\\?\`). Freezing here
-/// keeps ownership verification, enumeration, and library identity on one
-/// path space.
-fn canonical_runtime_root(runtime_root: &Path) -> Result<PathBuf, String> {
-    canonical_native_path(runtime_root)
-        .map_err(|error| format!("failed to freeze Project runtime root: {error}"))
 }
 
 fn validate_existing_runtime_child_directory(child: &Path) -> Result<(), String> {
