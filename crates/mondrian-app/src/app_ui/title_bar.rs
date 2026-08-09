@@ -559,14 +559,20 @@ mod tests {
 
         assert!(!recorder.texts.iter().any(|text| text == "Mondrian"));
         assert!(recorder.texts.iter().any(|text| text == "Demo Project"));
-        let minimum_geometry = match PlatformWindowControlStyle::current().edge() {
-            WindowControlEdge::Leading => 3,
-            WindowControlEdge::Trailing => 7,
-        };
-        assert!(
-            recorder.lines >= minimum_geometry,
-            "window controls should be painted as platform geometry"
-        );
+        match PlatformWindowControlStyle::current().edge() {
+            WindowControlEdge::Leading => {
+                assert!(
+                    recorder.rects.len() >= 3,
+                    "window controls should be painted as platform geometry"
+                );
+            }
+            WindowControlEdge::Trailing => {
+                assert!(
+                    recorder.lines >= 7,
+                    "window controls should be painted as platform geometry"
+                );
+            }
+        }
     }
 
     #[test]

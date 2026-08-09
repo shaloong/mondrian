@@ -28,6 +28,17 @@ pub fn canonical_asset_file_path(path: &std::path::Path) -> std::io::Result<std:
     native_path::ordinary_canonical_path(path)
 }
 
+/// Resolve one existing path into the ordinary canonical native namespace.
+///
+/// This is the cross-crate identity boundary for filesystem ownership: on
+/// Windows it removes the physical-I/O `\\?\` spelling and on Unix it resolves
+/// through symlinks (macOS `/var` -> `/private/var`), so a path spelled
+/// through either form compares equal. Callers must never compare a
+/// canonicalized path against a raw `std::fs::canonicalize` result.
+pub fn canonical_native_path(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    native_path::ordinary_canonical_path(path)
+}
+
 #[cfg(test)]
 mod dependency_direction_tests {
     #[test]

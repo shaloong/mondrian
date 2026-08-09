@@ -17,6 +17,7 @@
 //! Every retained kernel handle is revalidated against its namespace entry
 //! before mutation, so Unix unlink-and-replace cannot silently split authority.
 
+use mondrian_assets::canonical_native_path;
 use mondrian_core::ProjectId;
 #[cfg(not(test))]
 use mondrian_platform::{SystemPlatformService, UserStateDirectory};
@@ -486,12 +487,14 @@ fn normalize_publication_path(absolute: &Path) -> Result<PathBuf, String> {
                 return Ok(canonical);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let file_name = cursor.file_name().ok_or_else(|| {
-                    format!(
-                        "Project publication target has no existing canonical ancestor: {}",
-                        absolute.display()
-                    )
-                })?;
+                let Some(file_name) = cursor.file_name() else {
+                    // The anchor root itself does not exist (a Windows drive
+                    // that was never mounted, or a placeholder path in tests).
+                    // There is no filesystem fact to freeze; keep the absolute
+                    // spelling so the caller can still own the namespace, and
+                    // let any later payload operation surface the absence.
+                    return Ok(absolute.to_path_buf());
+                };
                 unresolved.push(normalize_unresolved_component(file_name));
                 cursor = cursor.parent().ok_or_else(|| {
                     format!(
@@ -813,7 +816,7 @@ pub(super) fn validate_runtime_owner_readonly(
     expected_project_id: ProjectId,
 ) -> Result<(), String> {
     let _guard = project_runtime_owner_guard();
-    validate_runtime_owner_unlocked(runtime_root, expected_project_id).map(|_| ())
+    validate_runtime_owner_unlocked(&runtime_root, expected_project_id).map(|_| ())
 }
 
 /// Read-only validation for discovery before a live lease is requested.
@@ -826,7 +829,7 @@ pub(super) fn validate_runtime_child_directory_readonly(
     expected_project_id: ProjectId,
 ) -> Result<(), String> {
     let _guard = project_runtime_owner_guard();
-    validate_runtime_owner_unlocked(runtime_root, expected_project_id)?;
+    validate_runtime_owner_unlocked(&runtime_root, expected_project_id)?;
     validate_direct_runtime_child(runtime_root, child)?;
     validate_existing_runtime_child_directory(child)
 }
@@ -989,6 +992,7 @@ fn claim_project_runtime_under_with_authority_and_logical(
     };
 
     ensure_durable_runtime_root(base, &runtime_root)?;
+    let runtime_root = canonical_runtime_root(&runtime_root)?;
 
     let session_lock = ExclusiveNamespaceLock::acquire(
         session_lock_path(&runtime_root),
@@ -1045,6 +1049,7 @@ fn acquire_existing_project_runtime_unlocked(
 ) -> Result<Arc<ProjectRuntimeLease>, String> {
     validate_runtime_root_directory(runtime_root)?;
     ensure_runtime_authority_directory(authority_root)?;
+    let runtime_root = canonical_runtime_root(runtime_root)?;
     let absolute_target = absolute_project_file(publication_target)?;
     let publication_identity = ProjectPathIdentity::from_absolute_project_file(&absolute_target)?;
     let logical_authority = match existing_logical_authority {
@@ -1080,23 +1085,23 @@ fn acquire_existing_project_runtime_unlocked(
         }
     };
     let session_lock = ExclusiveNamespaceLock::acquire(
-        session_lock_path(runtime_root),
+        session_lock_path(&runtime_root),
         "Project runtime Session",
     )?;
-    let manifest = match validate_runtime_owner_unlocked(runtime_root, project_id) {
+    let manifest = match validate_runtime_owner_unlocked(&runtime_root, project_id) {
         Ok(manifest) => manifest,
         Err(error) => {
             drop(session_lock);
             return Err(error);
         }
     };
-    if let Err(error) = publish_owner_manifest(runtime_root, &manifest) {
+    if let Err(error) = publish_owner_manifest(&runtime_root, &manifest) {
         drop(session_lock);
         return Err(format!(
             "failed to reconfirm durable Project runtime owner; the root remains inert: {error}"
         ));
     }
-    let republished = match validate_runtime_owner_unlocked(runtime_root, project_id) {
+    let republished = match validate_runtime_owner_unlocked(&runtime_root, project_id) {
         Ok(manifest) => manifest,
         Err(error) => {
             drop(session_lock);
@@ -1335,11 +1340,7 @@ fn runtime_contains_only_session_lock(runtime_root: &Path) -> Result<bool, Strin
 }
 
 fn validate_direct_runtime_child(runtime_root: &Path, child: &Path) -> Result<(), String> {
-    let parent_matches = child.parent() == Some(runtime_root)
-        || std::fs::canonicalize(runtime_root)
-            .ok()
-            .is_some_and(|resolved| child.parent() == Some(resolved.as_path()));
-    if !parent_matches
+    if child.parent() != Some(runtime_root)
         || child.file_name().is_none()
         || child.file_name() == Some(OsStr::new(PROJECT_RUNTIME_OWNER_FILE))
         || child.file_name() == Some(OsStr::new(PROJECT_RUNTIME_SESSION_LOCK_FILE))
@@ -1347,6 +1348,19 @@ fn validate_direct_runtime_child(runtime_root: &Path, child: &Path) -> Result<()
         return Err("Project runtime mutation target is not a permitted direct child".to_owned());
     }
     Ok(())
+}
+
+/// Freeze one existing runtime root into the ordinary canonical namespace.
+///
+/// A lease must keep one spelling for its filesystem authority; payload
+/// libraries independently canonicalize their root, so comparing the lease
+/// root against a library path would otherwise diverge through symlinks
+/// (macOS `/var`) or physical-I/O prefixes (Windows `\\?\`). Freezing here
+/// keeps ownership verification, enumeration, and library identity on one
+/// path space.
+fn canonical_runtime_root(runtime_root: &Path) -> Result<PathBuf, String> {
+    canonical_native_path(runtime_root)
+        .map_err(|error| format!("failed to freeze Project runtime root: {error}"))
 }
 
 fn validate_existing_runtime_child_directory(child: &Path) -> Result<(), String> {
