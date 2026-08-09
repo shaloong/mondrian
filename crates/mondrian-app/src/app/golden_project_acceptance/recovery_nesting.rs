@@ -724,8 +724,14 @@ pub(super) fn execute_recovery_nesting_stage(
     );
     let autosave_sha256 = sha256_file(&autosave_file)?;
     let candidates = recovery_candidates_for(&project_path);
+    let same_autosave = |candidate: &crate::app::CrashRecoveryCandidate| {
+        mondrian_assets::canonical_native_path(&candidate.autosave_file)
+            .ok()
+            .zip(mondrian_assets::canonical_native_path(&autosave_file).ok())
+            .is_some_and(|(candidate_path, published_path)| candidate_path == published_path)
+    };
     ensure!(
-        candidates.len() == 1 && candidates[0].autosave_file == autosave_file,
+        candidates.len() == 1 && same_autosave(&candidates[0]),
         "published autosave is not the exact canonical recovery candidate"
     );
     let candidate = candidates[0].clone();

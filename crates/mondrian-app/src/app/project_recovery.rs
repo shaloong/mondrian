@@ -801,6 +801,11 @@ fn discover_crash_recovery_candidates_under(root: &Path) -> Vec<CrashRecoveryCan
 
     for entry in entries.flatten() {
         let runtime_root = entry.path();
+        // The durable owner manifest freezes its runtime root through the
+        // canonical boundary, so resolve the enumerated spelling through the
+        // same boundary before comparing it against stored identity.
+        let runtime_root =
+            mondrian_assets::canonical_native_path(&runtime_root).unwrap_or(runtime_root);
         let manifest_path = recovery_manifest_path(&runtime_root);
         let Ok(manifest) = read_manifest(&manifest_path) else {
             continue;
