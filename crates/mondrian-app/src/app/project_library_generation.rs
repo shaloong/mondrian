@@ -226,7 +226,11 @@ pub(super) fn sweep_orphaned_project_libraries(
         let entry =
             entry.map_err(|error| format!("failed to inspect Project runtime entry: {error}"))?;
         let path = entry.path();
-        if protected.contains(&path) || !is_managed_library_directory(&path) {
+        let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if protected.contains(&path)
+            || protected.contains(&canonical_path)
+            || !is_managed_library_directory(&path)
+        {
             continue;
         }
         let file_type = entry
