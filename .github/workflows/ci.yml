@@ -212,7 +212,8 @@ jobs:
           # retry the install because vcpkg resumes from its downloads cache.
           $install = {
             & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
-          }          for ($attempt = 1; $attempt -le 3; $attempt++) {
+          }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
             & $install
             if ($LASTEXITCODE -eq 0) { break }
             if ($attempt -lt 3) {
