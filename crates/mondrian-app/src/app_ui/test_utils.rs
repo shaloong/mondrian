@@ -104,7 +104,18 @@ pub(crate) fn event_ctx<'a>(
 /// user-facing hint (Ctrl on other platforms, symbol glyphs on macOS).
 pub(crate) fn expected_shortcut(hint: &str) -> String {
     if cfg!(target_os = "macos") {
-        hint.replace("Ctrl", "\u{2303}").replace("Alt", "\u{2325}").replace("Shift", "\u{21e7}").replace('+', "")
+        hint.replace("Ctrl", "\u{2303}")
+            .replace("Alt", "\u{2325}")
+            .replace("Shift", "\u{21e7}")
+            .replace("Esc", "\u{238b}")
+            .replace("Tab", "\u{21e5}")
+            .replace("Enter", "\u{23ce}")
+            .replace("Backspace", "\u{232b}")
+            .replace("Left", "\u{25c0}")
+            .replace("Right", "\u{25b6}")
+            .replace("Up", "\u{25b2}")
+            .replace("Down", "\u{25bc}")
+            .replace('+', "")
     } else {
         hint.to_owned()
     }

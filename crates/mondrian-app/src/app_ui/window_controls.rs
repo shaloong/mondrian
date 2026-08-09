@@ -87,7 +87,7 @@ impl PlatformWindowControlStyle {
         }
     }
 
-    const fn button_width(self) -> f32 {
+    pub(crate) const fn button_width(self) -> f32 {
         match self {
             Self::Windows => 46.0,
             Self::MacOs => 22.0,

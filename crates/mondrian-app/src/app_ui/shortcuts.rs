@@ -569,6 +569,7 @@ fn ctrl_alt() -> Modifiers {
 mod tests {
     use super::*;
     use crate::app::ui_actions::app_shell_open_project_dialog_action;
+    use crate::app_ui::test_utils::expected_shortcut;
     use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
     use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
 
@@ -704,31 +705,31 @@ mod tests {
     fn shortcut_labels_share_the_default_descriptor_table() {
         assert_eq!(
             shortcut_label_for_action(&Action::SaveProject),
-            Some("Ctrl+S".to_owned())
+            Some(expected_shortcut("Ctrl+S"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::Copy),
-            Some("Ctrl+C".to_owned())
+            Some(expected_shortcut("Ctrl+C"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::Duplicate),
-            Some("Ctrl+D".to_owned())
+            Some(expected_shortcut("Ctrl+D"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::SwitchWorkspace(WorkspacePreset::Audio)),
-            Some("Ctrl+Alt+3".to_owned())
+            Some(expected_shortcut("Ctrl+Alt+3"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::FocusPanel(PanelKind::Inspector)),
-            Some("Ctrl+Alt+I".to_owned())
+            Some(expected_shortcut("Ctrl+Alt+I"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::SplitClipAtPlayhead),
-            Some("Ctrl+K".to_owned())
+            Some(expected_shortcut("Ctrl+K"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::RippleDeleteSelection),
-            Some("Shift+Delete".to_owned())
+            Some(expected_shortcut("Shift+Delete"))
         );
         assert_eq!(
             shortcut_label_for_action(&Action::MarkInAtPlayhead),
@@ -810,7 +811,7 @@ mod tests {
         );
         assert_eq!(
             shortcut_label_for_action_with_overrides(&Action::SaveProject, &overrides),
-            Some("Ctrl+Alt+S".to_owned())
+            Some(expected_shortcut("Ctrl+Alt+S"))
         );
     }
 
@@ -865,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             shortcut_label_for_action_with_overrides(&Action::SaveProject, &overrides),
-            Some("Ctrl+O".to_owned())
+            Some(expected_shortcut("Ctrl+O"))
         );
         assert_eq!(
             shortcut_label_for_action_with_overrides(

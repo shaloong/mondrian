@@ -416,7 +416,7 @@ mod tests {
         assert!(bar.menu_bar().bounds().x > icon_bounds.x + icon_bounds.width);
         assert_eq!(
             bar.control_bounds(WindowControl::Close).width,
-            PlatformWindowControlStyle::current().total_width() / 3.0
+            PlatformWindowControlStyle::current().button_width()
         );
         assert!(bar.control_bounds(WindowControl::Close).x > bar.menu_bar().bounds().x);
     }

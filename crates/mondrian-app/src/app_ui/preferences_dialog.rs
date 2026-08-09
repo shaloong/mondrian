@@ -1845,7 +1845,9 @@ mod tests {
         APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
-    use crate::app_ui::test_utils::{event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{
+        event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip,
+    };
 
     fn click(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
         let down = dialog.event(

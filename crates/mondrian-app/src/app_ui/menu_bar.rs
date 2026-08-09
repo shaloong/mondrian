@@ -543,7 +543,9 @@ mod tests {
         timeline_create_basic_title_action, APP_SHELL_ABOUT, APP_SHELL_NAMESPACE,
     };
     use crate::app::SelectedClipRef;
-    use crate::app_ui::test_utils::{event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{
+        event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip,
+    };
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
