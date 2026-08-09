@@ -2195,7 +2195,9 @@ mod tests {
         let lease = claim_project_runtime_under(&base, &project_file, project_id)
             .expect("safe retry completes owner");
 
-        assert_eq!(lease.runtime_root(), runtime_root);
+        let canonical_runtime_root =
+            mondrian_assets::canonical_native_path(&runtime_root).expect("canonical runtime root");
+        assert_eq!(lease.runtime_root(), canonical_runtime_root);
         validate_runtime_owner_readonly(&runtime_root, project_id)
             .expect("retry publishes exact durable owner");
         drop(lease);
