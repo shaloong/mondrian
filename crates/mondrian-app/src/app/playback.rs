@@ -2105,7 +2105,13 @@ mod tests {
     fn play_ready(state: &mut AppState) {
         state.play().expect("play");
         assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
-        assert!(state.observe_video_preroll(0, 0));
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("frame demand after play");
+        let observed_at = state.playback_observation_instant_anchor;
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, observed_at));
         assert_eq!(
             state.advance_playback_clock(Duration::ZERO).status,
             PlaybackAdvanceStatus::WaitingForFrame,
