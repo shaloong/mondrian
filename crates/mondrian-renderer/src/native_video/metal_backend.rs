@@ -106,7 +106,8 @@ impl MetalNativeVideoImportBackend {
             formats,
         )
         .with_renderer_backend_label("wgpu Metal VideoToolbox CVPixelBuffer + OCIO");
-        let plane_adapter = MetalNativeYuvPlaneAdapter { cache: CvMetalTextureCacheHandle(cache), support };
+        let plane_adapter =
+            MetalNativeYuvPlaneAdapter { cache: CvMetalTextureCacheHandle(cache), support };
         Ok(Self {
             inner: DirectNativeVideoImportBackend::new(plane_adapter, device, queue, resource_pool)
                 .map_err(|error| MetalNativeVideoImportBackendCreateError::Direct {
