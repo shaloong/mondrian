@@ -226,8 +226,7 @@ pub(super) fn sweep_orphaned_project_libraries(
         let entry =
             entry.map_err(|error| format!("failed to inspect Project runtime entry: {error}"))?;
         let path = entry.path();
-        let canonical_path =
-            mondrian_assets::canonical_native_path(&path).unwrap_or_else(|_| path.clone());
+        let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if protected.contains(&path)
             || protected.contains(&canonical_path)
             || !is_managed_library_directory(&path)
@@ -284,16 +283,12 @@ fn is_managed_library_directory(path: &Path) -> bool {
 
 /// Whether `library_root` is a direct child of the leased runtime root.
 ///
-/// `AssetLibrary` freezes its root through the ordinary canonical boundary
-/// (resolving symlinks on Unix, dropping the physical-I/O prefix on Windows)
-/// while the lease keeps the caller-supplied spelling. Compare the lease root
-/// through that same boundary so neither side can disagree about identity.
+/// `AssetLibrary` freezes its root with `canonicalize` while the lease keeps
+/// the caller-supplied spelling. On macOS the system temp directory resolves
+/// through a `/var` -> `/private/var` symlink, so compare the resolved forms.
 fn library_directory_belongs_to_runtime(runtime_root: &Path, library_root: &Path) -> bool {
-    match (
-        library_root.parent(),
-        mondrian_assets::canonical_native_path(runtime_root),
-    ) {
-        (Some(parent), Ok(resolved)) => parent == resolved.as_path(),
+    match (library_root.parent(), std::fs::canonicalize(runtime_root)) {
+        (Some(parent), Ok(resolved)) => parent == resolved,
         _ => false,
     }
 }
