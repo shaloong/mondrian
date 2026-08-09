@@ -816,7 +816,7 @@ pub(super) fn validate_runtime_owner_readonly(
     expected_project_id: ProjectId,
 ) -> Result<(), String> {
     let _guard = project_runtime_owner_guard();
-    validate_runtime_owner_unlocked(&runtime_root, expected_project_id).map(|_| ())
+    validate_runtime_owner_unlocked(runtime_root, expected_project_id).map(|_| ())
 }
 
 /// Read-only validation for discovery before a live lease is requested.
@@ -829,7 +829,7 @@ pub(super) fn validate_runtime_child_directory_readonly(
     expected_project_id: ProjectId,
 ) -> Result<(), String> {
     let _guard = project_runtime_owner_guard();
-    validate_runtime_owner_unlocked(&runtime_root, expected_project_id)?;
+    validate_runtime_owner_unlocked(runtime_root, expected_project_id)?;
     validate_direct_runtime_child(runtime_root, child)?;
     validate_existing_runtime_child_directory(child)
 }
