@@ -2958,13 +2958,15 @@ fn timeline_edit_command_mapping_emits_selection_trim_and_enable_actions() {
         timeline_edit_command_action(&model, TimelineEditCommand::TogglePlayback),
         Some(Action::TogglePlay)
     );
+    let expected_copy = crate::app_ui::test_utils::expected_shortcut("Ctrl+C");
     assert_eq!(
         timeline_edit_command_shortcut_label(TimelineEditCommand::CopySelection).as_deref(),
-        Some("Ctrl+C")
+        Some(expected_copy.as_str())
     );
+    let expected_duplicate = crate::app_ui::test_utils::expected_shortcut("Ctrl+D");
     assert_eq!(
         timeline_edit_command_shortcut_label(TimelineEditCommand::DuplicateSelection).as_deref(),
-        Some("Ctrl+D")
+        Some(expected_duplicate.as_str())
     );
     assert_eq!(
         timeline_edit_command_shortcut_label(TimelineEditCommand::TrimSelectionInToPlayhead),

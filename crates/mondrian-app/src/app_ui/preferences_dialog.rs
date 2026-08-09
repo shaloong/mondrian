@@ -1845,7 +1845,7 @@ mod tests {
         APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
         APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PREFERENCES_THEME_CHANGED,
     };
-    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip};
 
     fn click(dialog: &mut PreferencesDialog, ctx: &mut EventContext<'_>, position: Point) {
         let down = dialog.event(
@@ -2111,10 +2111,11 @@ mod tests {
         assert!(inspector.disabled);
         assert_eq!(inspector.conflict_owner, None);
         assert!(inspector.overridden);
+        let expected = expected_shortcut("Ctrl+S");
         assert!(model
             .shortcut_rows
             .iter()
-            .any(|row| row.id == "file.save_project" && row.binding_label == "Ctrl+S"));
+            .any(|row| row.id == "file.save_project" && row.binding_label == expected));
     }
 
     #[test]
@@ -2150,7 +2151,8 @@ mod tests {
             .find(|row| row.id == "file.open_project")
             .expect("open row");
 
-        assert_eq!(save.binding_label, "Ctrl+O");
+        let expected = expected_shortcut("Ctrl+O");
+        assert_eq!(save.binding_label, expected);
         assert!(!save.disabled);
         assert!(save.overridden);
         assert_eq!(open.binding_label, "与 file.save_project 冲突");

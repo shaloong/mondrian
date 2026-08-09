@@ -99,3 +99,13 @@ pub(crate) fn event_ctx<'a>(
         requests,
     }
 }
+
+/// Platform-localized shortcut hint text for tests that assert on the
+/// user-facing hint (Ctrl on other platforms, symbol glyphs on macOS).
+pub(crate) fn expected_shortcut(hint: &str) -> String {
+    if cfg!(target_os = "macos") {
+        hint.replace("Ctrl", "\u{2303}").replace("Alt", "\u{2325}").replace("Shift", "\u{21e7}").replace('+', "")
+    } else {
+        hint.to_owned()
+    }
+}

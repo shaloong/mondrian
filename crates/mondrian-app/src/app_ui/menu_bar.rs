@@ -543,7 +543,7 @@ mod tests {
         timeline_create_basic_title_action, APP_SHELL_ABOUT, APP_SHELL_NAMESPACE,
     };
     use crate::app::SelectedClipRef;
-    use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use crate::app_ui::test_utils::{event_ctx, expected_shortcut, DummyFocus, DummyShortcut, DummyTooltip};
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::types::{AssetId, TrackId};
     use mondrian_timeline::clip::{Clip, Transform2D};
@@ -948,9 +948,10 @@ mod tests {
             ("编辑", "删除所选", "Delete"),
             ("视图", "切换全屏", "F11"),
         ] {
+            let expected = expected_shortcut(shortcut);
             assert_eq!(
                 menu_item(&menu_items, menu_label, item_label).shortcut.as_deref(),
-                Some(shortcut),
+                Some(expected.as_str()),
                 "{menu_label}/{item_label} should show {shortcut}"
             );
         }
@@ -964,9 +965,10 @@ mod tests {
             ("节点图", "Ctrl+Alt+G"),
             ("导出", "Ctrl+Alt+X"),
         ] {
+            let expected = expected_shortcut(shortcut);
             assert_eq!(
                 menu_item(&menu_items, "窗口", panel_label).shortcut.as_deref(),
-                Some(shortcut),
+                Some(expected.as_str()),
                 "窗口/{panel_label} should show {shortcut}"
             );
         }
@@ -978,9 +980,10 @@ mod tests {
             ("合成", "Ctrl+Alt+4"),
             ("导出", "Ctrl+Alt+5"),
         ] {
+            let expected = expected_shortcut(shortcut);
             assert_eq!(
                 submenu_item(&menu_items, "窗口", "工作区", workspace_label).shortcut.as_deref(),
-                Some(shortcut),
+                Some(expected.as_str()),
                 "窗口/工作区/{workspace_label} should show {shortcut}"
             );
         }
@@ -1003,9 +1006,10 @@ mod tests {
         ];
         let menu_items = default_menu_items_with_shortcut_overrides(&overrides);
 
+        let expected = expected_shortcut("Ctrl+Alt+S");
         assert_eq!(
             menu_item(&menu_items, "文件", "保存").shortcut.as_deref(),
-            Some("Ctrl+Alt+S")
+            Some(expected.as_str())
         );
         assert_eq!(
             menu_item(&menu_items, "窗口", "检查器").shortcut.as_deref(),
@@ -1027,9 +1031,10 @@ mod tests {
         }];
         let menu_items = default_menu_items_with_shortcut_overrides(&overrides);
 
+        let expected = expected_shortcut("Ctrl+Alt+Shift+8");
         assert_eq!(
             submenu_item(&menu_items, "窗口", "工作区", "调色").shortcut.as_deref(),
-            Some("Ctrl+Alt+Shift+8")
+            Some(expected.as_str())
         );
     }
 
