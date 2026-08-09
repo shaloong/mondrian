@@ -1082,23 +1082,23 @@ fn acquire_existing_project_runtime_unlocked(
         }
     };
     let session_lock = ExclusiveNamespaceLock::acquire(
-        session_lock_path(&runtime_root),
+        session_lock_path(runtime_root),
         "Project runtime Session",
     )?;
-    let manifest = match validate_runtime_owner_unlocked(&runtime_root, project_id) {
+    let manifest = match validate_runtime_owner_unlocked(runtime_root, project_id) {
         Ok(manifest) => manifest,
         Err(error) => {
             drop(session_lock);
             return Err(error);
         }
     };
-    if let Err(error) = publish_owner_manifest(&runtime_root, &manifest) {
+    if let Err(error) = publish_owner_manifest(runtime_root, &manifest) {
         drop(session_lock);
         return Err(format!(
             "failed to reconfirm durable Project runtime owner; the root remains inert: {error}"
         ));
     }
-    let republished = match validate_runtime_owner_unlocked(&runtime_root, project_id) {
+    let republished = match validate_runtime_owner_unlocked(runtime_root, project_id) {
         Ok(manifest) => manifest,
         Err(error) => {
             drop(session_lock);
