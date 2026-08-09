@@ -374,13 +374,15 @@ fn validate_folder_reparent(
 impl AssetLibrary {
     /// 打开或创建素材库（root 为库根目录）
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
+        // Keep the caller-supplied spelling: the owning Project runtime and
+        // every identity comparison see the same path, and SQLite holds its
+        // database handle open for the lifetime of this library, so freezing
+        // the root through a symlink or physical-I/O prefix would only split
+        // the path space without adding durability.
         let root = ordinary_absolute_path(&root).map_err(|error| MondrianError::AssetDbError {
             reason: format!("invalid Asset Library root path: {error}"),
         })?;
         std::fs::create_dir_all(&root)?;
-        let root = ordinary_canonical_path(&root).map_err(|error| MondrianError::AssetDbError {
-            reason: format!("freeze Asset Library root path failed: {error}"),
-        })?;
         let db_path = root.join("index.db");
         let sqlite_path = sqlite_open_path(&db_path)
             .map_err(|e| mondrian_core::MondrianError::AssetDbError { reason: e.to_string() })?;
