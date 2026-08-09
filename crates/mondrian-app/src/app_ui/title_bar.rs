@@ -418,7 +418,15 @@ mod tests {
             bar.control_bounds(WindowControl::Close).width,
             PlatformWindowControlStyle::current().button_width()
         );
-        assert!(bar.control_bounds(WindowControl::Close).x > bar.menu_bar().bounds().x);
+        let close_x = bar.control_bounds(WindowControl::Close).x;
+        match PlatformWindowControlStyle::current().edge() {
+            WindowControlEdge::Leading => {
+                assert!(close_x < bar.menu_bar().bounds().x);
+            }
+            WindowControlEdge::Trailing => {
+                assert!(close_x > bar.menu_bar().bounds().x);
+            }
+        }
     }
 
     #[test]
@@ -551,8 +559,12 @@ mod tests {
 
         assert!(!recorder.texts.iter().any(|text| text == "Mondrian"));
         assert!(recorder.texts.iter().any(|text| text == "Demo Project"));
+        let minimum_geometry = match PlatformWindowControlStyle::current().edge() {
+            WindowControlEdge::Leading => 3,
+            WindowControlEdge::Trailing => 7,
+        };
         assert!(
-            recorder.lines >= 7,
+            recorder.lines >= minimum_geometry,
             "window controls should be painted as platform geometry"
         );
     }
