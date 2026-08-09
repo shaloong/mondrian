@@ -1335,7 +1335,11 @@ fn runtime_contains_only_session_lock(runtime_root: &Path) -> Result<bool, Strin
 }
 
 fn validate_direct_runtime_child(runtime_root: &Path, child: &Path) -> Result<(), String> {
-    if child.parent() != Some(runtime_root)
+    let parent_matches = child.parent() == Some(runtime_root)
+        || std::fs::canonicalize(runtime_root)
+            .ok()
+            .is_some_and(|resolved| child.parent() == Some(resolved.as_path()));
+    if !parent_matches
         || child.file_name().is_none()
         || child.file_name() == Some(OsStr::new(PROJECT_RUNTIME_OWNER_FILE))
         || child.file_name() == Some(OsStr::new(PROJECT_RUNTIME_SESSION_LOCK_FILE))
