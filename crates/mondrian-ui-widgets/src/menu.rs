@@ -568,9 +568,9 @@ impl Widget for Dropdown {
                         {
                             if let Some(hovered_idx) = self.item_at_depth(*position, check_depth) {
                                 new_hover_depth = Some((check_depth, hovered_idx));
-                                let children =
-                                    self.children_at(&self.submenu_chain[..check_depth]).unwrap();
-                                if children[hovered_idx].is_submenu()
+                                if let Some(children) =
+                                    self.children_at(&self.submenu_chain[..check_depth])
+                                    && children.get(hovered_idx).is_some_and(MenuItem::is_submenu)
                                     && self.submenu_chain.len() <= check_depth
                                 {
                                     self.submenu_chain.push(hovered_idx);

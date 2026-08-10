@@ -452,15 +452,17 @@ pub(crate) fn paint_submenu_arrow(ctx: &mut PaintContext, row_rect: Rect) {
     let x = row_rect.x + row_rect.width - visual.arrow_right_inset;
     let y = row_rect.y + (row_rect.height - size) * 0.5;
     let icon = submenu_arrow_icon();
-    icon.paint(ctx, Rect::new(x, y, size, size), tokens.muted_foreground);
+    if let Some(icon) = icon {
+        icon.paint(ctx, Rect::new(x, y, size, size), tokens.muted_foreground);
+    }
 }
 
-fn submenu_arrow_icon() -> crate::vector_icon::VectorIcon {
+fn submenu_arrow_icon() -> Option<crate::vector_icon::VectorIcon> {
     use crate::vector_icon::VectorIcon;
     use std::sync::OnceLock;
 
-    static ICON: OnceLock<VectorIcon> = OnceLock::new();
-    ICON.get_or_init(|| VectorIcon::from_svg_str(include_str!("caret_right.svg")).unwrap())
+    static ICON: OnceLock<Option<VectorIcon>> = OnceLock::new();
+    ICON.get_or_init(|| VectorIcon::from_svg_str(include_str!("caret_right.svg")).ok())
         .clone()
 }
 

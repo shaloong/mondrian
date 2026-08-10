@@ -2067,8 +2067,9 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
 }
 
 fn finite_kernel_roi_contract(radius: f32) -> EffectRoiPropagation {
-    let halo = crate::adjustment::gaussian_blur_input_halo(radius)
-        .expect("built-in Gaussian radius must have a finite implementation halo");
+    let Some(halo) = crate::adjustment::gaussian_blur_input_halo(radius) else {
+        return EffectRoiPropagation::FullFrame;
+    };
     EffectRoiPropagation::Expand { horizontal_pixels: halo, vertical_pixels: halo }
 }
 

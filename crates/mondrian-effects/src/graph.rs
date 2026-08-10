@@ -1055,7 +1055,7 @@ fn implementation_contract(
 impl Default for EffectGraphBuilderState {
     fn default() -> Self {
         let graph = EffectRenderGraph::identity();
-        let current_output = graph.output.expect("identity graph should have output");
+        let current_output = graph.output.unwrap_or(EffectGraphNodeId(0));
         Self {
             graph,
             current_output,
@@ -1546,7 +1546,7 @@ pub(crate) fn compile_effect_render_graph_in_domain(
     domain_contract: EffectColorDomainContract,
 ) -> EffectRenderGraph {
     let mut graph = EffectRenderGraph::identity();
-    let mut current = graph.output.expect("identity graph should have source output");
+    let mut current = graph.output.unwrap_or(EffectGraphNodeId(0));
 
     for (index, op) in plan.ops.iter().cloned().enumerate() {
         let node_id = EffectGraphNodeId((index + 1) as u32);

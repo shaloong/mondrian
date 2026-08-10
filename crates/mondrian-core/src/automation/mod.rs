@@ -849,11 +849,17 @@ impl<T: Interpolatable + Serialize + for<'de> Deserialize<'de>> KeyframeTrack<T>
             return self.static_value.clone();
         }
 
-        if time <= self.keyframes.first().expect("non-empty keyframes").time {
-            return self.keyframes.first().expect("non-empty keyframes").value.clone();
+        let Some(first) = self.keyframes.first() else {
+            return self.static_value.clone();
+        };
+        if time <= first.time {
+            return first.value.clone();
         }
-        if time >= self.keyframes.last().expect("non-empty keyframes").time {
-            return self.keyframes.last().expect("non-empty keyframes").value.clone();
+        let Some(last) = self.keyframes.last() else {
+            return self.static_value.clone();
+        };
+        if time >= last.time {
+            return last.value.clone();
         }
 
         let idx = self
@@ -2798,11 +2804,17 @@ fn evaluate_numeric_channel(channel: &AnimationChannel, time: TimelineTime, fall
     if channel.keyframes.is_empty() {
         return fallback;
     }
-    if time <= channel.keyframes.first().expect("non-empty keyframes").time {
-        return channel.keyframes.first().expect("non-empty keyframes").value;
+    let Some(first) = channel.keyframes.first() else {
+        return fallback;
+    };
+    if time <= first.time {
+        return first.value;
     }
-    if time >= channel.keyframes.last().expect("non-empty keyframes").time {
-        return channel.keyframes.last().expect("non-empty keyframes").value;
+    let Some(last) = channel.keyframes.last() else {
+        return fallback;
+    };
+    if time >= last.time {
+        return last.value;
     }
 
     let idx = channel

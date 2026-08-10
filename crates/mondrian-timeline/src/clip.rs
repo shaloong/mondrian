@@ -5,8 +5,8 @@ use glam::Vec2;
 use mondrian_core::{
     automation::{
         AnimatedProperty, ParameterEnumOption, ParameterInvalidValuePolicy,
-        ParameterNumericContract, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyHost,
-        PropertyMutation, PropertyValue,
+        ParameterNumericContract, ParameterNumericRange, ParameterUnit, PropertyBag,
+        PropertyDescriptor, PropertyHost, PropertyMutation, PropertyValue,
     },
     effect_data::{EffectNode, EffectType},
     mask_data::{MaskComponent, MaskShape, MaskShapeInterpolation},
@@ -212,7 +212,12 @@ impl Transform2D {
 
 fn normalized_opacity_contract() -> ParameterNumericContract {
     ParameterNumericContract::closed(0.0, 1.0, Some(0.01), ParameterInvalidValuePolicy::Reject)
-        .expect("opacity has a valid built-in numeric contract")
+        .unwrap_or_else(|_| ParameterNumericContract {
+            hard_range: ParameterNumericRange { min: 0.0, max: 1.0 },
+            soft_range: ParameterNumericRange { min: 0.0, max: 1.0 },
+            step: Some(0.01),
+            invalid_value_policy: ParameterInvalidValuePolicy::Reject,
+        })
 }
 
 fn blend_mode_to_text(mode: Option<BlendMode>) -> String {

@@ -376,22 +376,24 @@ impl MultilineTextInput {
     }
 
     fn get_geometry(&self) -> MultilineTextGeometry {
-        if self.geometry_cache.borrow().is_none() {
-            let preedit = self.composition.is_active().then(|| self.composition.preedit());
-            let geo = compute_multiline_geometry(
-                self.bounds,
-                &self.edit,
-                self.edit.cursor(),
-                preedit,
-                self.scroll_x.get(),
-                self.scroll_y.get(),
-                self.metrics,
-                &mut self.measure_cache.borrow_mut(),
-                self.wrap_mode,
-            );
-            self.geometry_cache.replace(Some(geo));
+        let cached = self.geometry_cache.borrow().clone();
+        if let Some(geometry) = cached {
+            return geometry;
         }
-        self.geometry_cache.borrow().clone().expect("geometry must be cached")
+        let preedit = self.composition.is_active().then(|| self.composition.preedit());
+        let geometry = compute_multiline_geometry(
+            self.bounds,
+            &self.edit,
+            self.edit.cursor(),
+            preedit,
+            self.scroll_x.get(),
+            self.scroll_y.get(),
+            self.metrics,
+            &mut self.measure_cache.borrow_mut(),
+            self.wrap_mode,
+        );
+        self.geometry_cache.replace(Some(geometry.clone()));
+        geometry
     }
 
     fn content_left(&self) -> f32 {

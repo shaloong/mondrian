@@ -141,7 +141,7 @@ impl LineMeasureCache {
         }
         match self
             .grapheme_x
-            .binary_search_by(|v| v.partial_cmp(&x).expect("x must be finite"))
+            .binary_search_by(|v| v.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Less))
         {
             Ok(idx) => idx,
             Err(idx) => {
@@ -327,39 +327,41 @@ fn position_to_content_point(
     visual_lines: &[VisualLine],
     mode: LineLayoutMode,
 ) -> Point {
-    let (x, y) = match mode {
-        LineLayoutMode::NoWrap => {
-            let line = position.line.min(state.line_count().saturating_sub(1));
-            let column = position.column.min(state.line_len_graphemes(line));
-            let line_text = state.line_text(line);
-            let cache = measure_cache
-                .entry(line)
-                .or_insert_with(|| LineMeasureCache::new(line_text, metrics.font_size));
-            let x = cache.x_for_column(column);
-            let y = line as f32 * metrics.line_height;
-            (x, y)
-        }
-        LineLayoutMode::WrapToWidth(_) => {
-            // Find the visual line containing this (logical_line, column)
-            let vl =
-                find_visual_line(
+    let (x, y) =
+        match mode {
+            LineLayoutMode::NoWrap => {
+                let line = position.line.min(state.line_count().saturating_sub(1));
+                let column = position.column.min(state.line_len_graphemes(line));
+                let line_text = state.line_text(line);
+                let cache = measure_cache
+                    .entry(line)
+                    .or_insert_with(|| LineMeasureCache::new(line_text, metrics.font_size));
+                let x = cache.x_for_column(column);
+                let y = line as f32 * metrics.line_height;
+                (x, y)
+            }
+            LineLayoutMode::WrapToWidth(_) => {
+                // Find the visual line containing this (logical_line, column)
+                let Some(vl) = find_visual_line(
                     visual_lines,
                     position.line,
                     position.column.min(state.line_len_graphemes(
                         position.line.min(state.line_count().saturating_sub(1)),
                     )),
-                );
-            let line = position.line.min(state.line_count().saturating_sub(1));
-            let line_text = state.line_text(line);
-            let cache = measure_cache
-                .entry(line)
-                .or_insert_with(|| LineMeasureCache::new(line_text, metrics.font_size));
-            let seg_start_x = cache.x_for_column(vl.start_column);
-            let x = cache.x_for_column(position.column.min(vl.end_column)) - seg_start_x;
-            let y = vl.top;
-            (x, y)
-        }
-    };
+                ) else {
+                    return Point::new(0.0, position.line as f32 * metrics.line_height);
+                };
+                let line = position.line.min(state.line_count().saturating_sub(1));
+                let line_text = state.line_text(line);
+                let cache = measure_cache
+                    .entry(line)
+                    .or_insert_with(|| LineMeasureCache::new(line_text, metrics.font_size));
+                let seg_start_x = cache.x_for_column(vl.start_column);
+                let x = cache.x_for_column(position.column.min(vl.end_column)) - seg_start_x;
+                let y = vl.top;
+                (x, y)
+            }
+        };
     Point::new(x, y)
 }
 
@@ -370,17 +372,17 @@ fn find_visual_line(
     visual_lines: &[VisualLine],
     logical_line: usize,
     column: usize,
-) -> &VisualLine {
-    let mut best = visual_lines.first().expect("visual_lines must not be empty");
+) -> Option<&VisualLine> {
+    let mut best = visual_lines.first()?;
     for vl in visual_lines {
         if vl.logical_line == logical_line && column >= vl.start_column && column < vl.end_column {
-            return vl;
+            return Some(vl);
         }
         if vl.logical_line == logical_line && column >= vl.start_column {
             best = vl;
         }
     }
-    best
+    Some(best)
 }
 
 // ── Public helpers ──────────────────────────────────────────────────────────────
