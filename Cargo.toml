@@ -33,7 +33,7 @@ edition       = "2024"
 authors       = ["Shaloong <contact@shaloong.com>"]
 license       = "AGPL-3.0-or-later"
 repository    = "https://github.com/mondrian-studio/mondrian"
-rust-version  = "1.92"
+rust-version  = "1.97.1"
 
 # ── 全局共享依赖（各 crate 通过 workspace = true 引用）──────────────────────────
 [workspace.dependencies]

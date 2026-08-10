@@ -76,7 +76,7 @@ jobs:
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2

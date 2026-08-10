@@ -4,7 +4,7 @@
 
 ## 1. 前置条件
 
-- Rust 工具链（MSRV 1.92），通过 [rustup](https://rustup.rs) 安装
+- Rust 工具链（MSRV 1.97.1），通过 [rustup](https://rustup.rs) 安装
 - 已克隆 Mondrian 仓库并能在本地构建
 
 ```bash

@@ -390,7 +390,7 @@ mod tests {
     fn about_system_info_format_contains_key_fields() {
         let info = AboutSystemInfo {
             pkg_version: "0.1.0".into(),
-            rust_version: "1.92.0".into(),
+            rust_version: "1.97.1".into(),
             os: "Windows".into(),
             arch: "x86_64".into(),
             os_version: "10.0".into(),
@@ -401,7 +401,7 @@ mod tests {
         assert!(formatted.contains("Mondrian"));
         assert!(formatted.contains("0.1.0"));
         assert!(formatted.contains("DirectX 12"));
-        assert!(formatted.contains("1.92.0"));
+        assert!(formatted.contains("1.97.1"));
         assert!(formatted.contains("Windows"));
         assert!(formatted.contains("x86_64"));
         assert!(formatted.contains("RTX 4090"));

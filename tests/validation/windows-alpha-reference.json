@@ -26,7 +26,7 @@
     "hdr_display_required_for_hdr_output_gate": true
   },
   "software": {
-    "rust_toolchain": "1.92.0",
+    "rust_toolchain": "1.97.1",
     "build_profile": "release",
     "ffmpeg_version_must_be_recorded": true,
     "gpu_driver_must_be_recorded": true

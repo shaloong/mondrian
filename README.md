@@ -1,7 +1,7 @@
 # Mondrian
 
 [![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
 > [!NOTE]
@@ -55,7 +55,7 @@
 
 ### 环境要求
 
-- Rust 1.92+
+- Rust 1.97.1+
 - FFmpeg 开发库与 `ffmpeg`/`ffprobe` CLI（仅源码构建需要；发行包自带私有动态运行时）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+

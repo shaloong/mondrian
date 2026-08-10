@@ -56,8 +56,8 @@
     "hdr-output-state"
   ],
   "tools": {
-    "rustc": "rustc 1.92.0 (contract fixture)",
-    "cargo": "cargo 1.92.0 (contract fixture)",
+    "rustc": "rustc 1.97.1 (contract fixture)",
+    "cargo": "cargo 1.97.1 (contract fixture)",
     "ffmpeg": "ffmpeg version contract-fixture",
     "ffprobe": "ffprobe version contract-fixture"
   }
