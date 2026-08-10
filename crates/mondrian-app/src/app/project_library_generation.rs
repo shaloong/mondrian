@@ -226,7 +226,8 @@ pub(super) fn sweep_orphaned_project_libraries(
         let entry =
             entry.map_err(|error| format!("failed to inspect Project runtime entry: {error}"))?;
         let path = entry.path();
-        let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let canonical_path =
+            mondrian_assets::canonical_native_path(&path).unwrap_or_else(|_| path.clone());
         if protected.contains(&path)
             || protected.contains(&canonical_path)
             || !is_managed_library_directory(&path)
@@ -287,8 +288,11 @@ fn is_managed_library_directory(path: &Path) -> bool {
 /// the caller-supplied spelling. On macOS the system temp directory resolves
 /// through a `/var` -> `/private/var` symlink, so compare the resolved forms.
 fn library_directory_belongs_to_runtime(runtime_root: &Path, library_root: &Path) -> bool {
-    match (library_root.parent(), std::fs::canonicalize(runtime_root)) {
-        (Some(parent), Ok(resolved)) => parent == resolved,
+    match (
+        library_root.parent(),
+        mondrian_assets::canonical_native_path(runtime_root),
+    ) {
+        (Some(parent), Ok(resolved)) => parent == resolved.as_path(),
         _ => false,
     }
 }
@@ -313,6 +317,35 @@ mod tests {
             std::process::id(),
             NEXT_ROOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
+    }
+
+    #[test]
+    fn library_directory_belongs_to_runtime_matches_canonical_spellings() {
+        let root = unique_root("identity-spelling");
+        let runtime_root = root.join("runtime");
+        std::fs::create_dir_all(&runtime_root).expect("runtime root");
+        let library_root = runtime_root.join(format!("{LIBRARY_GENERATION_PREFIX}abc"));
+        std::fs::create_dir(&library_root).expect("library root");
+
+        // The lease freezes the runtime root through the canonical boundary;
+        // the library root arrives already canonicalized by AssetLibrary::open.
+        let canonical_runtime =
+            mondrian_assets::canonical_native_path(&runtime_root).expect("canonical runtime");
+        let canonical_library =
+            mondrian_assets::canonical_native_path(&library_root).expect("canonical library");
+        assert!(library_directory_belongs_to_runtime(
+            &canonical_runtime,
+            &canonical_library
+        ));
+
+        // The raw caller spelling (short name, symlink, or physical-I/O
+        // prefix) must resolve to the same identity through the same boundary.
+        assert!(library_directory_belongs_to_runtime(
+            &runtime_root,
+            &canonical_library
+        ));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
