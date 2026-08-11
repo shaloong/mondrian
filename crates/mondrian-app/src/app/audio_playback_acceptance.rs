@@ -873,11 +873,7 @@ fn audio_state_name(state: AudioPlaybackState) -> &'static str {
 }
 
 fn basis_points(numerator: u64, denominator: u64) -> u64 {
-    if denominator == 0 {
-        0
-    } else {
-        numerator.saturating_mul(10_000) / denominator
-    }
+    numerator.saturating_mul(10_000).checked_div(denominator).unwrap_or(0)
 }
 
 fn require(

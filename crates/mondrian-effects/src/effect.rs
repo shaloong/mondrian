@@ -886,7 +886,7 @@ fn hash_json_value<H: std::hash::Hasher>(value: &serde_json::Value, state: &mut 
         serde_json::Value::Object(map) => {
             5u8.hash(state);
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             entries.len().hash(state);
             for (key, value) in entries {
                 key.hash(state);

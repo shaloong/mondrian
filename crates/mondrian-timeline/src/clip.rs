@@ -212,7 +212,7 @@ impl Transform2D {
 
 fn normalized_opacity_contract() -> ParameterNumericContract {
     ParameterNumericContract::closed(0.0, 1.0, Some(0.01), ParameterInvalidValuePolicy::Reject)
-        .unwrap_or_else(|_| ParameterNumericContract {
+        .unwrap_or(ParameterNumericContract {
             hard_range: ParameterNumericRange { min: 0.0, max: 1.0 },
             soft_range: ParameterNumericRange { min: 0.0, max: 1.0 },
             step: Some(0.01),

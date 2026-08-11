@@ -5903,7 +5903,7 @@ void {fragment_entry}() {{
         input_sampler_binding = wrapper.input_sampler_binding,
         fragment_entry = wrapper.fragment_entry_point,
         output_location = wrapper.output_location,
-        pixel_name = &link_plan.program_contract.pixel_name,
+        pixel_name = link_plan.program_contract.pixel_name,
         ocio_program_call = ocio_program_call,
     );
     let debug_combined_source =

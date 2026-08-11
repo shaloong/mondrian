@@ -1889,8 +1889,6 @@ fn validate_token_chain(
                 lane,
                 backend: EffectProcessingBackend::Gpu,
                 precision,
-                waits: _,
-                signal: _,
                 ..
             } => {
                 require_plan(transfer_count > 0, "gpu_dispatch_before_transfer")?;

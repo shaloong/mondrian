@@ -2,5 +2,5 @@
 # 说明: 该文件仅用于 Clippy 支持的配置项（阈值、MSRV 等），
 # 不能在这里声明 lint level（如 warn/deny）。
 
-msrv = "1.92"
+msrv = "1.97.1"
 too-many-arguments-threshold = 13

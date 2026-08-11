@@ -423,7 +423,9 @@ fn run_device_worker(
                     output,
                     || observer.snapshot(),
                     |final_snapshot| {
-                        event_tx.send(WorkerEvent::Lost { reason: loss_reason, final_snapshot })
+                        event_tx
+                            .send(WorkerEvent::Lost { reason: loss_reason, final_snapshot })
+                            .map_err(|_| ())
                     },
                 )
                 .is_err()

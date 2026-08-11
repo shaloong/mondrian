@@ -453,10 +453,8 @@ impl Widget for DockPanel {
             UiEvent::Drop { payload: DragPayload::PanelTab(panel), position } => {
                 let _ = self.drop_panel_tab(*panel, *position, ctx);
             }
-            UiEvent::DragLeave | UiEvent::Drop { .. } => {
-                if self.dock_hover.take().is_some() {
-                    ctx.request_repaint();
-                }
+            UiEvent::DragLeave | UiEvent::Drop { .. } if self.dock_hover.take().is_some() => {
+                ctx.request_repaint();
             }
             _ => {}
         }

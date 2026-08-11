@@ -1715,11 +1715,7 @@ pub(crate) fn evaluate_process_memory_gate(
 }
 
 fn percent(numerator: u64, denominator: u64) -> u64 {
-    if denominator == 0 {
-        0
-    } else {
-        numerator.saturating_mul(100) / denominator
-    }
+    numerator.saturating_mul(100).checked_div(denominator).unwrap_or(0)
 }
 
 fn push_failure(

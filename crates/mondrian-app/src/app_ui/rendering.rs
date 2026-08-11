@@ -85,13 +85,12 @@ impl AppUiFrameMetrics {
         glyph_upload_bytes: u64,
         render_stats: mondrian_ui_renderer::UiRenderFrameStats,
     ) -> Self {
-        let image_atlas_occupancy_bps = if render_stats.image_atlas_total_pixels == 0 {
-            0
-        } else {
-            ((render_stats.image_atlas_used_pixels.saturating_mul(10_000)
-                / render_stats.image_atlas_total_pixels)
-                .min(10_000)) as u16
-        };
+        let image_atlas_occupancy_bps = render_stats
+            .image_atlas_used_pixels
+            .saturating_mul(10_000)
+            .checked_div(render_stats.image_atlas_total_pixels)
+            .unwrap_or(0)
+            .min(10_000) as u16;
         Self {
             command_count: render_stats.command_count,
             batch_count: render_stats.batch_count,
