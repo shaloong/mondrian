@@ -101,11 +101,12 @@ mod platform {
             let total = required_bytes(&values, "MemTotal")?;
             let available = required_bytes(&values, "MemAvailable")?;
             let used = total.saturating_sub(available);
-            let load = if total == 0 {
-                return Err(String::from("MemTotal must be non-zero"));
-            } else {
-                u32::try_from(used.saturating_mul(100) / total).unwrap_or(100)
-            };
+            let load = u32::try_from(
+                used.saturating_mul(100)
+                    .checked_div(total)
+                    .ok_or_else(|| String::from("MemTotal must be non-zero"))?,
+            )
+            .unwrap_or(100);
             Ok((total, available, load))
         });
         match result {
