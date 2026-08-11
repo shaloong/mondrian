@@ -6808,6 +6808,7 @@ mod tests {
 
     #[test]
     fn viewer_gpu_output_diagnostics_attach_display_target_to_issue_summary() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let host = AppUiHost::new(AppState::new());
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         telemetry.record_display_contract_blocker(

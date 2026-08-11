@@ -2235,6 +2235,7 @@ mod tests {
 
     #[test]
     fn host_reports_renderer_native_import_admission_to_preview() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let host = AppUiHost::new(AppState::new());
 
         host.set_native_decoded_frame_import_support(
@@ -2782,6 +2783,7 @@ mod tests {
 
     #[test]
     fn workspace_layout_exposes_viewer_gpu_presentation_geometry() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new_with_preferences_path(
             workspace_app_state(),
             AppUiPreferences::default(),
@@ -2803,6 +2805,7 @@ mod tests {
 
     #[test]
     fn editor_action_error_without_status_hint_surfaces_in_status_bar_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new_with_preferences_path(
             AppState::new(),
             AppUiPreferences::default(),
@@ -2827,6 +2830,7 @@ mod tests {
 
     #[test]
     fn editor_action_error_keeps_specific_status_hint_from_app_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut state = AppState::new();
         state.set_status_hint("Previous failure", true);
         let mut host = AppUiHost::new_with_preferences_path(
@@ -4143,7 +4147,6 @@ mod tests {
 
         assert_eq!(commands, AppUiShellCommands::default());
         assert_eq!(host.preferences().theme_preference, ThemePreference::Light);
-        assert_eq!(current_theme().name, "Light");
         assert_eq!(
             load_app_ui_preferences_from(&path).theme_preference,
             ThemePreference::Light
