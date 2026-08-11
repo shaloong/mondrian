@@ -13,6 +13,8 @@ mod foundation_audio;
 mod generated_delivery;
 mod harness;
 mod headless_preview;
+#[cfg(test)]
+mod long_work_area_delivery;
 mod media_execution;
 mod plan;
 mod proxy_relink;

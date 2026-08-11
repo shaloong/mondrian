@@ -146,16 +146,16 @@ impl OperationEvidence {
 
 #[derive(Debug, Serialize)]
 pub(super) struct ExportEvidence {
-    export_id: String,
-    job_id: mondrian_core::JobId,
-    generation: u64,
-    executed: bool,
-    terminal_disposition: ExecutionTerminalDisposition,
-    diagnostics: ExportJobDiagnostics,
-    output_path: PathBuf,
-    output_sha256: String,
-    probe: ExportOutputProbe,
-    av_boundaries: AvBoundaryEvidence,
+    pub(super) export_id: String,
+    pub(super) job_id: mondrian_core::JobId,
+    pub(super) generation: u64,
+    pub(super) executed: bool,
+    pub(super) terminal_disposition: ExecutionTerminalDisposition,
+    pub(super) diagnostics: ExportJobDiagnostics,
+    pub(super) output_path: PathBuf,
+    pub(super) output_sha256: String,
+    pub(super) probe: ExportOutputProbe,
+    pub(super) av_boundaries: AvBoundaryEvidence,
 }
 
 impl ExportEvidence {
@@ -165,7 +165,7 @@ impl ExportEvidence {
 }
 
 #[derive(Debug, Serialize)]
-struct AvBoundaryEvidence {
+pub(super) struct AvBoundaryEvidence {
     allowed_error_ms: u32,
     video_start_offset_ms: f64,
     audio_start_offset_ms: f64,
@@ -198,7 +198,7 @@ struct ReimportEvidence {
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
-struct AudioSignalEvidence {
+pub(super) struct AudioSignalEvidence {
     start_sample: i64,
     frame_count: usize,
     left_rms: f64,
@@ -208,7 +208,7 @@ struct AudioSignalEvidence {
 }
 
 #[derive(Debug, Serialize)]
-struct AudioRoundtripEvidence {
+pub(super) struct AudioRoundtripEvidence {
     reference: AudioSignalEvidence,
     decoded: AudioSignalEvidence,
     left_rms_absolute_error: f64,
@@ -468,7 +468,7 @@ fn assert_probe_matches_contract(
     Ok(())
 }
 
-fn rec709_code(linear: f32) -> u8 {
+pub(super) fn rec709_code(linear: f32) -> u8 {
     let linear = linear.clamp(0.0, 1.0);
     let encoded = if linear < 0.018 {
         4.5 * linear
@@ -487,7 +487,7 @@ fn visual_sample_coordinates(resolution: Resolution) -> [(&'static str, u32, u32
     ]
 }
 
-fn max_rgb_error(left: [u8; 4], right: [u8; 4]) -> u8 {
+pub(super) fn max_rgb_error(left: [u8; 4], right: [u8; 4]) -> u8 {
     (0..3).map(|channel| left[channel].abs_diff(right[channel])).max().unwrap_or(0)
 }
 
@@ -830,7 +830,7 @@ pub(super) fn export_and_probe(
     })
 }
 
-fn stereo_signal_evidence(
+pub(super) fn stereo_signal_evidence(
     start_sample: i64,
     frame_count: usize,
     samples: &[f32],
@@ -875,7 +875,7 @@ fn stereo_signal_evidence(
     Ok(evidence)
 }
 
-fn render_program_audio_reference(
+pub(super) fn render_program_audio_reference(
     state: &AppState,
     work_area_start: TimelineTime,
     sample_rate: u32,
@@ -922,7 +922,7 @@ fn render_program_audio_reference(
     stereo_signal_evidence(start_sample, frame_count, &buffer.samples)
 }
 
-fn decode_delivery_audio(
+pub(super) fn decode_delivery_audio(
     state: &AppState,
     asset: &mondrian_assets::AssetRecord,
     reference: AudioSignalEvidence,
