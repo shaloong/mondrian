@@ -694,6 +694,32 @@ This closes the current local complete-Golden obligation only; native CI and
 the separately scoped real-device video/audio qualifications remain independent
 release evidence.
 
+The current-source professional playback run
+`20260811T042914Z-local-windows-16g-bdb49756` passed `passed-baseline` with a
+clean tree at `d2b5718` and rustc 1.97.1 on the qualified 16 GiB Windows
+reference machine. It ran the complete Video+Audio gate set: the video gate
+observed 45,003/45,003 native P010 hardware-presented media layers with the
+`uhd_hevc_main10_hardware_1x_v7` profile, and the audio gate completed the
+30-minute CPAL observation with the controlled device recycle and the
+`cpal_av_48khz_30min_recovery_v2` profile. Both gates exited with terminal
+evidence and `baseline_eligible: true`. This closes the current-source v7 4K
+Main10 playback/seek/supersession and real CPAL A/V recovery obligation; the
+`20260808T083650Z-local-windows-16g-8ee516a3` run on `d29dec4` and earlier
+reports remain regression baselines only.
+
+The long Work Area delivery candidate gate
+`long_work_area_delivery_candidate_gate` (ignored, `validation` feature)
+exports the contracted H.264 High/AAC SDR and HEVC Main10 delivery targets
+over the complete 300-second Hero Work Area through the production export
+queue. It proves full-window diagnosed coverage (7500/7500 frames), exact
+stream-local A/V boundaries at 300 s (0 ms error), sampled start/middle/end
+pixel roundtrip against an independent Rec.709 oracle (max 1 encoded code),
+an audio RMS/peak roundtrip over the production Program render path, and a
+durable save/reopen that retains the long window. The report is written under
+`target/validation/runs/long-work-area-*/long-work-area-report.json` with
+`complete_golden_project: false`; it is candidate evidence and never feeds the
+release repetition obligation.
+
 A separate non-ignored Retime Hero seam gate uses the same production
 single-Project workflow driver with internally consistent metadata-only
 video/audio streams. It proves that one linked exact-rate transaction and one

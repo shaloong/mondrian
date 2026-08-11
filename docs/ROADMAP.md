@@ -1,8 +1,8 @@
 # Mondrian 产品路线图
 
-> 更新日期：2026-08-07
+> 更新日期：2026-08-11
 >
-> 当前状态：M1 Alpha 收口中（实现与当前候选资格均未提前宣布完成）
+> 当前状态：M1 Alpha 收口完成（实现与本地候选资格已闭环；推送后 native CI 终验）
 >
 > 当前主线：冻结 M1，随后只推进 M2 的产品可靠性与交互完整性
 
@@ -96,12 +96,12 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 | 项目与恢复 | 实现闭合：durable save/autosave、SQLite snapshot、非阻塞 close、恢复确认和故障注入不覆盖源 | 当前 Golden v14 已通过 3/3 |
 | 素材与代理 | 实现闭合：有界 probe、fingerprint、稳定 AssetId、离线/重连、proxy/original 与 cache revision | Golden Proxy/Relink 已覆盖 |
 | 编辑 | M1 核心操作、Link、Lift/Extract、T/S、snapping、常速/反向/hold 与 Transition 已接入 | Golden Editorial/Transport 与 Retime 已覆盖 |
-| 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 历史 30 分钟设备证据有效；当前源码 v7 gate 待重跑 |
-| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | 历史 CPAL A/V 证据有效；当前源码 gate 待重跑 |
+| 播放 | 实现闭合：Clock、latest-wins、严格帧覆盖、取消、CPU/native decode 与 Viewer completion | 当前源码 v7 4K Main10 gate 已重跑通过（passed-baseline） |
+| 音频 | 实现闭合：gain/pan/fade、mute/solo、meter、automation、PDC、limiter、嵌套与共享 Runtime | 当前源码 CPAL A/V recovery gate 已通过（passed-baseline） |
 | 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 当前 Golden 与 CPU/GPU reference 已闭合 |
 | 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | M1 色彩资格闭合；Camera Log 属于 M2 |
-| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 当前 Golden 已闭合；长 Work Area 候选证据仍待当前源码确认 |
-| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 当前 Windows/Linux/macOS native CI 结果待确认 |
+| 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 当前 Golden 与长 Work Area 候选证据均已闭合 |
+| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 本地门禁通过（1.97.1 全量测试/clippy）；推送后 native CI 终验 |
 
 ### 4.3 退出门槛
 
@@ -110,9 +110,9 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 - [x] 同一 Hero Sequence 完成编辑、代理/重连、嵌套、恢复、标题、转场、效果、音频和两种交付。
 - [x] 作者级 Crop 贯通 stable ParameterId、动画、Inspector、Undo/Redo、持久化、Preview/Export、cache identity 与 CPU/GPU reference。
 - [x] HLG 通过独立 1000-nit 绝对 reference；PQ、Rec.709/sRGB/Alpha 的既有证据保持通过。
-- [ ] 当前源码完成 v7 4K Main10 播放/seek/supersession和真实 CPAL A/V recovery；历史报告只作回归基线。
+- [x] 当前源码完成 v7 4K Main10 播放/seek/supersession和真实 CPAL A/V recovery；历史报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
-- [ ] 当前源码的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
+- [ ] 当前源码的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义（本地全量 fmt/clippy/test 已绿，待推送后终验）。
 - [x] 当前源码 `windows-alpha-golden-v14` 连续三轮通过，并完成 workspace fmt/clippy/test。
 
 ### 4.4 已接受的 Alpha 限制
