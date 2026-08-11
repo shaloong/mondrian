@@ -14,6 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{ensure, Context};
 use mondrian_assets::{AssetKind, AssetRecord};
@@ -38,10 +39,9 @@ use super::media_execution::{decode_media, rgba8_at, source_rgba};
 use super::workflow::GoldenProductWorkflowDriver;
 use super::{load_json, sequence_settings_from_contract, GoldenProjectContract};
 use crate::app::ui_actions::{
-    assets_prepare_drag_action, clip_write_parameter_values_action, timeline_drop_asset_action,
-    timeline_trim_clips_action, AssetsPrepareDragPayload, ClipParameterValueWrite,
-    ClipWriteParameterValuesPayload, TimelineDropAssetPayload, TimelineTrimClipsPayload,
-    TimelineTrimPayloadEdge,
+    clip_write_parameter_values_action, timeline_drop_asset_action, timeline_trim_clips_action,
+    ClipParameterValueWrite, ClipWriteParameterValuesPayload, TimelineDropAssetPayload,
+    TimelineTrimClipsPayload, TimelineTrimPayloadEdge,
 };
 use crate::app::{AppState, ClipOverlapMode};
 use mondrian_core::automation::PropertyValue;
@@ -143,6 +143,9 @@ pub(super) fn execute_long_work_area_delivery(
     };
     let window_start = FramePosition::new(LONG_WORK_AREA_START_FRAME, time_base);
     let window_end = FramePosition::new(LONG_WORK_AREA_WINDOW_END_FRAME_EXCLUSIVE, time_base);
+    let duration_frames = LONG_WORK_AREA_WINDOW_END_FRAME_EXCLUSIVE - LONG_WORK_AREA_START_FRAME;
+    let duration_secs =
+        duration_frames as f64 * settings.frame_rate.den as f64 / settings.frame_rate.num as f64;
 
     state.dispatch_action(Action::ImportMedia(vec![fixture.path.clone()]))?;
     wait_for_media_imports(state)?;
@@ -159,19 +162,35 @@ pub(super) fn execute_long_work_area_delivery(
     );
 
     let solid_asset_id = state.create_solid_color_asset_in_folder(None, None)?;
-    state.dispatch_action(assets_prepare_drag_action(AssetsPrepareDragPayload {
-        asset_id: solid_asset_id,
-    }))?;
+    state.begin_drag_asset(
+        solid_asset_id,
+        "Long Work Area Solid".to_owned(),
+        AssetKind::SolidColor,
+        Duration::from_secs_f64(duration_secs),
+        false,
+    );
     let solid_clip_id = state.drop_dragging_asset_to_video_track_with_mode(
         video_track_id,
         LONG_WORK_AREA_START_FRAME,
         ClipOverlapMode::Overwrite,
     )?;
-    state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
-        clip_ids: vec![solid_clip_id],
-        edge: TimelineTrimPayloadEdge::Out,
-        position: window_end,
-    }))?;
+    let solid_needs_trim = {
+        let sequence = state.active_sequence().context("active Sequence is absent")?;
+        let solid_clip = sequence
+            .video_tracks
+            .iter()
+            .find(|track| track.id == video_track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == solid_clip_id))
+            .context("dropped solid Clip is absent")?;
+        solid_clip.end_position()? != TimelineTime::from_frame_position(window_end)?
+    };
+    if solid_needs_trim {
+        state.dispatch_action(timeline_trim_clips_action(TimelineTrimClipsPayload {
+            clip_ids: vec![solid_clip_id],
+            edge: TimelineTrimPayloadEdge::Out,
+            position: window_end,
+        }))?;
+    }
     let opacity_parameter = {
         let sequence = state.active_sequence().context("active Sequence is absent")?;
         let solid_clip = sequence
@@ -218,10 +237,22 @@ pub(super) fn execute_long_work_area_delivery(
             .map(|clip| clip.id)
             .context("PCM timeline drop created no audio Clip")?
     };
-    state.dispatch_action(Action::TrimClipEnd {
-        clip_id: pcm_clip_id,
-        new_source_out: window_end,
-    })?;
+    let pcm_needs_trim = {
+        let sequence = state.active_sequence().context("active Sequence is absent")?;
+        let pcm_clip = sequence
+            .audio_tracks
+            .iter()
+            .find(|track| track.id == audio_track_id)
+            .and_then(|track| track.clips.iter().find(|clip| clip.id == pcm_clip_id))
+            .context("dropped PCM Clip is absent")?;
+        pcm_clip.end_position()? != TimelineTime::from_frame_position(window_end)?
+    };
+    if pcm_needs_trim {
+        state.dispatch_action(Action::TrimClipEnd {
+            clip_id: pcm_clip_id,
+            new_source_out: window_end,
+        })?;
+    }
 
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let solid_clip = sequence
@@ -279,10 +310,7 @@ pub(super) fn execute_long_work_area_delivery(
             && reopened_pcm.end_position()? == TimelineTime::from_frame_position(window_end)?,
         "durable reopen changed the long Work Area coverage"
     );
-
     let duration_frames = LONG_WORK_AREA_WINDOW_END_FRAME_EXCLUSIVE - LONG_WORK_AREA_START_FRAME;
-    let duration_secs =
-        duration_frames as f64 * settings.frame_rate.den as f64 / settings.frame_rate.num as f64;
     let mut long_exports = Vec::new();
     let mut decode_context = PreviewDecodeSessionContext::new();
     for export in &contract.exports {
@@ -303,7 +331,6 @@ pub(super) fn execute_long_work_area_delivery(
         let reimport = reimport_and_sample(
             state,
             &evidence,
-            &settings,
             contract.timeline.audio_sample_rate,
             expected_center_rgba,
             &mut decode_context,
@@ -344,7 +371,6 @@ pub(super) fn execute_long_work_area_delivery(
 fn reimport_and_sample(
     state: &mut AppState,
     evidence: &ExportEvidence,
-    settings: &mondrian_timeline::SequenceSettings,
     audio_sample_rate: u32,
     expected_center_rgba: [u8; 4],
     decode_context: &mut PreviewDecodeSessionContext,
@@ -375,6 +401,14 @@ fn reimport_and_sample(
         asset.kind == AssetKind::Video && asset.file_path() == Some(evidence.output_path.as_path()),
         "long Work Area reimport did not retain the finished deliverable identity"
     );
+    let media_probe =
+        asset.media_probe().context("reimported asset has no coherent media probe")?;
+    let video = media_probe.primary_video().context("reimported asset has no video")?;
+    ensure!(
+        video.width > 0 && video.height > 0,
+        "reimported video dimensions are unproven"
+    );
+    let resolution = Resolution { width: video.width, height: video.height };
 
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let time_base = sequence.time_base();
@@ -382,10 +416,6 @@ fn reimport_and_sample(
         .settings
         .root_program_color_context(state.project_color_environment())
         .media_input(false);
-    let resolution = Resolution {
-        width: settings.resolution.width,
-        height: settings.resolution.height,
-    };
 
     let mut sampled_frames = Vec::new();
     for frame in SAMPLE_FRAME_STARTS {

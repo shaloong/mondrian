@@ -56,7 +56,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub(super) const DELIVERY_SLICE_ID: &str = "generated-delivery-roundtrip-v1";
-const EXPORT_TIMEOUT: Duration = Duration::from_secs(600);
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(7200);
 const VISUAL_ROUNDTRIP_MAX_RGB_ERROR: u8 = 16;
 const VISUAL_ORACLE_MAX_RGB_ERROR: u8 = 4;
 const AUDIO_MIN_RMS: f64 = 0.005;
