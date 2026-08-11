@@ -2,7 +2,7 @@
 
 > 更新日期：2026-08-11
 >
-> 当前状态：M1 Alpha 收口完成（实现与本地候选资格已闭环；推送后 native CI 终验）
+> 当前状态：M1 Alpha 收口完成（实现、候选资格与三平台 native CI 均已闭环）
 >
 > 当前主线：冻结 M1，随后只推进 M2 的产品可靠性与交互完整性
 
@@ -101,7 +101,7 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 | 视觉 | 作者级 Crop、基础算子、Basic Title、Cross Dissolve 与 Hold/Linear/Bezier 作者语义已接入 | 当前 Golden 与 CPU/GPU reference 已闭合 |
 | 色彩 | Rec.709/sRGB、PQ、HLG 与 straight Alpha 已有独立 reference；未知解释会阻止或要求 override | M1 色彩资格闭合；Camera Log 属于 M2 |
 | 导出 | H.264 High/AAC SDR、HEVC Main10、不可变 snapshot、取消、失败清理与完成前 probe 已接入 | 当前 Golden 与长 Work Area 候选证据均已闭合 |
-| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | 本地门禁通过（1.97.1 全量测试/clippy）；推送后 native CI 终验 |
+| 平台与质量 | 三平台生产入口和 Adapter 已进入 CI 配置；本地 workspace 门禁可执行 | Windows/Linux/macOS native CI 通过（1.97.1） |
 
 ### 4.3 退出门槛
 
@@ -112,7 +112,7 @@ Linux/macOS 共享生产 Interface 和常规 CI，但实机发布资格属于 M4
 - [x] HLG 通过独立 1000-nit 绝对 reference；PQ、Rec.709/sRGB/Alpha 的既有证据保持通过。
 - [x] 当前源码完成 v7 4K Main10 播放/seek/supersession和真实 CPAL A/V recovery；历史报告只作回归基线。
 - [x] 所有生产结果归类为 `Verified`、`ExplicitlyDegraded` 或 `Blocked/Unresolved`；没有隐式 RGBA8、错误源帧、Video Master 或静默效果旁路。
-- [ ] 当前源码的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义（本地全量 fmt/clippy/test 已绿，待推送后终验）。
+- [x] 当前源码的 Windows/Linux/macOS native CI 通过，平台专属类型不泄漏到共享语义。
 - [x] 当前源码 `windows-alpha-golden-v14` 连续三轮通过，并完成 workspace fmt/clippy/test。
 
 ### 4.4 已接受的 Alpha 限制
