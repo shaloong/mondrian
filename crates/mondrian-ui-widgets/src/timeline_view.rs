@@ -761,6 +761,12 @@ impl TimelineTrack {
     }
 }
 
+/// Minimum playhead travel between PointerDrag seek dispatches while the
+/// playhead is being dragged. Keeps a fast drag from issuing one seek (and
+/// one decode-cancel/generation rotation) per input event; the release
+/// dispatches the exact final position as `Settled`.
+const DRAG_SEEK_COALESCE_FRAMES: i64 = 4;
+
 /// Scrollable, zoomable timeline surface.
 pub struct TimelineView {
     id: WidgetId,
@@ -794,6 +800,13 @@ pub struct TimelineView {
     header_width: f32,
     ruler_height: f32,
     playhead_dragging: bool,
+    /// Most recently dispatched PointerDrag playhead seek, for drag
+    /// coalescing. `None` forces the first drag move to dispatch immediately.
+    last_drag_seek_frame: Option<i64>,
+    /// Latest drag position held back while the playhead travels less than
+    /// `DRAG_SEEK_COALESCE_FRAMES` from the last dispatched seek. The release
+    /// always dispatches the exact final position as `Settled`.
+    pending_drag_seek_frame: Option<i64>,
     in_out_drag: Option<TimelineInOutDrag>,
     asset_drop_hover: Option<TimelineAssetDropHover>,
     track_drag: Option<TimelineTrackDrag>,
@@ -950,6 +963,8 @@ impl TimelineView {
             header_width: metrics.default_header_width,
             ruler_height: metrics.default_ruler_height,
             playhead_dragging: false,
+            last_drag_seek_frame: None,
+            pending_drag_seek_frame: None,
             in_out_drag: None,
             asset_drop_hover: None,
             track_drag: None,
@@ -1061,6 +1076,8 @@ impl TimelineView {
             self.selected_track = None;
             self.playhead_dragging = false;
             self.active_snap = None;
+            self.last_drag_seek_frame = None;
+            self.pending_drag_seek_frame = None;
             self.in_out_drag = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
@@ -2709,11 +2726,24 @@ impl TimelineView {
         let proposed = frame.max(0);
         let snap = self.snap_frame(proposed, None, false);
         self.set_active_snap(snap, ctx);
-        self.seek_from_input(
-            snap.map_or(proposed, |snap| snap.frame),
-            TimelineSeekSource::PointerDrag,
-            ctx,
-        );
+        let frame = snap.map_or(proposed, |snap| snap.frame);
+        self.playhead_frame = frame;
+        // A fast drag can produce one move event per input frame; each seek
+        // cancels the in-flight decode and rotates the preview generation.
+        // Coalesce the stream so the engine only chases playhead travel of at
+        // least DRAG_SEEK_COALESCE_FRAMES; the release dispatch always lands
+        // the exact final position as Settled.
+        let coalesced = self
+            .last_drag_seek_frame
+            .is_some_and(|last| (frame - last).abs() < DRAG_SEEK_COALESCE_FRAMES);
+        if coalesced {
+            self.pending_drag_seek_frame = Some(frame);
+        } else {
+            self.last_drag_seek_frame = Some(frame);
+            self.pending_drag_seek_frame = None;
+            self.dispatch_seek(frame, TimelineSeekSource::PointerDrag, ctx);
+        }
+        ctx.request_repaint();
     }
 
     fn asset_drop_target_at(&self, position: Point) -> Option<(usize, i64)> {
@@ -4705,6 +4735,8 @@ impl Widget for TimelineView {
             self.focused = false;
             self.focus_visible = false;
             self.playhead_dragging = false;
+            self.last_drag_seek_frame = None;
+            self.pending_drag_seek_frame = None;
             self.in_out_drag = None;
             self.asset_drop_hover = None;
             self.track_drag = None;
@@ -4925,6 +4957,8 @@ impl Widget for TimelineView {
                         return EventResult::Handled;
                     }
                     self.playhead_dragging = true;
+                    self.last_drag_seek_frame = None;
+                    self.pending_drag_seek_frame = None;
                     self.request_timeline_pointer_capture(ctx);
                     self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
                     return EventResult::Handled;
@@ -4980,6 +5014,8 @@ impl Widget for TimelineView {
                     let playhead_x = self.frame_to_x(self.playhead_frame);
                     if (position.x - playhead_x).abs() <= 4.0 {
                         self.playhead_dragging = true;
+                        self.last_drag_seek_frame = None;
+                        self.pending_drag_seek_frame = None;
                         self.request_timeline_pointer_capture(ctx);
                         self.seek_from_drag_input(self.x_to_frame(position.x), ctx);
                         return EventResult::Handled;
@@ -5090,6 +5126,8 @@ impl Widget for TimelineView {
             UiEvent::MouseUp { button: MouseButton::Left, .. } if self.playhead_dragging => {
                 self.playhead_dragging = false;
                 self.active_snap = None;
+                self.last_drag_seek_frame = None;
+                self.pending_drag_seek_frame = None;
                 self.dispatch_seek(self.playhead_frame, TimelineSeekSource::Settled, ctx);
                 self.release_timeline_pointer_capture(ctx);
                 ctx.request_repaint();
@@ -5140,6 +5178,8 @@ impl Widget for TimelineView {
                 self.focus_visible = false;
                 self.playhead_dragging = false;
                 self.active_snap = None;
+                self.last_drag_seek_frame = None;
+                self.pending_drag_seek_frame = None;
                 self.in_out_drag = None;
                 self.asset_drop_hover = None;
                 self.track_drag = None;
@@ -6045,6 +6085,117 @@ mod tests {
             &[
                 TimelineSeek { frame: 24, source: TimelineSeekSource::PointerDrag },
                 TimelineSeek { frame: 24, source: TimelineSeekSource::Settled }
+            ]
+        );
+    }
+
+    #[test]
+    fn fast_ruler_drag_coalesces_pointer_drag_seeks_and_lands_exact_on_release() {
+        let seek_events = Rc::new(RefCell::new(Vec::new()));
+        let seek_log = Rc::clone(&seek_events);
+        let mut view = timeline().on_seek(move |seek| {
+            seek_log.borrow_mut().push(seek);
+            Action::Pause
+        });
+        view.layout(Rect::new(0.0, 0.0, 520.0, 180.0));
+
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = dispatching_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &|_| {},
+        );
+
+        // Engage the drag at frame 24: the first move always dispatches.
+        view.event(
+            &UiEvent::MouseDown {
+                position: timeline_content_point(192.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(view.playhead_frame(), 24);
+        assert_eq!(
+            seek_events.borrow().as_slice(),
+            &[TimelineSeek { frame: 24, source: TimelineSeekSource::PointerDrag }]
+        );
+
+        // Moves within the four-frame coalesce window update the widget
+        // playhead but must not spam the engine with another seek.
+        for frame in [25, 26, 27] {
+            view.event(
+                &UiEvent::MouseMove {
+                    position: timeline_content_point(192.0 + (frame - 24) as f32 * 3.75, 12.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            );
+        }
+        assert_eq!(view.playhead_frame(), 27);
+        assert_eq!(
+            seek_events.borrow().len(),
+            1,
+            "travel under DRAG_SEEK_COALESCE_FRAMES must not dispatch PointerDrag seeks"
+        );
+
+        // Exactly DRAG_SEEK_COALESCE_FRAMES of travel does dispatch.
+        view.event(
+            &UiEvent::MouseMove {
+                position: timeline_content_point(192.0 + 15.0, 12.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            seek_events.borrow().last(),
+            Some(&TimelineSeek { frame: 28, source: TimelineSeekSource::PointerDrag })
+        );
+
+        // Travel beyond the coalesce window dispatches the far position.
+        view.event(
+            &UiEvent::MouseMove {
+                position: timeline_content_point(300.0, 12.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let far_frame = view.playhead_frame();
+        assert_eq!(
+            seek_events.borrow().last(),
+            Some(&TimelineSeek {
+                frame: far_frame,
+                source: TimelineSeekSource::PointerDrag
+            })
+        );
+
+        // Release always lands the exact final playhead as Settled.
+        view.event(
+            &UiEvent::MouseUp {
+                position: timeline_content_point(300.0, 12.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            seek_events.borrow().as_slice(),
+            &[
+                TimelineSeek { frame: 24, source: TimelineSeekSource::PointerDrag },
+                TimelineSeek { frame: 28, source: TimelineSeekSource::PointerDrag },
+                TimelineSeek {
+                    frame: far_frame,
+                    source: TimelineSeekSource::PointerDrag
+                },
+                TimelineSeek {
+                    frame: far_frame,
+                    source: TimelineSeekSource::Settled
+                }
             ]
         );
     }
