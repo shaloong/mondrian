@@ -385,6 +385,10 @@ struct PreviewDecodeSession {
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: Option<ffmpeg::util::format::pixel::Pixel>,
+    /// Last color contract applied to the retained scaler. Per-frame
+    /// reconfiguration is skipped while the contract is unchanged, which is
+    /// the ordinary case inside one session.
+    scaler_color_contract: Option<DecodedRgbaFrameContract>,
     stream_index: usize,
     stream_tb: ffmpeg::Rational,
     /// Absolute stream PTS representing media-source-local time zero.
@@ -679,11 +683,34 @@ impl RetainedDecodedCandidateWindow {
         pts_high_water: &mut Option<i64>,
     ) -> Result<()> {
         advance_decoded_pts_high_water(pts_high_water, frame_pts);
-        self.insert(
-            RetainedDecodedCandidate::retain(frame_pts, frame, path)?,
-            true,
-        );
+        // Only clone when this decoded frame can enter the window. During a
+        // long-GOP forward scan almost every intermediate frame is outside
+        // the retained before/after slots; cloning each one would allocate an
+        // AVFrame plus buffer references per candidate for nothing.
+        if self.would_retain(frame_pts) {
+            self.insert(
+                RetainedDecodedCandidate::retain(frame_pts, frame, path)?,
+                true,
+            );
+        }
         Ok(())
+    }
+
+    fn would_retain(&self, candidate_pts: i64) -> bool {
+        let slot = if candidate_pts <= self.target_pts {
+            &self.before
+        } else {
+            &self.after
+        };
+        slot.as_ref().is_none_or(|current| {
+            let current_pts = current.extent.start_pts;
+            candidate_pts == current_pts
+                || if candidate_pts <= self.target_pts {
+                    candidate_pts > current_pts
+                } else {
+                    candidate_pts < current_pts
+                }
+        })
     }
 
     fn insert(&mut self, candidate: RetainedDecodedCandidate, record_duplicate: bool) {
@@ -1151,6 +1178,7 @@ impl PreviewDecodeSession {
             decoder,
             scaler,
             scaler_source_format,
+            scaler_color_contract: None,
             stream_index,
             stream_tb,
             stream_start_pts,
@@ -1206,7 +1234,9 @@ impl PreviewDecodeSession {
 
     fn retire_hardware_device_context(&self) {
         if let Some(device_context) = &self.hardware_device_context {
-            device_context.retire();
+            device_context.retire_after_runtime_failure(
+                "runtime video decode failure retired the hardware device context",
+            );
         }
     }
 
@@ -1673,6 +1703,7 @@ impl PreviewDecodeSession {
                                   scaler_source_format: &mut Option<
             ffmpeg::util::format::pixel::Pixel,
         >,
+                                  scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
                                   target_width: u32,
                                   target_height: u32,
                                   path: &Path,
@@ -1729,6 +1760,7 @@ impl PreviewDecodeSession {
                 hardware_decode_plan,
                 scaler,
                 scaler_source_format,
+                scaler_color_contract,
                 target_width,
                 target_height,
                 path,
@@ -1748,6 +1780,7 @@ impl PreviewDecodeSession {
                 &mut self.hardware_decode_plan,
                 &mut self.scaler,
                 &mut self.scaler_source_format,
+                &mut self.scaler_color_contract,
                 self.target_width,
                 self.target_height,
                 self.path.as_path(),
@@ -1806,6 +1839,7 @@ impl PreviewDecodeSession {
             &mut self.hardware_decode_plan,
             &mut self.scaler,
             &mut self.scaler_source_format,
+            &mut self.scaler_color_contract,
             self.target_width,
             self.target_height,
             self.path.as_path(),
@@ -1895,6 +1929,7 @@ impl PreviewDecodeSession {
                 &mut self.hardware_decode_plan,
                 &mut self.scaler,
                 &mut self.scaler_source_format,
+                &mut self.scaler_color_contract,
                 self.target_width,
                 self.target_height,
                 self.path.as_path(),
@@ -1964,6 +1999,7 @@ impl PreviewDecodeSession {
             &mut self.hardware_decode_plan,
             &mut self.scaler,
             &mut self.scaler_source_format,
+            &mut self.scaler_color_contract,
             self.target_width,
             self.target_height,
             self.path.as_path(),
@@ -2398,6 +2434,12 @@ pub(super) fn external_exact_frame_is_publishable(path: &Path, frame: &RgbaFrame
 /// then revalidate that revision after all demux, codec, conversion, and copy
 /// work. This closes the replacement race between execution admission and
 /// result publication.
+///
+/// The filesystem revalidation is intentionally skipped for reused-session
+/// results: the request start already verified the revision after the output
+/// lease wait and before any session admission, and a reused session decodes
+/// from its own open file descriptor, so the residual swap window is empty.
+/// Only long-lived session opens/replacements revalidate here.
 pub(super) fn finalize_preview_decode_outcome(
     path: &Path,
     fingerprint: MediaFileFingerprint,
@@ -2410,7 +2452,12 @@ pub(super) fn finalize_preview_decode_outcome(
         PreviewDecodeOutcome::Canceled(_) => None,
     };
     if let Some(diagnostics) = diagnostics {
-        verify_preview_source_revision(path, fingerprint)?;
+        if matches!(
+            diagnostics.session_disposition,
+            PreviewDecodeSessionDisposition::Opened | PreviewDecodeSessionDisposition::Replaced
+        ) {
+            verify_preview_source_revision(path, fingerprint)?;
+        }
         validate_preview_temporal_contract(path, diagnostics)?;
     }
     Ok(outcome)

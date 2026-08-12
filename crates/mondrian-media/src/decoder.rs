@@ -337,6 +337,7 @@ impl HwDeviceContextPool {
         }
     }
 
+    #[cfg(test)]
     fn retire(&self, key: HwAccelDeviceProbeKey, generation: u64) {
         let mut state = self.lock_state();
         let current_generation = state.entries.get(&key).map(|entry| entry.generation);
@@ -1000,6 +1001,7 @@ impl HwAccelDeviceContext {
     ///
     /// Other active Sessions remain safe because they retain independent Arc
     /// leases; a later acquisition creates a new generation.
+    #[cfg(test)]
     pub(crate) fn retire(&self) {
         self.pool.retire(self.key, self.generation);
     }
@@ -1007,6 +1009,21 @@ impl HwAccelDeviceContext {
     /// Retire this generation and apply a bounded owner-local retry delay
     /// after codec attachment or decoder-open failure.
     pub(crate) fn retire_after_setup_failure(&self, reason: impl Into<String>) {
+        self.pool.retire_after_setup_failure(
+            self.key,
+            self.generation,
+            HwAccelDeviceContextProbe::acquired(self.owner.backend, self.newly_created, reason),
+        );
+    }
+
+    /// Retire this generation and apply a bounded owner-local retry delay
+    /// after a runtime decode failure.
+    ///
+    /// A driver that opens successfully but fails during decode (a "half-bad"
+    /// environment common with multi-adapter or hybrid laptops) must not be
+    /// recreated on every request: without backoff each failure paid the full
+    /// device-creation and decoder-open cost and surfaced a fresh error.
+    pub(crate) fn retire_after_runtime_failure(&self, reason: impl Into<String>) {
         self.pool.retire_after_setup_failure(
             self.key,
             self.generation,

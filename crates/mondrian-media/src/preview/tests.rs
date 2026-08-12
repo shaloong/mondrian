@@ -1571,12 +1571,22 @@ fn swscale_expands_bt709_limited_range_to_full_rgba() {
         path,
     )
     .expect("create scaler");
-    let black =
-        convert_decoded_to_rgba(&decoded_yuv420(16), &mut scaler, path, test_source_color())
-            .expect("convert limited black");
-    let white =
-        convert_decoded_to_rgba(&decoded_yuv420(235), &mut scaler, path, test_source_color())
-            .expect("convert limited white");
+    let black = convert_decoded_to_rgba(
+        &decoded_yuv420(16),
+        &mut scaler,
+        path,
+        test_source_color(),
+        &mut None,
+    )
+    .expect("convert limited black");
+    let white = convert_decoded_to_rgba(
+        &decoded_yuv420(235),
+        &mut scaler,
+        path,
+        test_source_color(),
+        &mut None,
+    )
+    .expect("convert limited white");
 
     assert!(black.rgba()[..3].iter().all(|channel| *channel <= 2));
     assert!(white.rgba()[..3].iter().all(|channel| *channel >= 253));
@@ -2110,11 +2120,13 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
     plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
     let mut scaler = None;
     let mut scaler_source_format = None;
+    let mut scaler_color_contract = None;
     let payload = materialize_decoded_frame(
         &decoded,
         &mut plan,
         &mut scaler,
         &mut scaler_source_format,
+        &mut scaler_color_contract,
         2,
         2,
         Path::new("synthetic-rgba"),
@@ -2160,6 +2172,7 @@ fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
         &mut plan,
         &mut None,
         &mut None,
+        &mut None,
         2,
         1,
         Path::new("synthetic-linear.exr"),
@@ -2203,6 +2216,7 @@ fn gpu_required_software_frame_fails_closed() {
         &mut plan,
         &mut None,
         &mut None,
+        &mut None,
         2,
         2,
         Path::new("synthetic-rgba"),
@@ -2227,6 +2241,7 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
     let payload = materialize_decoded_frame(
         &decoded,
         &mut plan,
+        &mut None,
         &mut None,
         &mut None,
         960,
@@ -2271,6 +2286,7 @@ fn explicit_d3d12_p010_frame_materializes_native_with_decode_fence() {
     let payload = materialize_decoded_frame(
         &decoded,
         &mut plan,
+        &mut None,
         &mut None,
         &mut None,
         1920,
@@ -2842,14 +2858,43 @@ fn preview_decode_revalidates_revision_after_frame_materialization() {
         ),
         PreviewDecodePath::InProcessFfmpegCpuRgba,
     );
+    let opened_frame =
+        frame.clone().with_session_disposition(PreviewDecodeSessionDisposition::Opened);
 
     let error =
-        finalize_preview_decode_outcome(&path, admitted, PreviewDecodeOutcome::Frame(frame))
+        finalize_preview_decode_outcome(&path, admitted, PreviewDecodeOutcome::Frame(opened_frame))
             .expect_err("post-materialization replacement must fail before result publication");
     assert!(matches!(
         error,
         MondrianError::MediaSourceRevisionChanged { .. }
     ));
+}
+
+#[test]
+fn finalizer_skips_filesystem_revalidation_for_reused_session_frames() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("reused-session-frame.mov");
+    std::fs::write(&path, b"stable-source").expect("write stable source");
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let frame = RgbaFrame::new(
+        1,
+        1,
+        vec![0, 0, 0, 255],
+        DecodedRgbaFrameContract::source_encoded(
+            test_source_color(),
+            DecodedVideoMatrix::Bt709,
+            DecodedVideoRange::Limited,
+        ),
+        PreviewDecodePath::InProcessFfmpegCpuRgba,
+    )
+    .with_access_mode(PreviewDecodeAccessMode::RandomAccessStillFrame)
+    .with_temporal_selection(118, Some(DecodedTemporalExtent::from_duration(100, 20)))
+    .with_session_disposition(PreviewDecodeSessionDisposition::Reused);
+
+    let outcome =
+        finalize_preview_decode_outcome(&path, fingerprint, PreviewDecodeOutcome::Frame(frame))
+            .expect("reused-session frames skip the post-decode filesystem revalidation");
+    assert!(matches!(outcome, PreviewDecodeOutcome::Frame(_)));
 }
 
 #[test]

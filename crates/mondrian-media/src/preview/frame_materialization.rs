@@ -25,11 +25,15 @@ pub(super) fn convert_decoded_to_rgba(
     scaler: &mut ffmpeg::software::scaling::Context,
     path: &Path,
     source_color: PreviewSourceColorContract,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
 ) -> Result<RgbaFrame> {
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let color_contract = resolve_cpu_rgba_contract(decoded, source_color, path)?;
-    configure_preview_rgba_scaler(scaler, color_contract, path)?;
+    if *scaler_color_contract != Some(color_contract) {
+        configure_preview_rgba_scaler(scaler, color_contract, path)?;
+        *scaler_color_contract = Some(color_contract);
+    }
     let mut rgba = ffmpeg::util::frame::video::Video::empty();
     let swscale_started_at = Instant::now();
     scaler.run(decoded, &mut rgba).map_err(|error| MondrianError::DecodeFailed {
@@ -275,6 +279,7 @@ pub(super) fn materialize_decoded_frame(
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
     path: &Path,
@@ -285,6 +290,7 @@ pub(super) fn materialize_decoded_frame(
         hardware_decode_plan,
         scaler,
         scaler_source_format,
+        scaler_color_contract,
         target_width,
         target_height,
         path,
@@ -299,6 +305,7 @@ pub(super) fn materialize_decoded_frame_with_session_output_lease(
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
     path: &Path,
@@ -310,6 +317,7 @@ pub(super) fn materialize_decoded_frame_with_session_output_lease(
         hardware_decode_plan,
         scaler,
         scaler_source_format,
+        scaler_color_contract,
         target_width,
         target_height,
         path,
@@ -324,6 +332,7 @@ fn materialize_decoded_frame_inner(
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
     path: &Path,
@@ -371,6 +380,7 @@ fn materialize_decoded_frame_inner(
         hardware_decode_plan,
         scaler,
         scaler_source_format,
+        scaler_color_contract,
         target_width,
         target_height,
         path,
@@ -484,6 +494,7 @@ fn materialize_decoded_to_cpu(
     hardware_decode_plan: &mut PreviewHardwareDecodePlan,
     scaler: &mut Option<ffmpeg::software::scaling::Context>,
     scaler_source_format: &mut Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
     target_width: u32,
     target_height: u32,
     path: &Path,
@@ -510,7 +521,7 @@ fn materialize_decoded_to_cpu(
             target_height,
             path,
         )?;
-        return convert_decoded_to_rgba(decoded, scaler, path, source_color)
+        return convert_decoded_to_rgba(decoded, scaler, path, source_color, scaler_color_contract)
             .map(PreviewDecodedFramePayload::CpuRgba);
     }
 
@@ -560,7 +571,14 @@ fn materialize_decoded_to_cpu(
         target_height,
         path,
     )?;
-    convert_decoded_to_rgba(&transferred, scaler, path, source_color).map(|frame| {
+    convert_decoded_to_rgba(
+        &transferred,
+        scaler,
+        path,
+        source_color,
+        scaler_color_contract,
+    )
+    .map(|frame| {
         PreviewDecodedFramePayload::CpuRgba(frame.with_stage_durations(
             PreviewDecodeStageDurations {
                 hardware_transfer_us,
