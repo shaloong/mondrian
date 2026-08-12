@@ -4518,7 +4518,17 @@ mod tests {
         assert_eq!(scratch.effect_execution_diagnostics().gpu_plan_entries, 1);
 
         scratch.bind_effect_execution_generation(1);
-        assert_eq!(scratch.effect_execution_diagnostics().gpu_plan_entries, 0);
+        assert_eq!(
+            scratch.effect_execution_diagnostics().gpu_plan_entries,
+            1,
+            "generation rotation retains frame-independent GPU-plan residency so scrubbing does not re-lower every graph"
+        );
+        let generation_retained =
+            scratch.get_or_lower_effect_gpu_plan(&graph).expect("generation-retained plan");
+        assert!(
+            Arc::ptr_eq(&generation_retained, &second),
+            "the retained plan is reused, not re-lowered"
+        );
     }
 
     #[test]

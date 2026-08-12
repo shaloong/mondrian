@@ -199,21 +199,29 @@ impl EffectExecutionSession {
     ///
     /// Generation changes are conservative cache barriers. A canceled or
     /// superseded generation can therefore never publish into the next one.
+    ///
+    /// Frame-dependent pixel caches are cleared so stale temporal work cannot
+    /// be reused across a generation boundary. Frame-independent static caches
+    /// (dynamic graph topologies and GPU lowering plans) are retained: their
+    /// keys carry no time or generation identity and their values are pure
+    /// functions of the graph shape, so a superseded generation's entries can
+    /// never mislead the next generation. Retaining them is what keeps
+    /// frame-by-frame scrubbing from re-lowering and re-compiling every graph
+    /// on every playhead position.
     pub fn bind_generation(&mut self, generation: u64) {
         if self.generation != Some(generation) {
-            self.clear();
+            self.clear_pixel_caches();
             self.generation = Some(generation);
         }
     }
 
-    /// Remove every resident cache entry while retaining configuration.
-    pub fn clear(&mut self) {
+    /// Remove every resident pixel cache entry while retaining static
+    /// topology and GPU-plan residency.
+    pub fn clear_pixel_caches(&mut self) {
         self.encoded_outputs.clear();
         self.encoded_nodes.clear();
         self.float_outputs.clear();
         self.temporal_outputs.clear();
-        self.topologies.clear();
-        self.gpu_plans.clear();
     }
 
     /// Current bounded-residency diagnostics.
@@ -362,11 +370,6 @@ impl EffectTopologyCache {
         self.max_entries = max_entries;
         self.max_bytes = max_bytes;
         self.trim();
-    }
-
-    fn clear(&mut self) {
-        self.total_bytes = 0;
-        self.entries.clear();
     }
 
     fn entries(&self) -> usize {

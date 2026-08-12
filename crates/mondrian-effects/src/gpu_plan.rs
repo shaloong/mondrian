@@ -598,12 +598,6 @@ impl EffectGpuPlanCache {
         self.trim();
     }
 
-    pub(crate) fn clear(&mut self) {
-        self.total_bytes = 0;
-        self.entries.clear();
-        self.lru.clear();
-    }
-
     pub(crate) fn entries(&self) -> usize {
         self.entries.len()
     }
@@ -889,8 +883,17 @@ mod tests {
         assert!(!Arc::ptr_eq(&first, &first_after_eviction));
 
         session.bind_generation(7);
-        assert_eq!(session.diagnostics().gpu_plan_entries, 0);
-        session.get_or_lower_gpu_plan(&first_graph).expect("generation-local plan");
+        assert_eq!(
+            session.diagnostics().gpu_plan_entries,
+            1,
+            "generation rotation must retain frame-independent GPU-plan residency"
+        );
+        let generation_retained =
+            session.get_or_lower_gpu_plan(&first_graph).expect("generation-retained plan");
+        assert!(
+            Arc::ptr_eq(&generation_retained, &first_after_eviction),
+            "the retained plan is reused, not re-lowered"
+        );
         session.reconfigure(crate::EffectExecutionSessionConfig {
             max_gpu_plan_entries: 0,
             max_gpu_plan_bytes: 0,

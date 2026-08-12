@@ -1335,8 +1335,12 @@ mod tests {
             .evaluate_with_session(tt(1), &mut export)
             .expect("prepare independent Export topology");
         assert_eq!(export.diagnostics().topology_entries, 1);
-        preview.clear();
-        assert_eq!(preview.diagnostics().topology_entries, 0);
+        preview.clear_pixel_caches();
+        assert_eq!(
+            preview.diagnostics().topology_entries,
+            1,
+            "clearing pixel caches must retain frame-independent topology residency"
+        );
         assert_eq!(
             export.diagnostics().topology_entries,
             1,
@@ -1345,9 +1349,14 @@ mod tests {
 
         program
             .evaluate_with_session(tt(1), &mut preview)
-            .expect("repopulate Preview topology");
+            .expect("reuse retained Preview topology");
+        assert_eq!(preview.diagnostics().topology_entries, 1);
         preview.bind_generation(12);
-        assert_eq!(preview.diagnostics().topology_entries, 0);
+        assert_eq!(
+            preview.diagnostics().topology_entries,
+            1,
+            "generation rotation must retain frame-independent topology residency"
+        );
 
         export.reconfigure(topology_session_config(0, 0));
         assert_eq!(export.diagnostics().topology_entries, 0);
