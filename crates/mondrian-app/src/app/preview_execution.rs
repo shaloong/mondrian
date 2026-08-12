@@ -904,6 +904,35 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         current || prepared
     }
 
+    /// Revoke the registered output only when its exact semantic key matches.
+    ///
+    /// A force-retired quarantined submission lost its completion callback
+    /// after a queue-order publication; the artifact must not stay current,
+    /// but a newer output with a different key is untouched.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn clear_current_output_for_key(&mut self, key: &K)
+    where
+        K: PartialEq,
+    {
+        if self.current_output.as_ref().is_some_and(|(current, _)| current == key) {
+            self.current_output_generation = None;
+            self.current_output = None;
+        }
+    }
+
+    /// Revoke one prepared successor for an exact playback intent.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn clear_prepared_successor_for_intent(&mut self, intent: PreviewPlaybackIntent) {
+        if self
+            .prepared_successor
+            .as_ref()
+            .is_some_and(|(prepared, _)| *prepared == intent)
+        {
+            self.prepared_successor_generation = None;
+            self.prepared_successor = None;
+        }
+    }
+
     /// Retire the output only when both its semantic key and Adapter-owned
     /// physical artifact identity still match.
     ///

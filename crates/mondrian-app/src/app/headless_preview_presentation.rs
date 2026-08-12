@@ -468,6 +468,16 @@ fn drive_headless_gpu_submission(
                     clear_revoked_headless_gpu_output(preview, &output_key, revoked_output);
                 }
             }
+            HeadlessViewerGpuCompletionPoll::RetiredAfterQuarantine(retired) => {
+                if let Some(revoked_output) = retired.revoked_current_physical_output.as_ref() {
+                    clear_revoked_headless_gpu_output(
+                        preview,
+                        &retired.frame.output_key,
+                        revoked_output,
+                    );
+                }
+                fail_headless_heterogeneous_candidate(preview, state, &mut retired.frame);
+            }
             HeadlessViewerGpuCompletionPoll::Idle
             | HeadlessViewerGpuCompletionPoll::Pending { .. } => {}
         }
@@ -550,6 +560,47 @@ fn drive_headless_gpu_submission(
                     preview.fail_heterogeneous_gpu_execution(terminal),
                 );
             }
+            Ok(Some(HeadlessPreviewCandidate::Loading))
+        }
+        HeadlessViewerGpuCompletionPoll::RetiredAfterQuarantine(mut retired) => {
+            if let Some(error) = retired.completion_error.take() {
+                tracing::warn!(
+                    submission_id = retired.submission_id.get(),
+                    %error,
+                    "Headless Viewer force-retired a quarantined submission with native-import cleanup failure"
+                );
+            }
+            tracing::warn!(
+                submission_id = retired.submission_id.get(),
+                reason = ?retired.quarantine_reason,
+                "Headless Viewer retired a quarantined GPU submission whose completion callback was lost"
+            );
+            let revoked_output = gpu
+                .clear_current_physical_output_for_submission(retired.submission_id)
+                .or_else(|| retired.revoked_current_physical_output.take());
+            if let Some(revoked_output) = revoked_output.as_ref() {
+                clear_revoked_headless_gpu_output(
+                    preview,
+                    &retired.frame.output_key,
+                    revoked_output,
+                );
+            }
+            if let Some(
+                publication @ (FramePresentationDisposition::Presented(_)
+                | FramePresentationDisposition::NoDemand),
+            ) = retired.queued_publication
+            {
+                // The output was already published queue-order but the
+                // callback never proved it; revoke the semantic registration
+                // so a stale artifact cannot stay current.
+                let _ = publication;
+                preview.clear_registered_output_for_key(&retired.frame.output_key);
+            }
+            if retired.successor_prepared {
+                preview.clear_prepared_successor_for_intent(retired.frame.playback_intent());
+            }
+            drop(retired.presentation_lease);
+            fail_headless_heterogeneous_candidate(preview, state, &mut retired.frame);
             Ok(Some(HeadlessPreviewCandidate::Loading))
         }
         HeadlessViewerGpuCompletionPoll::Completed(mut completed) => {

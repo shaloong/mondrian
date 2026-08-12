@@ -6835,12 +6835,22 @@ fn wait_for_headless_gpu_ready_observation_impl(
         }
         let pump_outcome = apply_headless_preview_outcome(preview_service, state);
         let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-        if should_attempt_headless_gpu_candidate(
-            candidate_status,
-            candidate_binding,
-            current_intent,
-            pump_outcome,
-        ) {
+        let attempt_gate = if requirement == HeadlessPreviewObservationRequirement::DemandTerminal {
+            // Terminal observation is level-triggered on the unresolved still
+            // obligation: while any pending demand remains, every loop turn
+            // may present it. A ready result consumed on a turn whose attempt
+            // was blocked (for example by the single GPU slot) must not be
+            // lost to an edge-triggered visible-change gate.
+            target_intent.pending_demand.is_some()
+        } else {
+            should_attempt_headless_gpu_candidate(
+                candidate_status,
+                candidate_binding,
+                current_intent,
+                pump_outcome,
+            )
+        };
+        if attempt_gate {
             let attempt = execute_headless_gpu_candidate(
                 preview_service,
                 state,
@@ -6885,14 +6895,30 @@ fn wait_for_headless_gpu_ready_observation_impl(
                 "Headless terminal observation changed intent before resolving its exact demand: \
                  target={target_intent:?}, current={current_intent:?}"
             );
+            // Ended-demand lifecycle invariants: natural end retires the timed
+            // playback demand into a persistent still demand, and the final
+            // presentable frame must eventually appear through that still
+            // obligation (demand termination is its presentation proof).
+            if state.playback_engine.snapshot().state == TransportState::Ended {
+                anyhow::ensure!(
+                    state.playback_engine.active_playback_demand().is_none(),
+                    "ended transport must retire its timed playback demand: {:?}",
+                    state.playback_engine.frame_demand()
+                );
+            }
             if headless_demand_resolved_without_ready(
                 target_intent,
                 current_intent,
                 candidate_status,
             ) {
+                // The still obligation is satisfied: the final presentable
+                // frame was published (the retained output is its proof) or
+                // the demand was already consumed. Report ready so the
+                // opportunity ledger counts the natural-end presentation.
+                let output_published = preview_service.has_retained_gpu_output();
                 return Ok(HeadlessPreviewSample {
-                    current_gpu_ready: false,
-                    stale_output_available: preview_service.has_retained_gpu_output(),
+                    current_gpu_ready: output_published,
+                    stale_output_available: output_published,
                     unavailable: candidate_status == HeadlessGpuCandidateStatus::Unavailable,
                 });
             }

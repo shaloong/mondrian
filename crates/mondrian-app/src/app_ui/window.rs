@@ -1346,6 +1346,17 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                 ViewerGpuSubmissionPoll::Completed(completed) => {
                     self._completed_submission = Some(completed);
                 }
+                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                    // A lost completion callback cannot hold the single
+                    // submission slot forever; retire the owner with its
+                    // quarantine reason so the pipeline can continue.
+                    tracing::warn!(
+                        submission_id = retired.submission_id.get(),
+                        reason = ?retired.reason,
+                        "Window Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                    );
+                    self._lost_submission_owner = Some(retired.owner);
+                }
                 ViewerGpuSubmissionPoll::Idle
                 | ViewerGpuSubmissionPoll::Pending { .. }
                 | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
@@ -3613,6 +3624,30 @@ fn resolve_window_viewer_gpu_submission_poll(
                 quarantine,
                 WindowViewerGpuDeferredCleanup::ClearFrameResources,
             );
+            ViewerHeterogeneousCompletionPoll::TerminalChange
+        }
+        ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+            // The exact completion callback never arrived within the bounded
+            // grace after quarantine. Retire the owner through the same
+            // retirement path without callback evidence.
+            let quarantine = ViewerGpuSubmissionQuarantine {
+                submission_id: retired.submission_id,
+                reason: retired.reason,
+            };
+            begin_window_viewer_gpu_quarantine(
+                session,
+                host,
+                quarantine,
+                WindowViewerGpuDeferredCleanup::ClearFrameResources,
+            );
+            let mut owner = retired.owner;
+            if owner.texture_registered {
+                owner.texture_registered = false;
+                session.frame_renderer.unregister_external_texture(&owner.texture_key);
+            }
+            if let Some(terminal) = owner.terminal.take() {
+                let _ = host.fail_heterogeneous_viewer_gpu(terminal);
+            }
             ViewerHeterogeneousCompletionPoll::TerminalChange
         }
         ViewerGpuSubmissionPoll::Completed(completed) => {

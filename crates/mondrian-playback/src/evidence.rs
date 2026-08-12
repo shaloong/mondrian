@@ -992,7 +992,7 @@ fn ns_to_us_ceil(nanos: u128) -> Result<u64, PlaybackEvidenceError> {
 mod tests {
     use super::*;
     use crate::{
-        AudioDeviceClockObservation, FrameDeliveryCandidate, FrameDemandSequence,
+        AudioDeviceClockObservation, FrameDeliveryCandidate, FrameDemandKind, FrameDemandSequence,
         PlaybackClockPhaseObservation, PlaybackSnapshot,
     };
     use mondrian_core::{FramePosition, Rational};
@@ -1026,6 +1026,7 @@ mod tests {
 
     fn demand(epoch: PlaybackEpoch, sequence: u64, target_frame: i64) -> FrameDemand {
         FrameDemand {
+            kind: FrameDemandKind::TimedPlayback,
             epoch,
             quality_revision: 1,
             sequence: FrameDemandSequence(sequence),

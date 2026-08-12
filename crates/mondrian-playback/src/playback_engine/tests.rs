@@ -37,6 +37,7 @@ fn frame_delivery_round_trips_opaque_demand_identity() {
 #[test]
 fn presentation_ticket_classifies_completion_at_the_final_deadline() {
     let demand = FrameDemand {
+        kind: FrameDemandKind::TimedPlayback,
         epoch: PlaybackEpoch(7),
         quality_revision: 3,
         sequence: FrameDemandSequence(11),
@@ -1524,7 +1525,72 @@ fn natural_end_replaces_the_previous_terminal_with_an_untimed_final_demand() {
     assert_eq!(snapshot.state, TransportState::Ended);
     assert_eq!(final_demand.target.frame, 2);
     assert_eq!(final_demand.deadline, None);
+    assert_eq!(
+        final_demand.kind,
+        FrameDemandKind::PersistentStill,
+        "natural end retires the timed playback demand into a persistent still demand"
+    );
+    assert_eq!(
+        engine.active_playback_demand(),
+        None,
+        "ended transport has no realtime playback demand"
+    );
     assert!(final_demand.sequence.get() > penultimate.sequence.get());
+}
+
+#[test]
+fn ended_still_demand_is_presentable_without_a_deadline_and_holds_until_superseded() {
+    let mut engine = engine();
+    engine.play(60, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+    assert_eq!(
+        engine.frame_demand().map(|demand| demand.kind),
+        Some(FrameDemandKind::TimedPlayback)
+    );
+    assert!(engine.active_playback_demand().is_some());
+
+    let snapshot = engine.tick(ts(2_400)).unwrap();
+    assert_eq!(snapshot.state, TransportState::Ended);
+    assert_eq!(snapshot.position.frame, 60);
+    let still = engine.frame_demand().expect("ended still demand");
+    assert_eq!(still.kind, FrameDemandKind::PersistentStill);
+    assert_eq!(still.target.frame, 60);
+    assert_eq!(still.deadline, None);
+
+    // A late-by-any-amount presentation of the still frame is never Late:
+    // the still obligation has no realtime deadline.
+    let delivery = FramePresentationTicket::for_demand(still, FramePresentationQuality::Ready)
+        .complete_at(ts(9_999));
+    assert_eq!(delivery.kind(), FrameDeliveryKind::Ready);
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    assert_eq!(engine.pending_frame_demand(), None);
+
+    // Seek supersedes the consumed still demand with a fresh one.
+    engine.seek(FramePosition::new(30, Rational::new(1, 25)), ts(10_000)).unwrap();
+    let superseding = engine.frame_demand().expect("superseding demand");
+    assert_eq!(superseding.kind, FrameDemandKind::PersistentStill);
+    assert_eq!(superseding.target.frame, 30);
+    assert_eq!(engine.active_playback_demand(), None);
+    assert_ne!(superseding.identity(), still.identity());
+}
+
+#[test]
+fn paused_and_stopped_transport_hold_persistent_still_demands() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    engine.pause(ts(400)).unwrap();
+    assert_eq!(
+        engine.frame_demand().map(|demand| demand.kind),
+        Some(FrameDemandKind::PersistentStill)
+    );
+    assert_eq!(engine.active_playback_demand(), None);
+
+    engine.stop(ts(500)).unwrap();
+    assert_eq!(
+        engine.frame_demand().map(|demand| demand.kind),
+        Some(FrameDemandKind::PersistentStill)
+    );
+    assert_eq!(engine.active_playback_demand(), None);
 }
 
 #[test]

@@ -47,6 +47,8 @@ use crate::app::preview_decode_residency::{
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
+#[cfg(any(test, feature = "validation"))]
+use crate::app::preview_execution::PreviewPlaybackIntent;
 use crate::app::preview_execution::{
     PreviewCandidateDecision, PreviewExecutionCoordinator, PreviewGenerationBinding,
     PreviewPreparedPromotion, PreviewSemanticIdentityBuilder,
@@ -1349,6 +1351,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn registered_gpu_output_key(&self) -> Option<PreviewOutputKey> {
         self.execution.borrow().current_output().map(|(key, _)| key.clone())
+    }
+
+    /// Revoke a registered GPU output whose exact completion callback was lost.
+    ///
+    /// A force-retired quarantined submission may already have published
+    /// queue-order; without its callback evidence the artifact must not stay
+    /// current. Only the exact key is revoked; a newer output is untouched.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn clear_registered_output_for_key(&self, key: &PreviewOutputKey) {
+        self.execution.borrow_mut().clear_current_output_for_key(key);
+    }
+
+    /// Revoke one prepared successor whose exact completion callback was lost.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn clear_prepared_successor_for_intent(&self, intent: PreviewPlaybackIntent) {
+        self.execution.borrow_mut().clear_prepared_successor_for_intent(intent);
     }
 
     /// Complete identity of an already-published output proved under the

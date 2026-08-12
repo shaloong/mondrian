@@ -63,6 +63,22 @@ pub(crate) struct ViewerGpuCompletedSubmission<O, C> {
     pub(crate) quarantine_reason: Option<ViewerGpuSubmissionQuarantineReason>,
 }
 
+/// One retained submission force-retired after quarantine without its callback.
+///
+/// The exact completion callback never arrived within the bounded grace after
+/// quarantine. Keeping the single submission slot occupied forever would stall
+/// the whole presentation pipeline on one lost callback, so the owner is
+/// retired and the slot released; a callback that arrives later is counted as
+/// orphaned by the lifecycle.
+pub(crate) struct ViewerGpuRetiredSubmission<O> {
+    /// Exact physical submission identity.
+    pub(crate) submission_id: ViewerGpuSubmissionId,
+    /// Adapter-owned resource and semantic authority envelope.
+    pub(crate) owner: O,
+    /// Quarantine reason that revoked publication authority.
+    pub(crate) reason: ViewerGpuSubmissionQuarantineReason,
+}
+
 /// Result of one non-blocking lifecycle observation.
 pub(crate) enum ViewerGpuSubmissionPoll<O, C> {
     /// No reservation or submitted work exists.
@@ -80,6 +96,9 @@ pub(crate) enum ViewerGpuSubmissionPoll<O, C> {
     /// A deadline or device failure revoked publication authority while keeping
     /// all submitted owners resident.
     QuarantineStarted(ViewerGpuSubmissionQuarantine),
+    /// A quarantined submission's completion callback never arrived within the
+    /// bounded grace; the slot is force-released and the owner retired.
+    RetiredAfterQuarantine(ViewerGpuRetiredSubmission<O>),
 }
 
 struct ViewerGpuCompletionNotice<C> {
@@ -99,7 +118,8 @@ struct ViewerGpuInFlight<O> {
 ///
 /// Capacity is intentionally one until the renderer exposes move-only
 /// per-frame resource slots. A quarantined slot remains occupied until its
-/// exact callback arrives or the owning Adapter/device is dropped.
+/// exact callback arrives, the owning Adapter/device is dropped, or the
+/// bounded [`QUARANTINE_RELEASE_GRACE`] after the completion deadline elapses.
 pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
     next_submission_id: u64,
     in_flight: Option<ViewerGpuInFlight<O>>,
@@ -107,6 +127,15 @@ pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
     completion_receiver: mpsc::Receiver<ViewerGpuCompletionNotice<C>>,
     orphaned_completion_count: u64,
 }
+
+/// Bounded additional wait after quarantine for the exact completion callback
+/// before the capacity-one slot is force-released.
+///
+/// A lost wgpu work-done callback must stall the single Viewer submission slot
+/// for at most this grace; after it, the owner is retired with its quarantine
+/// reason and a late callback is counted as orphaned.
+pub(crate) const QUARANTINE_RELEASE_GRACE: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 /// Move-only admission authority for one not-yet-submitted Viewer batch.
 ///
@@ -237,6 +266,23 @@ where
                 .begin_quarantine(ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded)
         {
             return ViewerGpuSubmissionPoll::QuarantineStarted(quarantine);
+        }
+        if quarantined && now >= completion_deadline + QUARANTINE_RELEASE_GRACE {
+            // The exact completion callback never arrived. Release the
+            // capacity-one slot so the presentation pipeline can continue;
+            // the retired owner carries the quarantine reason for cleanup and
+            // a late callback is counted as orphaned.
+            let Some(in_flight) = self.in_flight.take() else {
+                return ViewerGpuSubmissionPoll::Idle;
+            };
+            let reason = in_flight
+                .quarantine
+                .unwrap_or(ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded);
+            return ViewerGpuSubmissionPoll::RetiredAfterQuarantine(ViewerGpuRetiredSubmission {
+                submission_id,
+                owner: in_flight.owner,
+                reason,
+            });
         }
         ViewerGpuSubmissionPoll::Pending { submission_id, quarantined }
     }

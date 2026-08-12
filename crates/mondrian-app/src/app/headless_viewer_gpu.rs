@@ -27,9 +27,9 @@ use crate::app::viewer_gpu_device_progress::{
 };
 use crate::app::viewer_gpu_publication::{ViewerGpuPhysicalPublication, ViewerGpuPublicationSlots};
 use crate::app::viewer_gpu_submission::{
-    ViewerGpuCompletedSubmission, ViewerGpuSubmissionAdmissionError, ViewerGpuSubmissionId,
-    ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll, ViewerGpuSubmissionQuarantine,
-    ViewerGpuSubmissionQuarantineReason,
+    ViewerGpuCompletedSubmission, ViewerGpuRetiredSubmission, ViewerGpuSubmissionAdmissionError,
+    ViewerGpuSubmissionId, ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll,
+    ViewerGpuSubmissionQuarantine, ViewerGpuSubmissionQuarantineReason,
 };
 use crate::app::FramePresentationDisposition;
 #[cfg(test)]
@@ -232,6 +232,21 @@ pub(crate) enum HeadlessViewerGpuCompletionPoll {
         quarantine: ViewerGpuSubmissionQuarantine,
         revoked_current_physical_output: Option<HeadlessViewerGpuOutput>,
     },
+    /// A quarantined submission never produced its callback within the bounded
+    /// grace; the slot was force-released and the owner must be retired.
+    RetiredAfterQuarantine(Box<HeadlessViewerGpuRetiredCandidate>),
+}
+
+/// One force-retired Headless owner whose exact callback never arrived.
+pub(crate) struct HeadlessViewerGpuRetiredCandidate {
+    pub(crate) submission_id: ViewerGpuSubmissionId,
+    pub(crate) frame: PreviewGpuFrame,
+    pub(crate) queued_publication: Option<FramePresentationDisposition>,
+    pub(crate) successor_prepared: bool,
+    pub(crate) quarantine_reason: ViewerGpuSubmissionQuarantineReason,
+    pub(crate) completion_error: Option<String>,
+    pub(crate) revoked_current_physical_output: Option<HeadlessViewerGpuOutput>,
+    pub(crate) presentation_lease: Option<ViewerGpuPresentationOutputLease>,
 }
 
 /// Opaque usable output payload registered with the production Preview Runtime.
@@ -244,6 +259,16 @@ pub(crate) struct HeadlessViewerGpuOutput {
     /// Presented output height.
     pub height: u32,
 }
+
+/// Frame-level completion safety deadline for one Headless Viewer submission.
+///
+/// The exact GPU work for one Viewer frame is millisecond-scale; a bounded
+/// safety window must therefore be much shorter than any caller observation
+/// deadline. When the work-done callback is lost, this deadline starts the
+/// quarantine and the bounded release grace frees the capacity-one slot, so a
+/// single lost callback cannot stall the pipeline for the caller's full wait.
+pub(crate) const HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(2);
 
 /// Stable adapter identity serialized by real-GPU execution gates.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -451,6 +476,14 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
             match self.lifecycle.poll(Instant::now()) {
                 ViewerGpuSubmissionPoll::Completed(completed) => {
                     self._completed_submission = Some(completed);
+                }
+                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                    tracing::warn!(
+                        submission_id = retired.submission_id.get(),
+                        reason = ?retired.reason,
+                        "Headless Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                    );
+                    self._lost_submission_owner = Some(retired.owner);
                 }
                 ViewerGpuSubmissionPoll::Idle
                 | ViewerGpuSubmissionPoll::Pending { .. }
@@ -960,9 +993,17 @@ impl HeadlessViewerGpuAdapter {
             completion_started_at: completion_started,
         };
         let queue = &self.queue;
+        // The completion deadline is a frame-level safety bound, not the
+        // caller's overall observation deadline. A lost work-done callback
+        // must quarantine the submission within this window and force-release
+        // the capacity-one slot shortly after, so the presentation pipeline
+        // can continue; the caller's own (much longer) deadline then observes
+        // the recovery instead of racing the slot release.
+        let completion_deadline =
+            deadline.instant().min(Instant::now() + HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE);
         reservation.commit(
             owner,
-            deadline.instant(),
+            completion_deadline,
             move |callback| {
                 heterogeneous_submission.register_completion_callback(queue, callback);
             },
@@ -1369,7 +1410,11 @@ impl HeadlessViewerGpuAdapter {
             self.submission_lifecycle.poll_deadline_only(observation_time)
         };
         self.report_new_orphaned_completions();
-        if let ViewerGpuSubmissionPoll::Completed(_) = &initial {
+        if matches!(
+            &initial,
+            ViewerGpuSubmissionPoll::Completed(_)
+                | ViewerGpuSubmissionPoll::RetiredAfterQuarantine(_)
+        ) {
             let generation_failure = device_failure.map(|(submission_id, reason)| {
                 ViewerGpuSubmissionQuarantineReason::DevicePollFailed(format!(
                     "device generation terminal {}: {reason}",
@@ -1451,6 +1496,35 @@ impl HeadlessViewerGpuAdapter {
                     self.finish_completed_submission(completed, retirement_reason),
                 ))
             }
+            ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                HeadlessViewerGpuCompletionPoll::RetiredAfterQuarantine(Box::new(
+                    self.finish_retired_submission(retired),
+                ))
+            }
+        }
+    }
+
+    fn finish_retired_submission(
+        &mut self,
+        retired: ViewerGpuRetiredSubmission<HeadlessViewerGpuSubmissionOwner>,
+    ) -> HeadlessViewerGpuRetiredCandidate {
+        let ViewerGpuRetiredSubmission { submission_id, owner, reason } = retired;
+        let completion_error = self
+            .runtime
+            .retire_completed_native_import_sources()
+            .err()
+            .map(|error| error.to_string());
+        let revoked_current_physical_output =
+            self.take_physical_output_for_submission(submission_id);
+        HeadlessViewerGpuRetiredCandidate {
+            submission_id,
+            frame: owner.frame,
+            queued_publication: owner.queued_publication,
+            successor_prepared: owner.successor_prepared,
+            quarantine_reason: reason,
+            completion_error,
+            revoked_current_physical_output,
+            presentation_lease: owner.presentation_lease,
         }
     }
 

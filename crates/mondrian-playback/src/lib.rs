@@ -139,9 +139,32 @@ pub struct FrameDemandIdentity {
     pub target_frame: i64,
 }
 
+/// Lifecycle class of one authoritative frame demand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FrameDemandKind {
+    /// Realtime playback demand carrying a bounded presentation deadline.
+    ///
+    /// The Engine derives each demand's deadline from the video phase budget
+    /// and the successor frame boundary; late deliveries beyond the bounded
+    /// grace are rejected without publication.
+    TimedPlayback,
+    /// Persisted still presentation demand without a realtime deadline.
+    ///
+    /// The final presentable frame must eventually appear and hold until the
+    /// demand is superseded by a seek, play, stop, or project mutation. It is
+    /// never dropped for queue lateness and may resolve from the
+    /// decoded-frame cache. Paused, stopped, and ended transports all hold a
+    /// still obligation; ended transport specifically retires its timed
+    /// playback demand and atomically adopts a still demand for the final
+    /// presentable frame.
+    PersistentStill,
+}
+
 /// Authoritative current-frame request emitted by the Playback Engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameDemand {
+    /// Lifecycle class of this demand.
+    pub kind: FrameDemandKind,
     /// Playback Session identity.
     pub epoch: PlaybackEpoch,
     /// Runtime quality-policy revision.
@@ -1003,6 +1026,7 @@ impl PlaybackEngine {
         self.clock_master = None;
         self.reset_runtime_policy()?;
         self.reanchor(now)?;
+        self.refresh_untimed_frame_demand()?;
         Ok(self.snapshot())
     }
 
@@ -1613,9 +1637,29 @@ impl PlaybackEngine {
         self.last_timestamp
     }
 
-    /// Return the current demand that preview adapters must carry end-to-end.
+    /// Return the active frame demand of any lifecycle class.
+    ///
+    /// Preview adapters must carry the returned demand end-to-end: a timed
+    /// playback demand while running, and a persistent still demand while
+    /// paused, stopped, or ended.
     pub const fn frame_demand(&self) -> Option<FrameDemand> {
         self.active_demand
+    }
+
+    /// Return the active realtime playback demand, if any.
+    ///
+    /// Ended transport has none: its final-frame obligation is a
+    /// [`FrameDemandKind::PersistentStill`] demand instead. Presentation
+    /// adapters that need the exact still obligation use
+    /// [`Self::frame_demand`].
+    pub const fn active_playback_demand(&self) -> Option<FrameDemand> {
+        match self.active_demand {
+            Some(demand) => match demand.kind {
+                FrameDemandKind::TimedPlayback => Some(demand),
+                FrameDemandKind::PersistentStill => None,
+            },
+            None => None,
+        }
     }
 
     /// Return the active demand only while no terminal presentation/decode
@@ -1917,7 +1961,7 @@ impl PlaybackEngine {
             demand.epoch == self.epoch
                 && demand.quality_revision == self.quality_revision
                 && demand.target == self.position
-                && demand.deadline.is_none()
+                && demand.kind == FrameDemandKind::PersistentStill
         });
         if !current_matches {
             self.refresh_untimed_frame_demand()?;
@@ -1930,7 +1974,7 @@ impl PlaybackEngine {
             demand.epoch == self.epoch
                 && demand.quality_revision == self.quality_revision
                 && demand.target == self.position
-                && demand.deadline.is_none()
+                && demand.kind == FrameDemandKind::PersistentStill
         });
         if !pending_matches {
             self.refresh_untimed_frame_demand()?;
@@ -1945,7 +1989,7 @@ impl PlaybackEngine {
             .filter(|demand| {
                 demand.epoch == self.epoch
                     && demand.target == self.position
-                    && demand.deadline.is_some()
+                    && demand.kind == FrameDemandKind::TimedPlayback
             })
             .and_then(|demand| demand.deadline)
             .map_or(computed_deadline, |existing| {
@@ -2031,6 +2075,7 @@ impl PlaybackEngine {
             .checked_add(1)
             .ok_or(PlaybackError::TransportArithmeticOverflow)?;
         self.active_demand = Some(FrameDemand {
+            kind: FrameDemandKind::TimedPlayback,
             epoch: self.epoch,
             quality_revision: self.quality_revision,
             sequence,
@@ -2053,6 +2098,7 @@ impl PlaybackEngine {
             .checked_add(1)
             .ok_or(PlaybackError::TransportArithmeticOverflow)?;
         self.active_demand = Some(FrameDemand {
+            kind: FrameDemandKind::PersistentStill,
             epoch: self.epoch,
             quality_revision: self.quality_revision,
             sequence,
