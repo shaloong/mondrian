@@ -1493,6 +1493,12 @@ impl AppState {
 
     /// Project the current Frame Demand deadline into the production monotonic
     /// domain at the exact sampling instant used by a Preview Adapter.
+    ///
+    /// The projected Adapter deadline includes the demand's bounded
+    /// late-presentation grace so decode and GPU work that lands inside the
+    /// grace window is still handed off for a degraded presentation instead of
+    /// being dropped as already-late. Presentation classification itself stays
+    /// on the exact [`FramePresentationTicket`] deadline.
     pub fn playback_frame_deadline_at(&self, sampled_at: Instant) -> Option<Instant> {
         let demand = self.playback_engine.pending_frame_demand()?;
         let deadline = demand.deadline?;
@@ -1504,7 +1510,8 @@ impl AppState {
             .duration_since_origin()
             .checked_sub(sampled_timestamp.duration_since_origin())
             .unwrap_or(Duration::ZERO);
-        sampled_at.checked_add(remaining)
+        let grace = Duration::from_nanos(demand.late_presentation_grace_ns);
+        sampled_at.checked_add(remaining.saturating_add(grace))
     }
 
     /// Identity preview adapters may return only while the current demand still
@@ -2897,14 +2904,24 @@ mod tests {
         state.advance_playback_clock(Duration::from_millis(40));
         let demand_anchor = state.playback_observation_instant_anchor;
         let sampled_at = demand_anchor + Duration::from_millis(10);
+        let grace_ns = state
+            .playback_engine
+            .pending_frame_demand()
+            .expect("active playback demand")
+            .late_presentation_grace_ns;
+        let grace = Duration::from_nanos(grace_ns);
 
         let deadline_at =
             state.playback_frame_deadline_at(sampled_at).expect("projected worker deadline");
 
-        assert_eq!(deadline_at, demand_anchor + Duration::from_millis(20));
+        assert_eq!(
+            deadline_at,
+            demand_anchor + Duration::from_millis(20) + grace,
+            "the projected Adapter deadline preserves the phase budget and adds the bounded late-presentation grace"
+        );
         assert_eq!(
             deadline_at.duration_since(sampled_at),
-            Duration::from_millis(10)
+            Duration::from_millis(10) + grace
         );
     }
 

@@ -1033,6 +1033,7 @@ mod tests {
             timeline_revision: 1,
             target: FramePosition::new(target_frame, Rational::new(1, 25)),
             deadline: Some(at(500)),
+            late_presentation_grace_ns: 0,
             preview_scale: PreviewResolutionScale::Full,
         }
     }

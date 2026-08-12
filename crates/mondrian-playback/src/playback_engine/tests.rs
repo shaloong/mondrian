@@ -44,6 +44,7 @@ fn presentation_ticket_classifies_completion_at_the_final_deadline() {
         timeline_revision: 9,
         target: FramePosition::new(42, Rational::new(1, 25)),
         deadline: Some(ts(40)),
+        late_presentation_grace_ns: 5_000_000,
         preview_scale: PreviewResolutionScale::Full,
     };
     let ready = FramePresentationTicket::for_demand(demand, FramePresentationQuality::Ready);
@@ -54,14 +55,42 @@ fn presentation_ticket_classifies_completion_at_the_final_deadline() {
         degraded.delivery_kind_at(ts(39)),
         FrameDeliveryKind::Degraded
     );
-    assert_eq!(ready.delivery_kind_at(ts(40)), FrameDeliveryKind::Late);
     assert_eq!(ready.complete_at(ts(39)).kind(), FrameDeliveryKind::Ready);
     assert_eq!(
         degraded.complete_at(ts(39)).kind(),
         FrameDeliveryKind::Degraded
     );
-    assert_eq!(ready.complete_at(ts(40)).kind(), FrameDeliveryKind::Late);
-    assert_eq!(degraded.complete_at(ts(41)).kind(), FrameDeliveryKind::Late);
+    assert_eq!(
+        ready.delivery_kind_at(ts(40)),
+        FrameDeliveryKind::Degraded,
+        "delivery inside the late-presentation grace is presented degraded"
+    );
+    assert_eq!(
+        ready.complete_at(ts(40)).kind(),
+        FrameDeliveryKind::Degraded,
+        "completion at the deadline is still presented degraded within grace"
+    );
+    assert_eq!(
+        ready.delivery_kind_at(ts(44)),
+        FrameDeliveryKind::Degraded,
+        "delivery at the grace boundary remains presentable"
+    );
+    assert_eq!(
+        ready.delivery_kind_at(ts(45)),
+        FrameDeliveryKind::Degraded,
+        "completion exactly at the grace boundary is still presentable"
+    );
+    assert_eq!(ready.delivery_kind_at(ts(46)), FrameDeliveryKind::Late);
+    assert_eq!(ready.complete_at(ts(46)).kind(), FrameDeliveryKind::Late);
+    assert_eq!(
+        degraded.complete_at(ts(41)).kind(),
+        FrameDeliveryKind::Degraded
+    );
+    assert_eq!(
+        degraded.complete_at(ts(45)).kind(),
+        FrameDeliveryKind::Degraded
+    );
+    assert_eq!(degraded.complete_at(ts(46)).kind(), FrameDeliveryKind::Late);
 }
 
 #[test]
@@ -485,12 +514,24 @@ fn headless_seek_device_and_delayed_presentation_fault_sequence_stays_continuous
     let deadline = delayed_ticket.deadline().expect("playing demand deadline");
     let completed_at = deadline.saturating_add(Duration::from_millis(1));
     let delivery = delayed_ticket.complete_at(completed_at);
-    assert_eq!(delivery.kind(), FrameDeliveryKind::Late);
+    assert_eq!(
+        delivery.kind(),
+        FrameDeliveryKind::Degraded,
+        "a delivery inside the late-presentation grace is presented degraded rather than dropped"
+    );
     assert!(engine
         .observe_frame_delivery(delivery)
         .expect("current delayed presentation remains an accepted terminal fact")
         .accepted());
     assert_eq!(engine.snapshot().clock_master, Some(ClockMaster::Synthetic));
+
+    let beyond_grace =
+        delayed_ticket.complete_at(deadline.saturating_add(Duration::from_millis(60)));
+    assert_eq!(
+        beyond_grace.kind(),
+        FrameDeliveryKind::Late,
+        "a delivery beyond the late-presentation grace remains Late"
+    );
 }
 
 #[test]

@@ -157,6 +157,9 @@ pub struct FrameDemand {
     /// Latest useful presentation time for realtime work, or `None` for a
     /// paused current-frame presentation that remains useful until superseded.
     pub deadline: Option<MonotonicTimestamp>,
+    /// Bounded nanoseconds after `deadline` at which a running delivery is
+    /// still presented as [`FrameDeliveryKind::Degraded`].
+    pub late_presentation_grace_ns: u64,
     /// Runtime-only spatial quality selected by recovery policy.
     pub preview_scale: PreviewResolutionScale,
 }
@@ -192,6 +195,7 @@ pub struct FramePresentationTicket {
     identity: FrameDemandIdentity,
     deadline: Option<MonotonicTimestamp>,
     quality: FramePresentationQuality,
+    late_presentation_grace_ns: u64,
 }
 
 impl FramePresentationTicket {
@@ -201,6 +205,7 @@ impl FramePresentationTicket {
             identity: demand.identity(),
             deadline: demand.deadline,
             quality,
+            late_presentation_grace_ns: demand.late_presentation_grace_ns,
         }
     }
 
@@ -220,13 +225,29 @@ impl FramePresentationTicket {
     /// output. The same `completed_at` must then be passed to [`Self::complete_at`]
     /// after publication succeeds.
     pub fn delivery_kind_at(self, completed_at: MonotonicTimestamp) -> FrameDeliveryKind {
-        if self.deadline.is_some_and(|deadline| completed_at >= deadline) {
-            FrameDeliveryKind::Late
-        } else {
-            match self.quality {
+        let Some(deadline) = self.deadline else {
+            return match self.quality {
                 FramePresentationQuality::Ready => FrameDeliveryKind::Ready,
                 FramePresentationQuality::Degraded => FrameDeliveryKind::Degraded,
-            }
+            };
+        };
+        if completed_at < deadline {
+            return match self.quality {
+                FramePresentationQuality::Ready => FrameDeliveryKind::Ready,
+                FramePresentationQuality::Degraded => FrameDeliveryKind::Degraded,
+            };
+        }
+        let grace_end = if self.late_presentation_grace_ns == 0 {
+            deadline
+        } else {
+            deadline
+                .checked_add(Duration::from_nanos(self.late_presentation_grace_ns))
+                .unwrap_or(deadline)
+        };
+        if completed_at <= grace_end {
+            FrameDeliveryKind::Degraded
+        } else {
+            FrameDeliveryKind::Late
         }
     }
 
@@ -586,6 +607,14 @@ pub struct PlaybackPolicy {
     /// delivery as timely after it has already exceeded the product's A/V
     /// phase contract.
     pub max_video_presentation_phase_error: Duration,
+    /// Bounded additional lateness after the Frame Demand deadline at which a
+    /// running delivery is still presented, classified as [`FrameDeliveryKind::Degraded`].
+    ///
+    /// Decode/composite jitter that crosses the exact deadline by less than
+    /// this grace is displayed rather than dropped, keeping the picture
+    /// advancing through ordinary hiccups. Deliveries beyond the grace window
+    /// remain [`FrameDeliveryKind::Late`] and are rejected without publication.
+    pub late_presentation_grace: Duration,
 }
 
 /// Largest immediate video lookahead a Playback Adapter may report for
@@ -604,6 +633,7 @@ impl Default for PlaybackPolicy {
             audio_clock_uncertainty_grace: Duration::from_secs(1),
             max_audio_handoff_phase_error: Duration::from_millis(20),
             max_video_presentation_phase_error: Duration::from_millis(20),
+            late_presentation_grace: Duration::from_millis(16),
         }
     }
 }
@@ -2008,6 +2038,7 @@ impl PlaybackEngine {
             timeline_revision: self.timeline_revision,
             target: self.position,
             deadline: Some(deadline),
+            late_presentation_grace_ns: self.late_presentation_grace_ns()?,
             preview_scale: self.preview_scale,
         });
         self.terminal_delivery = None;
@@ -2029,10 +2060,28 @@ impl PlaybackEngine {
             timeline_revision: self.timeline_revision,
             target: self.position,
             deadline: None,
+            late_presentation_grace_ns: 0,
             preview_scale: self.preview_scale,
         });
         self.terminal_delivery = None;
         Ok(())
+    }
+
+    /// Bound the late-presentation grace so a degraded delivery is never
+    /// published more than one half frame interval after the last useful
+    /// presentation time. The phase budget already constrains the deadline;
+    /// this clamps only the jitter absorption window.
+    fn late_presentation_grace_ns(&self) -> Result<u64, PlaybackError> {
+        let policy_grace_ns =
+            u64::try_from(self.policy.late_presentation_grace.as_nanos()).unwrap_or(u64::MAX);
+        if policy_grace_ns == 0 {
+            return Ok(0);
+        }
+        let frame_boundary_ns =
+            timeline_frame_boundary_ns(FramePosition::new(1, self.position.time_base))?;
+        let half_frame_ns = frame_boundary_ns.checked_div(2).unwrap_or(i128::MAX);
+        let half_frame_ns = u64::try_from(half_frame_ns).unwrap_or(u64::MAX);
+        Ok(policy_grace_ns.min(half_frame_ns))
     }
 
     fn push_pressure(&mut self, pressured: bool) {
