@@ -1419,13 +1419,12 @@ fn prepare_source_layer<'a>(
                         prepared
                             .fallback_reasons
                             .push(format!("viewer native video import failed: {error}"));
-                        tracing::warn!(
-                            sequence_id = %request.sequence_id,
-                            frame = request.timeline_frame,
-                            width = request.width,
-                            height = request.height,
-                            "viewer native video import failed: {error}"
-                        );
+                        runtime.log_persistent_failure_warn(|| {
+                            format!(
+                                "viewer native video import failed: {error} (sequence_id={:?}, frame={})",
+                                request.sequence_id, request.timeline_frame
+                            )
+                        });
                         native_import_error = Some(error.to_string());
                         None
                     }
@@ -1459,13 +1458,12 @@ fn prepare_source_layer<'a>(
                                 if let Some(frame) = frame.as_ref() {
                                     prepared.residency.cpu_upload_layers =
                                         prepared.residency.cpu_upload_layers.saturating_add(1);
-                                    tracing::warn!(
-                                        sequence_id = %request.sequence_id,
-                                        frame = request.timeline_frame,
-                                        width = request.width,
-                                        height = request.height,
-                                        "viewer GPU input transform failed; using CPU working layer upload: {error:?}"
-                                    );
+                                    runtime.log_persistent_failure_warn(|| {
+                                        format!(
+                                            "viewer GPU input transform failed; using CPU working layer upload: {error:?} (sequence_id={:?}, frame={})",
+                                            request.sequence_id, request.timeline_frame
+                                        )
+                                    });
                                     PreparedCompositeLayerSource::CpuFrame(frame)
                                 } else {
                                     return Err(ViewerGpuExecutionError::InputPreparation(

@@ -704,6 +704,9 @@ pub struct RenderGpuOutputBoundaryRuntime {
     frame_ids: GpuColorFrameIdAllocator,
     frame_table: GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
     resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    /// Last wall-clock instant a persistent per-frame failure class emitted a
+    /// warn log, so fallback paths cannot flood the log at frame rate.
+    persistent_failure_warned_at: std::cell::Cell<Option<std::time::Instant>>,
 }
 
 impl RenderGpuOutputBoundaryRuntime {
@@ -741,7 +744,28 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_ids: GpuColorFrameIdAllocator::new(first_frame_id)?,
             frame_table: GpuColorFrameResourceTable::new(),
             resource_pool,
+            persistent_failure_warned_at: std::cell::Cell::new(None),
         })
+    }
+
+    /// Rate-limit warn logging for persistent per-frame failure classes.
+    ///
+    /// A broken import path (for example a driver that cannot expose NV12
+    /// shared textures) otherwise warns once per layer per frame at 30-60 fps.
+    /// The diagnostic counters still record every fallback; only the log is
+    /// throttled to one message per five seconds per runtime.
+    pub(crate) fn log_persistent_failure_warn(&self, message: impl FnOnce() -> String) {
+        const VIEWER_PERSISTENT_FAILURE_WARN_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        let already_warned = self.persistent_failure_warned_at.get().is_some_and(|last| {
+            now.saturating_duration_since(last) < VIEWER_PERSISTENT_FAILURE_WARN_INTERVAL
+        });
+        if already_warned {
+            return;
+        }
+        self.persistent_failure_warned_at.set(Some(now));
+        tracing::warn!("{}", message());
     }
 
     /// Return point-in-time runtime diagnostics.
@@ -1284,6 +1308,7 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_ids,
             frame_table,
             resource_pool,
+            ..
         } = self;
         let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
         let stage_plan = planner
@@ -1341,6 +1366,7 @@ impl RenderGpuOutputBoundaryRuntime {
             shader_cache,
             backend_prep,
             backend_objects,
+            frame_ids: _,
             frame_table,
             resource_pool,
             ..
@@ -1426,6 +1452,7 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_ids,
             frame_table,
             resource_pool,
+            ..
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
@@ -1505,6 +1532,7 @@ impl RenderGpuOutputBoundaryRuntime {
             frame_ids,
             frame_table,
             resource_pool,
+            ..
         } = self;
         let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
         let plan = planner
