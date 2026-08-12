@@ -6899,7 +6899,8 @@ fn wait_for_headless_gpu_ready_observation_impl(
         }
         anyhow::ensure!(
             Instant::now() < deadline,
-            "timed out waiting for a real headless Viewer GPU output; target_intent={target_intent:?}, current_intent={sampled_intent:?}, candidate_status={candidate_status:?}, candidate_binding={candidate_binding:?}, candidate_output_binding={candidate_output_binding:?}, output_binding_matches={output_binding_matches}, transport={:?}, diagnostics={:?}",
+            "timed out waiting for a real headless Viewer GPU output; target_intent={target_intent:?}, current_intent={sampled_intent:?}, candidate_status={candidate_status:?}, candidate_binding={candidate_binding:?}, candidate_output_binding={candidate_output_binding:?}, output_binding_matches={output_binding_matches}, pending_demand={:?}, transport={:?}, diagnostics={:?}",
+            state.pending_playback_frame_demand_identity(),
             state.playback_engine.snapshot(),
             preview_service.diagnostics()
         );
@@ -6915,16 +6916,16 @@ fn wait_for_headless_gpu_ready_observation_impl(
 fn headless_demand_resolved_without_ready(
     target: HeadlessGpuCandidateIntent,
     current: HeadlessGpuCandidateIntent,
-    status: HeadlessGpuCandidateStatus,
+    _status: HeadlessGpuCandidateStatus,
 ) -> bool {
     match target.pending_demand {
         Some(target_demand) => current.pending_demand != Some(target_demand),
-        None => !matches!(
-            status,
-            HeadlessGpuCandidateStatus::QueuedReady
-                | HeadlessGpuCandidateStatus::InFlight
-                | HeadlessGpuCandidateStatus::Backpressured
-        ),
+        // The demand was already consumed before this terminal observation
+        // began. No in-flight submission can still publish (LostAuthority
+        // rejects it), so the observation is complete regardless of the
+        // harness status; a later ready sample is a bonus, never a
+        // prerequisite for closing the terminal window.
+        None => true,
     }
 }
 

@@ -213,6 +213,14 @@ pub(crate) fn present_headless_preview_candidate_at(
                 Err(HeadlessViewerGpuError::Backpressure(_)) => {
                     return Ok(HeadlessPreviewCandidate::Backpressured);
                 }
+                Err(HeadlessViewerGpuError::DeadlineExceeded) => {
+                    // The caller's bounded completion-safety deadline expired
+                    // while the harness was waiting. The wait loop enforces
+                    // its own deadline with full diagnostics; a stale safety
+                    // deadline must not become a confusing hard error that
+                    // hides the real readiness state.
+                    return Ok(HeadlessPreviewCandidate::Loading);
+                }
                 Err(error) => return Err(error).context("submit Headless Viewer GPU candidate"),
             };
             if submitted.heterogeneous {
