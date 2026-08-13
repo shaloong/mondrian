@@ -437,7 +437,7 @@ fn visual_program_cache_does_not_cross_equal_author_state_between_open_sessions(
         for _ in 0..32 {
             let sequence = state.active_sequence().expect("active Sequence");
             let snapshot = state.preview_execution_snapshot(Instant::now());
-            match runtime.resolve_timeline(
+            match runtime.resolve_timeline_for_test(
                 &snapshot,
                 state,
                 sequence,

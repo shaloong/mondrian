@@ -138,6 +138,34 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         bump(&self.metrics.timeline_resolve_count);
     }
 
+    /// Test-only alias for resolving the timeline directly.
+    ///
+    /// Production code must use [`Self::acquire_frame_evaluation`]; this seam
+    /// exists so unit tests can drive the raw timeline contract without
+    /// bypassing the coordinator's resolve accounting.
+    #[cfg(test)]
+    pub(super) fn resolve_timeline_for_test(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
+        sequence: &Sequence,
+        frame: i64,
+        width: u32,
+        height: u32,
+        color_context: ProgramColorContext,
+    ) -> PreviewTimelineResolution {
+        self.bump_timeline_resolve_count();
+        self.resolve_timeline(
+            snapshot,
+            proxy_demands,
+            sequence,
+            frame,
+            width,
+            height,
+            color_context,
+        )
+    }
+
     /// Invalidate evaluations that depend on one media asset.
     ///
     /// Wait entries name their dependencies typed, so only the evaluations
@@ -147,7 +175,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.evaluation_working_set.borrow_mut().invalidate_for_asset(asset_id);
     }
 
-    pub(super) fn resolve_timeline(
+    /// Resolve the timeline exactly once per miss.
+    ///
+    /// Module-private by design: the evaluation coordinator is the only
+    /// authoritative producer. Consumers must go through
+    /// [`Self::acquire_frame_evaluation`]; a future consumer that needs the
+    /// raw timeline result must be wired through the coordinator instead of
+    /// calling this directly.
+    fn resolve_timeline(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,
         proxy_demands: &dyn PreviewProxyDemandSink,

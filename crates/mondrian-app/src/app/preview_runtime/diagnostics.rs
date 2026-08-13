@@ -223,6 +223,15 @@ pub struct PreviewDiagnostics {
     pub unavailability: crate::app::preview_unavailability::PreviewUnavailabilityEvidenceSnapshot,
     /// Playback current-frame requests expired so buffering cannot hold the shell indefinitely.
     pub playback_current_stalled_expirations: u64,
+    /// Authoritative timeline resolutions through the evaluation coordinator;
+    /// deduplicated acquires and wait hits do not count.
+    pub timeline_resolve_count: u64,
+    /// Acquires satisfied by the evaluation working set without resolving.
+    pub timeline_evaluation_hits: u64,
+    /// Acquires satisfied by a retained typed wait entry without resolving.
+    pub timeline_evaluation_wait_hits: u64,
+    /// Acquires that missed both working set and wait entries.
+    pub timeline_evaluation_misses: u64,
     /// Requests for a CPU working-frame candidate for the app-window GPU output path.
     pub gpu_preview_candidate_requests: u64,
     /// GPU preview candidate requests that produced a working-frame candidate.

@@ -34,6 +34,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .metrics
                 .playback_current_stalled_expirations
                 .get(),
+            timeline_resolve_count: self.metrics.timeline_resolve_count.get(),
+            timeline_evaluation_hits: self.metrics.timeline_evaluation_hits.get(),
+            timeline_evaluation_wait_hits: self.metrics.timeline_evaluation_wait_hits.get(),
+            timeline_evaluation_misses: self.metrics.timeline_evaluation_misses.get(),
             gpu_preview_candidate_requests: self.metrics.gpu_preview_candidate_requests.get(),
             gpu_preview_candidate_ready: self.metrics.gpu_preview_candidate_ready.get(),
             gpu_preview_candidate_current: self.metrics.gpu_preview_candidate_current.get(),
