@@ -101,6 +101,38 @@ fn repeated_acquires_for_the_same_evaluation_do_not_re_resolve() {
 }
 
 #[test]
+fn asset_arrival_re_evaluates_the_next_headless_style_attempt() {
+    // Headless drivers attempt the same frame repeatedly. Without a
+    // dependency change those attempts must not re-resolve; once an asset
+    // arrives (invalidation), the next attempt re-evaluates exactly once
+    // and the following attempts deduplicate again.
+    let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    for _ in 0..3 {
+        execute_gpu_preview_for_test_app(&runtime, &state);
+    }
+    assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
+
+    runtime.invalidate_evaluations_for_asset(AssetId::new());
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        2,
+        "the first attempt after asset arrival must re-evaluate"
+    );
+
+    for _ in 0..3 {
+        execute_gpu_preview_for_test_app(&runtime, &state);
+    }
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        2,
+        "subsequent attempts must deduplicate against the fresh evaluation"
+    );
+}
+
+#[test]
 fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
     let mut set = EvaluationWorkingSet::new();
     let sequence = Sequence::new("working-set");
