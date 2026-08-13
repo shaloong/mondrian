@@ -162,6 +162,25 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
 }
 
 #[test]
+fn sequence_revision_change_forces_re_resolution() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
+
+    let mut sequence = state.active_sequence().expect("active Sequence").clone();
+    sequence.revision = sequence.revision.checked_next().expect("test revision can advance");
+    state.test_set_sequence(Some(sequence));
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        2,
+        "a sequence revision change is part of the evaluation key and must re-resolve"
+    );
+}
+
+#[test]
 fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
     let mut set = EvaluationWorkingSet::new();
     let sequence = Sequence::new("working-set");
