@@ -324,6 +324,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.media_execution_failures.borrow_mut().remove(&result.key);
                     }
                     outcome.visible_change |= presentation_current;
+                    // A decoded frame became available; evaluations that may
+                    // depend on it must re-resolve instead of hitting the
+                    // working set with stale media content.
+                    self.invalidate_evaluations();
                 }
                 None => {
                     if let Some(reason) = result.failure_reason {

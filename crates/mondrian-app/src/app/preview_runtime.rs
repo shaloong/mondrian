@@ -336,6 +336,8 @@ pub struct PreviewProductionRuntime<O: Clone> {
     visual_dependencies: PreviewVisualDependencyObserver,
     visual_dependency_health_failed: Cell<bool>,
     scratch: RefCell<TimelineCompositeScratch>,
+    evaluation_working_set: RefCell<EvaluationWorkingSet>,
+    evaluation_working_set_clock: Cell<u64>,
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
@@ -500,6 +502,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             ),
             visual_dependency_health_failed: Cell::new(false),
             scratch: RefCell::new(TimelineCompositeScratch::default()),
+            evaluation_working_set: RefCell::new(EvaluationWorkingSet::new()),
+            evaluation_working_set_clock: Cell::new(0),
             last_color_rejection: RefCell::new(None),
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
             display_snapshot: RefCell::new(None),
@@ -802,7 +806,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .as_ref()
                 .map(DisplayOutputSnapshot::contract_identity),
         };
-        let resolved = match self.resolve_frame_evaluation(
+        let resolved = match self.acquire_frame_evaluation(
             snapshot,
             proxy_demands,
             sequence,
@@ -811,13 +815,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             color_context,
             evaluation_key,
-            Some(&monitor_adaptation),
         ) {
             FrameResolutionOutcome::Ready(evaluation) => {
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&evaluation.elements),
                 );
-                let cache_key = evaluation.output_key.clone();
+                // The GPU output identity overlays the monitor adaptation on
+                // the evaluation's plan identity; the shared evaluation stays
+                // display-independent.
+                let cache_key = evaluation.output_key.with_monitor_adaptation(&monitor_adaptation);
                 let cache_reusable =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable);
                 if transport.is_successor_preparation()
@@ -2184,6 +2190,11 @@ struct PreviewMetrics {
     stale_frames: Cell<u64>,
     unavailable_frames: Cell<u64>,
     playback_current_stalled_expirations: Cell<u64>,
+    /// Total authoritative timeline resolves through the evaluation
+    /// coordinator; deduplicated acquires do not count.
+    timeline_resolve_count: Cell<u64>,
+    timeline_evaluation_hits: Cell<u64>,
+    timeline_evaluation_misses: Cell<u64>,
     gpu_preview_candidate_requests: Cell<u64>,
     gpu_preview_candidate_ready: Cell<u64>,
     gpu_preview_candidate_current: Cell<u64>,

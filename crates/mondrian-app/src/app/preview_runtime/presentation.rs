@@ -93,7 +93,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .as_ref()
                 .map(DisplayOutputSnapshot::contract_identity),
         };
-        let resolved = self.resolve_frame_evaluation(
+        let resolved = self.acquire_frame_evaluation(
             snapshot,
             proxy_demands,
             sequence,
@@ -102,7 +102,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             color_context,
             evaluation_key,
-            None,
         );
         let mut render_stage_durations = PreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),

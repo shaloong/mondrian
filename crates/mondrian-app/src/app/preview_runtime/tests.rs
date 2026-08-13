@@ -53,6 +53,53 @@ fn visual_result_drain_limit_requires_follow_up_without_a_new_notification() {
     ));
 }
 
+fn evaluation_resolve_count<O: Clone>(runtime: &PreviewProductionRuntime<O>) -> u64 {
+    runtime.metrics.timeline_resolve_count.get()
+}
+
+#[test]
+fn gpu_then_presentation_share_one_evaluation_for_the_same_frame() {
+    let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    let _ = execute_preview_presentation_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        1,
+        "GPU production followed by presentation arbitration must resolve one frame evaluation exactly once"
+    );
+}
+
+#[test]
+fn presentation_then_gpu_share_one_evaluation_for_the_same_frame() {
+    let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    let _ = execute_preview_presentation_for_test_app(&runtime, &state);
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        1,
+        "presentation arbitration followed by GPU production must resolve one frame evaluation exactly once"
+    );
+}
+
+#[test]
+fn repeated_acquires_for_the_same_evaluation_do_not_re_resolve() {
+    let state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    for _ in 0..4 {
+        execute_gpu_preview_for_test_app(&runtime, &state);
+    }
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        1,
+        "repeated acquires for the same picture must hit the evaluation working set"
+    );
+}
+
 fn test_preview_semantic_identity(revision: u64) -> PreviewSemanticIdentity {
     let mut builder =
         PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-frame-identity.v1");

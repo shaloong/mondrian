@@ -228,3 +228,72 @@ pub(crate) struct FrameEvaluationLease {
     pub(crate) intent: PreviewExecutionIntent,
     pub(crate) evaluation: Arc<ResolvedFrameEvaluation>,
 }
+
+/// Tiny role-aware bounded working set of resolved evaluations.
+///
+/// Deliberately not a general LRU: every entry pins the decoded frames its
+/// elements reference, so the set must stay small (2-4 entries) and evict
+/// the least recently used evaluation. Successor-to-current promotion
+/// reuses the same entry because the key never contains the role.
+pub(crate) struct EvaluationWorkingSet {
+    entries: Vec<EvaluationWorkingSetEntry>,
+}
+
+struct EvaluationWorkingSetEntry {
+    key: FrameEvaluationKey,
+    evaluation: Arc<ResolvedFrameEvaluation>,
+    last_used: u64,
+}
+
+impl EvaluationWorkingSet {
+    pub(crate) const fn capacity() -> usize {
+        4
+    }
+
+    pub(crate) fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    /// Drop every retained evaluation; used by coarse dependency invalidation.
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    /// Return the retained evaluation for an exact key, if resident.
+    pub(crate) fn get(
+        &mut self,
+        key: FrameEvaluationKey,
+        clock: u64,
+    ) -> Option<Arc<ResolvedFrameEvaluation>> {
+        let entry = self.entries.iter_mut().find(|entry| entry.key == key)?;
+        entry.last_used = clock;
+        Some(Arc::clone(&entry.evaluation))
+    }
+
+    /// Retain one evaluation for its key, evicting the least recently used
+    /// entry when the set is full.
+    pub(crate) fn insert(
+        &mut self,
+        key: FrameEvaluationKey,
+        evaluation: Arc<ResolvedFrameEvaluation>,
+        clock: u64,
+    ) {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
+            entry.evaluation = evaluation;
+            entry.last_used = clock;
+            return;
+        }
+        if self.entries.len() >= Self::capacity() {
+            let least = self
+                .entries
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(index, _)| index)
+                .expect("non-empty working set");
+            self.entries.remove(least);
+        }
+        self.entries
+            .push(EvaluationWorkingSetEntry { key, evaluation, last_used: clock });
+    }
+}

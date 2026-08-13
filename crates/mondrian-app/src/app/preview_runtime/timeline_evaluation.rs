@@ -11,14 +11,15 @@ use crate::app::preview_timeline_execution::{
 };
 
 impl<O: Clone> PreviewProductionRuntime<O> {
-    /// Resolve one frame evaluation through the single authoritative entry.
+    /// Acquire one frame evaluation through the single authoritative entry.
     ///
     /// This is the only path that may call [`Self::resolve_timeline`]; every
     /// consumer (GPU production, presentation arbitration, and later headless)
     /// must go through here so one semantic evaluation has exactly one
-    /// producer. `monitor_adaptation` is already-proven by the GPU producer;
-    /// optional consumers let the helper prove it best-effort.
-    pub(super) fn resolve_frame_evaluation(
+    /// producer. Ready evaluations are deduplicated by [`FrameEvaluationKey`]
+    /// in the bounded working set; repeated acquires for the same picture do
+    /// not re-resolve.
+    pub(super) fn acquire_frame_evaluation(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,
         proxy_demands: &dyn PreviewProxyDemandSink,
@@ -28,8 +29,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         height: u32,
         color_context: ProgramColorContext,
         evaluation_key: FrameEvaluationKey,
-        monitor_adaptation: Option<&RenderMonitorAdaptation>,
     ) -> FrameResolutionOutcome {
+        let clock = self.evaluation_working_set_clock.get();
+        if let Some(evaluation) =
+            self.evaluation_working_set.borrow_mut().get(evaluation_key, clock)
+        {
+            bump(&self.metrics.timeline_evaluation_hits);
+            return FrameResolutionOutcome::Ready(evaluation);
+        }
+        bump(&self.metrics.timeline_evaluation_misses);
+        self.bump_timeline_resolve_count();
         let resolution = self.resolve_timeline(
             snapshot,
             proxy_demands,
@@ -42,7 +51,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         match resolution {
             PreviewTimelineResolution::Ready(resolved) => {
                 let plan = resolved.plan;
-                let output_key = plan.cache_key.with_monitor_adaptation_opt(monitor_adaptation);
                 let resolved_quality = match resolved_preview_presentation_quality(&plan.elements) {
                     mondrian_playback::FramePresentationQuality::Ready => {
                         ResolvedFrameQuality::Full
@@ -56,18 +64,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 } else {
                     EvaluationReusePolicy::Transient
                 };
-                FrameResolutionOutcome::Ready(Arc::new(ResolvedFrameEvaluation {
+                let evaluation = Arc::new(ResolvedFrameEvaluation {
                     key: evaluation_key,
-                    output_key,
+                    output_key: plan.cache_key,
                     elements: plan.elements.into(),
                     color_context: plan.color_context,
                     resolved_quality,
                     reuse_policy,
-                    // P6 commit 2: dependency tracking arrives with the
-                    // EvaluationCoordinator; until then re-resolution is
-                    // driven by the existing per-call flow.
+                    // P6 commit 4 adds typed dependency invalidation; until
+                    // then re-resolution is driven by the working-set miss.
                     dependencies: Arc::from([]),
-                }))
+                });
+                let clock = self.evaluation_working_set_clock.get();
+                self.evaluation_working_set.borrow_mut().insert(
+                    evaluation_key,
+                    Arc::clone(&evaluation),
+                    clock,
+                );
+                self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                FrameResolutionOutcome::Ready(evaluation)
             }
             PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
             PreviewTimelineResolution::Pending { dependency } => {
@@ -77,6 +92,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 FrameResolutionOutcome::Unavailable(reason)
             }
         }
+    }
+
+    pub(super) fn bump_timeline_resolve_count(&self) {
+        bump(&self.metrics.timeline_resolve_count);
+    }
+
+    /// Invalidate every retained evaluation because media availability changed.
+    ///
+    /// Transitional coarse-grained dependency invalidation (P6 commit 4
+    /// replaces this with typed per-dependency invalidation): a decoded frame
+    /// arriving for the same evaluation key must force re-resolution instead
+    /// of a stale working-set hit.
+    pub(super) fn invalidate_evaluations(&self) {
+        self.evaluation_working_set.borrow_mut().clear();
     }
 
     pub(super) fn resolve_timeline(
