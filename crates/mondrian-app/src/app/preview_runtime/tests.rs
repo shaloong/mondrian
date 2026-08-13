@@ -133,6 +133,35 @@ fn asset_arrival_re_evaluates_the_next_headless_style_attempt() {
 }
 
 #[test]
+fn generation_rollover_reuses_semantically_valid_evaluations() {
+    // Playing is scheduling state, never frame content: a play/pause
+    // transition rotates the preview generation but the evaluation key
+    // stays identical, so the working set serves the same evaluation and
+    // produced-candidate authority stays generation-scoped.
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
+
+    let _ = state.play();
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        1,
+        "generation rollover on play must reuse the semantically valid evaluation"
+    );
+
+    let _ = state.pause();
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        1,
+        "generation rollover on pause must reuse the semantically valid evaluation"
+    );
+}
+
+#[test]
 fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
     let mut set = EvaluationWorkingSet::new();
     let sequence = Sequence::new("working-set");
