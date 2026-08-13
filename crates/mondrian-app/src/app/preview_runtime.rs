@@ -1898,6 +1898,7 @@ impl ViewerPreviewGenerationKey {
 
 mod input;
 pub(crate) use input::*;
+mod frame_evaluation;
 mod diagnostics;
 pub use diagnostics::*;
 mod evidence;
