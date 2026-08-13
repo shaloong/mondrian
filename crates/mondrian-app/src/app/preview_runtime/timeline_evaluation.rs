@@ -1,5 +1,7 @@
 //! Production Adapter for UI-independent prepared Preview materialization.
 
+use std::sync::Arc;
+
 use super::*;
 use crate::app::preview_timeline_execution::{
     resolve_preview_timeline_with_programs_and_observer, PreviewTimelineExecutionBinding,
@@ -9,6 +11,74 @@ use crate::app::preview_timeline_execution::{
 };
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Resolve one frame evaluation through the single authoritative entry.
+    ///
+    /// This is the only path that may call [`Self::resolve_timeline`]; every
+    /// consumer (GPU production, presentation arbitration, and later headless)
+    /// must go through here so one semantic evaluation has exactly one
+    /// producer. `monitor_adaptation` is already-proven by the GPU producer;
+    /// optional consumers let the helper prove it best-effort.
+    pub(super) fn resolve_frame_evaluation(
+        &self,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+        proxy_demands: &dyn PreviewProxyDemandSink,
+        sequence: &Sequence,
+        frame: i64,
+        width: u32,
+        height: u32,
+        color_context: ProgramColorContext,
+        evaluation_key: FrameEvaluationKey,
+        monitor_adaptation: Option<&RenderMonitorAdaptation>,
+    ) -> FrameResolutionOutcome {
+        let resolution = self.resolve_timeline(
+            snapshot,
+            proxy_demands,
+            sequence,
+            frame,
+            width,
+            height,
+            color_context,
+        );
+        match resolution {
+            PreviewTimelineResolution::Ready(resolved) => {
+                let plan = resolved.plan;
+                let output_key = plan.cache_key.with_monitor_adaptation_opt(monitor_adaptation);
+                let resolved_quality = match resolved_preview_presentation_quality(&plan.elements) {
+                    mondrian_playback::FramePresentationQuality::Ready => {
+                        ResolvedFrameQuality::Full
+                    }
+                    mondrian_playback::FramePresentationQuality::Degraded => {
+                        ResolvedFrameQuality::Half
+                    }
+                };
+                let reuse_policy = if plan.cache_reusable {
+                    EvaluationReusePolicy::Reusable
+                } else {
+                    EvaluationReusePolicy::Transient
+                };
+                FrameResolutionOutcome::Ready(Arc::new(ResolvedFrameEvaluation {
+                    key: evaluation_key,
+                    output_key,
+                    elements: plan.elements.into(),
+                    color_context: plan.color_context,
+                    resolved_quality,
+                    reuse_policy,
+                    // P6 commit 2: dependency tracking arrives with the
+                    // EvaluationCoordinator; until then re-resolution is
+                    // driven by the existing per-call flow.
+                    dependencies: Arc::from([]),
+                }))
+            }
+            PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
+            PreviewTimelineResolution::Pending { dependency } => {
+                FrameResolutionOutcome::Pending(dependency)
+            }
+            PreviewTimelineResolution::Unavailable { reason } => {
+                FrameResolutionOutcome::Unavailable(reason)
+            }
+        }
+    }
+
     pub(super) fn resolve_timeline(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,

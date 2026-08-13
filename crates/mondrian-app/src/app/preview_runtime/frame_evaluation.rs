@@ -134,6 +134,24 @@ pub(crate) struct PreviewFrameRequest<'a> {
     pub(crate) intent: PreviewExecutionIntent,
 }
 
+/// Outcome of one frame evaluation lookup/resolve attempt.
+///
+/// [`EvaluationState`] is the coordinator-shaped view used once dependency
+/// tracking lands; [`FrameResolutionOutcome`] is the resolver-shaped view
+/// that preserves every branch of today's single resolve call so consumers
+/// keep their branch-local side effects while sharing the evaluation
+/// construction.
+pub(crate) enum FrameResolutionOutcome {
+    /// A fully resolved, immutable evaluation is available.
+    Ready(Arc<ResolvedFrameEvaluation>),
+    /// The frame resolves to the transparent canvas.
+    Empty,
+    /// Resolution is blocked on one concrete dependency.
+    Pending(crate::app::preview_timeline_execution::PreviewTimelinePendingDependency),
+    /// Resolution failed closed with a typed reason.
+    Unavailable(crate::app::preview_unavailability::PreviewUnavailability),
+}
+
 /// Outcome of one evaluation lookup/resolve attempt.
 pub(crate) enum EvaluationState {
     /// A fully resolved, immutable evaluation is available.

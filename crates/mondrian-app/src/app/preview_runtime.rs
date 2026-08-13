@@ -95,21 +95,18 @@ use crate::app::preview_scheduler_policy::{
     preview_decode_presentation_quality, MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD,
     PREVIEW_SCRUB_SLOW_LATENCY_US,
 };
-use crate::app::preview_timeline_execution::PreviewTimelineResolution;
 use crate::app::preview_title_task::PreviewTitleTask;
 use crate::app::preview_unavailability::{
     PreviewOutputStage, PreviewUnavailability, PreviewUnavailabilityEvidence,
 };
 #[cfg(test)]
 use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved;
+#[cfg(test)]
+use crate::app::preview_viewer_plan::viewer_preview_cache_key_for_resolved_plan;
 use crate::app::preview_viewer_plan::{
     prepare_gpu_composite_layers_with_heterogeneous_effects, resolved_preview_decode_execution,
     resolved_preview_media_protections, resolved_preview_presentation_quality,
-    PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError,
-};
-#[cfg(test)]
-use crate::app::preview_viewer_plan::{
-    viewer_preview_cache_key_for_resolved_plan, ResolvedPreviewElement,
+    PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
 };
 use crate::app::preview_visual_dependencies::PreviewVisualDependencyObserver;
 use crate::app::preview_visual_execution_task::{
@@ -789,7 +786,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 self.playback_presentation_ticket(snapshot),
             ));
         }
-        let mut resolved = match self.resolve_timeline(
+        let evaluation_key = FrameEvaluationKey {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            author_generation: snapshot
+                .authoring()
+                .map(PreviewAuthoringSnapshot::author_generation)
+                .unwrap_or(0),
+            frame,
+            width,
+            height,
+            runtime_scale: transport.runtime_scale(),
+            display_color_space,
+            display_contract_identity: display_snapshot
+                .as_ref()
+                .map(DisplayOutputSnapshot::contract_identity),
+        };
+        let resolved = match self.resolve_frame_evaluation(
             snapshot,
             proxy_demands,
             sequence,
@@ -797,9 +810,51 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             width,
             height,
             color_context,
+            evaluation_key,
+            Some(&monitor_adaptation),
         ) {
-            PreviewTimelineResolution::Ready(resolved) => resolved.plan,
-            PreviewTimelineResolution::Empty => {
+            FrameResolutionOutcome::Ready(evaluation) => {
+                self.execution.borrow_mut().set_presentation_quality(
+                    resolved_preview_presentation_quality(&evaluation.elements),
+                );
+                let cache_key = evaluation.output_key.clone();
+                let cache_reusable =
+                    matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable);
+                if transport.is_successor_preparation()
+                    && cache_reusable
+                    && self
+                        .execution
+                        .borrow_mut()
+                        .prepare_successor_from_current(playback_intent, &cache_key)
+                {
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
+                if cache_reusable && self.execution.borrow_mut().output_for(&cache_key).is_some() {
+                    self.schedule_media_prefetches(
+                        snapshot,
+                        proxy_demands,
+                        sequence,
+                        frame,
+                        width,
+                        height,
+                    );
+                    self.scheduler.prune_obsolete();
+                    self.try_release_settled_transport_media_residency();
+                    bump(&self.metrics.gpu_preview_candidate_current);
+                    return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
+                        (),
+                        self.playback_presentation_ticket(snapshot),
+                    ));
+                }
+                ResolvedPlanView {
+                    elements: Arc::clone(&evaluation.elements),
+                    cache_key,
+                    cache_reusable,
+                    color_context: evaluation.color_context.clone(),
+                }
+            }
+            FrameResolutionOutcome::Empty => {
                 if transport.is_successor_preparation() {
                     self.execution
                         .borrow_mut()
@@ -823,7 +878,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 debug_assert!(matches!(decision, PreviewCandidateDecision::Unavailable));
                 return self.transparent_gpu_candidate(snapshot);
             }
-            PreviewTimelineResolution::Pending { dependency } => {
+            FrameResolutionOutcome::Pending(dependency) => {
                 let decision = self.execution.borrow_mut().plan_candidate(None);
                 self.last_gpu_loading_reason.set(Some(match dependency {
                     crate::app::preview_timeline_execution::PreviewTimelinePendingDependency::Media(_) => "timeline_media",
@@ -860,7 +915,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                 };
             }
-            PreviewTimelineResolution::Unavailable { reason } => {
+            FrameResolutionOutcome::Unavailable(reason) => {
                 let _ = self.execution.borrow_mut().plan_candidate(None);
                 self.schedule_media_prefetches(
                     snapshot,
@@ -874,33 +929,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 return self.unavailable_gpu_candidate(reason);
             }
         };
-        resolved.cache_key = resolved.cache_key.with_monitor_adaptation(&monitor_adaptation);
         let mut media_residency_protections =
             resolved_preview_media_protections(&resolved.elements);
-        self.execution
-            .borrow_mut()
-            .set_presentation_quality(resolved_preview_presentation_quality(&resolved.elements));
         let mut cache_key = resolved.cache_key.clone();
-        if transport.is_successor_preparation()
-            && resolved.cache_reusable
-            && self
-                .execution
-                .borrow_mut()
-                .prepare_successor_from_current(playback_intent, &cache_key)
-        {
-            self.scheduler.prune_obsolete();
-            return PreviewGpuFrameState::Prepared;
-        }
-        if resolved.cache_reusable && self.execution.borrow_mut().output_for(&cache_key).is_some() {
-            self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
-            self.scheduler.prune_obsolete();
-            self.try_release_settled_transport_media_residency();
-            bump(&self.metrics.gpu_preview_candidate_current);
-            return PreviewGpuFrameState::Current(PreviewPresentationCandidate::new(
-                (),
-                self.playback_presentation_ticket(snapshot),
-            ));
-        }
         let program_output_boundary =
             match output_boundary_from_color_context(&resolved.color_context) {
                 Ok(boundary) => boundary,
@@ -1848,6 +1879,18 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
     }
 }
 
+/// Borrowed projection of a resolved evaluation consumed by the GPU producer.
+///
+/// Preserves the legacy field access of `ResolvedPreviewPlan` while the
+/// evaluation itself becomes the single authoritative construction point
+/// (output key, elements, color context, reuse policy).
+struct ResolvedPlanView {
+    elements: Arc<[ResolvedPreviewElement]>,
+    cache_key: PreviewOutputKey,
+    cache_reusable: bool,
+    color_context: ProgramColorContext,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ViewerPreviewGenerationKey {
     sequence_id: SequenceId,
@@ -1899,6 +1942,7 @@ impl ViewerPreviewGenerationKey {
 mod input;
 pub(crate) use input::*;
 mod frame_evaluation;
+pub(crate) use frame_evaluation::*;
 mod diagnostics;
 pub use diagnostics::*;
 mod evidence;

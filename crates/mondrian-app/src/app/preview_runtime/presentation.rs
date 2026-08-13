@@ -77,7 +77,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
-        let resolved = self.resolve_timeline(
+        let evaluation_key = FrameEvaluationKey {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            author_generation: snapshot
+                .authoring()
+                .map(PreviewAuthoringSnapshot::author_generation)
+                .unwrap_or(0),
+            frame,
+            width,
+            height,
+            runtime_scale: transport.runtime_scale(),
+            display_color_space,
+            display_contract_identity: display_snapshot
+                .as_ref()
+                .map(DisplayOutputSnapshot::contract_identity),
+        };
+        let resolved = self.resolve_frame_evaluation(
             snapshot,
             proxy_demands,
             sequence,
@@ -85,43 +101,51 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             width,
             height,
             color_context,
+            evaluation_key,
+            None,
         );
         let mut render_stage_durations = PreviewRenderStageDurations {
             resolve_us: app_duration_us(resolve_started_at.elapsed()),
             ..PreviewRenderStageDurations::default()
         };
         let preview_state = match resolved {
-            PreviewTimelineResolution::Ready(resolved) => {
-                let mut resolved = resolved.plan;
-                if !resolved.cache_reusable {
-                    let execution_nonce = self.execution.borrow_mut().issue_candidate_id();
-                    resolved.cache_key = resolved.cache_key.with_execution_nonce(execution_nonce);
-                }
+            FrameResolutionOutcome::Ready(evaluation) => {
+                let output_key =
+                    if matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable) {
+                        evaluation.output_key.clone()
+                    } else {
+                        // An Uncacheable graph may keep one in-progress attempt
+                        // stable across UI polls, but it must never rebound work
+                        // across Preview generations merely because its semantic
+                        // graph fingerprint is unchanged.
+                        let execution_nonce = self.execution.borrow_mut().issue_candidate_id();
+                        evaluation.output_key.with_execution_nonce(execution_nonce)
+                    };
                 self.execution.borrow_mut().set_presentation_quality(
-                    resolved_preview_presentation_quality(&resolved.elements),
+                    resolved_preview_presentation_quality(&evaluation.elements),
                 );
                 let final_cache_lookup_started_at = Instant::now();
                 // GPU outputs include monitor adaptation; raster cache identity
                 // remains display-independent because CPU packaging already
                 // records its concrete presentation color space.
-                let external_cache_key = resolved
-                    .cache_reusable
-                    .then(|| {
-                        resolved.color_context.output_color_space.color().and_then(
-                            |program_output_color_space| {
-                                RenderMonitorAdaptation::new(
-                                    program_output_color_space,
-                                    display_color_space,
-                                    resolved.color_context.engine.clone(),
-                                )
-                                .ok()
-                                .map(|adaptation| {
-                                    resolved.cache_key.with_monitor_adaptation(&adaptation)
-                                })
-                            },
-                        )
-                    })
-                    .flatten();
+                let external_cache_key =
+                    matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
+                        .then(|| {
+                            evaluation.color_context.output_color_space.color().and_then(
+                                |program_output_color_space| {
+                                    RenderMonitorAdaptation::new(
+                                        program_output_color_space,
+                                        display_color_space,
+                                        evaluation.color_context.engine.clone(),
+                                    )
+                                    .ok()
+                                    .map(|adaptation| {
+                                        output_key.with_monitor_adaptation(&adaptation)
+                                    })
+                                },
+                            )
+                        })
+                        .flatten();
                 if let Some(frame) = external_cache_key
                     .as_ref()
                     .and_then(|cache_key| self.registered_gpu_output_for_key(cache_key))
@@ -137,10 +161,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         PreviewPresentationContent::Gpu(frame),
                         self.playback_presentation_ticket(snapshot),
                     ))
-                } else if let Some(frame) = resolved
-                    .cache_reusable
-                    .then(|| self.cached_viewer_frame(&resolved.cache_key))
-                    .flatten()
+                } else if let Some(frame) =
+                    matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
+                        .then(|| self.cached_viewer_frame(&output_key))
+                        .flatten()
                 {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
@@ -184,7 +208,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     render_stage_durations.final_cache_lookup_us =
                         app_duration_us(final_cache_lookup_started_at.elapsed());
                     let raster_contract =
-                        match preview_raster_presentation_contract(&resolved.color_context) {
+                        match preview_raster_presentation_contract(&evaluation.color_context) {
                             Ok(contract) => contract,
                             Err(error) => {
                                 return self.observe_preview_state(
@@ -195,8 +219,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let output = match composite_resolved_preview(
                         width,
                         height,
-                        &resolved.elements,
-                        &resolved.color_context,
+                        &evaluation.elements,
+                        &evaluation.color_context,
                         &mut self.scratch.borrow_mut(),
                     ) {
                         Ok(rgba) => rgba,
@@ -221,7 +245,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                     self.record_color_stage(output.color_stage_diagnostics);
                     let frame_packaging_started_at = Instant::now();
-                    let key = preview_raster_resource_key(&resolved.cache_key);
+                    let key = preview_raster_resource_key(&output_key);
                     match PreviewRasterFrame::new(
                         key,
                         width,
@@ -230,10 +254,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         output.rgba,
                     ) {
                         Ok(frame) => {
-                            if resolved.cache_reusable {
+                            if matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable) {
                                 self.frame_store
                                     .borrow_mut()
-                                    .insert_viewer_frame(resolved.cache_key, frame.clone());
+                                    .insert_viewer_frame(output_key.clone(), frame.clone());
                             }
                             render_stage_durations.frame_packaging_us =
                                 app_duration_us(frame_packaging_started_at.elapsed());
@@ -263,11 +287,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     }
                 }
             }
-            PreviewTimelineResolution::Pending { .. } => self
+            FrameResolutionOutcome::Pending(_) => self
                 .stale_viewer_content_for_sequence(sequence, width, height)
                 .map(PreviewPresentationState::Stale)
                 .unwrap_or(PreviewPresentationState::Loading),
-            PreviewTimelineResolution::Empty => {
+            FrameResolutionOutcome::Empty => {
                 self.execution
                     .borrow_mut()
                     .set_presentation_quality(mondrian_playback::FramePresentationQuality::Ready);
@@ -282,7 +306,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ))
                 }
             }
-            PreviewTimelineResolution::Unavailable { reason } => {
+            FrameResolutionOutcome::Unavailable(reason) => {
                 PreviewPresentationState::Unavailable(reason)
             }
         };

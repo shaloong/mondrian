@@ -8,6 +8,7 @@ use crate::app::preview_frame_store::MediaWorkReservationAdmission;
 use crate::app::preview_raster_frame::{
     preview_raster_resource_key, PreviewRasterColorSpace, PreviewRasterFrame,
 };
+use crate::app::preview_timeline_execution::PreviewTimelineResolution;
 use crate::app::preview_unavailability::PreviewUnavailabilityDisposition;
 use crate::app::preview_viewer_plan::{
     gpu_composite_layers_for_resolved_with_session, viewer_preview_plan_allows_cross_call_reuse,

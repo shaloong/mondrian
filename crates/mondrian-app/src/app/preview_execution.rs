@@ -181,6 +181,20 @@ impl PreviewOutputKey {
 
     /// Derive the monitor-adapted identity used by final Viewer presentation.
     pub(crate) fn with_monitor_adaptation(&self, adaptation: &RenderMonitorAdaptation) -> Self {
+        self.with_monitor_adaptation_opt(Some(adaptation))
+    }
+
+    /// Derive the monitor-adapted identity when a proven adaptation exists.
+    ///
+    /// A missing adaptation leaves the plan identity unchanged, matching the
+    /// optional-consumer fallback of best-effort presentation adapters.
+    pub(crate) fn with_monitor_adaptation_opt(
+        &self,
+        adaptation: Option<&RenderMonitorAdaptation>,
+    ) -> Self {
+        let Some(adaptation) = adaptation else {
+            return self.clone();
+        };
         let mut builder =
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.monitor-output.v1");
         self.plan_identity.hash(&mut builder);
