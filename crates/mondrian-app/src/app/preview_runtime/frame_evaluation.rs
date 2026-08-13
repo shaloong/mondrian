@@ -235,8 +235,13 @@ pub(crate) struct FrameEvaluationLease {
 /// elements reference, so the set must stay small (2-4 entries) and evict
 /// the least recently used evaluation. Successor-to-current promotion
 /// reuses the same entry because the key never contains the role.
+///
+/// Pending evaluations are retained as typed wait entries so repeated
+/// acquires while a dependency is unresolved do not re-resolve; a completed
+/// dependency removes only the wait entries that name it.
 pub(crate) struct EvaluationWorkingSet {
     entries: Vec<EvaluationWorkingSetEntry>,
+    waiting: Vec<EvaluationWaitEntry>,
 }
 
 struct EvaluationWorkingSetEntry {
@@ -245,18 +250,24 @@ struct EvaluationWorkingSetEntry {
     last_used: u64,
 }
 
+struct EvaluationWaitEntry {
+    key: FrameEvaluationKey,
+    dependencies: Arc<[EvaluationDependency]>,
+}
+
 impl EvaluationWorkingSet {
     pub(crate) const fn capacity() -> usize {
         4
     }
 
     pub(crate) fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self { entries: Vec::new(), waiting: Vec::new() }
     }
 
-    /// Drop every retained evaluation; used by coarse dependency invalidation.
+    /// Drop every retained evaluation and wait entry.
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.waiting.clear();
     }
 
     /// Return the retained evaluation for an exact key, if resident.
@@ -268,6 +279,17 @@ impl EvaluationWorkingSet {
         let entry = self.entries.iter_mut().find(|entry| entry.key == key)?;
         entry.last_used = clock;
         Some(Arc::clone(&entry.evaluation))
+    }
+
+    /// Return the retained wait dependencies for an exact key, if resident.
+    pub(crate) fn waiting_for(
+        &self,
+        key: FrameEvaluationKey,
+    ) -> Option<Arc<[EvaluationDependency]>> {
+        self.waiting
+            .iter()
+            .find(|entry| entry.key == key)
+            .map(|entry| Arc::clone(&entry.dependencies))
     }
 
     /// Retain one evaluation for its key, evicting the least recently used
@@ -295,5 +317,34 @@ impl EvaluationWorkingSet {
         }
         self.entries
             .push(EvaluationWorkingSetEntry { key, evaluation, last_used: clock });
+    }
+
+    /// Retain one unresolved wait entry for an exact key.
+    pub(crate) fn insert_waiting(
+        &mut self,
+        key: FrameEvaluationKey,
+        dependencies: Arc<[EvaluationDependency]>,
+    ) {
+        if let Some(entry) = self.waiting.iter_mut().find(|entry| entry.key == key) {
+            entry.dependencies = dependencies;
+            return;
+        }
+        self.waiting.push(EvaluationWaitEntry { key, dependencies });
+    }
+
+    /// Drop wait entries that depend on one asset, plus every retained
+    /// evaluation.
+    ///
+    /// Ready evaluations currently carry no extracted dependencies, so the
+    /// retained set is cleared conservatively alongside the typed wait
+    /// entries; per-dependency Ready invalidation lands with dependency
+    /// extraction.
+    pub(crate) fn invalidate_for_asset(&mut self, asset_id: AssetId) {
+        self.waiting.retain(|entry| {
+            !entry.dependencies.iter().any(|dependency| {
+                matches!(dependency, EvaluationDependency::MediaFrame(dep) if *dep == asset_id)
+            })
+        });
+        self.entries.clear();
     }
 }

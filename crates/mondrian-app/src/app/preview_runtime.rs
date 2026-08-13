@@ -2194,6 +2194,7 @@ struct PreviewMetrics {
     /// coordinator; deduplicated acquires do not count.
     timeline_resolve_count: Cell<u64>,
     timeline_evaluation_hits: Cell<u64>,
+    timeline_evaluation_wait_hits: Cell<u64>,
     timeline_evaluation_misses: Cell<u64>,
     gpu_preview_candidate_requests: Cell<u64>,
     gpu_preview_candidate_ready: Cell<u64>,

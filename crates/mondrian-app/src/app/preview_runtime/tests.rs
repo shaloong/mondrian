@@ -100,6 +100,59 @@ fn repeated_acquires_for_the_same_evaluation_do_not_re_resolve() {
     );
 }
 
+#[test]
+fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
+    let mut set = EvaluationWorkingSet::new();
+    let sequence = Sequence::new("working-set");
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 4,
+        width: 640,
+        height: 360,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let asset = AssetId::new();
+
+    assert!(set.waiting_for(key).is_none());
+    set.insert_waiting(key, Arc::from([EvaluationDependency::MediaFrame(asset)]));
+    assert!(
+        set.waiting_for(key).is_some(),
+        "a pending evaluation must be retained as a typed wait entry"
+    );
+
+    // An unrelated asset arrival must not invalidate this wait entry.
+    set.invalidate_for_asset(AssetId::new());
+    assert!(set.waiting_for(key).is_some());
+
+    // The exact asset arrival removes the wait entry.
+    set.invalidate_for_asset(asset);
+    assert!(set.waiting_for(key).is_none());
+
+    // A ready evaluation is retained and cleared by the same invalidation.
+    let ready = Arc::new(ResolvedFrameEvaluation {
+        key,
+        output_key: PreviewOutputKey::new(
+            key.sequence_id,
+            key.width,
+            key.height,
+            test_preview_semantic_identity(1),
+        ),
+        elements: Arc::from([]),
+        color_context: test_color_context(ColorSpace::Srgb),
+        resolved_quality: ResolvedFrameQuality::Full,
+        reuse_policy: EvaluationReusePolicy::Reusable,
+        dependencies: Arc::from([]),
+    });
+    set.insert(key, Arc::clone(&ready), 1);
+    assert!(set.get(key, 2).is_some());
+    set.invalidate_for_asset(asset);
+    assert!(set.get(key, 3).is_none());
+}
+
 fn test_preview_semantic_identity(revision: u64) -> PreviewSemanticIdentity {
     let mut builder =
         PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-frame-identity.v1");

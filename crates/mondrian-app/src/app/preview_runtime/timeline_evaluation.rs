@@ -10,6 +10,33 @@ use crate::app::preview_timeline_execution::{
     PreviewTimelineTitleRequest,
 };
 
+/// Project one typed evaluation dependency from a media timeline pending
+/// dependency. Non-media waits keep their existing per-call behavior until
+/// typed generated-title/temporal variants land.
+fn media_dependency_from_pending(
+    dependency: PreviewTimelinePendingDependency,
+) -> Option<EvaluationDependency> {
+    match dependency {
+        PreviewTimelinePendingDependency::Media(asset_id) => {
+            Some(EvaluationDependency::MediaFrame(asset_id))
+        }
+        PreviewTimelinePendingDependency::BasicTitle(_)
+        | PreviewTimelinePendingDependency::Temporal { .. } => None,
+    }
+}
+
+/// Reconstruct the media timeline dependency for consumers that keep
+/// branch-local pending handling.
+fn media_pending_dependency_from_wait(
+    dependencies: &[EvaluationDependency],
+) -> Option<PreviewTimelinePendingDependency> {
+    dependencies.first().map(|dependency| match dependency {
+        EvaluationDependency::MediaFrame(asset_id) => {
+            PreviewTimelinePendingDependency::Media(*asset_id)
+        }
+    })
+}
+
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Acquire one frame evaluation through the single authoritative entry.
     ///
@@ -36,6 +63,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         {
             bump(&self.metrics.timeline_evaluation_hits);
             return FrameResolutionOutcome::Ready(evaluation);
+        }
+        if let Some(dependencies) = self.evaluation_working_set.borrow().waiting_for(evaluation_key)
+            && let Some(dependency) = media_pending_dependency_from_wait(&dependencies)
+        {
+            bump(&self.metrics.timeline_evaluation_wait_hits);
+            return FrameResolutionOutcome::Pending(dependency);
         }
         bump(&self.metrics.timeline_evaluation_misses);
         self.bump_timeline_resolve_count();
@@ -71,8 +104,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     color_context: plan.color_context,
                     resolved_quality,
                     reuse_policy,
-                    // P6 commit 4 adds typed dependency invalidation; until
-                    // then re-resolution is driven by the working-set miss.
+                    // Ready evaluations keep their dependencies empty until
+                    // per-dependency extraction lands; the working set is
+                    // still cleared on media arrival.
                     dependencies: Arc::from([]),
                 });
                 let clock = self.evaluation_working_set_clock.get();
@@ -86,6 +120,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
             PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
             PreviewTimelineResolution::Pending { dependency } => {
+                if let Some(evaluation_dependency) = media_dependency_from_pending(dependency) {
+                    let dependencies = Arc::from([evaluation_dependency]);
+                    self.evaluation_working_set
+                        .borrow_mut()
+                        .insert_waiting(evaluation_key, dependencies);
+                }
                 FrameResolutionOutcome::Pending(dependency)
             }
             PreviewTimelineResolution::Unavailable { reason } => {
@@ -98,14 +138,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         bump(&self.metrics.timeline_resolve_count);
     }
 
-    /// Invalidate every retained evaluation because media availability changed.
+    /// Invalidate evaluations that depend on one media asset.
     ///
-    /// Transitional coarse-grained dependency invalidation (P6 commit 4
-    /// replaces this with typed per-dependency invalidation): a decoded frame
-    /// arriving for the same evaluation key must force re-resolution instead
-    /// of a stale working-set hit.
-    pub(super) fn invalidate_evaluations(&self) {
-        self.evaluation_working_set.borrow_mut().clear();
+    /// Wait entries name their dependencies typed, so only the evaluations
+    /// waiting on this asset are removed; retained ready evaluations are
+    /// still cleared conservatively until dependency extraction lands.
+    pub(super) fn invalidate_evaluations_for_asset(&self, asset_id: AssetId) {
+        self.evaluation_working_set.borrow_mut().invalidate_for_asset(asset_id);
     }
 
     pub(super) fn resolve_timeline(
