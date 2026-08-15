@@ -3223,17 +3223,11 @@ mod tests {
 
     #[test]
     fn property_descriptor_try_new_rejects_invalid_plugin_paths_without_panicking() {
-        let invalid_characters = PropertyDescriptor::try_new(
-            "plugin radius!",
-            "Radius",
-            PropertyValue::Float(4.0),
-        );
+        let invalid_characters =
+            PropertyDescriptor::try_new("plugin radius!", "Radius", PropertyValue::Float(4.0));
         assert!(invalid_characters.is_err());
-        let too_long = PropertyDescriptor::try_new(
-            "x".repeat(512),
-            "Radius",
-            PropertyValue::Float(4.0),
-        );
+        let too_long =
+            PropertyDescriptor::try_new("x".repeat(512), "Radius", PropertyValue::Float(4.0));
         assert!(too_long.is_err());
         let valid = PropertyDescriptor::try_new(
             "plugin.sdk.soft_glow.radius",

@@ -459,7 +459,10 @@ pub fn validate_export_output_cancellable(
     }
     .map(|signal| &signal.static_hdr_metadata);
     let side_data = if has_video {
-        Some(ffprobe_first_video_frame_side_data(output_path, cancellation)?)
+        Some(ffprobe_first_video_frame_side_data(
+            output_path,
+            cancellation,
+        )?)
     } else {
         None
     };
@@ -1434,7 +1437,10 @@ mod tests {
         // frame-rate rounding.
         let mut report = base_report();
         report.format.as_mut().expect("format").duration = Some("9.2".to_string());
-        report.streams.iter_mut().for_each(|stream| stream.duration = Some("9.2".to_string()));
+        report
+            .streams
+            .iter_mut()
+            .for_each(|stream| stream.duration = Some("9.2".to_string()));
         let expected = ExportValidationExpectations {
             container: Container::Mp4,
             video: ExpectedStream::Required(ExpectedVideoConstraints {
