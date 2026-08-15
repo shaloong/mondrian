@@ -1418,11 +1418,12 @@ fn in_flight_locality_policy_does_not_mask_explicit_preemption() {
     };
 
     clock.set(Duration::from_millis(35));
+    // A same-class Playback current admission preserves the prefetch lease's
+    // session locality instead of preempting it (only an Interactive current
+    // preempts Playback prefetch work); the locality policy does not turn a
+    // same-class current admission into a hidden cancellation.
     broker.submit(request(2, generation, FrameWorkClass::Playback));
-    assert!(matches!(
-        broker.execution_cancellation(execution.id),
-        Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. })
-    ));
+    assert_eq!(broker.execution_cancellation(execution.id), None);
 }
 
 #[test]
@@ -1875,7 +1876,11 @@ fn earliest_preemption_survives_later_generation_invalidation() {
     };
 
     clock.set(Duration::from_millis(20));
-    broker.submit(request(2, generation, FrameWorkClass::Playback));
+    // An Interactive current admission preempts the Playback prefetch lease;
+    // the later generation invalidation must not erase that earliest
+    // preemption record. (A same-class Playback current would instead preserve
+    // the prefetch session locality and never preempt it.)
+    broker.submit(request(2, generation, FrameWorkClass::Interactive));
     clock.set(Duration::from_millis(30));
     broker.begin_generation();
     clock.set(Duration::from_millis(40));
@@ -2124,10 +2129,10 @@ fn failed_dual_capacity_admission_preserves_every_existing_binding() {
     );
     assert!(broker.has_pending_key(&1));
     assert!(broker.has_pending_key(&2));
-    assert!(matches!(
-        broker.execution_cancellation(prefetch_execution.id),
-        Some(FrameExecutionCancellation::PrefetchPreemptedByCurrent { .. })
-    ));
+    // A same-class Playback current admission preserves the prefetch lease's
+    // session locality instead of preempting it; the backpressure drop above
+    // must leave every existing binding untouched either way.
+    assert_eq!(broker.execution_cancellation(prefetch_execution.id), None);
     let queued = match broker.receive(FrameWorkerLane::Playback) {
         Some(FrameWorkReceive::Ready(execution)) => execution,
         other => panic!("unexpected receive: {other:?}"),
