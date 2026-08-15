@@ -754,12 +754,16 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
         cpu_working_required: false,
     });
     assert!(matches!(
-        outcome,
+        &outcome,
         PreviewMediaSourceOutcome::Unavailable(UnavailablePreviewMediaSource {
             reason: PreviewMediaSourceUnavailableReason::SourceSamplingUnavailable,
             ..
         })
     ));
+    let PreviewMediaSourceOutcome::Unavailable(unavailable) = outcome else {
+        panic!("missing sampling must be unavailable")
+    };
+    assert!(unavailable.reason.to_string().contains("Interpret Asset"));
     assert!(
         crate::app::proxy_generation::resolve_asset_proxy_color_contract(&asset, &context).is_err()
     );
@@ -820,6 +824,41 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         rejected,
         PreviewMediaSourceOutcome::ColorRejected(_)
     ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn assume_rec709_policy_binds_yuv_matrix_into_decode_identity() {
+    let root = unique_root("mondrian-preview-source-rec709-matrix-policy");
+    let source = root.join("untagged-source.mp4");
+    std::fs::create_dir_all(&root).expect("test root");
+    std::fs::write(&source, b"source").expect("source");
+    let asset = video_asset_with_detected_color(source, None);
+    let config = proxy_config(root.join("proxy"));
+    let mut context = color_context();
+    context.missing_metadata_policy = MissingColorMetadataPolicy::AssumeRec709;
+
+    let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {
+        asset: &asset,
+        color_space_override: None,
+        alpha_interpretation: AlphaInterpretation::Straight,
+        source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+        target_resolution: Resolution { width: 320, height: 180 },
+        input_color: &context,
+        prefer_proxy: false,
+        request_missing_proxy_generation: false,
+        proxy_config: &config,
+        proxy_color: None,
+        hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
+        cpu_working_required: true,
+    });
+    let PreviewMediaSourceOutcome::Ready(ready) = outcome else {
+        panic!("assumed Rec.709 source must produce a decode identity")
+    };
+    assert_eq!(
+        ready.key.decode.source_color().yuv_matrix_fallback,
+        Some(DecodedVideoMatrix::Bt709)
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

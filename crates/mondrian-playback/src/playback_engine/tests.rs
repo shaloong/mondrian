@@ -1171,6 +1171,49 @@ fn repeated_presentable_degradation_enters_resolution_recovery() {
 }
 
 #[test]
+fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
+    let policy = PlaybackPolicy {
+        pressure_window: 3,
+        pressure_threshold: 3,
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+
+    engine.tick(ts(40)).unwrap();
+    engine.tick(ts(80)).unwrap();
+    engine.tick(ts(120)).unwrap();
+
+    assert_eq!(engine.snapshot().state, TransportState::Recovering);
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Half
+    );
+    assert_eq!(
+        engine.pending_frame_demand().expect("recovery demand").target.frame,
+        3
+    );
+
+    for instant in [160, 200, 240] {
+        engine.tick(ts(instant)).unwrap();
+    }
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Half,
+        "a new scale must receive one terminal execution attempt before another reduction"
+    );
+
+    let half_attempt = current_delivery(&engine, FrameDeliveryKind::Late, ts(240));
+    engine.observe_frame_delivery(half_attempt).unwrap();
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Quarter,
+        "a failed Half attempt may authorize the next bounded reduction"
+    );
+}
+
+#[test]
 fn blocked_delivery_is_not_reclassified_as_buffering_or_pressure() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
