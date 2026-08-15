@@ -368,22 +368,27 @@ fn media_preview_worker_with_decoder<DecodeJob>(
     // through an implicit media-layer thread-local cache.
     let mut decode_context = MediaPreviewWorkerDecodeContext::new(decode_context_bootstrap);
     let mut residency_revision = 0;
+    // A family retirement whose native outputs are still leased (e.g. a
+    // hardware-decoded still frame retained by the Frame Store or Viewer) is
+    // acknowledged immediately so the family barrier cannot stall decode
+    // admission behind one renderer/lease lifetime; the codec context is then
+    // retired lazily once the last native lease drops.
+    let mut pending_native_retire = false;
     loop {
+        if pending_native_retire && decode_context.native_outputs_released() {
+            decode_context.clear();
+            pending_native_retire = false;
+        }
         if let Some(directive) = residency.worker_directive(lane, residency_revision) {
             if directive.retire_context() {
-                // Published native outputs retain AVFrame references after the
-                // codec call returns. Do not acknowledge family retirement
-                // until the Frame Store/completion/renderer ownership chain has
-                // released every such lease.
-                if !decode_context.native_outputs_released() {
-                    if shutdown.is_requested() {
-                        break;
-                    }
-                    std::thread::sleep(MEDIA_PREVIEW_LIFECYCLE_POLL_INTERVAL);
-                    continue;
+                if decode_context.native_outputs_released() {
+                    decode_context.clear();
+                    pending_native_retire = false;
+                    residency.acknowledge_retirement(lane, directive.revision());
+                } else {
+                    residency.acknowledge_retirement(lane, directive.revision());
+                    pending_native_retire = true;
                 }
-                decode_context.clear();
-                residency.acknowledge_retirement(lane, directive.revision());
             }
             residency_revision = directive.revision();
         }
