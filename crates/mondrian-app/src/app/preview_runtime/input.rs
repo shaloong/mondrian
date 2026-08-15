@@ -273,7 +273,7 @@ impl PreviewTransportSnapshot {
 
     /// Minimal transport identity consumed by Preview execution.
     pub(crate) const fn intent(self) -> PreviewTransportIntent {
-        PreviewTransportIntent::new(self.is_playing(), self.epoch)
+        PreviewTransportIntent::new(self.is_playing(), self.is_priming(), self.epoch)
     }
 
     /// Current Frame Demand, if any.

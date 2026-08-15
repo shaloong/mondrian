@@ -119,10 +119,9 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
             MondrianError::DecodeFailed { asset_id: path.display().to_string(), reason }
         })?;
     // CICP RGB colorimetry and YCbCr sampling matrices are independent facts.
-    // The source identity therefore cannot authorize a guessed matrix when the
-    // decoded frame omits it. A future authored fallback must be explicit and
-    // participate in diagnostics and cache identity.
-    let matrix = decoded_matrix.ok_or_else(|| MondrianError::DecodeFailed {
+    // A missing frame fact can only use a fallback already bound into the
+    // immutable source contract by an authored/project policy.
+    let matrix = decoded_matrix.or(source.yuv_matrix_fallback).ok_or_else(|| MondrianError::DecodeFailed {
         asset_id: path.display().to_string(),
         reason: format!(
             "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",

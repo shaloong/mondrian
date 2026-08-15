@@ -25,7 +25,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.visual_programs.borrow_mut().rotate_scope();
             self.transport_epoch.set(None);
             self.retire_obsolete_transport_work();
-            self.frame_store.borrow_mut().clear_all();
+            self.clear_all_preview_residency();
         }
         self.future_media_window.borrow_mut().clear();
         self.visual_program_authoring_session.set(current);
@@ -69,7 +69,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         // Final Viewer outputs have independent ownership. Dropping decoded
         // media here releases native-output leases before worker-owned codec
         // contexts acknowledge retirement.
-        self.frame_store.borrow_mut().clear_decoder_resource_media_frames();
+        self.clear_decoder_resource_preview_residency();
         self.jobs.interrupt_workers_for_lifecycle();
     }
 
@@ -80,23 +80,44 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// and byte budgets alone are not sufficient at a transport-idle boundary.
     /// The operation fails closed if queued, in-flight, or unresolved work is
     /// still visible to the Broker.
+    #[cfg(test)]
     pub(crate) fn try_release_idle_media_residency(&self) -> bool {
-        let scheduler = self.scheduler.diagnostics();
-        let queue = self.jobs.diagnostics();
-        if self.execution.borrow().is_pending()
-            || scheduler.pending_requests != 0
-            || queue.queued_jobs != 0
-            || queue.in_flight_jobs != 0
-        {
+        if !self.preview_media_work_is_idle() {
             return false;
         }
-        self.frame_store.borrow_mut().clear_media_frames();
+        self.clear_media_preview_residency();
         true
     }
 
-    /// Release idle media only after a stopped transport has a durable final
-    /// GPU Viewer output proved under the active Preview generation.
+    fn preview_media_work_is_idle(&self) -> bool {
+        let scheduler = self.scheduler.diagnostics();
+        let queue = self.jobs.diagnostics();
+        !self.execution.borrow().is_pending()
+            && scheduler.pending_requests == 0
+            && queue.queued_jobs == 0
+            && queue.in_flight_jobs == 0
+    }
+
+    /// Release idle decoder-native resources after a stopped transport has a
+    /// durable final GPU Viewer output under the active Preview generation.
+    ///
+    /// Bounded CPU frames remain in the Frame Store so immediate playback can
+    /// reuse the exact paused frame without another cold source open. Native
+    /// frames are retired because even one can pin the decoder surface pool.
     pub(crate) fn try_release_settled_transport_media_residency(&self) -> bool {
+        if self.transport_playing.get()
+            || !self.execution.borrow().has_exact_current_output()
+            || !self.preview_media_work_is_idle()
+        {
+            return false;
+        }
+        self.clear_decoder_resource_preview_residency();
+        true
+    }
+
+    /// Release all idle decoded media at an explicit validation/lifecycle seam.
+    #[cfg(test)]
+    pub(crate) fn try_release_settled_transport_all_media_residency(&self) -> bool {
         if self.transport_playing.get() || !self.execution.borrow().has_exact_current_output() {
             return false;
         }
@@ -115,7 +136,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.future_media_window.borrow_mut().clear();
         self.transport_epoch.set(None);
         self.retire_obsolete_transport_work();
-        self.frame_store.borrow_mut().clear_all();
+        self.clear_all_preview_residency();
     }
 
     fn retire_obsolete_transport_work(&self) {
@@ -131,6 +152,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.visual_ready.borrow_mut().clear();
         self.visual_failures.borrow_mut().clear();
         self.visual_terminal_candidates.borrow_mut().clear();
+        self.cpu_fallback_in_flight.borrow_mut().take();
+        self.cpu_fallback_failure.borrow_mut().take();
         let queued_jobs = queued_jobs as u64;
         bump(&self.metrics.interactive_cancel_requests);
         add_cell(
@@ -148,7 +171,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let already_shutdown = self.shutdown.request();
         self.future_media_window.borrow_mut().clear();
         self.retire_obsolete_transport_work();
-        self.frame_store.borrow_mut().clear_all();
+        self.clear_all_preview_residency();
         if !already_shutdown {
             self.reap_workers_async();
         }
@@ -168,5 +191,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 "failed to start production preview reaper; workers will finish detached: {err}"
             );
         }
+    }
+
+    /// Atomically retire every owner of native decoder surfaces known to the
+    /// Preview Runtime. Evaluation entries are dropped first because their
+    /// frame handles are clones of Store payloads.
+    pub(super) fn clear_decoder_resource_preview_residency(&self) {
+        self.evaluation_working_set.borrow_mut().clear_decoder_resource_entries();
+        self.frame_store.borrow_mut().clear_decoder_resource_media_frames();
+    }
+
+    /// Atomically retire every decoded-media owner while preserving final
+    /// Viewer outputs and failure memory.
+    pub(super) fn clear_media_preview_residency(&self) {
+        self.evaluation_working_set.borrow_mut().clear();
+        self.frame_store.borrow_mut().clear_media_frames();
+    }
+
+    /// Retire all Preview residency at an Authoring Session boundary.
+    pub(super) fn clear_all_preview_residency(&self) {
+        self.evaluation_working_set.borrow_mut().clear();
+        self.frame_store.borrow_mut().clear_all();
     }
 }

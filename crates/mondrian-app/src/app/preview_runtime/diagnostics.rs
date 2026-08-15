@@ -488,7 +488,11 @@ pub struct PreviewDiagnostics {
     pub enqueued_jobs: u64,
     /// Playback prefetch passes skipped because visible current-frame media was pending.
     pub prefetch_skipped_current_pending: u64,
-    /// Playback prefetch passes skipped because current-frame work was queued or running.
+    /// Prefetch passes that observed queued or in-flight current media work.
+    ///
+    /// The serialized field name predates pipelined admission. Current work
+    /// remains first in Broker order, but does not itself suppress a
+    /// resource-admissible future prefix.
     pub prefetch_skipped_current_work: u64,
     /// Playback prefetch passes skipped because queued/running prefetch already held the window.
     pub prefetch_skipped_prefetch_backlog: u64,

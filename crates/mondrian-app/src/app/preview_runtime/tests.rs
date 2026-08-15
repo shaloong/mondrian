@@ -162,6 +162,41 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
 }
 
 #[test]
+fn viewer_gpu_failure_executes_bounded_cpu_fallback_off_thread() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime.synchronize_transport_intent(state.preview_transport_intent());
+    runtime.request_viewer_cpu_fallback("test GPU record failure");
+
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Loading
+    ));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let poll = runtime.pump_cpu_fallback_results();
+        if poll.visible_change {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "CPU fallback worker did not complete"
+        );
+        std::thread::yield_now();
+    }
+
+    assert!(matches!(
+        execute_preview_presentation_for_test_app(&runtime, &state),
+        PreviewPresentationState::Ready(_)
+    ));
+    runtime.clear_viewer_cpu_fallback();
+    assert!(!runtime.viewer_cpu_fallback_active.get());
+
+    let _ = state.pause();
+}
+
+#[test]
 fn sequence_revision_change_forces_re_resolution() {
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
     let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
@@ -198,7 +233,7 @@ fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
     let asset = AssetId::new();
 
     assert!(set.waiting_for(key).is_none());
-    set.insert_waiting(key, Arc::from([EvaluationDependency::MediaFrame(asset)]));
+    set.insert_waiting(key, Arc::from([EvaluationDependency::MediaProducer(asset)]));
     assert!(
         set.waiting_for(key).is_some(),
         "a pending evaluation must be retained as a typed wait entry"
@@ -231,6 +266,89 @@ fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
     assert!(set.get(key, 2).is_some());
     set.invalidate_for_asset(asset);
     assert!(set.get(key, 3).is_none());
+}
+
+#[test]
+fn retained_media_producer_wait_reasserts_pending_each_presentation_turn() {
+    let (state, _asset_id, root) = state_with_invalid_video_asset();
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Loading
+    ));
+    assert!(runtime.execution.borrow().is_pending());
+
+    assert!(matches!(
+        execute_gpu_preview_for_test_app(&runtime, &state),
+        PreviewGpuFrameState::Loading
+    ));
+    assert!(
+        runtime.execution.borrow().is_pending(),
+        "a retained producer wait must restore the per-turn pending level"
+    );
+    assert_eq!(runtime.diagnostics().unavailability.failed, 0);
+
+    runtime.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
+fn evaluation_working_set_retires_native_decoder_resource_owners() {
+    let mut set = EvaluationWorkingSet::new();
+    let sequence = Sequence::new("native-residency");
+    let key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 0,
+        width: 320,
+        height: 180,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    let native = MediaPreviewFrame::from_native(
+        test_native_source_frame(320, 180),
+        Resolution { width: 320, height: 180 },
+        Resolution { width: 320, height: 180 },
+        test_preview_semantic_identity(2),
+        mondrian_playback::FramePresentationQuality::Ready,
+        PreviewDecodeExecutionSummary::default(),
+    );
+    let evaluation = Arc::new(ResolvedFrameEvaluation {
+        key,
+        output_key: PreviewOutputKey::new(
+            key.sequence_id,
+            key.width,
+            key.height,
+            test_preview_semantic_identity(3),
+        ),
+        elements: Arc::from([ResolvedPreviewElement::Media {
+            frame: native,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: mondrian_effects::identity_compiled_effect_graph()
+                .expect("identity graph"),
+            prepared_heterogeneous_route: None,
+            frame_seed: 0,
+        }]),
+        color_context: test_color_context(ColorSpace::Srgb),
+        resolved_quality: ResolvedFrameQuality::Full,
+        reuse_policy: EvaluationReusePolicy::Reusable,
+        dependencies: Arc::from([]),
+    });
+    set.insert(key, evaluation, 1);
+    assert!(set.get(key, 2).is_some());
+
+    set.clear_decoder_resource_entries();
+
+    assert!(
+        set.get(key, 3).is_none(),
+        "decoder-family retirement must not leave native surfaces pinned by evaluation reuse"
+    );
 }
 
 fn test_preview_semantic_identity(revision: u64) -> PreviewSemanticIdentity {
@@ -634,6 +752,36 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         "ordinary playback must retain forward prefetch work"
     );
 
+    let presentation_rotated = viewer_preview_generation_key_for_state(
+        &state,
+        &sequence,
+        5,
+        960,
+        540,
+        ColorSpace::Srgb,
+        Some(managed_icc_display_snapshot(ColorSpace::Srgb).contract_identity()),
+    );
+    assert_ne!(current, presentation_rotated);
+    assert!(
+        presentation_rotated.has_compatible_playback_media_authority(&current),
+        "presentation-only rotation must retain the running decoder session"
+    );
+
+    let spatially_rotated = viewer_preview_generation_key_for_state(
+        &state,
+        &sequence,
+        5,
+        640,
+        360,
+        ColorSpace::Srgb,
+        Some(managed_icc_display_snapshot(ColorSpace::Srgb).contract_identity()),
+    );
+    assert_ne!(current, spatially_rotated);
+    assert!(
+        !spatially_rotated.has_compatible_playback_media_authority(&current),
+        "old-size queued work must not starve the new adaptive-scale window"
+    );
+
     state.seek(6).expect("seek");
     let after_seek = viewer_preview_generation_key_for_state(
         &state,
@@ -648,6 +796,7 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         current, after_seek,
         "seek must invalidate the prior playback epoch"
     );
+    assert!(!after_seek.has_compatible_playback_media_authority(&current));
 
     state.pause().expect("pause");
     let idle_a = viewer_preview_generation_key_for_state(
@@ -3299,6 +3448,11 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
             preservable_media_frames: preroll_window,
         })
     );
+    assert_eq!(
+        service.jobs.diagnostics().queued_prefetch_jobs,
+        preroll_window,
+        "preroll observation must actively admit its bounded future prefix"
+    );
 
     let frame = state.current_frame().saturating_add(1);
     let program = PreparedVisualProgram::prepare(sequence).expect("next frame visual program");
@@ -4243,6 +4397,12 @@ fn preview_decode_performance_report_classifies_codec_bound_slow_frame() {
     );
     assert!(report.checks.iter().any(|check| {
         check.code == "preview_decode_playback_cursor_forward_steady_max_worker_execution_us"
+            && check.severity == PreviewDecodePerformanceSeverity::Pass
+            && check.observed == 120_000
+            && check.limit == Some(250_000)
+    }));
+    assert!(report.checks.iter().any(|check| {
+        check.code == "preview_decode_playback_cursor_forward_steady_p95_worker_execution_us"
             && check.severity == PreviewDecodePerformanceSeverity::Fail
             && check.observed == 120_000
             && check.limit == Some(50_000)
@@ -4706,7 +4866,7 @@ fn preview_decode_performance_report_accepts_engaged_playback_hardware_fallback(
         check.code == "preview_decode_playback_cursor_forward_steady_max_worker_execution_us"
             && check.severity == PreviewDecodePerformanceSeverity::Pass
             && check.observed == 0
-            && check.limit == Some(50_000)
+            && check.limit == Some(250_000)
     }));
     assert!(!report
         .root_causes
@@ -8756,9 +8916,9 @@ fn stale_viewer_frame_is_scoped_to_sequence_and_dimensions() {
 }
 
 #[test]
-fn playback_prefetch_yields_while_current_frame_is_pending() {
+fn playback_prefetch_proceeds_while_only_viewer_execution_is_pending() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let (mut state, _asset_id, root) = state_with_invalid_video_asset();
     state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
 
@@ -8766,9 +8926,13 @@ fn playback_prefetch_yields_while_current_frame_is_pending() {
     schedule_media_prefetches_for_state(&service, &state, sequence, state.current_frame());
 
     let diagnostics = service.diagnostics();
-    assert_eq!(diagnostics.prefetch_skipped_current_pending, 1);
-    assert_eq!(diagnostics.enqueued_jobs, 0);
-    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+    assert_eq!(diagnostics.prefetch_skipped_current_pending, 0);
+    assert!(diagnostics.enqueued_jobs > 0);
+    assert!(diagnostics.worker_queue.queued_prefetch_jobs > 0);
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
 }
 
 #[test]
@@ -8918,11 +9082,15 @@ fn stalled_scrub_releases_capacity_without_reporting_playback_delivery() {
     let outcome = service.expire_stalled_realtime_current_with_timeout(Duration::ZERO, None);
 
     assert!(!outcome.visible_change);
-    assert!(outcome.transport_change);
+    assert!(!outcome.transport_change);
     assert!(outcome.frame_delivery_candidates.is_empty());
     let diagnostics = service.diagnostics();
-    assert_eq!(diagnostics.scheduler.pending_requests, 0);
-    assert_eq!(diagnostics.worker_queue.queued_jobs, 0);
+    // Interactive scrub work has latest-wins cancellation through generation
+    // rotation but no presentation deadline, so the playback stall window must
+    // never expire it (a scrub may legitimately outlive one GOP open). Its
+    // pending admission therefore survives this seam untouched.
+    assert_eq!(diagnostics.scheduler.pending_requests, 1);
+    assert_eq!(diagnostics.worker_queue.queued_jobs, 1);
     assert_eq!(diagnostics.playback_current_stalled_expirations, 0);
     assert_eq!(diagnostics.playback_schedule.current_drop_late_decisions, 0);
 }
@@ -9170,9 +9338,9 @@ fn playback_pressure_recovery_suppresses_forward_prefetch_until_current_success(
 }
 
 #[test]
-fn playback_prefetch_yields_while_current_work_is_queued() {
+fn playback_prefetch_queues_behind_current_work() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let (mut state, _asset_id, root) = state_with_invalid_video_asset();
     state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let current_key = test_media_key(100);
@@ -9202,13 +9370,17 @@ fn playback_prefetch_yields_while_current_work_is_queued() {
     assert_eq!(diagnostics.prefetch_skipped_current_work, 1);
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
     assert_eq!(diagnostics.worker_queue.queued_current_jobs, 1);
-    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
+    assert!(diagnostics.worker_queue.queued_prefetch_jobs > 0);
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
 }
 
 #[test]
-fn playback_prefetch_yields_while_current_work_is_in_flight() {
+fn playback_prefetch_respects_headroom_while_current_work_is_in_flight() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
-    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let (mut state, _asset_id, root) = state_with_invalid_video_asset();
     state.play().expect("play");
     let sequence = state.active_sequence().expect("sequence");
     let generation = service.scheduler.begin_generation();
@@ -9230,6 +9402,10 @@ fn playback_prefetch_yields_while_current_work_is_in_flight() {
     assert_eq!(diagnostics.enqueued_jobs, 0);
     assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 0);
     assert_eq!(diagnostics.worker_queue.in_flight_current_jobs, 1);
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
 }
 
 #[test]
@@ -9817,7 +9993,7 @@ fn preview_service_deadline_uses_worker_completion_not_later_poll_time() {
 }
 
 #[test]
-fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
+fn preview_service_keeps_exact_hardware_fallback_ready_until_presentation() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
     state.play().expect("play");
@@ -9850,7 +10026,7 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
             .expect("hardware fallback remains temporally exact"),
     );
     result.decode_diagnostics = Some(decode_diagnostics);
-    result_tx.send(result).expect("send degraded successful result");
+    result_tx.send(result).expect("send exact fallback result");
 
     let outcome = service.poll_finished_outcome_with_budget(
         8,
@@ -9874,19 +10050,19 @@ fn preview_service_stages_presentable_hardware_fallback_until_presentation() {
         .presentation_quality();
     assert_eq!(
         cached_quality,
-        mondrian_playback::FramePresentationQuality::Degraded,
-        "cache admission must preserve executed hardware-fallback quality"
+        mondrian_playback::FramePresentationQuality::Ready,
+        "decode backend fallback must not become temporal degradation"
     );
     service.execution.borrow_mut().set_presentation_quality(cached_quality);
     let ticket =
         playback_presentation_ticket_for_state(&service, &state).expect("presentation ticket");
     let completion = state
         .complete_frame_presentation(ticket, Instant::now())
-        .expect("current degraded presentation remains authoritative");
+        .expect("current exact fallback presentation remains authoritative");
     assert_eq!(completion.delivery().identity(), demand_identity);
     assert_eq!(
         completion.delivery().kind(),
-        mondrian_playback::FrameDeliveryKind::Degraded
+        mondrian_playback::FrameDeliveryKind::Ready
     );
     assert!(
         !completion.transport_changed(),
@@ -10279,6 +10455,23 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
     let result_tx = install_preview_result_channel_for_test(&service);
     let generation = service.scheduler.begin_generation();
     let key = test_media_key(91);
+    let asset_id = key.asset_id;
+    let sequence = Sequence::new("canceled-producer-wait");
+    let evaluation_key = FrameEvaluationKey {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: 0,
+        frame: 5,
+        width: 320,
+        height: 180,
+        runtime_scale: mondrian_playback::PreviewResolutionScale::Full,
+        display_color_space: ColorSpace::Srgb,
+        display_contract_identity: None,
+    };
+    service.evaluation_working_set.borrow_mut().insert_waiting(
+        evaluation_key,
+        Arc::from([EvaluationDependency::MediaProducer(asset_id)]),
+    );
     assert!(matches!(
         service.scheduler.request(
             key.clone(),
@@ -10317,6 +10510,14 @@ fn canceled_current_scrub_requests_follow_up_render_for_settled_frame() {
     assert!(
         outcome.visible_change,
         "settled non-playback work must get a render pass after cancellation"
+    );
+    assert!(
+        service
+            .evaluation_working_set
+            .borrow()
+            .waiting_for(evaluation_key)
+            .is_none(),
+        "a canceled producer must release retained evaluation waits so the settled frame can re-admit"
     );
     service.shutdown();
 }
@@ -10632,6 +10833,16 @@ fn obsolete_media_request_never_becomes_unowned_pending_work() {
     assert_eq!(service.scheduler.diagnostics().pending_requests, 0);
     assert_eq!(service.jobs.diagnostics().queued_jobs, 0);
     service.shutdown();
+}
+
+#[test]
+fn obsolete_media_generation_is_a_retryable_timeline_wait_not_a_failure() {
+    assert_eq!(
+        media_adapter::media_wait_for_admission(
+            request_scheduler::MediaPreviewRequestAdmission::ObsoleteGeneration,
+        ),
+        Some(crate::app::preview_timeline_execution::PreviewTimelineMediaWait::RetryAdmission),
+    );
 }
 
 #[test]
@@ -12225,6 +12436,12 @@ fn gpu_output_registration_does_not_run_settled_media_release_inside_commit() {
 
     assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 1);
     assert!(service.try_release_settled_transport_media_residency());
+    assert_eq!(
+        service.frame_store.borrow().diagnostics().media_entries,
+        1,
+        "bounded CPU residency must remain reusable for immediate playback"
+    );
+    assert!(service.try_release_settled_transport_all_media_residency());
     assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 0);
     service.shutdown();
 }
@@ -12267,14 +12484,33 @@ fn stopped_generation_rotation_retries_media_release_after_worker_settles() {
     assert_eq!(service.diagnostics().worker_queue.in_flight_jobs, 0);
 
     state.seek(5).expect("seek");
-    assert!(matches!(
-        execute_gpu_preview_for_test_app(&service, &state),
-        PreviewGpuFrameState::Ready(_) | PreviewGpuFrameState::Current(_)
-    ));
+    let seeked = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        PreviewGpuFrameState::Current(_) => {
+            assert!(
+                service.try_release_settled_transport_media_residency(),
+                "an unchanged generation must keep the settled release authorized"
+            );
+            assert_eq!(service.frame_store.borrow().diagnostics().media_entries, 1);
+            service.shutdown();
+            return;
+        }
+        _ => panic!("expected stopped GPU candidate after seek"),
+    };
+    assert!(
+        register_test_window_preview_output(
+            &service,
+            &seeked,
+            "seeked-output",
+            ViewerExternalTexturePresentation::full_frame(seeked.width, seeked.height)
+                .expect("valid seeked presentation"),
+        ),
+        "the seeked exact output must register"
+    );
     assert_eq!(
         service.frame_store.borrow().diagnostics().media_entries,
-        0,
-        "the last exact output must authorize source release before becoming stale"
+        1,
+        "bounded CPU residency must remain reusable for immediate playback after the settled release"
     );
     service.shutdown();
 }

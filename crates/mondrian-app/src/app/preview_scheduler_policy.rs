@@ -276,8 +276,13 @@ pub(crate) fn preview_hardware_decode_effective(diagnostics: &PreviewDecodeDiagn
         || diagnostics.hardware_decode_cpu_transfer_observed
 }
 
-/// Preserve executed decode quality on the produced frame so prefetch/cache
-/// reuse cannot lose hardware-fallback evidence.
+/// Classify temporal presentation quality independently from decode backend.
+///
+/// Exact software fallback remains `Ready`: backend selection is retained in
+/// `PreviewDecodeExecutionSummary`, while presentation quality is reserved for
+/// temporal approximation or actual deadline degradation. Conflating the two
+/// would make every on-time CPU frame drive Playback recovery and invalidate
+/// the very prefetch window needed by a software decoder.
 pub(crate) fn preview_decode_presentation_quality(
     diagnostics: &PreviewDecodeDiagnostics,
 ) -> Result<FramePresentationQuality, MediaPreviewFailureReason> {
@@ -287,13 +292,7 @@ pub(crate) fn preview_decode_presentation_quality(
         }
         return Ok(FramePresentationQuality::Degraded);
     }
-    if playback_hardware_decode_requested(diagnostics.hardware_decode_request)
-        && !preview_hardware_decode_effective(diagnostics)
-    {
-        Ok(FramePresentationQuality::Degraded)
-    } else {
-        Ok(FramePresentationQuality::Ready)
-    }
+    Ok(FramePresentationQuality::Ready)
 }
 
 /// Minimal executed decode facts consumed by playback delivery policy.
@@ -350,15 +349,18 @@ pub(crate) fn playback_hardware_recovery_signals(
     }
 }
 
-/// Classify a playback-current worker completion without treating capability
-/// probes as execution. A correct CPU frame after requested-but-unengaged
-/// hardware decode is presentable, but explicitly Degraded so Playback Quality
-/// Policy can lower temporary resolution.
+/// Classify a playback-current worker completion without treating decode
+/// backend selection as temporal presentation quality.
+///
+/// A correct CPU frame after requested-but-unengaged hardware decode remains
+/// `Ready`. Actual lateness still drives Playback Quality Policy, while
+/// [`playback_hardware_recovery_signals`] retains the independent evidence that
+/// proxy or hardware-path recovery may be useful.
 pub(crate) fn playback_frame_delivery_kind(
     completed_after_deadline: bool,
     has_frame: bool,
-    priority: MediaPreviewRequestPriority,
-    execution: Option<PlaybackDecodeExecution>,
+    _priority: MediaPreviewRequestPriority,
+    _execution: Option<PlaybackDecodeExecution>,
 ) -> FrameDeliveryKind {
     if completed_after_deadline {
         return FrameDeliveryKind::Late;
@@ -366,17 +368,7 @@ pub(crate) fn playback_frame_delivery_kind(
     if !has_frame {
         return FrameDeliveryKind::Failed;
     }
-    let hardware_fallback = priority == MediaPreviewRequestPriority::Current
-        && execution.is_some_and(|execution| {
-            execution.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-                && playback_hardware_decode_requested(execution.hardware_decode_request)
-                && !execution.hardware_decode_effective
-        });
-    if hardware_fallback {
-        FrameDeliveryKind::Degraded
-    } else {
-        FrameDeliveryKind::Ready
-    }
+    FrameDeliveryKind::Ready
 }
 
 #[cfg(test)]
@@ -445,7 +437,7 @@ mod tests {
     }
 
     #[test]
-    fn requested_but_unengaged_hardware_decode_is_a_degraded_delivery() {
+    fn requested_but_unengaged_hardware_decode_is_temporally_ready() {
         assert_eq!(
             playback_frame_delivery_kind(
                 false,
@@ -453,7 +445,7 @@ mod tests {
                 MediaPreviewRequestPriority::Current,
                 Some(software_fallback_execution()),
             ),
-            FrameDeliveryKind::Degraded
+            FrameDeliveryKind::Ready
         );
     }
 

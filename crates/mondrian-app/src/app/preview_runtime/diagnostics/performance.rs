@@ -661,6 +661,7 @@ fn preview_decode_performance_policy(
         PreviewDecodeWorkClass::Unclassified,
     ];
     const REUSED_SEEK_BUDGET_US: u64 = 500_000;
+    const PLAYBACK_FORWARD_STEADY_MAX_BUDGET_MULTIPLIER: u64 = 5;
 
     let mut work_budgets = Vec::with_capacity(ACCESS_MODES.len() * WORK_CLASSES.len());
     for access_mode in ACCESS_MODES {
@@ -688,6 +689,20 @@ fn preview_decode_performance_policy(
                     (REUSED_SEEK_BUDGET_US, Some(REUSED_SEEK_BUDGET_US))
                 }
                 PreviewDecodeWorkClass::Unclassified => (0, None),
+                PreviewDecodeWorkClass::ForwardSteady
+                    if access_mode == PreviewDecodeAccessMode::PlaybackCursor =>
+                {
+                    // Playback executes bounded lookahead specifically so a
+                    // rare source/GOP or OS-scheduling spike can be absorbed
+                    // without disturbing cadence. Keep the cadence budget on
+                    // p95 while retaining a finite five-frame hard bound for
+                    // individual prefetched work.
+                    (
+                        slow_frame_budget_us
+                            .saturating_mul(PLAYBACK_FORWARD_STEADY_MAX_BUDGET_MULTIPLIER),
+                        Some(slow_frame_budget_us),
+                    )
+                }
                 PreviewDecodeWorkClass::CacheHit
                 | PreviewDecodeWorkClass::ForwardSteady
                 | PreviewDecodeWorkClass::ReusedOther => {

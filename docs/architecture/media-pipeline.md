@@ -400,8 +400,11 @@ NLEs separate playback, interactive navigation, and precise still extraction:
   working-to-sRGB display boundary before publishing its validated raster.
 
 Every request also carries a required `PreviewSourceColorContract`: the
-app-resolved input/source color space plus an authority-aware
-`DecodedVideoRangeContract`. In Auto mode CPU/native decode prefers each YUV
+app-resolved input/source color space, an authority-aware
+`DecodedVideoRangeContract`, and an optional explicit missing-matrix policy.
+The Sequence `AssumeRec709` policy binds `Bt709` into this immutable contract
+and therefore into decode/cache identity; it never relies on an implicit
+swscale default. In Auto mode CPU/native decode prefers each YUV
 frame's explicit range and falls back to the stream probe only when the frame
 omits it; Full/Limited user overrides remain authoritative. Matrix is resolved
 independently: an explicit decoded matrix controls YCbCr-to-RGB sampling even
@@ -745,14 +748,18 @@ requests are rejected at admission and surfaced as structured diagnostics. The
 worker transport queue repeats this invariant and derives priority only from
 `MediaPreviewJob::priority`; queue callers must not pass a second priority value
 that can drift from the job payload.
-Playback forward prefetch is also slack-only. If visible current-frame media is
-pending, current-frame work is waiting in the worker queue or already running,
-or queued plus in-flight prefetch already covers the configured forward window,
-the app must skip that prefetch pass instead of adding more speculative jobs.
-Diagnostics report these as `prefetch_skipped_current_pending`,
-`prefetch_skipped_current_work`, and `prefetch_skipped_prefetch_backlog`. This
-keeps first-frame display and dropped-frame recovery ahead of cache warming on
-slow or long-GOP media. The configured forward window is derived from a
+Playback forward prefetch is resource-bounded and lower priority, but its
+admission is pipelined with current media work. A queued or in-flight current
+request does not by itself suppress planning: the Broker always dequeues
+Current before Prefetch, and the Frame Store projects headroom only after the
+current reservation is charged. This lets a Playback worker move directly from
+the exact current frame into the admitted sequential prefix instead of waiting
+for another main-thread candidate turn. A current reservation that leaves no
+physical headroom still forms a frontier, and queued plus in-flight Prefetch
+that already covers the configured window suppresses duplicate admission.
+`prefetch_skipped_current_work` is retained as a report-schema-compatible
+coexistence observation; `prefetch_skipped_prefetch_backlog` remains the actual
+covered-window skip. The configured forward window is derived from a
 250 ms wall-clock horizon and the active sequence frame rate, then capped at
 eight frames before enqueueing. This preserves the full horizon through 30 fps;
 higher-rate playback degrades only the speculative horizon (eight frames are
@@ -777,6 +784,18 @@ cannot advance availability or permit farther work to bypass it. Blank frames
 do not terminate the prefix, whereas dependency errors and terminal failures
 do. Actual Store admission remains authoritative; the scheduler never inflates
 policy to make all eight fit.
+Once a slack-admitted `PlaybackCursor` prefetch begins, a later Playback-current
+request does not by itself preempt the lease. The task has a two-second hard
+execution budget and may finish only under normal Broker freshness/publication
+rules; interactive current work and explicit resource pressure can still
+preempt it. This lets cold isolated-demux and codec setup become reusable
+Session locality instead of repeatedly canceled process launches during the
+first second of playback.
+After the priming-current frame is presented, its consumed Frame Demand must not
+suppress this top-up. Preview continues admitting future `PlaybackCursor` work
+until bounded preroll completes or the Engine's priming deadline releases the
+Clock Master; a Viewer-only generation rotation may independently make the old
+output stale without revoking that media admission.
 Preview diagnostics expose this playback-clock contract as structured
 `playback_schedule` evidence, including the current-frame display deadline
 budget, the prefetch horizon/window, and invalid frame-rate counters. Invalid
@@ -931,6 +950,24 @@ spending the same long-GOP CPU budget as deterministic extraction, and leaves a
 clear replacement point for future hardware-resident playback and low-latency
 scrub backends.
 
+Software decoder threading follows the same residency boundary. Interactive
+and Still sessions use the fair per-worker CPU share, while `PlaybackCursor`
+may use the larger bounded decoder-thread grant after reserving UI, render, and
+audio cores. Playback and Interactive residency are mutually exclusive, so the
+idle NonPlayback workers cannot multiply this grant during playback. Explicit
+thread-count environment overrides remain bounded by the same machine grant.
+Real-media validation treats hardware engagement as an optimization: a CPU
+fallback that proves the complete continuous window as exact, on-time Ready
+output stays at full quality. Half/Quarter execution is mandatory only when the
+fallback misses that evidence; tests must not manufacture degradation merely
+because a requested hardware profile was unsupported.
+
+A settled paused Viewer output automatically retires decoder-native frames but
+keeps ordinary CPU-decoded frames inside the bounded Frame Store. This prevents
+a single native handle from pinning a hardware surface pool while preserving
+the exact paused CPU frame for immediate Play. Explicit lifecycle, pressure,
+and validation cleanup may still clear all decoded-media residency.
+
 The normal scrub budget derived from an indexed keyframe includes
 decoder-reordering headroom and retains the unindexed safety floor.
 Frame-threaded codecs and imperfect container indexes can make the actual
@@ -1048,7 +1085,8 @@ native decoded-frame import readiness; missing or unsupported sampling remains a
 structured blocker instead of silently falling back to guessed NV12/P010 shader
 constants.
 Absent matrix metadata is distinct from an explicitly unsupported matrix.
-Only the absent case may use the resolved source contract's matrix; explicit
+Only the absent case may use a matrix fallback explicitly bound into the
+resolved source contract (currently the Sequence `AssumeRec709` policy); explicit
 BT.2020 constant-luminance, derived, YCgCo, and ICtCp-style matrices remain
 fail-closed until their conversion math is implemented.
 Complete BT.470BG/gamma-2.8 and SMPTE 170M primaries/transfer pairs resolve to
@@ -1225,7 +1263,14 @@ That deadline expires queued work and classifies worker completion, but
 `Current + PlaybackCursor` explicitly uses
 `FrameInFlightDeadlinePolicy::FinishForLocality`: once its playback-lane lease
 has started, a display miss cannot tear down the worker-owned sequential
-demux/codec Session. `app::preview_scheduler_policy` owns the pure
+demux/codec Session. Full/Half/Quarter, output dimensions, monitor/color output
+contracts and presentation-source changes within the same Playback Epoch and
+unchanged Sequence/Project author authority also rotate Viewer/output generation
+without canceling that lease; it loses publication authority first and an
+on-time, reusable result may finish only as exact-key `CacheOnly` media work.
+Seek, source authoring, Project authoring
+and lifecycle changes retain ordinary latest-generation cancellation.
+`app::preview_scheduler_policy` owns the pure
 worker-deadline eligibility, executed decode-quality classification, and bounded
 frame-rate-to-prefetch-window policy;
 `app::preview_access_mode` owns Broker admission/job transport,
@@ -1253,16 +1298,23 @@ cannot advance, pause, or select the Clock Master. Transport actions still
 cancel obsolete preview generations and refresh controls without synchronously
 requesting new preview/composite work.
 Background polling must also enforce a hard escape hatch for the current
-realtime playback request. If a scheduler-accepted `Current` request for
-`PlaybackCursor` or `ScrubCursor` remains pending past the realtime stall
-budget, the app preview service expires only that realtime-current pending work,
-removes matching queued worker jobs, and clears the current-frame pending flag.
+realtime playback request. If a scheduler-accepted `Current + PlaybackCursor`
+request remains pending past the realtime stall budget, the app preview service
+expires only that playback-current pending work, removes matching queued worker
+jobs, and clears the current-frame pending flag.
+The shorter playing-frame stall budget is disabled during `Priming`: the
+Playback Engine's own bounded preroll deadline remains authoritative, allowing
+a cold software-decoded first frame to establish output instead of being
+reclassified Late every 250 ms.
 The scheduler returns the expired key, access mode, and original optional Frame
 Demand identity instead of requiring the host to inspect current transport.
-Only an expired `PlaybackCursor` carrying that identity records
-`playback_current_stalled_expirations` and emits an exact Late Frame Delivery;
-an expired `ScrubCursor` releases interactive capacity without mutating the
-Playback Session or playback-pressure counters. This
+An expired `PlaybackCursor` carrying that identity records
+`playback_current_stalled_expirations` and emits an exact Late Frame Delivery.
+`ScrubCursor` is explicitly outside this wall-clock expiry: source open, GOP
+seek, or index construction may legitimately exceed a playback presentation
+window, and interactive latest-wins generation changes already cancel obsolete
+scrubs. Applying the playback timeout to a stable scrub would repeatedly cancel
+slow camera originals before their first decodable frame. This
 is not a renderer fallback and must not clear ready/stale frames,
 still-frame work, media caches, or external GPU viewer textures. It exists so a
 lost, wedged, or pathologically slow current decode cannot retain scheduler
@@ -1304,6 +1356,12 @@ still records and diagnoses the slowest individual frame, but the continuous
 playback hard-failure selector does not let one session-open maximum override a
 healthy p95 plus readiness gate. Timeout, queue loss, invalid access modes,
 sustained pressure, missing locality, and p95 regressions remain hard failures.
+Exact-current readiness is proven by the union lower bound of accepted Engine
+`Ready` deliveries and de-duplicated Viewer GPU publications. This matters at a
+clock boundary: an older Frame Demand can be superseded after its exact output
+has already become visible. The two ledgers remain independently gated, so a
+repeated stale output cannot borrow coverage from rendered-but-unpublished GPU
+work and a missing Engine delivery cannot erase an already-proven presentation.
 
 External smoke media is always registered from one real `probe_media_info`;
 the harness does not synthesize codec, profile, resolution, bit depth, duration,
@@ -1779,6 +1837,14 @@ create an `AVHWDeviceContext`, change decoder format negotiation, allocate
 hardware frames, or report active hardware decode. Its purpose is to separate
 "FFmpeg/codec cannot use this backend" from "Mondrian has not connected the
 decoder adapter yet".
+The codec-wide FFmpeg table is not sufficient profile evidence. Before device
+creation, the Session rejects H.264 High 10, High 4:2:2, and High 4:4:4 profile
+families from hardware admission because Mondrian has no cross-platform native
+or CPU-transfer contract that can rely on those device outputs. Preferred
+hardware requests proceed directly through the software decoder;
+`RequireGpuResident` remains explicitly unsupported. This avoids repeatedly
+opening a device-backed decoder that will negotiate a software frame while
+preserving exact CPU fallback semantics.
 Playback sessions acquire an immutable device-root lease from their injected
 `PreviewDecodeWorkerResources::HwDeviceContextPool`, keyed by exact hardware
 backend and renderer-selected adapter. The pool owns only its configured idle
@@ -2164,6 +2230,15 @@ reinterpreted as two-plane GPU textures. A GPU-preferred CPU fallback records
 `ResourceAdapterUnavailable`, `SurfaceFormatUnavailable`,
 `SamplingMetadataIncomplete`, or `ResourceRetentionFailed`. A required-GPU
 request returns a decode error for the same condition instead.
+Hardware-preferred Session setup already walks compatible backends before
+software. If a preferred Session later fails during packet send, frame receive,
+seek, or materialization, the worker retires the poisoned codec/device state
+and retries the same semantic request once through a fresh software Session.
+Success reports `RuntimeHardwareFailure`, and the exact source revision/stream
+is quarantined from another hardware attempt for 30 seconds so every frame does
+not repeat the same driver failure. `RequireGpuResident` never takes this path.
+Sources without a proven NV12/P010 native hint do not attempt GPU-resident
+admission under the current renderer contract.
 On multi-adapter Windows systems, a native-import admission attaches the typed
 `D3D12VaAdapterIndex` selector derived from the renderer's physical DXGI
 adapter. Media includes it in decoder-session identity and passes its decimal
@@ -2200,7 +2275,11 @@ attempts, or external clones to exhaust the decoder pool. CPU fallback payloads
 use the same ledger's exact host-byte charge. The shared future-prefix planner
 also preserves accepted native resident leases until all nearer missing work
 has transferred into Broker ownership; decoder-surface LRU policy therefore
-cannot invert timeline priority.
+ cannot invert timeline priority.
+The App evaluation working set retains only Store-protected frame clones. Every
+decoder-family, media-only, and all-residency retirement first drops matching
+evaluation entries, then clears the Frame Store, preventing a native lease
+from becoming an unaccounted owner after Store eviction.
 CPU consumers such as thumbnails and current RGBA fallback paths must explicitly
 match `Frame(RgbaFrame)` and fail closed on `NativeGpuFrame`; they must not
 reinterpret a native decoder surface as RGBA or silently force a CPU transfer.
@@ -2321,10 +2400,25 @@ stage timings plus max queue wait, while aggregate stage totals remain trend
 evidence. This avoids blaming a cumulative stage total when an interactive stall
 came from one pathological seek, decode, software-scale/copy, composite,
 output-boundary frame, or current-frame job waiting behind other decode work.
-The in-process preview decoder uses bounded frame threading by default. This is
-the product default because 4K HEVC Main10/Long-GOP preview seeks are commonly
-packet-decode bound, and frame threading is the safer general FFmpeg software
-decode default than slice threading for this class of media. The app
+The in-process preview decoder uses bounded slice threading by default for
+continuous Playback of UHD software decode, and frame threading everywhere else
+(including non-playback access modes and sub-UHD playback). Measured on
+software H.264 High 4:2:2 10-bit 3840x2160@60000/1001 on a 12-thread machine,
+slice threading sustains the 16.7 ms frame budget under ordinary desktop load
+(60/60 exact presentations, decode p95 ~25 ms) while frame threading falls
+behind (53-55/60, decode p95 clamped at 40 ms); reducing slice threads below
+~8 collapses per-frame throughput (5 threads measured at ~125 ms/frame) and
+spawning a second concurrent Playback decoder for the same source costs more in
+seek/demux contention than it gains in parallelism. The default threading kind
+is therefore chosen per access mode and coded frame size
+(`MONDRIAN_PREVIEW_DECODE_THREADING` / `MONDRIAN_PREVIEW_DECODE_THREADS`
+override it), and frame threading remains the conservative general default for
+non-UHD and non-playback work. Software UHD decode is not real-time on a
+machine with sustained background load: at ~60% host utilization the same
+decode measures ~38 ms/frame (about 30 fps), so the playback gate's decode p95
+bound is load-sensitive by design and the pipeline degrades quality
+(Full -> Half -> Quarter) without changing time, color, or source semantics.
+The app
 preview service runs a conservative decode worker pool from
 `PreviewDecodeCpuBudget`: one worker on small CPU budgets, two on common
 mid-range machines, and three only on larger workstations. FFmpeg decoder
@@ -2572,17 +2666,31 @@ operation; including that output extent in the decode key would invalidate
 useful prefetch whenever adaptive presentation scale changes. CPU decode keeps
 its requested decode extent because scaling is part of that media operation.
 Preview decode session reuse is isolated by physical execution family and the
-full decode contract. Playback has its own slot; GPU-resident scrub and exact
+source-decoder contract. Playback has its own slot; GPU-resident scrub and exact
 Still share the Interactive slot while deriving policy anew from each request;
 CPU Still remains separate. Every slot and every App Preview Frame Store entry
 must be keyed by a complete media file fingerprint, not by path alone. Session
 reuse additionally requires the exact requested physical video stream,
-geometry, backend, hardware request/device selector, packet-source execution
-family, and source-color contract. Proxy regeneration finalizes fresh media at
+backend, hardware request/device selector, packet-source execution family, and
+source-color contract. Adaptive output geometry is a materialization binding,
+not a decoder identity: changing it retains demux/codec/DPB/seek state, rebuilds
+the CPU scaler, and clears only output payloads cached at the old extent. Proxy
+regeneration finalizes fresh media at
 the same proxy path, so same-path Store hits or reused FFmpeg Sessions are valid
 only while the newly observed complete object identity and filesystem change
 generation match the fingerprint captured at admission. Path, length, and
 modification timestamp alone cannot authorize that reuse.
+An execution generation superseded before Broker admission is a retryable
+Adapter race, not a Timeline execution failure. It may remain visible in
+scheduler churn diagnostics, but Viewer presentation projects `Loading` until
+a fresh execution snapshot admits or resolves the request; user-facing error
+state is reserved for a terminal media or execution contract failure.
+The frame-evaluation working set may retain a typed media-producer wait to
+deduplicate Timeline resolution, but every acquire must reassert the
+execution-pending level after the presentation turn resets it. A retained wait
+without that level would falsely project normal decode latency as a Timeline
+execution failure. A retry-admission wait has no producer by definition and
+therefore remains Loading only until a fresh snapshot can attempt admission.
 FFmpeg's default app log level is fatal for product preview decode. Codec-level
 warnings and recoverable decoder errors, such as HEVC reference-frame messages
 during aggressive seek/scrub, must not leak directly to the user terminal as the

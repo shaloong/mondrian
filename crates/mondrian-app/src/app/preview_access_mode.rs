@@ -18,7 +18,7 @@ use mondrian_media::{
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
-pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
+pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 2_000_000;
 pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
@@ -843,9 +843,7 @@ fn frame_work_deadline(
 fn media_preview_in_flight_deadline_policy(
     job: &MediaPreviewJob,
 ) -> mondrian_playback::FrameInFlightDeadlinePolicy {
-    if job.priority == MediaPreviewRequestPriority::Current
-        && job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-    {
+    if job.access_mode == PreviewDecodeAccessMode::PlaybackCursor {
         mondrian_playback::FrameInFlightDeadlinePolicy::FinishForLocality
     } else {
         mondrian_playback::FrameInFlightDeadlinePolicy::Cancel
@@ -1076,6 +1074,10 @@ impl MediaPreviewScheduler {
 
     pub(crate) fn begin_generation(&self) -> u64 {
         self.broker.begin_generation()
+    }
+
+    pub(crate) fn begin_generation_preserving_playback_locality(&self) -> u64 {
+        self.broker.begin_generation_preserving_playback_locality()
     }
 
     pub(crate) fn submit_job(
@@ -1387,12 +1389,12 @@ impl MediaPreviewScheduler {
         self.broker.cancel_key(key);
     }
 
-    pub(crate) fn expire_realtime_current_older_than(
+    pub(crate) fn expire_playback_current_older_than(
         &self,
         max_age: Duration,
     ) -> Vec<ExpiredMediaPreviewRequest> {
         self.broker
-            .expire_realtime_current_older_than(max_age)
+            .expire_playback_current_older_than(max_age)
             .into_iter()
             .map(|request| ExpiredMediaPreviewRequest {
                 key: request.key,

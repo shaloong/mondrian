@@ -14,13 +14,13 @@ use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::{
-    DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeGeometry, PreviewDecodeKey,
-    PreviewDecodePayloadRequirement, PreviewDecodeSource, PreviewSourceColorContract,
-    ProxyArtifactManifest, ProxyColorContract, ProxyConfig, ProxyGenerator, ProxyStatus,
-    VideoColorDiagnostic, VideoStreamInfo,
+    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeGeometry,
+    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeSource,
+    PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
+    ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
 use mondrian_timeline::sequence::{
-    InputColorResolution, MediaInputColorContext, ResolvedInputColor,
+    InputColorResolution, InputColorResolutionSource, MediaInputColorContext, ResolvedInputColor,
 };
 
 use super::preview_access_mode::MediaPreviewKey;
@@ -122,7 +122,9 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
     SourceProbeUnavailable,
     #[error("admitted media probe has no video stream")]
     SourceVideoStreamUnavailable,
-    #[error("admitted video stream has no proven, internally consistent sampling contract")]
+    #[error(
+        "admitted video stream has no proven, internally consistent sampling contract; open Interpret Asset and set source color space/range before Preview"
+    )]
     SourceSamplingUnavailable,
     #[error("source file revision changed after the admitted media probe")]
     SourceRevisionChanged,
@@ -199,13 +201,19 @@ pub(crate) fn resolve_preview_media_source(
             });
         }
     };
-    let source_color = PreviewSourceColorContract::new(
+    let mut source_color = PreviewSourceColorContract::new(
         input_color_space,
         DecodedVideoRangeContract::from_interpretation(
             request.asset.interpretation.range,
             primary_video.color_range,
         ),
     );
+    if input_color_resolution.source == InputColorResolutionSource::MissingPolicyAssumeRec709 {
+        // "Assume Rec.709" must authorize the complete YUV-to-RGB
+        // interpretation. Binding BT.709 here makes the fallback explicit in
+        // the decode/cache identity instead of relying on swscale defaults.
+        source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
+    }
     let source_has_alpha = proven_sampling.has_alpha;
     let resolved_path = match resolve_preview_media_decode_path(
         request.prefer_proxy,

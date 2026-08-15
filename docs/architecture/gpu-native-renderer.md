@@ -954,7 +954,16 @@ reconfigures the surface and rebuilds the frame renderer for the new format. A
 selected surface color-space change follows the same rebuild path. The preview
 service may keep a CPU `RasterImage` as the correctness/fallback path, but it
 does not own wgpu objects and must not create short-lived GPU output runtimes
-inside CPU media workers.
+inside CPU media workers. After a concrete Window recording/device-generation
+failure, the App switches the current semantic generation to a dedicated
+one-worker, one-queued-request CPU fallback Adapter. It requests
+CPU-addressable media, runs canonical basic effects/composition plus Program
+Output and monitor color transforms off the Window thread, publishes a
+validated sRGB raster through the existing Frame Store and presentation
+ticket, and drops late generation/epoch results. This is real execution rather
+than a diagnostic-only `CpuFallbackRequested` state. Creation of a replacement
+healthy GPU generation explicitly exits fallback and invalidates the old
+execution generation before GPU admission resumes.
 Preview resolution is sampling density, not timeline geometry. Source and
 sequence transforms are evaluated in their full authoring extents, then
 `project_affine_to_sampled_extents` projects that affine into the decoded and

@@ -4,7 +4,8 @@ use super::{
     convert_decoded_to_rgba, decode_preview_frame_cancellable,
     decoded_native_surface_format_from_software_format, decoded_surface_format_from_pixel,
     decoded_temporal_candidate_within_selection_distance, decoded_video_sampling_from_frame,
-    duration_us, exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
+    default_decoder_threads_for_access_mode, duration_us,
+    exact_seek_non_reference_discard_until_pts, forward_decode_work_units,
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
     resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
@@ -618,6 +619,29 @@ fn hardware_decode_plan_does_not_report_native_before_frame_is_observed() {
 }
 
 #[test]
+fn hardware_decode_plan_rejects_h264_high422_before_device_setup() {
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::PreferGpuResident,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Auto,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+
+    plan.apply_stream_profile(ffmpeg::codec::Profile::H264(
+        ffmpeg::codec::profile::H264::High422,
+    ));
+
+    assert_eq!(
+        plan.decision,
+        PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported
+    );
+    assert!(!plan.ffmpeg_codec_config.ffmpeg_codec_config_available);
+    assert!(!plan.should_configure_hardware_decoder(PreviewDecodeAccessMode::PlaybackCursor));
+    assert!(plan.probe.reason.contains("High422"));
+}
+
+#[test]
 fn hardware_decode_plan_can_prefer_cpu_transfer_without_requiring_native_residency() {
     let plan = PreviewHardwareDecodePlan::resolve(
         PreviewHardwareDecodeRequest::PreferHardwareDecode,
@@ -834,6 +858,24 @@ fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
 }
 
 #[test]
+fn software_decode_threading_defaults_prefer_slice_for_uhd_playback() {
+    let playback = super::PreviewDecodeAccessMode::PlaybackCursor;
+    let scrub = super::PreviewDecodeAccessMode::ScrubCursor;
+    assert_eq!(
+        super::default_threading_kind_for_software_decode(playback, 3_840 * 2_160),
+        super::PreviewDecodeThreadingKind::Slice
+    );
+    assert_eq!(
+        super::default_threading_kind_for_software_decode(playback, 1_920 * 1_080),
+        super::PreviewDecodeThreadingKind::Frame
+    );
+    assert_eq!(
+        super::default_threading_kind_for_software_decode(scrub, 3_840 * 2_160),
+        super::PreviewDecodeThreadingKind::Frame
+    );
+}
+
+#[test]
 fn preview_decode_cpu_budget_coordinates_workers_and_decoder_threads() {
     let small = super::PreviewDecodeCpuBudget::for_available_parallelism(4);
     assert_eq!(small.preview_worker_count, 1);
@@ -843,12 +885,34 @@ fn preview_decode_cpu_budget_coordinates_workers_and_decoder_threads() {
     let common = super::PreviewDecodeCpuBudget::for_available_parallelism(8);
     assert_eq!(common.preview_worker_count, 2);
     assert_eq!(common.decoder_threads_per_worker, 3);
+    assert_eq!(common.max_decoder_threads_per_worker, 6);
     assert_eq!(common.reserved_interactive_threads, 2);
+
+    let large = super::PreviewDecodeCpuBudget::for_available_parallelism(24);
+    assert_eq!(large.preview_worker_count, 3);
+    assert_eq!(large.decoder_threads_per_worker, 7);
+    assert_eq!(large.max_decoder_threads_per_worker, 12);
+    assert_eq!(large.reserved_interactive_threads, 2);
 
     let workstation = super::PreviewDecodeCpuBudget::for_available_parallelism(32);
     assert_eq!(workstation.preview_worker_count, 3);
-    assert_eq!(workstation.decoder_threads_per_worker, 6);
-    assert_eq!(workstation.max_decoder_threads_per_worker, 6);
+    assert_eq!(workstation.decoder_threads_per_worker, 10);
+    assert_eq!(workstation.max_decoder_threads_per_worker, 12);
+
+    assert_eq!(
+        default_decoder_threads_for_access_mode(
+            workstation,
+            PreviewDecodeAccessMode::PlaybackCursor,
+        ),
+        12
+    );
+    assert_eq!(
+        default_decoder_threads_for_access_mode(
+            workstation,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        ),
+        10
+    );
 }
 
 #[test]
@@ -1444,6 +1508,15 @@ fn cpu_rgba_contract_rejects_yuv_without_explicit_matrix_evidence() {
     )
     .expect_err("RGB color identity must not synthesize a missing YUV matrix");
     assert!(error.to_string().contains("YUV matrix is unspecified"));
+
+    let policy_contract = resolve_cpu_rgba_contract(
+        &frame,
+        PreviewSourceColorContract::automatic(ColorSpace::Rec709, DecodedVideoRange::Limited)
+            .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
+        Path::new("policy-untagged-rec709.mov"),
+    )
+    .expect("an explicit source-policy fallback must authorize conversion");
+    assert_eq!(policy_contract.applied_matrix, DecodedVideoMatrix::Bt709);
 
     let mut tagged_yuv = frame;
     tagged_yuv.set_color_space(ffmpeg::util::color::Space::BT709);
@@ -2518,6 +2591,45 @@ fn playback_session_drains_reordered_frames_between_sequential_requests() {
 }
 
 #[test]
+fn playback_session_reuses_decoder_across_adaptive_output_geometry() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-adaptive-output.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+
+    for (request_index, (frame_index, extent)) in
+        [(5, 64), (6, 32), (7, 64)].into_iter().enumerate()
+    {
+        let request = covering_decode_request(
+            path.as_path(),
+            TimelineTime::new(frame_index, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
+        )
+        .with_max_size(Some(extent), Some(extent))
+        .with_fingerprint(fingerprint);
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("adaptive frame {frame_index} must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("software playback fixture must return an RGBA frame");
+        };
+        assert_eq!((frame.width, frame.height), (extent, extent));
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            if request_index == 0 {
+                PreviewDecodeSessionDisposition::Opened
+            } else {
+                PreviewDecodeSessionDisposition::Reused
+            },
+            "output-only scale changes must not reopen the source decoder"
+        );
+    }
+}
+
+#[test]
 fn exact_random_access_decodes_stream_start_with_negative_dts_preroll() {
     const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
     let root = tempfile::tempdir().expect("tempdir");
@@ -3176,7 +3288,7 @@ fn preview_decode_fixture_sequence_perf_smoke() {
             TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
                 .expect("quantized diagnostic source time"),
             PreviewDecodeAccessMode::PlaybackCursor,
-            test_source_color(),
+            test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
         )
         .with_max_size(max_width, max_height)
         .with_fingerprint(fingerprint);

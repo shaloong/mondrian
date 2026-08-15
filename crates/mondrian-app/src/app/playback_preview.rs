@@ -55,18 +55,33 @@ pub(crate) struct PreviewVideoPreroll {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PreviewTransportIntent {
     playing: bool,
+    priming: bool,
     epoch: PlaybackEpoch,
 }
 
 impl PreviewTransportIntent {
     /// Bind one Playback Epoch to its decoder-family selection.
-    pub(crate) const fn new(playing: bool, epoch: PlaybackEpoch) -> Self {
-        Self { playing, epoch }
+    pub(crate) const fn new(playing: bool, priming: bool, epoch: PlaybackEpoch) -> Self {
+        Self { playing, priming, epoch }
     }
 
     /// Whether the Playback decoder family is authoritative.
     pub(crate) const fn playing(self) -> bool {
         self.playing
+    }
+
+    /// Whether the Playback Engine still owns bounded startup preroll.
+    pub(crate) const fn priming(self) -> bool {
+        self.priming
+    }
+
+    /// Whether ordinary playback stall expiry may terminate the current demand.
+    ///
+    /// Priming has its own authoritative deadline. Applying the shorter
+    /// playing-frame stall window there can prevent a software-decoded first
+    /// frame from ever establishing the Playback Session.
+    pub(crate) const fn allows_playback_stall_expiration(self) -> bool {
+        self.playing() && !self.priming()
     }
 
     /// Playback Session identity used to detect discontinuities.
@@ -173,6 +188,17 @@ mod tests {
     use mondrian_playback::{FrameDeliveryCandidate, FrameDeliveryKind};
 
     use super::*;
+
+    #[test]
+    fn startup_priming_owns_its_deadline_before_playback_stall_expiration() {
+        let epoch = AppState::new().playback_epoch();
+
+        assert!(!PreviewTransportIntent::new(true, true, epoch).allows_playback_stall_expiration());
+        assert!(PreviewTransportIntent::new(true, false, epoch).allows_playback_stall_expiration());
+        assert!(
+            !PreviewTransportIntent::new(false, false, epoch).allows_playback_stall_expiration()
+        );
+    }
 
     struct FakePreviewAdapter {
         poll: RefCell<Option<PreviewWorkPoll>>,

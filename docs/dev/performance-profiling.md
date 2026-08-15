@@ -375,6 +375,12 @@ closer to production playback expectations than the broad wall-clock timeout:
 intended for 4K HEVC/HDR/Long-GOP fixture runs: a failure should drive
 hardware decode, proxy, scheduler, or renderer-residency work, not timeout
 widening. Override them only when documenting a different fixture class.
+The current-ready ratio uses the maximum of accepted Engine `Ready` deliveries
+and unique exact-current Viewer GPU publications. Both evidence streams
+de-duplicate by playback epoch and frame, and GPU publication coverage is also
+checked separately. This avoids charging a clock-boundary supersession as a
+miss after the exact frame was already visible without allowing cached stale or
+merely prepared successor work to count as presentation.
 
 For compressed-wall-clock isolation of long-lived native decoder state, use
 the ignored `preview_media_external_accelerated_native_surface_endurance_probe`

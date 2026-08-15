@@ -18,6 +18,8 @@ thread_local! {
     };
 }
 
+const PREVIEW_HARDWARE_FAILURE_QUARANTINE: Duration = Duration::from_secs(30);
+
 /// Reusable resources explicitly owned by one Preview decode worker family.
 ///
 /// Clone this value only between workers in the same scheduling family.
@@ -78,6 +80,24 @@ pub struct PreviewDecodeSessionContext {
     execution_observer: PreviewDecodeExecutionObserver,
     demux_worker: Option<PreviewDemuxWorkerConfig>,
     resources: PreviewDecodeWorkerResources,
+    hardware_failure_quarantine: HashMap<PreviewHardwareFailureQuarantineKey, Instant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PreviewHardwareFailureQuarantineKey {
+    path: PathBuf,
+    fingerprint: Option<MediaFileFingerprint>,
+    video_stream_index: Option<u32>,
+}
+
+impl PreviewHardwareFailureQuarantineKey {
+    fn from_request(request: &PreviewDecodeRequest<'_>) -> Self {
+        Self {
+            path: request.path.to_path_buf(),
+            fingerprint: request.fingerprint,
+            video_stream_index: request.video_stream_index,
+        }
+    }
 }
 
 /// Thread-safe construction authority for a Preview decode context.
@@ -203,6 +223,7 @@ impl PreviewDecodeSessionContext {
             execution_observer,
             demux_worker,
             resources,
+            hardware_failure_quarantine: HashMap::new(),
         }
     }
 
@@ -243,19 +264,152 @@ impl PreviewDecodeSessionContext {
     /// Decode one request using sessions explicitly owned by this context.
     pub fn decode_cancellable(
         &mut self,
-        request: PreviewDecodeRequest<'_>,
+        mut request: PreviewDecodeRequest<'_>,
         should_cancel: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Result<PreviewDecodeOutcome> {
         let _execution = self.execution_observer.begin_request();
         let should_cancel: PreviewDecodeCancelProbe = Arc::new(should_cancel);
-        decode_preview_frame_outcome_in_sessions(
+        let requested_hardware = request.hardware_decode_request;
+        let quarantine_key = PreviewHardwareFailureQuarantineKey::from_request(&request);
+        let now = Instant::now();
+        let quarantined = self
+            .hardware_failure_quarantine
+            .get(&quarantine_key)
+            .is_some_and(|retry_after| *retry_after > now);
+        if !quarantined {
+            self.hardware_failure_quarantine.remove(&quarantine_key);
+        }
+        if hardware_request_allows_runtime_software_recovery(requested_hardware) && quarantined {
+            request.hardware_decode_request = PreviewHardwareDecodeRequest::Auto;
+        }
+        let first = decode_preview_frame_outcome_in_sessions(
             &mut self.sessions,
             &self.execution_observer,
             request,
             &self.resources,
             self.demux_worker.as_ref(),
-            should_cancel,
-        )
+            Arc::clone(&should_cancel),
+        );
+        if let Err(error) = &first {
+            preview_trace(format!(
+                "[preview] decode request failed before runtime recovery: {error}"
+            ));
+        }
+        match first {
+            Ok(outcome) if quarantined => {
+                Ok(mark_runtime_hardware_fallback(outcome, requested_hardware))
+            }
+            Ok(outcome) => Ok(outcome),
+            Err(hardware_error)
+                if hardware_request_allows_runtime_software_recovery(requested_hardware)
+                    && request.hardware_decode_request != PreviewHardwareDecodeRequest::Auto
+                    && runtime_decode_error_allows_hardware_recovery(&hardware_error)
+                    && !should_cancel() =>
+            {
+                self.sessions.clear();
+                self.resources.hardware_device_contexts.release_idle();
+                let retry_after =
+                    now.checked_add(PREVIEW_HARDWARE_FAILURE_QUARANTINE).unwrap_or(now);
+                self.hardware_failure_quarantine.insert(quarantine_key, retry_after);
+                let mut software_request = request;
+                software_request.hardware_decode_request = PreviewHardwareDecodeRequest::Auto;
+                match decode_preview_frame_outcome_in_sessions(
+                    &mut self.sessions,
+                    &self.execution_observer,
+                    software_request,
+                    &self.resources,
+                    self.demux_worker.as_ref(),
+                    should_cancel,
+                ) {
+                    Ok(outcome) => Ok(mark_runtime_hardware_fallback(
+                        outcome,
+                        requested_hardware,
+                    )),
+                    Err(software_error) => Err(MondrianError::DecodeFailed {
+                        asset_id: request.path.display().to_string(),
+                        reason: format!(
+                            "hardware-preferred decode failed ({hardware_error}); bounded software recovery also failed ({software_error})"
+                        ),
+                    }),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn hardware_request_allows_runtime_software_recovery(
+    request: PreviewHardwareDecodeRequest,
+) -> bool {
+    matches!(
+        request,
+        PreviewHardwareDecodeRequest::PreferHardwareDecode
+            | PreviewHardwareDecodeRequest::PreferGpuResident
+    )
+}
+
+fn runtime_decode_error_allows_hardware_recovery(error: &MondrianError) -> bool {
+    matches!(error, MondrianError::DecodeFailed { .. })
+}
+
+fn mark_runtime_hardware_fallback(
+    mut outcome: PreviewDecodeOutcome,
+    requested_hardware: PreviewHardwareDecodeRequest,
+) -> PreviewDecodeOutcome {
+    let diagnostics = match &mut outcome {
+        PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::Canceled(_) => None,
+    };
+    if let Some(diagnostics) = diagnostics {
+        diagnostics.hardware_decode_request = requested_hardware;
+        diagnostics.native_decode_fallback =
+            Some(PreviewNativeDecodeFallback::RuntimeHardwareFailure);
+    }
+    outcome
+}
+
+#[cfg(test)]
+mod runtime_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_software_recovery_never_weakens_required_gpu_residency() {
+        assert!(hardware_request_allows_runtime_software_recovery(
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        ));
+        assert!(hardware_request_allows_runtime_software_recovery(
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        ));
+        assert!(!hardware_request_allows_runtime_software_recovery(
+            PreviewHardwareDecodeRequest::RequireGpuResident
+        ));
+        assert!(!hardware_request_allows_runtime_software_recovery(
+            PreviewHardwareDecodeRequest::Auto
+        ));
+    }
+
+    #[test]
+    fn runtime_software_recovery_only_retries_decode_failures() {
+        assert!(runtime_decode_error_allows_hardware_recovery(
+            &MondrianError::DecodeFailed {
+                asset_id: "asset".to_owned(),
+                reason: "receive_frame failed".to_owned(),
+            }
+        ));
+        assert!(!runtime_decode_error_allows_hardware_recovery(
+            &MondrianError::DecodeTimeout {
+                asset_id: "asset".to_owned(),
+                access_mode: "playback".to_owned(),
+                budget_ms: 1,
+                frame: 0,
+                secs: 0.0,
+            }
+        ));
+        assert!(!runtime_decode_error_allows_hardware_recovery(
+            &MondrianError::Cancelled
+        ));
     }
 }
 
@@ -1029,7 +1183,22 @@ impl PreviewDecodeSession {
             codec_id,
             hardware_decode_device_selector,
         );
-        let requested_threading = preview_decode_threading_config_for_codec(codec_id);
+        let stream_profile = unsafe {
+            // `parameters` owns a valid AVCodecParameters allocation for this
+            // Session open. FFmpeg stores the demux-probed profile directly in
+            // this field before decoder construction.
+            ffmpeg::codec::Profile::from((codec_id, (*parameters.as_ptr()).profile))
+        };
+        hardware_decode_plan.apply_stream_profile(stream_profile);
+        let decode_pixels = unsafe {
+            // `parameters` owns a valid AVCodecParameters allocation for this
+            // Session open; FFmpeg fills coded width/height during demux probe.
+            let raw = parameters.as_ptr();
+            u64::from((*raw).width.max(0) as u32)
+                .saturating_mul(u64::from((*raw).height.max(0) as u32))
+        };
+        let requested_threading =
+            preview_decode_threading_config_for_codec(codec_id, access_mode, decode_pixels);
         let ffmpeg_threading = ffmpeg::codec::threading::Config {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
@@ -1211,7 +1380,7 @@ impl PreviewDecodeSession {
         })
     }
 
-    fn matches(
+    fn matches_decoder_contract(
         &self,
         request: &PreviewDecodeSessionOpenRequest<'_>,
         demux_worker_available: bool,
@@ -1225,12 +1394,37 @@ impl PreviewDecodeSession {
             && request.fingerprint.authorizes_reuse()
             && self.fingerprint == request.fingerprint
             && self.requested_video_stream_index == request.video_stream_index
-            && self.max_width == request.max_width
-            && self.max_height == request.max_height
             && self.backend == request.backend
             && self.hardware_decode_request == request.hardware_decode_request
             && self.hardware_decode_device_selector == request.hardware_decode_device_selector
             && self.source_color == request.source_color
+    }
+
+    /// Rebind output materialization without retiring the source decoder.
+    ///
+    /// Adaptive Preview scale changes only the output extent. The demuxer,
+    /// codec, decoded candidate window, seek index, and hardware device remain
+    /// valid for the same physical stream and decode contract. CPU payloads in
+    /// the Playback ring and the swscale context do carry the old extent, so
+    /// those output-only resources must be invalidated atomically.
+    fn rebind_output_geometry(&mut self, max_width: Option<u32>, max_height: Option<u32>) {
+        if self.max_width == max_width && self.max_height == max_height {
+            return;
+        }
+        let (target_width, target_height) = fit_target_size(
+            self.decoder.width(),
+            self.decoder.height(),
+            max_width,
+            max_height,
+        );
+        self.max_width = max_width;
+        self.max_height = max_height;
+        self.target_width = target_width;
+        self.target_height = target_height;
+        self.scaler = None;
+        self.scaler_source_format = None;
+        self.scaler_color_contract = None;
+        self.playback_ring.clear();
     }
 
     fn native_output_released(&self) -> bool {
@@ -2177,7 +2371,7 @@ fn decode_preview_frame_outcome_in_sessions(
         let had_session = slot.is_some();
         let current_match = slot
             .as_ref()
-            .map(|session| session.matches(&open_request, demux_worker.is_some()))
+            .map(|session| session.matches_decoder_contract(&open_request, demux_worker.is_some()))
             .unwrap_or(false);
         let session_disposition = if current_match {
             PreviewDecodeSessionDisposition::Reused
@@ -2230,7 +2424,13 @@ fn decode_preview_frame_outcome_in_sessions(
             session_open_us = duration_us(open_started_at.elapsed());
         }
 
-        let session = slot.as_mut().expect("preview decode session must exist");
+        let Some(session) = slot.as_mut() else {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "preview decoder Session was unavailable after successful setup".to_owned(),
+            });
+        };
+        session.rebind_output_geometry(max_width, max_height);
         let interrupt_state = Arc::clone(&session.interrupt_state);
         let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
         let mut external_process_us = 0;
