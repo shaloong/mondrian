@@ -431,6 +431,18 @@ pub(super) struct PreviewHardwareDecodeContextState {
     pub(super) preferred_hw_pixel_format: ffmpeg::ffi::AVPixelFormat,
 }
 
+/// FFmpeg `AVCodecContext::get_format` callback that selects the preferred
+/// hardware pixel format from the decoder-offered list.
+///
+/// # Safety
+/// - `context` must be the live codec context whose `opaque` field was set to
+///   a `Box<PreviewHardwareDecodeContextState>` pointer that outlives every
+///   decoder callback (the state is dropped after the codec context).
+/// - `pixel_formats` is an FFmpeg-provided list terminated by
+///   `AV_PIX_FMT_NONE`; the loop only dereferences entries before the
+///   terminator, as FFmpeg's `get_format` contract guarantees.
+/// - A null context, null list, or null opaque returns `AV_PIX_FMT_NONE` so
+///   FFmpeg falls back to software rather than dereferencing invalid state.
 pub(super) unsafe extern "C" fn preview_hardware_decode_get_format(
     context: *mut ffmpeg::ffi::AVCodecContext,
     pixel_formats: *const ffmpeg::ffi::AVPixelFormat,

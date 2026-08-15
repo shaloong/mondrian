@@ -915,6 +915,11 @@ fn configure_preview_hardware_decode_context(
 
     let mut state =
         Box::new(PreviewHardwareDecodeContextState { preferred_hw_pixel_format: hw_pixel_format });
+    // SAFETY: `context` is the live decoder context under construction. The
+    // `opaque` pointer borrows the boxed `state`; the caller stores `state` in
+    // a field declared after the decoder so the box outlives every FFmpeg
+    // `get_format` callback. `extra_hw_frames` and `get_format` are plain
+    // field writes through the valid context pointer.
     unsafe {
         (*context.as_mut_ptr()).extra_hw_frames = preview_hardware_extra_frames(plan.request);
         (*context.as_mut_ptr()).opaque = (&mut *state) as *mut _ as *mut c_void;
