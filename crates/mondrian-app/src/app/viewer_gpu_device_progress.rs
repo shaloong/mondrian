@@ -346,6 +346,36 @@ impl<T> DerefMut for ViewerGpuDeviceGenerationMember<T> {
     }
 }
 
+impl ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner> {
+    /// Progress terminal for the live owner.
+    ///
+    /// An empty replacement shell has no authoritative device generation yet,
+    /// so it reports no terminal rather than dereferencing a missing owner.
+    pub(crate) fn generation_terminal(&self) -> Option<ViewerGpuDeviceGenerationTerminal> {
+        self.value.as_ref().and_then(|owner| owner.generation_terminal())
+    }
+
+    /// Consume one progress observation from the live owner.
+    ///
+    /// An empty replacement shell has no progress domain and yields none.
+    pub(crate) fn try_observe(&self) -> Option<ViewerGpuDeviceProgressObservation> {
+        self.value.as_ref().and_then(|owner| owner.try_observe())
+    }
+
+    /// Reserve progress authority from the live owner.
+    ///
+    /// An empty replacement shell behaves like a shut-down owner so callers
+    /// take the explicit CPU-fallback path instead of dereferencing nothing.
+    pub(crate) fn reserve_submission(
+        &self,
+    ) -> Result<ViewerGpuDeviceProgressPermit<'_>, ViewerGpuDeviceProgressReserveError> {
+        match self.value.as_ref() {
+            Some(owner) => owner.reserve_submission(),
+            None => Err(ViewerGpuDeviceProgressReserveError::OwnerShutdown),
+        }
+    }
+}
+
 struct ViewerGpuDeviceGenerationState {
     terminal: Mutex<Option<ViewerGpuDeviceGenerationTerminal>>,
 }
@@ -1360,6 +1390,17 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn empty_device_generation_member_reports_no_terminal_and_no_observations() {
+        let member = ViewerGpuDeviceGenerationMember::<ViewerGpuDeviceProgressOwner>::empty();
+        assert!(member.generation_terminal().is_none());
+        assert!(member.try_observe().is_none());
+        assert!(matches!(
+            member.reserve_submission(),
+            Err(ViewerGpuDeviceProgressReserveError::OwnerShutdown)
+        ));
+    }
 
     type WaitCallLog = Arc<Mutex<Vec<Option<u64>>>>;
 
