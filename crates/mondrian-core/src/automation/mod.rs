@@ -7,7 +7,7 @@ use crate::{
     authoring::AuthoringMap,
     error::{MondrianError, Result},
     types::{AnimationTrackId, AssetId, Color, KeyframeId},
-    AuthoringList, ParameterId, TimelineTime, TimelineTimeRange,
+    AuthoringList, ParameterId, ParameterIdError, TimelineTime, TimelineTimeRange,
 };
 use glam::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
@@ -921,32 +921,50 @@ pub struct PropertyDescriptor {
 }
 
 impl PropertyDescriptor {
+    /// Define a property from an address alias, returning an error for
+    /// untrusted (plugin/authoring) input instead of panicking the host.
+    ///
+    /// The convenience constructor derives a namespaced identity for local
+    /// prototypes and tests. Product definitions must immediately call
+    /// [`Self::with_parameter_id`] so address changes cannot rename persisted
+    /// parameter identity. A plugin-supplied path must flow through this
+    /// fallible entry point so malformed input surfaces as a typed error.
+    pub fn try_new(
+        path: impl Into<String>,
+        display_name: impl Into<String>,
+        default_value: PropertyValue,
+    ) -> Result<Self, ParameterIdError> {
+        let path = path.into();
+        let derived_id = format!("mondrian.property.{path}");
+        let parameter_id = ParameterId::new(derived_id)?;
+        let mut schema = ParameterSchema::v1(parameter_id, default_value);
+        if matches!(schema.value_type, PropertyValueType::Resource) {
+            schema.cache_impact = ParameterCacheImpact::Resource;
+        }
+        Ok(Self {
+            schema,
+            path,
+            display_name: display_name.into(),
+            ui_metadata: AnimatablePropertyUiMetadata::default(),
+        })
+    }
+
     /// Define a property from an address alias.
     ///
     /// This convenience constructor derives a namespaced identity for local
     /// prototypes and tests. Product definitions must immediately call
     /// [`Self::with_parameter_id`] so address changes cannot rename persisted
-    /// parameter identity.
+    /// parameter identity. For untrusted input (plugin authoring, external
+    /// files), use [`Self::try_new`] and propagate the typed error instead of
+    /// panicking the host.
     pub fn new(
         path: impl Into<String>,
         display_name: impl Into<String>,
         default_value: PropertyValue,
     ) -> Self {
-        let path = path.into();
-        let derived_id = format!("mondrian.property.{path}");
-        let parameter_id = ParameterId::new(derived_id.clone()).unwrap_or_else(|error| {
-            panic!("property address `{path}` cannot derive `{derived_id}`: {error}")
-        });
-        let mut schema = ParameterSchema::v1(parameter_id, default_value);
-        if matches!(schema.value_type, PropertyValueType::Resource) {
-            schema.cache_impact = ParameterCacheImpact::Resource;
-        }
-        Self {
-            schema,
-            path,
-            display_name: display_name.into(),
-            ui_metadata: AnimatablePropertyUiMetadata::default(),
-        }
+        Self::try_new(path, display_name, default_value).unwrap_or_else(|error| {
+            panic!("property address cannot derive a parameter identity: {error}")
+        })
     }
 
     /// Bind the product definition to an address-independent stable identity.
@@ -3201,6 +3219,28 @@ mod tests {
 
     fn tt(frame: i64) -> TimelineTime {
         TimelineTime::new(frame, 25).expect("test timeline time")
+    }
+
+    #[test]
+    fn property_descriptor_try_new_rejects_invalid_plugin_paths_without_panicking() {
+        let invalid_characters = PropertyDescriptor::try_new(
+            "plugin radius!",
+            "Radius",
+            PropertyValue::Float(4.0),
+        );
+        assert!(invalid_characters.is_err());
+        let too_long = PropertyDescriptor::try_new(
+            "x".repeat(512),
+            "Radius",
+            PropertyValue::Float(4.0),
+        );
+        assert!(too_long.is_err());
+        let valid = PropertyDescriptor::try_new(
+            "plugin.sdk.soft_glow.radius",
+            "Radius",
+            PropertyValue::Float(4.0),
+        );
+        assert!(valid.is_ok());
     }
 
     fn ht(value: f64) -> TimelineTime {
