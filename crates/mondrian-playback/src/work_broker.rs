@@ -511,7 +511,63 @@ where
     pub fn begin_generation(&self) -> u64 {
         let mut state = lock_state(&self.shared.state);
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        for execution in state.in_flight.values_mut() {
+            execution.presentation_binding_expired = false;
+        }
         state.latest_generation = state.latest_generation.saturating_add(1);
+        let queued_before = state.queue.len();
+        prune_obsolete_locked(&mut state);
+        let pruned = queued_before.saturating_sub(state.queue.len());
+        state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
+        refresh_in_flight_invalidations_locked(&mut state, now);
+        self.shared.changed.notify_all();
+        state.latest_generation
+    }
+
+    /// Begin a new generation while preserving bounded Playback decode locality.
+    ///
+    /// Running leases lose presentation authority before old bindings are
+    /// pruned, so their results can only resolve as stale/cache-only. Queued
+    /// Playback work that explicitly preserves decoder locality is rebound to
+    /// the new generation: its semantic media key and Playback Epoch remain
+    /// valid, and discarding the bounded forward queue would force the decoder
+    /// to reopen or seek after a Viewer-only rotation.
+    ///
+    /// This seam is reserved for Viewer-only changes whose source, Playback
+    /// Epoch, and authored semantics remain identical. Seek, source authoring,
+    /// Project authoring, and lifecycle changes must use
+    /// [`Self::begin_generation`].
+    pub fn begin_generation_preserving_playback_locality(&self) -> u64 {
+        let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        for execution in state.in_flight.values_mut() {
+            if execution.work_class == FrameWorkClass::Playback
+                && execution.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality
+                && execution.completed_at.is_none()
+                && execution.preempted_at.is_none()
+                && execution.invalidated_at.is_none()
+            {
+                execution.presentation_binding_expired = true;
+            }
+        }
+        state.latest_generation = state.latest_generation.saturating_add(1);
+        let latest_generation = state.latest_generation;
+        let mut rebound_bindings = Vec::new();
+        for queued in &mut state.queue {
+            if queued.request.work_class == FrameWorkClass::Playback
+                && queued.request.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality
+            {
+                queued.request.generation = latest_generation;
+                rebound_bindings.push((queued.request.key.clone(), binding_for(&queued.request)));
+            }
+        }
+        for (key, binding) in rebound_bindings {
+            if let Some(pending) = state.pending.get_mut(&key) {
+                pending.binding = binding;
+            }
+        }
         let queued_before = state.queue.len();
         prune_obsolete_locked(&mut state);
         let pruned = queued_before.saturating_sub(state.queue.len());
@@ -1165,6 +1221,9 @@ where
         let queued = state.queue.len();
         state.pending.clear();
         state.queue.clear();
+        for execution in state.in_flight.values_mut() {
+            execution.presentation_binding_expired = false;
+        }
         state.active_playback_demand = None;
         state.latest_generation = state.latest_generation.saturating_add(1);
         refresh_in_flight_invalidations_locked(&mut state, now);
@@ -1247,8 +1306,13 @@ where
         removed
     }
 
-    /// Expire latest realtime current bindings older than `max_age`.
-    pub fn expire_realtime_current_older_than(
+    /// Expire latest Playback-current bindings older than `max_age`.
+    ///
+    /// Interactive scrub work is deliberately excluded. It has latest-wins
+    /// cancellation through generations, but no presentation deadline and may
+    /// legitimately spend longer than a playback stall window opening a GOP
+    /// or building source-session evidence.
+    pub fn expire_playback_current_older_than(
         &self,
         max_age: Duration,
     ) -> Vec<ExpiredFrameWork<K, D>> {
@@ -1260,7 +1324,7 @@ where
             .iter()
             .filter(|(_, pending)| {
                 pending.binding.priority == FrameWorkPriority::Current
-                    && pending.binding.work_class != FrameWorkClass::Still
+                    && pending.binding.work_class == FrameWorkClass::Playback
                     && pending.binding.generation >= latest
                     && elapsed_since(now, pending.requested_at) >= max_age
             })
@@ -2036,6 +2100,7 @@ fn oldest_other_current_request<K, D>(
     pending: &HashMap<K, PendingBinding<D>>,
     execution: &InFlightWork<K>,
     realtime_only: bool,
+    preserve_playback_prefetch: bool,
 ) -> Option<MonotonicTimestamp>
 where
     K: Eq,
@@ -2046,6 +2111,8 @@ where
             (*key != &execution.key || pending.binding.resource_scope != execution.resource_scope)
                 && pending.binding.priority == FrameWorkPriority::Current
                 && (!realtime_only || pending.binding.work_class != FrameWorkClass::Still)
+                && !(preserve_playback_prefetch
+                    && pending.binding.work_class == FrameWorkClass::Playback)
                 && pending.binding.generation >= latest_generation
         })
         .map(|(_, pending)| pending.requested_at)
@@ -2274,7 +2341,13 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
     let BrokerState { latest_generation, pending, in_flight, .. } = state;
     for execution in in_flight.values_mut() {
         if execution.presentation_binding_expired {
-            if execution.generation < *latest_generation && execution.invalidated_at.is_none() {
+            let retained_playback_locality = execution.work_class == FrameWorkClass::Playback
+                && execution.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality;
+            if execution.generation < *latest_generation
+                && !retained_playback_locality
+                && execution.invalidated_at.is_none()
+            {
                 execution.invalidated_at = Some(now);
             }
         } else if let Some(current) =
@@ -2290,9 +2363,15 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
             execution.invalidated_at = Some(now);
         }
         let preempted_at = if execution.priority == FrameWorkPriority::Prefetch {
-            oldest_other_current_request(*latest_generation, pending, execution, false)
+            oldest_other_current_request(
+                *latest_generation,
+                pending,
+                execution,
+                false,
+                execution.work_class == FrameWorkClass::Playback,
+            )
         } else if execution.work_class == FrameWorkClass::Still {
-            oldest_other_current_request(*latest_generation, pending, execution, true)
+            oldest_other_current_request(*latest_generation, pending, execution, true, false)
         } else {
             None
         };
@@ -2547,11 +2626,11 @@ where
     }
     if execution.presentation_binding_expired {
         return FrameRequestResolution {
-            completion: if execution.generation >= state.latest_generation {
-                FrameRequestCompletion::CacheOnly
-            } else {
-                FrameRequestCompletion::Stale
-            },
+            // Only explicit locality-preserving seams set this flag. The
+            // presentation binding is permanently detached, but a reusable
+            // payload still has exact key/resource identity and may populate
+            // its domain cache across a Viewer-only generation rotation.
+            completion: FrameRequestCompletion::CacheOnly,
             binding: None,
             deadline,
         };
