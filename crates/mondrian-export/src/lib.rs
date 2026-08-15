@@ -4,7 +4,6 @@
 
 pub mod capture;
 pub mod delivery;
-pub mod encoder;
 pub mod preset;
 pub mod queue;
 pub mod validator;
@@ -19,7 +18,6 @@ pub use delivery::{
     resolve_export_delivery, ExportDeliveryError, ExportDeliveryIssueCode,
     ResolvedExportDeliveryContract,
 };
-pub use encoder::EncoderBackend;
 pub use preset::{
     BuiltinExportPreset, ExportConfig, ExportMediaDependency, ExportOutputPolicy, ExportPreset,
     ResolvedTimelineExportRange, TimelineExportRange, TimelineExportRangeError,

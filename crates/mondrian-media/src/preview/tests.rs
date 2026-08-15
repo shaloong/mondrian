@@ -456,23 +456,8 @@ fn synthetic_d3d12_frame(
 }
 
 #[test]
-fn preview_decode_backend_codes_are_explicit_and_cpu_resident() {
-    assert_eq!(PreviewDecodeBackend::from_u8(0), PreviewDecodeBackend::Auto);
-    assert_eq!(
-        PreviewDecodeBackend::from_u8(1),
-        PreviewDecodeBackend::Software
-    );
-    assert_eq!(
-        PreviewDecodeBackend::from_u8(2),
-        PreviewDecodeBackend::ExternalFfmpegCpuRgba
-    );
-    assert_eq!(PreviewDecodeBackend::Auto.as_u8(), 0);
-    assert_eq!(PreviewDecodeBackend::Software.as_u8(), 1);
-    assert_eq!(PreviewDecodeBackend::ExternalFfmpegCpuRgba.as_u8(), 2);
-    assert_eq!(
-        PreviewDecodeBackend::from_u8(255),
-        PreviewDecodeBackend::Auto
-    );
+fn preview_decode_backend_defaults_to_auto_without_a_process_global_setter() {
+    assert_eq!(super::preview_decode_backend(), PreviewDecodeBackend::Auto);
 }
 
 #[test]

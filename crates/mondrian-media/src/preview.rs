@@ -21,7 +21,7 @@ use std::collections::VecDeque;
 use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1434,32 +1434,16 @@ impl PreviewDecodeDiagnostics {
     }
 }
 
-impl PreviewDecodeBackend {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Software => 1,
-            Self::ExternalFfmpegCpuRgba => 2,
-        }
-    }
-
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Software,
-            2 => Self::ExternalFfmpegCpuRgba,
-            _ => Self::Auto,
-        }
-    }
-}
-
-static PREVIEW_DECODE_BACKEND: AtomicU8 = AtomicU8::new(0);
-
-pub fn set_preview_decode_backend(backend: PreviewDecodeBackend) {
-    PREVIEW_DECODE_BACKEND.store(backend.as_u8(), Ordering::Relaxed);
-}
-
+/// Current preview decode backend selection.
+///
+/// The product currently always runs `Auto`; a process-global setter had no
+/// production caller and created an unowned mutable seam, so it was removed.
+/// Backend choice belongs to explicit Session/worker configuration, not a
+/// latent global. `Auto` still honors the bounded
+/// `MONDRIAN_PREVIEW_EXTERNAL_FFMPEG_CPU_RGBA` environment opt-in for
+/// diagnostics.
 pub fn preview_decode_backend() -> PreviewDecodeBackend {
-    PreviewDecodeBackend::from_u8(PREVIEW_DECODE_BACKEND.load(Ordering::Relaxed))
+    PreviewDecodeBackend::Auto
 }
 
 pub use decoded_frame::*;
