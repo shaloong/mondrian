@@ -80,8 +80,20 @@ pub(crate) struct PreviewTimelineMediaRequest {
 /// Exhaustive Adapter response for one media layer needed by Timeline execution.
 pub(crate) enum PreviewTimelineMediaFrame {
     Ready(MediaPreviewFrame),
-    Pending,
+    Pending { wait: PreviewTimelineMediaWait },
     Unavailable { reason: PreviewUnavailability },
+}
+
+/// Why an exact media request is pending.
+///
+/// A producer wait may be memoized until that producer publishes a result.
+/// An admission retry has no producer yet and must be re-evaluated on the
+/// next candidate pass; retaining it would suppress the retry that can make
+/// forward progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewTimelineMediaWait {
+    Producer,
+    RetryAdmission,
 }
 
 /// Complete generated-title request emitted while materializing a prepared node.
@@ -116,7 +128,10 @@ pub(crate) enum PreviewTimelineTitleFrame {
 /// Typed dependency that keeps media identity distinct from generated work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PreviewTimelinePendingDependency {
-    Media(AssetId),
+    Media {
+        asset_id: AssetId,
+        wait: PreviewTimelineMediaWait,
+    },
     BasicTitle(BasicTitleRasterRequestIdentity),
     Temporal {
         clip_id: mondrian_core::ClipId,
@@ -878,7 +893,7 @@ where
             );
             let frame = match (execution.media_frame)(request) {
                 PreviewTimelineMediaFrame::Ready(frame) => frame,
-                PreviewTimelineMediaFrame::Pending => {
+                PreviewTimelineMediaFrame::Pending { .. } => {
                     return Ok(PreviewTemporalSourceResolution::Pending);
                 }
                 PreviewTimelineMediaFrame::Unavailable { reason } => {
@@ -1378,9 +1393,12 @@ where
                     .map_err(preview_route_abort)?;
                     match (execution.media_frame)(request) {
                         PreviewTimelineMediaFrame::Ready(frame) => frame,
-                        PreviewTimelineMediaFrame::Pending => {
+                        PreviewTimelineMediaFrame::Pending { wait } => {
                             return Err(PreviewTimelineAbort::Pending {
-                                dependency: PreviewTimelinePendingDependency::Media(asset_id),
+                                dependency: PreviewTimelinePendingDependency::Media {
+                                    asset_id,
+                                    wait,
+                                },
                             });
                         }
                         PreviewTimelineMediaFrame::Unavailable { reason } => {
@@ -1696,9 +1714,9 @@ where
                     .map_err(preview_route_abort)?;
             let frame = match (execution.media_frame)(request) {
                 PreviewTimelineMediaFrame::Ready(frame) => frame,
-                PreviewTimelineMediaFrame::Pending => {
+                PreviewTimelineMediaFrame::Pending { wait } => {
                     return Err(PreviewTimelineAbort::Pending {
-                        dependency: PreviewTimelinePendingDependency::Media(asset_id),
+                        dependency: PreviewTimelinePendingDependency::Media { asset_id, wait },
                     });
                 }
                 PreviewTimelineMediaFrame::Unavailable { reason } => {

@@ -635,6 +635,12 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
         self.generation_key.as_ref() == Some(key)
     }
 
+    /// Borrow the exact active generation identity for transition
+    /// classification without transferring mutation authority.
+    pub(crate) fn current_generation_key(&self) -> Option<&G> {
+        self.generation_key.as_ref()
+    }
+
     /// Reuse the exact current generation or rotate through the sole generation
     /// authority supplied by the execution Adapter.
     pub(crate) fn bind_generation(

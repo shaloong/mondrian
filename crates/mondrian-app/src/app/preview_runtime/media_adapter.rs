@@ -12,8 +12,32 @@ use crate::app::preview_media_source::{
     PreviewMediaSourceRequest, PreviewProxyGenerationIntent,
 };
 use crate::app::preview_timeline_execution::{
-    PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
+    PreviewTimelineMediaFrame, PreviewTimelineMediaRequest, PreviewTimelineMediaWait,
 };
+
+/// Classify nonterminal admission outcomes without projecting expected
+/// generation races as Viewer failures.
+pub(super) const fn media_wait_for_admission(
+    admission: MediaPreviewRequestAdmission,
+) -> Option<PreviewTimelineMediaWait> {
+    match admission {
+        MediaPreviewRequestAdmission::Scheduled | MediaPreviewRequestAdmission::ExistingWork => {
+            Some(PreviewTimelineMediaWait::Producer)
+        }
+        MediaPreviewRequestAdmission::DeferredResidencyTransition
+        | MediaPreviewRequestAdmission::DeferredAggregateCapacity
+        | MediaPreviewRequestAdmission::DeferredExecutionPressure
+        | MediaPreviewRequestAdmission::ObsoleteGeneration => {
+            Some(PreviewTimelineMediaWait::RetryAdmission)
+        }
+        MediaPreviewRequestAdmission::AlreadyResident
+        | MediaPreviewRequestAdmission::BlockedCurrentDemand
+        | MediaPreviewRequestAdmission::BlockedAggregateCapacity
+        | MediaPreviewRequestAdmission::InvalidMediaIdentity
+        | MediaPreviewRequestAdmission::InvalidScheduling
+        | MediaPreviewRequestAdmission::WorkerUnavailable => None,
+    }
+}
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn media_frame_for_plan(
@@ -75,7 +99,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         } else {
             MediaPreviewRequestIntent::Current(current_demand_id)
         };
-        let admission = if request.cpu_working_required {
+        let admission = if request.cpu_working_required || self.viewer_cpu_fallback_active.get() {
             self.request_cpu_working_media_preview(
                 key.clone(),
                 intent,
@@ -95,15 +119,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             )
         };
         self.last_current_media_admission.set(Some(admission.as_str()));
-        match admission {
-            MediaPreviewRequestAdmission::Scheduled
-            | MediaPreviewRequestAdmission::ExistingWork
-            | MediaPreviewRequestAdmission::DeferredResidencyTransition
-            | MediaPreviewRequestAdmission::DeferredAggregateCapacity
-            | MediaPreviewRequestAdmission::DeferredExecutionPressure => {
+        if let Some(wait) = media_wait_for_admission(admission) {
+            // An obsolete generation has no physical producer and must be
+            // retried from a fresh execution snapshot. Other pending outcomes
+            // retain an observable work/residency owner that will publish a
+            // retry edge.
+            if admission != MediaPreviewRequestAdmission::ObsoleteGeneration {
                 self.execution.borrow_mut().set_pending(true);
-                PreviewTimelineMediaFrame::Pending
             }
+            return PreviewTimelineMediaFrame::Pending { wait };
+        }
+        match admission {
             MediaPreviewRequestAdmission::AlreadyResident => {
                 match self.protected_cached_media_frame(&key, current_demand_id) {
                     Ok(Some(frame)) => PreviewTimelineMediaFrame::Ready(frame),
@@ -155,14 +181,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ),
                 }
             }
-            MediaPreviewRequestAdmission::ObsoleteGeneration => {
-                PreviewTimelineMediaFrame::Unavailable {
-                    reason: PreviewUnavailability::failed(
-                        PreviewOutputStage::TimelineEvaluation,
-                        "media request generation was superseded before Broker admission",
-                    ),
-                }
-            }
             MediaPreviewRequestAdmission::WorkerUnavailable => {
                 PreviewTimelineMediaFrame::Unavailable {
                     reason: PreviewUnavailability::failed(
@@ -171,6 +189,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ),
                 }
             }
+            MediaPreviewRequestAdmission::Scheduled
+            | MediaPreviewRequestAdmission::ExistingWork => PreviewTimelineMediaFrame::Pending {
+                wait: PreviewTimelineMediaWait::Producer,
+            },
+            MediaPreviewRequestAdmission::DeferredResidencyTransition
+            | MediaPreviewRequestAdmission::DeferredAggregateCapacity
+            | MediaPreviewRequestAdmission::DeferredExecutionPressure
+            | MediaPreviewRequestAdmission::ObsoleteGeneration => PreviewTimelineMediaFrame::Pending {
+                wait: PreviewTimelineMediaWait::RetryAdmission,
+            },
         }
     }
 
@@ -236,7 +264,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             record_color_rejection,
             request_missing_proxy_generation,
             self.hardware_decode_admission.get(),
-            request.cpu_working_required,
+            request.cpu_working_required || self.viewer_cpu_fallback_active.get(),
         )
     }
 
