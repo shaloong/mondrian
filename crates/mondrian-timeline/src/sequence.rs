@@ -1,7 +1,7 @@
 //! 序列（时间线）
 
 use crate::{
-    clip::ActiveClip,
+    clip::{ActiveClip, Clip},
     track::{Track, TrackType},
 };
 pub use mondrian_core::AudioChannelLayout;
@@ -2070,6 +2070,36 @@ impl Sequence {
         self.compact_clip_link_groups();
         self.compact_video_transitions();
         self.compact_audio_program();
+    }
+
+    /// Replace clips by identity and restore the author-graph invariants.
+    ///
+    /// This is the canonical apply step for a bulk trim prepared by the
+    /// timeline edit algorithms: callers hand over the validated replacement
+    /// clips and the Sequence owns re-sorted placement plus structural
+    /// compaction, so no caller may sort `Track::clips` or compact references
+    /// itself.
+    pub fn apply_bulk_trim(
+        &mut self,
+        updates: impl IntoIterator<Item = Clip>,
+    ) -> mondrian_core::Result<()> {
+        for updated in updates {
+            let clip_id = updated.id;
+            let slot = self
+                .video_tracks
+                .iter_mut()
+                .chain(&mut self.audio_tracks)
+                .find_map(|track| track.clips.iter_mut().find(|clip| clip.id == clip_id))
+                .ok_or_else(|| mondrian_core::MondrianError::ClipNotFound {
+                    clip_id: clip_id.to_string(),
+                })?;
+            *slot = updated;
+        }
+        for track in self.video_tracks.iter_mut().chain(&mut self.audio_tracks) {
+            track.clips.sort_by_key(|clip| clip.position);
+        }
+        self.compact_structural_references();
+        Ok(())
     }
 
     /// Drop unreferenced processing definitions and invalidated Transition references.
