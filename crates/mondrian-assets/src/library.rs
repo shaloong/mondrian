@@ -434,13 +434,18 @@ impl AssetLibrary {
         }
         let source = self.db.lock();
         let actual_revision = connection_revision(&source)?;
-        if actual_revision != expected_revision {
+        if actual_revision < expected_revision {
             return Err(MondrianError::AssetDbError {
                 reason: format!(
-                    "asset library changed after snapshot capture: expected revision {expected_revision}, current {actual_revision}"
+                    "asset library revision regressed after snapshot capture: expected at least {expected_revision}, current {actual_revision}"
                 ),
             });
         }
+        // Forward drift is safe and must not fail the save: imports only add
+        // assets and retirement is membership-only, so a newer snapshot remains
+        // a superset of the revision the author snapshot observed. Rejecting
+        // forward drift made every save race an in-flight import batch.
+        let _ = expected_revision;
         let staging =
             OwnedPublicationFile::create_sibling(&sibling_anchor, "asset-library-snapshot")
                 .map_err(|error| MondrianError::AssetDbError {
@@ -1834,7 +1839,7 @@ mod tests {
     }
 
     #[test]
-    fn online_snapshot_fails_closed_when_asset_revision_advanced() {
+    fn online_snapshot_tolerates_forward_asset_revision_drift() {
         let lib = open_test_library();
         let captured = lib.database_revision().expect("captured revision");
         lib.create_adjustment_layer_asset(Some("Changed after capture"))
@@ -1842,12 +1847,13 @@ mod tests {
         let snapshot_dir = tempfile::tempdir().expect("snapshot tempdir");
         let snapshot_path = snapshot_dir.path().join("library.db");
 
-        let error = lib
+        let snapshot = lib
             .snapshot_database(captured, &snapshot_path)
-            .expect_err("stale snapshot must fail");
+            .expect("forward revision drift must not fail the snapshot");
 
-        assert!(error.to_string().contains("changed after snapshot capture"));
-        assert!(!snapshot_path.exists());
+        let newer_revision = lib.database_revision().expect("current revision");
+        assert!(newer_revision > captured);
+        assert!(snapshot.path().is_file());
     }
 
     #[test]
