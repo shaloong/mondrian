@@ -446,20 +446,22 @@ pub fn validate_export_output_cancellable(
     let report = ffprobe_report(output_path, cancellation)?;
     validate_report(&report, expectations)?;
 
+    // Every deliverable with a video stream must prove its first frame is
+    // decodable, not only HDR variants. Previously an SDR export with a
+    // corrupt interior GOP could pass QC without ever decoding a frame.
+    let has_video = report
+        .streams
+        .iter()
+        .any(|stream| stream.codec_type.as_deref() == Some("video"));
     let expected_static_hdr = match &expectations.video {
         ExpectedStream::Required(video) => video.signal.as_ref(),
         ExpectedStream::Forbidden => None,
     }
     .map(|signal| &signal.static_hdr_metadata);
-    let side_data = if expected_static_hdr
-        .is_none_or(|expected| matches!(expected, ExpectedStaticHdrMetadata::Unspecified))
-    {
-        None
+    let side_data = if has_video {
+        Some(ffprobe_first_video_frame_side_data(output_path, cancellation)?)
     } else {
-        Some(ffprobe_first_video_frame_side_data(
-            output_path,
-            cancellation,
-        )?)
+        None
     };
     match (expected_static_hdr, side_data.as_deref()) {
         (None | Some(ExpectedStaticHdrMetadata::Unspecified), _) => {}
@@ -698,7 +700,9 @@ fn validate_report(
             return Err("导出时长无效（<= 0）".to_string());
         }
 
-        let tolerance = expected_duration_secs.max(1.0) * 0.03;
+        // Tolerate encoder frame-rate rounding, not a truncated tail: a 3%
+        // window would accept an encode missing seconds of content.
+        let tolerance = expected_duration_secs.mul_add(0.005, 0.05).max(0.05);
         if (actual_duration_secs - expected_duration_secs).abs() > tolerance {
             return Err(format!(
                 "导出时长不匹配：期望 {:.3}s，实际 {:.3}s",
@@ -1420,6 +1424,32 @@ mod tests {
         };
 
         assert!(validate_report(&report, &expected).is_ok());
+    }
+
+    #[test]
+    fn validate_report_rejects_a_tail_truncated_export() {
+        // A 3% duration tolerance would accept an encode missing nearly a
+        // second of a 30 s deliverable. The tightened window (0.5% + 50 ms)
+        // rejects that tail truncation while still allowing encoder
+        // frame-rate rounding.
+        let mut report = base_report();
+        report.format.as_mut().expect("format").duration = Some("9.2".to_string());
+        report.streams.iter_mut().for_each(|stream| stream.duration = Some("9.2".to_string()));
+        let expected = ExportValidationExpectations {
+            container: Container::Mp4,
+            video: ExpectedStream::Required(ExpectedVideoConstraints {
+                width: Some(1920),
+                height: Some(1080),
+                fps_num: Some(25),
+                fps_den: Some(1),
+                signal: None,
+                ..ExpectedVideoConstraints::default()
+            }),
+            audio: base_audio_expectation(),
+            expected_duration_secs: Some(10.0),
+        };
+
+        assert!(validate_report(&report, &expected).is_err());
     }
 
     #[test]
