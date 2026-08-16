@@ -1201,11 +1201,11 @@ fn decode_media_preview_inner(
                 job.key.input_tone_map,
                 job.key.engine.clone(),
             );
+            // The sampled extent is the native surface's own representation
+            // extent, never an output/composition extent. Scaling to the
+            // composition target is owned by the compositor/spatial stage.
             let sampled_resolution =
-                job.key.decode.geometry().materialization_extent(mondrian_core::Resolution {
-                    width: frame.width,
-                    height: frame.height,
-                });
+                mondrian_core::Resolution { width: frame.width, height: frame.height };
             let native_source = MediaPreviewNativeSourceFrame::from_native_frame(
                 frame,
                 job.key.decode.source_color().color_space,

@@ -13,8 +13,8 @@ use mondrian_core::types::{AssetId, ColorEngine};
 use mondrian_core::{Resolution, SourceSampleTarget, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeGeometry,
-    PreviewDecodeKey, PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
+    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeKey,
+    PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
@@ -62,11 +62,11 @@ impl MediaPreviewKey {
     }
 
     /// Conservative decoded extent used for App-owned residency admission.
+    ///
+    /// Residency is charged at the decode representation's own extent
+    /// (source or proxy raster), never a consumer/output extent.
     pub(crate) const fn residency_resolution(&self) -> Resolution {
-        match self.decode.geometry() {
-            PreviewDecodeGeometry::FitWithin(resolution) => resolution,
-            PreviewDecodeGeometry::NativeSource { .. } => self.source_resolution,
-        }
+        self.decode.representation().extent_for_source(self.source_resolution)
     }
 
     /// Build one exact CPU-addressable key for App unit tests.
@@ -81,13 +81,17 @@ impl MediaPreviewKey {
         if !path.is_absolute() {
             path = std::env::temp_dir().join(path);
         }
-        let source =
-            mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(path, fingerprint, 0)
-                .expect("complete synthetic Preview source");
+        let source = mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(
+            path,
+            fingerprint,
+            0,
+            resolution,
+        )
+        .expect("complete synthetic Preview source");
         let decode = PreviewDecodeKey::new(
             source,
             SourceSampleTarget::covering(source_time),
-            PreviewDecodeGeometry::FitWithin(resolution),
+            mondrian_media::PreviewDecodeRepresentation::NativeCpu,
             source_color,
         )
         .expect("valid synthetic Preview decode key");

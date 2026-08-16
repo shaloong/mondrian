@@ -29,7 +29,7 @@ fn with_source_time(mut key: MediaPreviewKey, source_time: TimelineTime) -> Medi
     key.decode = PreviewDecodeKey::new(
         key.decode.source().clone(),
         mondrian_core::SourceSampleTarget::covering(source_time),
-        key.decode.geometry(),
+        key.decode.representation(),
         key.decode.source_color(),
     )
     .expect("valid replacement source time");

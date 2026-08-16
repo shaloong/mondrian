@@ -53,7 +53,6 @@ pub(super) fn decode_media_with_preference(
         color_space_override: request.color_space_override,
         alpha_interpretation: request.alpha_interpretation,
         source_sample: request.source_sample,
-        target_resolution: request.target_resolution,
         input_color: &request.input_color,
         prefer_proxy,
         request_missing_proxy_generation: false,

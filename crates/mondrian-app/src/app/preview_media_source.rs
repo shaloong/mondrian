@@ -14,8 +14,8 @@ use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::{Resolution, TimelineTime};
 use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeGeometry,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeSource,
+    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
     PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
     ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
@@ -73,7 +73,6 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) source_sample: mondrian_core::SourceSampleTarget,
-    pub(crate) target_resolution: Resolution,
     pub(crate) input_color: &'a MediaInputColorContext,
     pub(crate) prefer_proxy: bool,
     pub(crate) request_missing_proxy_generation: bool,
@@ -251,13 +250,12 @@ pub(crate) fn resolve_preview_media_source(
     let hardware_request = request
         .hardware_admission
         .request_for_surface(decode_source.native_surface_hint());
-    let geometry = match PreviewDecodeGeometry::canonical(
+    let representation = match PreviewDecodeRepresentation::canonical(
         &decode_source,
-        request.target_resolution,
         payload_requirement,
         hardware_request,
     ) {
-        Ok(geometry) => geometry,
+        Ok(representation) => representation,
         Err(error) => {
             return unavailable(
                 &request,
@@ -267,18 +265,22 @@ pub(crate) fn resolve_preview_media_source(
             );
         }
     };
-    let decode =
-        match PreviewDecodeKey::new(decode_source, request.source_sample, geometry, source_color) {
-            Ok(decode) => decode,
-            Err(error) => {
-                return unavailable(
-                    &request,
-                    PreviewMediaSourceUnavailableReason::DecodeContractInvalid {
-                        reason: error.to_string(),
-                    },
-                );
-            }
-        };
+    let decode = match PreviewDecodeKey::new(
+        decode_source,
+        request.source_sample,
+        representation,
+        source_color,
+    ) {
+        Ok(decode) => decode,
+        Err(error) => {
+            return unavailable(
+                &request,
+                PreviewMediaSourceUnavailableReason::DecodeContractInvalid {
+                    reason: error.to_string(),
+                },
+            );
+        }
+    };
     let key = MediaPreviewKey {
         asset_id: request.asset.id,
         decode,
@@ -370,9 +372,21 @@ fn resolve_preview_media_decode_path(
                     },
                 );
             }
-            let source =
-                PreviewDecodeSource::from_proxy_artifact(proxy_path, proxy_fingerprint, &manifest)
-                    .map_err(decode_contract_unavailable)?;
+            let proxy_height = manifest.settings.resolution.height();
+            let proxy_extent = fit_proxy_extent(
+                Resolution {
+                    width: primary_video.width,
+                    height: primary_video.height,
+                },
+                proxy_height,
+            );
+            let source = PreviewDecodeSource::from_proxy_artifact(
+                proxy_path,
+                proxy_fingerprint,
+                &manifest,
+                proxy_extent,
+            )
+            .map_err(decode_contract_unavailable)?;
             Ok(PreviewMediaDecodePath {
                 source,
                 resolution: PreviewMediaDecodePathResolution::Proxy,
@@ -431,6 +445,23 @@ fn media_path_fingerprint(path: &Path) -> std::io::Result<MediaFileFingerprint> 
             "media source lacks complete filesystem revision evidence",
         ))
     }
+}
+
+/// Aspect-preserving proxy raster extent for a source extent and proxy height.
+///
+/// This is the artifact's own decode representation extent, never an
+/// output/consumer extent.
+fn fit_proxy_extent(source: Resolution, proxy_height: u32) -> Resolution {
+    let scale = f64::from(proxy_height) / f64::from(source.height).max(1.0);
+    let mut width = (f64::from(source.width) * scale).round().max(1.0) as u32;
+    let mut height = (f64::from(source.height) * scale).round().max(1.0) as u32;
+    if width % 2 == 1 {
+        width = width.saturating_sub(1).max(1);
+    }
+    if height % 2 == 1 {
+        height = height.saturating_sub(1).max(1);
+    }
+    Resolution { width, height }
 }
 
 fn proxy_generation_intent(

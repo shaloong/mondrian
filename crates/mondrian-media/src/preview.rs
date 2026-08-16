@@ -44,8 +44,8 @@ mod playback_ring;
 mod seek_index;
 
 pub use decode_contract::{
-    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeGeometry,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeSource,
+    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
     PreviewNativeSurfaceHint,
 };
 pub use demux_worker::run_preview_demux_worker;
@@ -512,9 +512,12 @@ impl<'a> PreviewDecodeRequest<'a> {
     ///
     /// This keeps access-mode scheduling and adaptive/hardware execution hints
     /// outside [`PreviewDecodeKey`] while preventing callers from rebuilding
-    /// path, revision, stream, time, geometry, or source color independently.
+    /// path, revision, stream, time, representation, or source color
+    /// independently. The request's extent cap is the representation's own
+    /// extent — never the consumer's output extent.
     pub fn from_key(key: &'a PreviewDecodeKey, access_mode: PreviewDecodeAccessMode) -> Self {
-        let (max_width, max_height) = key.geometry().maximum_dimensions();
+        let (max_width, max_height) =
+            key.representation().maximum_dimensions_for_source(key.source().source_extent());
         Self {
             path: key.source().path(),
             video_stream_index: Some(key.source().video_stream_index()),

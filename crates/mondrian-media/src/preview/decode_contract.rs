@@ -53,6 +53,7 @@ pub struct PreviewDecodeSource {
     video_stream_index: u32,
     alpha_presence: PreviewDecodeAlphaPresence,
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
+    source_extent: Resolution,
 }
 
 impl PreviewDecodeSource {
@@ -96,6 +97,7 @@ impl PreviewDecodeSource {
             stream.index,
             alpha_presence,
             native_surface_hint_from_pixel_format(sampling.pixel_format),
+            Resolution { width: stream.width, height: stream.height },
         )
     }
 
@@ -107,10 +109,11 @@ impl PreviewDecodeSource {
     pub fn capture_proxy_artifact(
         path: impl Into<PathBuf>,
         manifest: &ProxyArtifactManifest,
+        source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         let path = path.into();
         let fingerprint = MediaFileFingerprint::capture(&path);
-        Self::from_proxy_artifact(path, fingerprint, manifest)
+        Self::from_proxy_artifact(path, fingerprint, manifest, source_extent)
     }
 
     /// Build one generated proxy source from an already captured exact revision.
@@ -118,6 +121,7 @@ impl PreviewDecodeSource {
         path: impl Into<PathBuf>,
         fingerprint: MediaFileFingerprint,
         manifest: &ProxyArtifactManifest,
+        source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         if manifest.version != PROXY_MANIFEST_VERSION {
             return Err(
@@ -138,6 +142,7 @@ impl PreviewDecodeSource {
             PROXY_PRIMARY_VIDEO_STREAM_INDEX,
             PreviewDecodeAlphaPresence::Opaque,
             native_surface_hint,
+            source_extent,
         )
     }
 
@@ -145,11 +150,13 @@ impl PreviewDecodeSource {
     ///
     /// This constructor is intended for callers such as immutable Export
     /// snapshots that already froze path/revision/stream but deliberately do
-    /// not claim native-surface eligibility.
+    /// not claim native-surface eligibility. `source_extent` is the frozen
+    /// stream's own raster extent, never a consumer/output extent.
     pub fn from_frozen_cpu_stream(
         path: impl Into<PathBuf>,
         fingerprint: MediaFileFingerprint,
         video_stream_index: u32,
+        source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         Self::new(
             path.into(),
@@ -157,6 +164,7 @@ impl PreviewDecodeSource {
             video_stream_index,
             PreviewDecodeAlphaPresence::Unknown,
             None,
+            source_extent,
         )
     }
 
@@ -166,6 +174,7 @@ impl PreviewDecodeSource {
         video_stream_index: u32,
         alpha_presence: PreviewDecodeAlphaPresence,
         native_surface_hint: Option<PreviewNativeSurfaceHint>,
+        source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         if path.as_os_str().is_empty() {
             return Err(PreviewDecodeContractError::EmptySourcePath);
@@ -180,12 +189,14 @@ impl PreviewDecodeSource {
                 path: path.display().to_string(),
             });
         }
+        validate_extent(source_extent)?;
         Ok(Self {
             path,
             fingerprint,
             video_stream_index,
             alpha_presence,
             native_surface_hint,
+            source_extent,
         })
     }
 
@@ -214,10 +225,118 @@ impl PreviewDecodeSource {
         self.native_surface_hint
     }
 
+    /// The source's own raster extent (never a consumer/output extent).
+    pub const fn source_extent(&self) -> Resolution {
+        self.source_extent
+    }
+
     /// Whether this source is eligible to request an opaque native output.
     pub const fn permits_native_output(&self) -> bool {
         matches!(self.alpha_presence, PreviewDecodeAlphaPresence::Opaque)
             && self.native_surface_hint.is_some()
+    }
+}
+
+/// Media representation identity for Preview decode, fully decoupled from
+/// every consumer/output resolution.
+///
+/// The representation is a decode-policy choice owned by the media layer.
+/// Preview/sequence/export dimensions are never part of this identity: an
+/// output-extent change is a composition/spatial-target change and must not
+/// invalidate the decoded-frame cache. The compositor and spatial stages own
+/// scaling from this representation to the composition target, with the same
+/// contract on GPU and on CPU fallback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreviewDecodeRepresentation {
+    /// Media's own representation at its source raster extent, materialized as
+    /// CPU-addressable pixels. Decode never swscales to an output extent.
+    NativeCpu,
+    /// Media's own representation as a decoder-native surface at source
+    /// extent; the renderer materializes the composition target from it.
+    NativeSurface,
+    /// A generated proxy artifact representation at the artifact's own raster
+    /// extent. This is a decode-policy seam (the artifact itself), not an
+    /// output-resolution alias.
+    Proxy(Resolution),
+    /// Reserved decode-policy entry for reduced-raster decode at a bounded
+    /// divisor of the source extent. Not an output-resolution alias.
+    #[allow(dead_code)]
+    Reduced { divisor: u32 },
+}
+
+impl PreviewDecodeRepresentation {
+    /// Resolve the only valid representation for one payload requirement and
+    /// hardware intent. No output extent participates: the representation is
+    /// derived from the source and hardware admission alone.
+    pub fn canonical(
+        source: &PreviewDecodeSource,
+        payload_requirement: PreviewDecodePayloadRequirement,
+        hardware_request: PreviewHardwareDecodeRequest,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        let native_requested = matches!(
+            hardware_request,
+            PreviewHardwareDecodeRequest::PreferGpuResident
+                | PreviewHardwareDecodeRequest::RequireGpuResident
+        );
+        if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
+            && native_requested
+            && source.permits_native_output()
+        {
+            return Ok(Self::NativeSurface);
+        }
+        if hardware_request == PreviewHardwareDecodeRequest::RequireGpuResident {
+            return Err(
+                PreviewDecodeContractError::RequiredNativeOutputUnavailable {
+                    alpha_presence: source.alpha_presence,
+                    native_surface_hint: source.native_surface_hint,
+                    payload_requirement,
+                },
+            );
+        }
+        Ok(Self::NativeCpu)
+    }
+
+    /// Resolve the representation for a generated proxy artifact at its own
+    /// raster extent. The artifact itself is the identity; no output extent.
+    pub fn for_proxy_artifact(extent: Resolution) -> Result<Self, PreviewDecodeContractError> {
+        validate_extent(extent)?;
+        Ok(Self::Proxy(extent))
+    }
+
+    /// Whether this representation may be carried as a decoder-native surface.
+    pub const fn is_native_surface(self) -> bool {
+        matches!(self, Self::NativeSurface)
+    }
+
+    /// Whether this representation is CPU-addressable.
+    pub const fn is_cpu_addressable(self) -> bool {
+        !self.is_native_surface()
+    }
+
+    /// The representation's own raster extent given a concrete source extent.
+    ///
+    /// Native representations keep the source extent; a proxy representation
+    /// keeps its artifact extent. This is the decode output extent — never an
+    /// output/composition extent.
+    pub const fn extent_for_source(self, source: Resolution) -> Resolution {
+        match self {
+            Self::NativeCpu | Self::NativeSurface | Self::Reduced { .. } => source,
+            Self::Proxy(extent) => extent,
+        }
+    }
+
+    /// Legacy FFmpeg maximum dimensions for the representation given a source
+    /// extent. Decode caps at the representation extent, never the consumer's
+    /// output extent.
+    pub fn maximum_dimensions_for_source(self, source: Resolution) -> (Option<u32>, Option<u32>) {
+        let extent = self.extent_for_source(source);
+        (Some(extent.width), Some(extent.height))
+    }
+
+    /// The representation's materialization extent for a concrete source
+    /// raster, aspect-preserved within the representation extent.
+    pub fn materialization_extent_for_source(self, source: Resolution) -> Resolution {
+        self.extent_for_source(source)
     }
 }
 
@@ -230,116 +349,17 @@ pub enum PreviewDecodePayloadRequirement {
     NativeAllowed,
 }
 
-/// Canonical physical decode geometry and native-payload permission.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PreviewDecodeGeometry {
-    /// Produce CPU-addressable pixels fitting within this non-empty extent.
-    FitWithin(Resolution),
-    /// Permit a decoder-native surface while retaining the exact downstream
-    /// materialization extent in the physical decode identity.
-    NativeSource {
-        /// Non-empty raster extent the renderer must materialize from the
-        /// decoder-native surface. The decoder may retain its physical source
-        /// extent; this value prevents Preview scale from disappearing at the
-        /// native/renderer boundary.
-        target: Resolution,
-    },
-}
-
-impl PreviewDecodeGeometry {
-    /// Resolve the only valid geometry for one payload requirement and hardware intent.
-    pub fn canonical(
-        source: &PreviewDecodeSource,
-        requested_extent: Resolution,
-        payload_requirement: PreviewDecodePayloadRequirement,
-        hardware_request: PreviewHardwareDecodeRequest,
-    ) -> Result<Self, PreviewDecodeContractError> {
-        validate_extent(requested_extent)?;
-        let native_requested = matches!(
-            hardware_request,
-            PreviewHardwareDecodeRequest::PreferGpuResident
-                | PreviewHardwareDecodeRequest::RequireGpuResident
-        );
-        if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
-            && native_requested
-            && source.permits_native_output()
-        {
-            return Ok(Self::NativeSource { target: requested_extent });
-        }
-        if hardware_request == PreviewHardwareDecodeRequest::RequireGpuResident {
-            return Err(
-                PreviewDecodeContractError::RequiredNativeOutputUnavailable {
-                    alpha_presence: source.alpha_presence,
-                    native_surface_hint: source.native_surface_hint,
-                    payload_requirement,
-                },
-            );
-        }
-        Ok(Self::FitWithin(requested_extent))
-    }
-
-    /// Validate a directly constructed geometry against its physical source.
-    pub fn validate_for(
-        self,
-        source: &PreviewDecodeSource,
-    ) -> Result<(), PreviewDecodeContractError> {
-        match self {
-            Self::FitWithin(extent) => validate_extent(extent),
-            Self::NativeSource { target } => {
-                validate_extent(target)?;
-                if source.permits_native_output() {
-                    Ok(())
-                } else {
-                    Err(PreviewDecodeContractError::NativeSourceUnavailable {
-                        alpha_presence: source.alpha_presence,
-                        native_surface_hint: source.native_surface_hint,
-                    })
-                }
-            }
-        }
-    }
-
-    /// Legacy FFmpeg maximum dimensions represented by this exact geometry.
-    pub const fn maximum_dimensions(self) -> (Option<u32>, Option<u32>) {
-        match self {
-            Self::FitWithin(extent) => (Some(extent.width), Some(extent.height)),
-            Self::NativeSource { target } => (Some(target.width), Some(target.height)),
-        }
-    }
-
-    /// Resolve the aspect-preserving materialization extent for a concrete
-    /// decoded source raster.
-    pub fn materialization_extent(self, source: Resolution) -> Resolution {
-        let target = match self {
-            Self::FitWithin(target) | Self::NativeSource { target } => target,
-        };
-        fit_within_extent(source, target)
-    }
-}
-
-fn fit_within_extent(source: Resolution, target: Resolution) -> Resolution {
-    let source_width = f64::from(source.width);
-    let source_height = f64::from(source.height);
-    let scale = (f64::from(target.width) / source_width)
-        .min(f64::from(target.height) / source_height)
-        .min(1.0);
-    let mut width = (source_width * scale).round().max(1.0) as u32;
-    let mut height = (source_height * scale).round().max(1.0) as u32;
-    if width % 2 == 1 {
-        width = width.saturating_sub(1).max(1);
-    }
-    if height % 2 == 1 {
-        height = height.saturating_sub(1).max(1);
-    }
-    Resolution { width, height }
-}
-
 /// Exact cache/session-independent identity of one physical Preview decode.
+///
+/// The key contains no consumer/output extent: the representation is a
+/// decode-policy identity, so an output-extent change (Preview scale, Viewer
+/// size, sequence settings) never invalidates this identity or the cached
+/// decoded frame behind it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PreviewDecodeKey {
     source: PreviewDecodeSource,
     source_sample: SourceSampleTarget,
-    geometry: PreviewDecodeGeometry,
+    representation: PreviewDecodeRepresentation,
     source_color: PreviewSourceColorContract,
 }
 
@@ -348,7 +368,7 @@ impl PreviewDecodeKey {
     pub fn new(
         source: PreviewDecodeSource,
         source_sample: SourceSampleTarget,
-        geometry: PreviewDecodeGeometry,
+        representation: PreviewDecodeRepresentation,
         source_color: PreviewSourceColorContract,
     ) -> Result<Self, PreviewDecodeContractError> {
         if source_sample.time().is_negative() {
@@ -364,8 +384,13 @@ impl PreviewDecodeKey {
                 boundary: source_sample.boundary(),
             });
         }
-        geometry.validate_for(&source)?;
-        Ok(Self { source, source_sample, geometry, source_color })
+        validate_representation_for_source(representation, &source)?;
+        Ok(Self {
+            source,
+            source_sample,
+            representation,
+            source_color,
+        })
     }
 
     /// Selected physical file and stream revision.
@@ -378,14 +403,35 @@ impl PreviewDecodeKey {
         self.source_sample
     }
 
-    /// Canonical CPU/native decode geometry.
-    pub const fn geometry(&self) -> PreviewDecodeGeometry {
-        self.geometry
+    /// Decode-policy representation identity (no output extent).
+    pub const fn representation(&self) -> PreviewDecodeRepresentation {
+        self.representation
     }
 
     /// App-resolved source color/range facts used by media conversion.
     pub const fn source_color(&self) -> PreviewSourceColorContract {
         self.source_color
+    }
+}
+
+fn validate_representation_for_source(
+    representation: PreviewDecodeRepresentation,
+    source: &PreviewDecodeSource,
+) -> Result<(), PreviewDecodeContractError> {
+    match representation {
+        PreviewDecodeRepresentation::NativeSurface => {
+            if source.permits_native_output() {
+                Ok(())
+            } else {
+                Err(PreviewDecodeContractError::NativeSourceUnavailable {
+                    alpha_presence: source.alpha_presence,
+                    native_surface_hint: source.native_surface_hint,
+                })
+            }
+        }
+        PreviewDecodeRepresentation::NativeCpu
+        | PreviewDecodeRepresentation::Proxy(_)
+        | PreviewDecodeRepresentation::Reduced { .. } => Ok(()),
     }
 }
 
@@ -622,6 +668,7 @@ mod tests {
                 absolute_test_path("media/source.mov"),
                 MediaFileFingerprint::default(),
                 2,
+                Resolution { width: 3840, height: 2160 },
             ),
             Err(PreviewDecodeContractError::IncompleteSourceRevision { .. })
         ));
@@ -631,6 +678,7 @@ mod tests {
                 "relative/source.mov",
                 exact_fingerprint(12),
                 2,
+                Resolution { width: 3840, height: 2160 },
             ),
             Err(PreviewDecodeContractError::RelativeSourcePath { .. })
         ));
@@ -648,6 +696,7 @@ mod tests {
             absolute_test_path("cache/proxy.mp4"),
             exact_fingerprint(13),
             &proxy_manifest(ProxyEncodingProfile::H264High8),
+            Resolution { width: 1280, height: 720 },
         )
         .expect("valid proxy source");
 
@@ -682,6 +731,7 @@ mod tests {
                 absolute_test_path(format!("cache/proxy-{index}.mov")),
                 exact_fingerprint(index as u64 + 20),
                 &proxy_manifest(encoding),
+                Resolution { width: 1280, height: 720 },
             )
             .expect("valid proxy source");
             assert_eq!(source.video_stream_index(), 0);
@@ -691,40 +741,31 @@ mod tests {
     }
 
     #[test]
-    fn canonical_geometry_separates_cpu_and_native_output_contracts() {
+    fn canonical_representation_separates_cpu_and_native_contracts() {
         let native_source = PreviewDecodeSource::from_probed_stream(
             absolute_test_path("media/source.mov"),
             exact_fingerprint(30),
             &video_stream(0, PixelFormat::P010, true),
         )
         .expect("valid native source");
-        let requested = Resolution { width: 960, height: 540 };
 
         assert_eq!(
-            PreviewDecodeGeometry::canonical(
+            PreviewDecodeRepresentation::canonical(
                 &native_source,
-                requested,
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
             )
-            .expect("native geometry"),
-            PreviewDecodeGeometry::NativeSource { target: requested }
-        );
-        let native = PreviewDecodeGeometry::NativeSource { target: requested };
-        assert_eq!(native.maximum_dimensions(), (Some(960), Some(540)));
-        assert_eq!(
-            native.materialization_extent(Resolution { width: 4096, height: 2160 }),
-            Resolution { width: 960, height: 506 }
+            .expect("native representation"),
+            PreviewDecodeRepresentation::NativeSurface
         );
         assert_eq!(
-            PreviewDecodeGeometry::canonical(
+            PreviewDecodeRepresentation::canonical(
                 &native_source,
-                requested,
                 PreviewDecodePayloadRequirement::CpuAddressable,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
             )
-            .expect("CPU geometry"),
-            PreviewDecodeGeometry::FitWithin(requested)
+            .expect("CPU representation"),
+            PreviewDecodeRepresentation::NativeCpu
         );
 
         let alpha_source = PreviewDecodeSource::from_probed_stream(
@@ -734,24 +775,37 @@ mod tests {
         )
         .expect("valid alpha source");
         assert_eq!(
-            PreviewDecodeGeometry::canonical(
+            PreviewDecodeRepresentation::canonical(
                 &alpha_source,
-                requested,
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
             )
             .expect("preferred native may safely downgrade"),
-            PreviewDecodeGeometry::FitWithin(requested)
+            PreviewDecodeRepresentation::NativeCpu
         );
         assert!(matches!(
-            PreviewDecodeGeometry::canonical(
+            PreviewDecodeRepresentation::canonical(
                 &alpha_source,
-                requested,
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::RequireGpuResident,
             ),
             Err(PreviewDecodeContractError::RequiredNativeOutputUnavailable { .. })
         ));
+    }
+
+    #[test]
+    fn representation_extents_come_from_source_not_output() {
+        let source_extent = Resolution { width: 3840, height: 2160 };
+        let native = PreviewDecodeRepresentation::NativeCpu;
+        assert_eq!(
+            native.maximum_dimensions_for_source(source_extent),
+            (Some(3840), Some(2160))
+        );
+        let proxy = PreviewDecodeRepresentation::Proxy(Resolution { width: 1280, height: 720 });
+        assert_eq!(
+            proxy.extent_for_source(source_extent),
+            Resolution { width: 1280, height: 720 }
+        );
     }
 
     #[test]
@@ -762,14 +816,14 @@ mod tests {
             &video_stream(5, PixelFormat::Yuv420p, true),
         )
         .expect("valid source");
-        let geometry = PreviewDecodeGeometry::FitWithin(Resolution { width: 1280, height: 720 });
+        let representation = PreviewDecodeRepresentation::NativeCpu;
         assert!(matches!(
             PreviewDecodeKey::new(
                 source.clone(),
                 SourceSampleTarget::covering(
                     TimelineTime::new(-1, 1).expect("valid negative rational"),
                 ),
-                geometry,
+                representation,
                 source_color(),
             ),
             Err(PreviewDecodeContractError::NegativeSourceTime { .. })
@@ -778,7 +832,7 @@ mod tests {
         let key = PreviewDecodeKey::new(
             source,
             SourceSampleTarget::covering(TimelineTime::new(1, 2).expect("valid source time")),
-            geometry,
+            representation,
             source_color(),
         )
         .expect("valid decode key");
@@ -794,8 +848,8 @@ mod tests {
         );
         assert_eq!(request.fingerprint, Some(key.source().fingerprint()));
         assert_eq!(request.source_sample, key.source_sample());
-        assert_eq!(request.max_width, Some(1280));
-        assert_eq!(request.max_height, Some(720));
+        assert_eq!(request.max_width, Some(3840));
+        assert_eq!(request.max_height, Some(2160));
         assert_eq!(request.source_color, key.source_color());
     }
 
@@ -807,19 +861,19 @@ mod tests {
             &video_stream(5, PixelFormat::Yuv420p, true),
         )
         .expect("valid source");
-        let geometry = PreviewDecodeGeometry::FitWithin(Resolution { width: 1280, height: 720 });
+        let representation = PreviewDecodeRepresentation::NativeCpu;
         let source_time = TimelineTime::new(1, 1).expect("valid source time");
         let covering = PreviewDecodeKey::new(
             source.clone(),
             SourceSampleTarget::covering(source_time),
-            geometry,
+            representation,
             source_color(),
         )
         .expect("covering key");
         let strict = PreviewDecodeKey::new(
             source.clone(),
             SourceSampleTarget::strict_predecessor(source_time),
-            geometry,
+            representation,
             source_color(),
         )
         .expect("strict predecessor key");
@@ -829,7 +883,7 @@ mod tests {
             PreviewDecodeKey::new(
                 source,
                 SourceSampleTarget::strict_predecessor(TimelineTime::ZERO),
-                geometry,
+                representation,
                 source_color(),
             ),
             Err(PreviewDecodeContractError::SourceSampleBeforeOrigin { .. })
