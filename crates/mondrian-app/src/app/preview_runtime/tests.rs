@@ -565,6 +565,39 @@ fn execute_preview_presentation_for_test_app<O: Clone>(
     runtime.presentation(state.preview_frame_execution_request(Instant::now()))
 }
 
+#[test]
+fn resolution_scale_change_invalidates_still_frame_generation() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    let sequence_id = state.active_sequence_id().expect("active sequence");
+
+    let set_scale = |state: &mut AppState, scale: f32| {
+        state
+            .commit_sequence_edit(sequence_id, "修改预览分辨率", |sequence| {
+                let mut settings = sequence.settings.clone();
+                settings.preview.resolution_scale = scale;
+                sequence.apply_settings(settings)
+            })
+            .expect("commit resolution scale edit");
+    };
+
+    set_scale(&mut state, 1.0);
+    let full = execute_gpu_preview_for_test_app(&service, &state);
+    let full_frame = match full {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected full-resolution still frame"),
+    };
+    assert_eq!((full_frame.width, full_frame.height), (1920, 1080));
+
+    set_scale(&mut state, 0.5);
+    let half = execute_gpu_preview_for_test_app(&service, &state);
+    let half_frame = match half {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected re-evaluated still frame after resolution change"),
+    };
+    assert_eq!((half_frame.width, half_frame.height), (960, 540));
+}
+
 fn playback_presentation_ticket_for_state<O: Clone>(
     runtime: &PreviewProductionRuntime<O>,
     state: &AppState,
