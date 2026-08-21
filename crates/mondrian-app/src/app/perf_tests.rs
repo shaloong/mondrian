@@ -3248,6 +3248,192 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "development preview media resolution-scale decode stability smoke; run manually"]
+fn preview_media_resolution_scale_decode_stability_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let ready_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_RESOLUTION_SCALE_READY_TIMEOUT_MS",
+        30_000,
+    ) as u64);
+    let seek_frames_per_scale =
+        env_usize_clamped("MONDRIAN_PREVIEW_RESOLUTION_SCALE_SEEKS", 8, 2, 24);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_resolution_scale_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let video_path = root_dir.join("preview-resolution-scale-smoke.mp4");
+
+    if !generate_preview_media_fixture_with_size(&video_path, 640, 360, 2)? {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_resolution_scale_decode_stability\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
+        );
+        let _ = fs::remove_dir_all(&root_dir);
+        return Ok(());
+    }
+
+    let result = run_preview_media_resolution_scale_decode_stability_probe(
+        &root_dir,
+        &video_path,
+        seek_frames_per_scale,
+        ready_timeout,
+    );
+    let _ = fs::remove_dir_all(&root_dir);
+
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+
+    anyhow::ensure!(
+        report.passed,
+        "preview media resolution-scale decode stability smoke failed: {report_json}"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewMediaResolutionScalePhaseEvidence {
+    resolution_scale: f32,
+    output_width: u32,
+    output_height: u32,
+    presented_frames: usize,
+    decode_decoded_frame_count: u64,
+    decode_random_access_still_frames: u64,
+    decode_seeked_frames: u64,
+    decoded_frame_delta_from_warm: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewMediaResolutionScaleDecodeStabilityReport {
+    scenario: &'static str,
+    source_width: u32,
+    source_height: u32,
+    sequence_frame_count: usize,
+    seek_frames_per_scale: usize,
+    phases: Vec<PreviewMediaResolutionScalePhaseEvidence>,
+    passed: bool,
+}
+
+/// Stage-2/3 regression probe for the DecodeRepresentation contract: with real
+/// media, switching the authored preview resolution scale (output extent) must
+/// only change the composition/render target. The decode identity and the
+/// decoded-frame residency are source-representation state, so replaying the
+/// same frames at 1.0 -> 0.5 -> 0.25 must not consume one more decoded frame.
+fn run_preview_media_resolution_scale_decode_stability_probe(
+    root_dir: &Path,
+    video_path: &Path,
+    seek_frames_per_scale: usize,
+    ready_timeout: Duration,
+) -> anyhow::Result<PreviewMediaResolutionScaleDecodeStabilityReport> {
+    let media_info = probe_media_info(video_path)
+        .with_context(|| format!("probe resolution-scale media {}", video_path.display()))?;
+    let source_video = media_info
+        .primary_video()
+        .context("resolution-scale fixture has no primary video stream")?;
+    let source_width = source_video.width;
+    let source_height = source_video.height;
+    let sequence_frame_count = source_video
+        .total_frames
+        .and_then(|frames| usize::try_from(frames).ok())
+        .unwrap_or(60)
+        .clamp(seek_frames_per_scale.saturating_add(2), 60);
+    let mut state = build_preview_media_perf_state_with_media_info(
+        root_dir,
+        video_path,
+        Some(media_info),
+        sequence_frame_count,
+    )?;
+    let preview_service = HeadlessPreviewRuntime::new();
+    let mut gpu_adapter =
+        HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(
+            PreviewNativeVideoGpuTimingPolicy::Disabled.renderer_policy(),
+            0,
+        )
+        .context("create real headless Viewer GPU Adapter")?;
+    configure_headless_gpu_decode_admission(&preview_service, &mut gpu_adapter);
+    let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
+    let sequence_id = state
+        .active_sequence_id()
+        .context("resolution-scale probe has no active Sequence")?;
+
+    let scales = [1.0_f32, 0.5, 0.25];
+    let target_span = sequence_frame_count.saturating_sub(1);
+    let mut phases = Vec::with_capacity(scales.len());
+    let mut warm_decoded_frames = None;
+
+    state.seek(0)?;
+    for scale in scales {
+        state.commit_sequence_edit(sequence_id, "修改预览分辨率", |sequence| {
+            let mut settings = sequence.settings.clone();
+            settings.preview.resolution_scale = scale;
+            sequence.apply_settings(settings)
+        })?;
+        let output = crate::app::preview_quality::preview_execution_resolution(
+            state
+                .active_sequence()
+                .context("resolution-scale probe lost its active Sequence")?
+                .settings
+                .resolution,
+            scale,
+            mondrian_playback::PreviewResolutionScale::Full,
+        );
+        for index in 0..seek_frames_per_scale {
+            let target = index
+                .saturating_add(1)
+                .saturating_mul(target_span)
+                .checked_div(seek_frames_per_scale.saturating_add(1))
+                .unwrap_or(0);
+            let source = if index % 2 == 0 {
+                TimelineSeekSource::PointerDrag
+            } else {
+                TimelineSeekSource::Settled
+            };
+            state.seek_with_source(target as i64, source)?;
+            wait_for_headless_gpu_ready(
+                &preview_service,
+                &mut state,
+                &mut gpu_adapter,
+                &mut gpu_summary,
+                ready_timeout,
+            )?;
+        }
+        wait_for_preview_work_quiescence(&preview_service, &mut state, ready_timeout)?;
+        let diagnostics = preview_service.diagnostics();
+        let decoded = diagnostics.decode_decoded_frame_count;
+        let warm = *warm_decoded_frames.get_or_insert(decoded);
+        phases.push(PreviewMediaResolutionScalePhaseEvidence {
+            resolution_scale: scale,
+            output_width: output.width,
+            output_height: output.height,
+            presented_frames: seek_frames_per_scale,
+            decode_decoded_frame_count: decoded,
+            decode_random_access_still_frames: diagnostics.decode_random_access_still_frames,
+            decode_seeked_frames: diagnostics.decode_seeked_frames,
+            decoded_frame_delta_from_warm: decoded.saturating_sub(warm),
+        });
+    }
+
+    let warm_decoded =
+        warm_decoded_frames.context("resolution-scale probe recorded no warm phase")?;
+    let extents_changed = phases.windows(2).all(|pair| {
+        (pair[0].output_width, pair[0].output_height)
+            != (pair[1].output_width, pair[1].output_height)
+    });
+    let decode_stable = phases.iter().skip(1).all(|phase| phase.decoded_frame_delta_from_warm == 0);
+    let passed = warm_decoded > 0 && extents_changed && decode_stable;
+    Ok(PreviewMediaResolutionScaleDecodeStabilityReport {
+        scenario: "preview_media_resolution_scale_decode_stability",
+        source_width,
+        source_height,
+        sequence_frame_count,
+        seek_frames_per_scale,
+        phases,
+        passed,
+    })
+}
+
+#[test]
 #[ignore = "manual bounded product-audio source smoke; requires real external media"]
 fn audio_bounded_source_external_render_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");
@@ -7323,6 +7509,15 @@ fn build_app_ui_perf_state(
 }
 
 fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
+    generate_preview_media_fixture_with_size(path, 320, 180, 2)
+}
+
+fn generate_preview_media_fixture_with_size(
+    path: &Path,
+    width: u32,
+    height: u32,
+    duration_secs: u32,
+) -> anyhow::Result<bool> {
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return Ok(false);
     }
@@ -7335,7 +7530,9 @@ fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
         .arg("-f")
         .arg("lavfi")
         .arg("-i")
-        .arg("testsrc2=size=320x180:rate=30:duration=2")
+        .arg(format!(
+            "testsrc2=size={width}x{height}:rate=30:duration={duration_secs}"
+        ))
         .arg("-an")
         .arg("-c:v")
         .arg("mpeg4")
