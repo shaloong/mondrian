@@ -949,7 +949,21 @@ where
     I: Send + 'static,
     D: ViewerGpuDeviceWait<I>,
 {
-    while let Ok(command) = command_receiver.recv() {
+    // Idle pacing: wgpu invokes `on_submitted_work_done` callbacks only from
+    // `Device::poll`. If a submission was registered while the worker had no
+    // pending command, the callback would otherwise stay staged forever and
+    // its completion notice would never reach the submission lifecycle. Keep
+    // polling on a bounded idle cadence so an already-completed submission
+    // still releases through its authoritative callback.
+    loop {
+        let command = match command_receiver.recv_timeout(policy.wait_quantum) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = driver.wait(None, policy.wait_quantum);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match command {
             ViewerGpuDeviceProgressCommand::Track {
                 submission_id,
@@ -1004,6 +1018,7 @@ fn drive_viewer_gpu_submission<I, D>(
 {
     let mut exact_wait = true;
     let mut terminal_reported = false;
+    let mut fence_satisfied = false;
 
     loop {
         if let Some(terminal) = health.terminal() {
@@ -1034,10 +1049,13 @@ fn drive_viewer_gpu_submission<I, D>(
         match wait {
             Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut)) => {}
             Ok(Ok(ViewerGpuDeviceWaitStatus::Satisfied)) => {
-                // If the callback was conservatively bound to a later shared
-                // queue submission, continue bounded latest-submission waits
-                // until its cleanup ticket appears.
+                // The fence is the authoritative GPU completion evidence:
+                // wgpu reports `WaitSucceeded` only after the exact submission
+                // finished executing. `fence_satisfied` records that fact; the
+                // post-poll barrier below publishes it, while a device-loss
+                // terminal observed from the same poll still dominates.
                 exact_wait = false;
+                fence_satisfied = true;
             }
             Ok(Err(reason)) => {
                 let terminal =
@@ -1098,7 +1116,12 @@ fn drive_viewer_gpu_submission<I, D>(
         // `Device::poll` is on this stack. Observe that release before pacing;
         // otherwise every already-complete frame pays an artificial full
         // wait quantum and 60 fps playback loses almost half its frame budget.
-        if callback_observed.load(Ordering::Acquire) {
+        // The bounded wait's `WaitSucceeded` fence result is also authoritative
+        // GPU completion evidence: publish it even when the supplementary
+        // callback races or lags this poll (wgpu 30 defers callback delivery),
+        // otherwise the completion notice stays stranded behind an unavailable
+        // callback and the quarantine deadline revokes the retained output.
+        if callback_observed.load(Ordering::Acquire) || fence_satisfied {
             // A progress failure still forbids publication, but this exact
             // post-poll callback lets the Adapter retire its quarantined
             // lifecycle owner. Actual device loss returned above instead.

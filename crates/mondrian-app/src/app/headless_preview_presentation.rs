@@ -159,6 +159,14 @@ pub(crate) fn present_headless_preview_candidate_at(
     if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
         return Ok(candidate);
     }
+    // The transport reached its natural end: no next frame demand will ever
+    // promote a prepared successor, so release its retained capacity-one
+    // physical lease. Otherwise it reports as a second live presentation
+    // output and rejects every later ordinary record with a
+    // presentation-capacity Backpressure.
+    if state.playback_engine.snapshot().state == mondrian_playback::TransportState::Ended {
+        gpu.clear_prepared_physical_output();
+    }
     // Reconfiguration may trim pools still referenced by the capacity-one
     // submission owner. A pending callback is ordinary bounded pressure, not
     // an Adapter failure. The App/Preview authorities above have retained the
@@ -261,6 +269,15 @@ pub(crate) fn present_headless_preview_candidate_at(
                         FramePresentationDisposition::NoDemand => None,
                         _ => unreachable!("matched presentable disposition"),
                     };
+                    // An ordinary Ready publication replaces the visible
+                    // output without going through the Current-candidate
+                    // promotion seam (for example the first presentation after
+                    // the transport reached its natural end). Promote an exact
+                    // same-key prepared successor now, otherwise its retained
+                    // capacity-one physical lease stays in the prepared slot
+                    // and reports as a second live presentation output that
+                    // rejects every later ordinary record.
+                    gpu.promote_prepared_successor(&submitted_output_key);
                     preview.try_release_settled_transport_media_residency();
                     observe_playback_video_preroll(state, preview);
                     Ok(HeadlessPreviewCandidate::Ready {
@@ -390,6 +407,17 @@ pub(crate) fn prepare_headless_preview_successor(
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
         return Ok(None);
     };
+    // A successor beyond the last content frame can never be promoted to the
+    // visible slot: after the transport reaches its natural end no next frame
+    // demand exists, so the retained prepared publication would occupy its
+    // capacity-one physical lease forever. That stale lease then reports as a
+    // second live presentation output and rejects every later ordinary record
+    // with a presentation-capacity Backpressure. Do not prepare out-of-content
+    // successors at all.
+    let successor_frame = request.snapshot().transport().current_frame();
+    if state.last_content_frame().is_ok_and(|last| successor_frame > last) {
+        return Ok(None);
+    }
     let playback_intent = request.snapshot().transport().playback_intent();
     match preview.gpu_preview_frame(request) {
         PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),

@@ -936,6 +936,7 @@ impl ViewerHeterogeneousGpuSubmissionBatch {
 
 /// Exact completion evidence for every heterogeneous continuation in one
 /// Viewer candidate.
+#[derive(Default)]
 pub struct ViewerHeterogeneousGpuCompletedBatch {
     continuations: Vec<HeterogeneousGpuCompletedContinuation>,
 }
