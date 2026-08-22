@@ -22,6 +22,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
+  # Keep the Windows native dependency ABI identical to CI and fail closed if
+  # the registry tag ever stops resolving to the reviewed commit.
+  VCPKG_REF: "2025.12.12"
+  VCPKG_COMMIT: "84bab45d415d22042bd0b9081aea57f362da3f35"
   # 启用包级别 LTO，提升发布构建质量
   CARGO_PROFILE_RELEASE_LTO: "thin"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
@@ -101,19 +105,25 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-release-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-release-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-release-
-            ${{ runner.os }}-vcpkg-ffmpeg-
+            ${{ runner.os }}-vcpkg-ffmpeg-release-${{ env.VCPKG_COMMIT }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not (Test-Path C:\vcpkg)) {
-            git clone https://github.com/microsoft/vcpkg C:\vcpkg
-            & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            git clone --branch $env:VCPKG_REF --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+          } else {
+            git -C C:\vcpkg fetch --depth 1 origin "refs/tags/$env:VCPKG_REF"
+            git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
+          $resolvedCommit = git -C C:\vcpkg rev-parse HEAD
+          if ($resolvedCommit -ne $env:VCPKG_COMMIT) {
+            throw "vcpkg ref resolved to $resolvedCommit, expected $env:VCPKG_COMMIT"
+          }
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'
@@ -160,7 +170,11 @@ jobs:
           }
 
           pkg-config --version
-          pkg-config --modversion libavcodec
+          $avcodecVersion = (pkg-config --modversion libavcodec).Trim()
+          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^61\.') {
+            throw "Expected FFmpeg 7 libavcodec ABI 61, found '$avcodecVersion'"
+          }
+          Write-Host "libavcodec $avcodecVersion"
           pkg-config --modversion libavformat
           pkg-config --modversion libavfilter
           pkg-config --modversion libavdevice
