@@ -139,12 +139,14 @@ jobs:
           }
 
           $pathLine = $lines | Where-Object {
-            $_.StartsWith('PATH=', [System.StringComparison]::Ordinal)
+            $_.StartsWith('PATH=', [System.StringComparison]::OrdinalIgnoreCase) -and
+            $_.Contains($compilerDirectory, [System.StringComparison]::OrdinalIgnoreCase)
           } | Select-Object -First 1
           if ([string]::IsNullOrWhiteSpace($pathLine)) {
-            throw 'VsDevCmd did not define PATH.'
+            throw 'VsDevCmd did not add the discovered x64 compiler to PATH.'
           }
-          foreach ($entry in $pathLine.Substring(5).Split(';')) {
+          $pathValue = $pathLine.Substring($pathLine.IndexOf('=') + 1)
+          foreach ($entry in $pathValue.Split(';')) {
             if (-not [string]::IsNullOrWhiteSpace($entry)) {
               $entry | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
             }
