@@ -567,6 +567,15 @@ with source replacement therefore returns typed
 reusable Session can be published. An incomplete revision may still open a
 non-file source, but cannot authorize Session or cache reuse.
 
+Packaged worker discovery is a production admission requirement, not a hint.
+An explicitly configured worker path that is missing, or a product/test layout
+without the packaged `mondrian` executable, prevents media decode workers from
+starting and closes their scheduler. Timeline evaluation then returns a typed
+`MediaDecode` failure while non-media UI remains available. Production never
+falls back to the direct `AVFormatContext` Adapter merely because discovery
+failed; that Adapter remains reachable only through explicitly unconfigured
+media tests and diagnostics.
+
 Helper execution evidence is part of the existing per-worker
 `PreviewDecodeExecutionObserver`, not a global process Registry or an App-owned
 reconstruction. Every successful spawn creates one single-owner lifecycle

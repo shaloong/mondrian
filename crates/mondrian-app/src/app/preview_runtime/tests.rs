@@ -278,7 +278,10 @@ fn cancellation_evidence(
 
 #[test]
 fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
-    let runtime = PreviewProductionRuntime::<()>::with_worker_count(preview_decode_cpu_budget(), 2);
+    let runtime = PreviewProductionRuntime::<()>::with_direct_worker_count_for_test(
+        preview_decode_cpu_budget(),
+        2,
+    );
     let watch = runtime.decode_execution_watch();
     let diagnostics = runtime.diagnostics();
 
@@ -10662,7 +10665,8 @@ fn terminal_media_worker_health_refuses_new_pending_admission() {
 
 #[test]
 fn configured_media_result_disconnect_fails_pending_demand_once_and_closes_admission() {
-    let service = WindowPreviewAdapter::with_worker_count(preview_decode_cpu_budget(), 1);
+    let service =
+        WindowPreviewAdapter::with_direct_worker_count_for_test(preview_decode_cpu_budget(), 1);
     let (disconnected_sender, disconnected_receiver) =
         mpsc::sync_channel(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
     service.results.replace(disconnected_receiver);
