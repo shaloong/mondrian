@@ -182,6 +182,8 @@ fn normal_blend(src: vec4<f32>, dst: vec4<f32>) -> vec4<f32> {
 | 帧预渲染队列        | 播放时提前预渲染 4 帧（lookahead）      |
 | Compute Shader 并行 | 多个效果节点并行执行 compute pass       |
 
+渲染缓存使用仍受安全公告支持的 `lru` 版本；依赖升级不得改变显存预算、淘汰顺序或缓存键语义，并由渲染测试与 `cargo deny` 同时把关。
+
 ---
 
 ## 7. 色彩管理
