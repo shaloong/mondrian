@@ -1555,6 +1555,14 @@ proved output after media release, while any authoring, display, color-config,
 seek, or transport discontinuity must re-evaluate and cannot revive stale
 media semantics.
 
+Regression coverage for play/pause generation rollover establishes a paused
+transport at an exact frame before sampling the evaluation working set. A
+Stopped-to-Playing action intentionally restarts at frame zero, so it is a
+semantic coordinate change and must not be used as evidence that scheduling
+generation alone preserves a frame evaluation. Transport actions in this
+coverage must succeed explicitly; an ignored action failure is not a valid
+cache-reuse observation.
+
 `app::preview_frame_store::PreviewFrameStoreAdapter` is the sole Frame Store
 policy Adapter inside the Preview Production Runtime. It computes exact
 `MediaPreviewFrame` host-byte/native-resource reservations, admits the validated

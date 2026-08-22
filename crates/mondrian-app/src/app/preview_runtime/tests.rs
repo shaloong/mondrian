@@ -139,12 +139,19 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
     // stays identical, so the working set serves the same evaluation and
     // produced-candidate authority stays generation-scoped.
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    // `play` from Stopped intentionally restarts at frame zero. Establish a
+    // paused transport at the fixture's exact frame so this test varies only
+    // scheduling generation, never semantic frame content.
+    state.play().expect("start transport fixture");
+    state.pause().expect("pause transport fixture");
+    state.seek(4).expect("restore exact fixture frame");
     let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
     let before = evaluation_resolve_count(&runtime);
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
 
-    let _ = state.play();
+    state.play().expect("play from the paused fixture frame");
+    assert_eq!(state.current_frame(), 4);
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(
         evaluation_resolve_count(&runtime) - before,
@@ -152,7 +159,8 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
         "generation rollover on play must reuse the semantically valid evaluation"
     );
 
-    let _ = state.pause();
+    state.pause().expect("pause on the same fixture frame");
+    assert_eq!(state.current_frame(), 4);
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(
         evaluation_resolve_count(&runtime) - before,
