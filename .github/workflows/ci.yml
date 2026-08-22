@@ -9,10 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # ffmpeg-next 8.1 targets the FFmpeg 6 ABI. Bind the newest compatible
-  # registry tag to its commit so runner or tag drift cannot select ABI 7/8.
-  VCPKG_REF: "2024.07.12"
-  VCPKG_COMMIT: "1de2026f28ead93ff1773e6e680387643e914ea1"
+  # Use a modern registry/toolchain while vcpkg.json locks ffmpeg-next 8.1 to
+  # the compatible FFmpeg 6 ABI. The tag is verified against this commit.
+  VCPKG_REF: "2026.07.29"
+  VCPKG_COMMIT: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
@@ -165,9 +165,9 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock', 'vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-
+            ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -196,8 +196,12 @@ jobs:
           if (Test-Path $ffmpegInstall) {
             Write-Host '✓ FFmpeg already cached and installed, skipping vcpkg install'
           } else {
-            Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
-            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+            Write-Host 'Installing manifest-locked FFmpeg via vcpkg...'
+            & C:\vcpkg\vcpkg.exe install `
+              --triplet x64-windows `
+              --x-manifest-root=$PWD `
+              --x-install-root=C:\vcpkg\installed
+            if ($LASTEXITCODE -ne 0) { throw 'vcpkg FFmpeg installation failed' }
           }
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'

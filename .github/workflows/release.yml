@@ -22,10 +22,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
-  # Keep the Windows native dependency ABI identical to CI and fail closed if
-  # the registry tag ever stops resolving to the reviewed commit.
-  VCPKG_REF: "2024.07.12"
-  VCPKG_COMMIT: "1de2026f28ead93ff1773e6e680387643e914ea1"
+  # Keep the modern Windows registry identical to CI; vcpkg.json locks the
+  # native FFmpeg ABI and the tag must resolve to this reviewed commit.
+  VCPKG_REF: "2026.07.29"
+  VCPKG_COMMIT: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   # 启用包级别 LTO，提升发布构建质量
   CARGO_PROFILE_RELEASE_LTO: "thin"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
@@ -105,9 +105,9 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-release-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock', 'vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-release-${{ env.VCPKG_COMMIT }}-
+            ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -136,8 +136,12 @@ jobs:
           if (Test-Path $ffmpegInstall) {
             Write-Host 'FFmpeg already cached and installed, skipping vcpkg install'
           } else {
-            Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
-            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+            Write-Host 'Installing manifest-locked FFmpeg via vcpkg...'
+            & C:\vcpkg\vcpkg.exe install `
+              --triplet x64-windows `
+              --x-manifest-root=$PWD `
+              --x-install-root=C:\vcpkg\installed
+            if ($LASTEXITCODE -ne 0) { throw 'vcpkg FFmpeg installation failed' }
           }
 
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
