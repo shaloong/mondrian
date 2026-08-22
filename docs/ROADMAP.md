@@ -198,6 +198,10 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
 
 ### 5.6 Windows 发布工程
 
+- **已建立的发布前置门禁：** `windows-commercial-engine-v1` 把精确、干净、可信分支源码与
+  Complete Golden 三连跑、真实 4K Main10 Video 和 30 分钟 CPAL A/V Playback 证据封装为
+  可复验哈希制品；Release 对缺失、过期或不匹配证据 fail-closed。它只证明 Windows 引擎候选，
+  在下述候选包闭环完成前 GitHub Release 必须保持 draft，Linux/macOS 不生成发布制品。
 - 建立安装、升级、回滚、卸载、文件关联、离线运行、依赖许可、crash dump、日志脱敏和
   诊断包；候选包必须可复现并绑定源码、工具链、配置与资产清单。
 - 覆盖 Intel/AMD/NVIDIA、集显/独显、常见声卡和显示缩放；Unsupported 原生路径要回到已验证

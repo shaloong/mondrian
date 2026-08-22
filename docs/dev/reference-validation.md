@@ -100,11 +100,37 @@ mutable or “latest” URLs are prohibited.
 3. `Release` has the same asset strictness and additionally requires three
    consecutive Golden Project passes plus export/reimport and recovery evidence.
 
+The source-qualified Windows release engine is governed by
+`tests/validation/windows-commercial-engine.json`. A trusted manual run of
+`.github/workflows/windows-commercial-engine.yml` checks out one exact
+`main`/`develop` commit on the prepared reference machine, runs the complete
+three-pass Golden gate and the full Video+Audio Playback gate, then seals the two
+baseline-eligible reports and their hashes into one artifact. Release rejects an
+artifact whose source SHA, contract hash, report hashes, exact gate set, machine
+qualification, diagnostic flags, or executable identity do not match.
+
+This is an engine qualification, not a candidate-package qualification. Until
+the Windows clean-machine installation/upgrade/rollback/uninstall loop in M2 is
+implemented, GitHub Release remains a draft. Linux and macOS remain ordinary CI
+targets and are not emitted as release artifacts before their M4 real-machine
+qualification exists.
+
 Run manifest validation:
 
 ```powershell
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Nightly -Scope Playback
+```
+
+After both baseline gates have run for the same clean source, the sealing step
+used by the reference workflow can also be reproduced locally:
+
+```powershell
+pwsh -File scripts/validation/resolve-commercial-engine-evidence.ps1 `
+  -GoldenReportPath <complete-golden-consecutive-report.json> `
+  -PlaybackReportPath <playback-evidence.json> `
+  -OutputDirectory target/validation/sealed-commercial-engine `
+  -ExpectedSourceSha <40-character-git-sha>
 ```
 
 Inspect the current top-level Golden coverage ledger without generating media:

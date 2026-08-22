@@ -32,10 +32,10 @@ env:
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
 
 jobs:
-  # A tag is only a name. Release authority comes from a successful CI run for
-  # the exact immutable source SHA on a protected integration branch.
+  # A tag is only a name. Release authority comes from successful CI plus sealed
+  # Windows reference evidence for the exact immutable source SHA.
   qualification:
-    name: qualify / exact-source-ci
+    name: qualify / exact-source-commercial-engine
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -43,6 +43,8 @@ jobs:
     outputs:
       ci_run_id: ${{ steps.ci.outputs.run_id }}
       ci_run_url: ${{ steps.ci.outputs.run_url }}
+      commercial_run_id: ${{ steps.commercial.outputs.run_id }}
+      commercial_run_url: ${{ steps.commercial.outputs.run_url }}
     steps:
       - uses: actions/checkout@v7
 
@@ -79,6 +81,60 @@ jobs:
             Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           Write-Host "Qualified source SHA $env:GITHUB_SHA with CI run $($qualified.url)"
 
+      - name: Require sealed Windows commercial engine evidence
+        id: commercial
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runs = @(
+            gh run list `
+              --workflow windows-commercial-engine.yml `
+              --status success `
+              --limit 100 `
+              --json databaseId,headBranch,event,conclusion,url,createdAt |
+              ConvertFrom-Json
+          )
+          $candidates = @(
+            $runs | Where-Object {
+              $_.event -eq 'workflow_dispatch' -and
+              $_.headBranch -in @('main', 'develop') -and
+              $_.conclusion -eq 'success'
+            } | Sort-Object createdAt -Descending
+          )
+          $qualified = $null
+          $evidenceDirectory = Join-Path $PWD 'target/release-commercial-evidence'
+          foreach ($candidate in $candidates) {
+            if (Test-Path -LiteralPath $evidenceDirectory) {
+              Remove-Item -LiteralPath $evidenceDirectory -Recurse -Force
+            }
+            New-Item -ItemType Directory -Path $evidenceDirectory | Out-Null
+            gh run download $candidate.databaseId `
+              --name "windows-commercial-engine-$env:GITHUB_SHA" `
+              --dir $evidenceDirectory 2>$null
+            if ($LASTEXITCODE -ne 0) { continue }
+            try {
+              pwsh -File scripts/validation/resolve-commercial-engine-evidence.ps1 `
+                -EvidenceDirectory $evidenceDirectory `
+                -ExpectedSourceSha $env:GITHUB_SHA
+              if ($LASTEXITCODE -eq 0) {
+                $qualified = $candidate
+                break
+              }
+            } catch {
+              Write-Warning "Rejected commercial evidence from run $($candidate.databaseId): $($_.Exception.Message)"
+            }
+          }
+          if ($null -eq $qualified) {
+            throw "No valid sealed Windows commercial engine evidence exists for source SHA $env:GITHUB_SHA."
+          }
+
+          "run_id=$($qualified.databaseId)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "run_url=$($qualified.url)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Qualified source SHA $env:GITHUB_SHA with Windows reference run $($qualified.url)"
+
   # ─────────────────────────────────────────────────────────────────────────
   # 构建矩阵：每个 Job 构建一个目标平台
   # ─────────────────────────────────────────────────────────────────────────
@@ -90,28 +146,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64（原生）
-          - label: linux-x86_64-gnu
-            artifact_platform: linux
-            artifact_arch: x64
-            # Build on the oldest supported glibc baseline. A binary linked on
-            # ubuntu-latest can silently stop launching on Ubuntu 22.04 even
-            # when every non-system shared object is bundled correctly.
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            ext: tar.gz
-
-          # macOS ARM64（原生）
-          - label: macos-aarch64-darwin
-            artifact_platform: darwin
-            artifact_arch: arm64
-            # Pin the oldest standard Apple-Silicon image used by the product
-            # baseline; do not let the SDK and Homebrew runtime drift via latest.
-            os: macos-14
-            target: aarch64-apple-darwin
-            ext: tar.gz
-
-          # Windows x86_64（原生）
+          # Windows is the only current release target with a versioned reference
+          # machine and real-device engine qualification contract. Linux/macOS
+          # remain CI targets until their M4 release qualification exists.
           - label: windows-x86_64-msvc
             artifact_platform: win32
             artifact_arch: x64
@@ -293,6 +330,11 @@ jobs:
             trusted_ci = [ordered]@{
               run_id = '${{ needs.qualification.outputs.ci_run_id }}'
               run_url = '${{ needs.qualification.outputs.ci_run_url }}'
+            }
+            commercial_engine_qualification = [ordered]@{
+              run_id = '${{ needs.qualification.outputs.commercial_run_id }}'
+              run_url = '${{ needs.qualification.outputs.commercial_run_url }}'
+              contract = 'windows-commercial-engine-v1'
             }
             release_workflow = [ordered]@{
               run_id = '${{ github.run_id }}'
@@ -545,7 +587,10 @@ jobs:
             dist/**/*
             SHA256SUMS
           generate_release_notes: true
-          draft: false
+          # Installation/upgrade/uninstall clean-machine qualification is still
+          # open. Keep artifacts reviewable but never publicly claim commercial
+          # release readiness until that candidate-package gate exists.
+          draft: true
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
           fail_on_unmatched_files: true
         env:

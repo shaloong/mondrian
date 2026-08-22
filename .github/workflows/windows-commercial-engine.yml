@@ -1,0 +1,124 @@
+name: Windows Commercial Engine Qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact 40-character main/develop commit to qualify"
+        required: true
+        type: string
+      machine_id:
+        description: "Opaque ID of the prepared Windows reference machine"
+        required: true
+        type: string
+      regenerate_generated_fixtures:
+        description: "Regenerate the versioned playback fixtures before qualification"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: windows-commercial-engine-reference
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: qualify / windows-reference-engine
+    runs-on: [self-hosted, Windows, X64, mondrian-reference]
+    # Cold release builds plus two independently bounded 45-minute playback
+    # observations can legitimately exceed three hours on the reference host.
+    timeout-minutes: 360
+    env:
+      QUALIFICATION_SOURCE_SHA: ${{ inputs.source_sha }}
+      QUALIFICATION_MACHINE_ID: ${{ inputs.machine_id }}
+      QUALIFICATION_REGENERATE_FIXTURES: ${{ inputs.regenerate_generated_fixtures }}
+      QUALIFICATION_WORKFLOW_BRANCH: ${{ github.ref_name }}
+    steps:
+      - name: Require a trusted workflow branch
+        shell: pwsh
+        run: |
+          if ($env:QUALIFICATION_WORKFLOW_BRANCH -notin @('main', 'develop')) {
+            throw 'Commercial qualification must be dispatched from main or develop.'
+          }
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+
+      - name: Attest exact trusted source
+        shell: pwsh
+        run: |
+          $sourceSha = $env:QUALIFICATION_SOURCE_SHA.ToLowerInvariant()
+          if ($sourceSha -notmatch '^[0-9a-f]{40}$') {
+            throw 'source_sha must be one exact 40-character commit.'
+          }
+          $headSha = (git rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $headSha -ne $sourceSha) {
+            throw "Checkout resolved '$headSha', expected '$sourceSha'."
+          }
+          git fetch --no-tags origin main develop
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot fetch trusted branches.' }
+          git merge-base --is-ancestor $sourceSha origin/main
+          $onMain = $LASTEXITCODE -eq 0
+          git merge-base --is-ancestor $sourceSha origin/develop
+          $onDevelop = $LASTEXITCODE -eq 0
+          if (-not $onMain -and -not $onDevelop) {
+            throw 'The requested source is not reachable from main or develop.'
+          }
+          if (@(git status --porcelain --untracked-files=normal).Count -ne 0) {
+            throw 'Commercial qualification requires a clean checkout.'
+          }
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+
+      - name: Run three-pass Complete Golden gate
+        shell: pwsh
+        run: |
+          pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1 `
+            -RunRoot 'target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/golden'
+          if ($LASTEXITCODE -ne 0) { throw 'Complete Golden gate failed.' }
+
+      - name: Run complete real-device Playback gate
+        shell: pwsh
+        run: |
+          $parameters = @{
+            MachineId = $env:QUALIFICATION_MACHINE_ID
+            Gate = 'All'
+            RunRoot = 'target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback'
+          }
+          if ($env:QUALIFICATION_REGENERATE_FIXTURES -eq 'true') {
+            $parameters.RegenerateGeneratedFixtures = $true
+          }
+          & scripts/validation/invoke-playback-reference-gates.ps1 @parameters
+          if ($LASTEXITCODE -ne 0) { throw 'Playback reference gate failed.' }
+
+      - name: Seal exact-source evidence
+        shell: pwsh
+        run: |
+          $root = 'target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}'
+          $golden = @(Get-ChildItem "$root/golden" -Recurse -Filter 'complete-golden-consecutive-report.json')
+          $playback = @(Get-ChildItem "$root/playback" -Recurse -Filter 'evidence.json')
+          if ($golden.Count -ne 1 -or $playback.Count -ne 1) {
+            throw "Expected one Golden and one Playback report; found $($golden.Count) and $($playback.Count)."
+          }
+          pwsh -File scripts/validation/resolve-commercial-engine-evidence.ps1 `
+            -GoldenReportPath $golden[0].FullName `
+            -PlaybackReportPath $playback[0].FullName `
+            -OutputDirectory "$root/sealed" `
+            -ExpectedSourceSha $env:QUALIFICATION_SOURCE_SHA
+          if ($LASTEXITCODE -ne 0) { throw 'Commercial engine evidence sealing failed.' }
+
+      - name: Upload sealed evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-commercial-engine-${{ inputs.source_sha }}
+          path: target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/sealed/
+          if-no-files-found: error
+          retention-days: 90
