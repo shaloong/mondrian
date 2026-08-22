@@ -96,6 +96,9 @@ git push origin v0.1.1
   `develop` 的 `push` CI 中完整成功的结果；找不到该运行时 fail-closed。
 - CI 与 Release 固定同一不可变 vcpkg registry tag、`Cargo.lock` 和
   `vcpkg-overlay` 内容，禁止从 vcpkg HEAD 隐式解析不同依赖图。
+- 所有外部 GitHub Action 必须固定到完整的 40 位提交 SHA；可在同行注释
+  人类可读版本，但禁止用 branch、tag 或 floating major 作为执行身份。
+  `scripts/validation/validate-github-actions-pins.ps1` 在 CI 中持续执行此契约。
 - 每个平台包内都包含 `RELEASE_PROVENANCE.json`，绑定 source SHA、可信 CI
   运行和 native dependency registry；GitHub Release 同时发布
   `SHA256SUMS`。

@@ -46,7 +46,7 @@ jobs:
       commercial_run_id: ${{ steps.commercial.outputs.run_id }}
       commercial_run_url: ${{ steps.commercial.outputs.run_url }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Require successful CI for this exact source SHA
         id: ci
@@ -159,15 +159,15 @@ jobs:
             ext: zip
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
 
@@ -191,7 +191,7 @@ jobs:
       - name: 缓存 vcpkg (Windows)
         if: runner.os == 'Windows'
         id: vcpkg-cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             C:\vcpkg\downloads
@@ -548,7 +548,7 @@ jobs:
           tar -czf "$PACKAGE_PATH" "$stage_dir"
 
       - name: 上传构建产物
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.artifact_meta.outputs.package_name }}
           path: ${{ steps.artifact_meta.outputs.package_path }}
@@ -566,10 +566,10 @@ jobs:
       contents: write
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 下载所有制品
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: dist/
 
@@ -581,7 +581,7 @@ jobs:
           find dist -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
 
       - name: 发布 / 上传 Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           files: |
             dist/**/*

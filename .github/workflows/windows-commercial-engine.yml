@@ -44,7 +44,7 @@ jobs:
             throw 'Commercial qualification must be dispatched from main or develop.'
           }
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
@@ -74,7 +74,7 @@ jobs:
           }
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: 1.97.1
 
@@ -116,7 +116,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Commercial engine evidence sealing failed.' }
 
       - name: Upload sealed evidence
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: windows-commercial-engine-${{ inputs.source_sha }}
           path: target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/sealed/
