@@ -202,11 +202,16 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
   Complete Golden 三连跑、真实 4K Main10 Video 和 30 分钟 CPAL A/V Playback 证据封装为
   可复验哈希制品；Release 对缺失、过期或不匹配证据 fail-closed。它只证明 Windows 引擎候选，
   在下述候选包闭环完成前 GitHub Release 必须保持 draft，Linux/macOS 不生成发布制品。
-- 建立安装、升级、回滚、卸载、文件关联、离线运行、依赖许可、crash dump、日志脱敏和
+- **已建立的 portable 候选门禁：** `windows-portable-candidate-v1` 只构建一次 ZIP，以
+  source/package/contract 哈希绑定身份，并由三个独立干净 `windows-2022` runner 验证同一字节、
+  隔离用户状态和净化 PATH 下的完整运行时。它不替代安装或产品工作流资格。
+- 建立安装、重装、失败回滚、卸载、文件关联、离线运行、依赖许可、crash dump、日志脱敏和
   诊断包；候选包必须可复现并绑定源码、工具链、配置与资产清单。
 - 覆盖 Intel/AMD/NVIDIA、集显/独显、常见声卡和显示缩放；Unsupported 原生路径要回到已验证
   Adapter 或明确阻止，不因驱动差异静默改变颜色、Alpha、时间或音频布局。
-- 建立 P0/P1 阻断、已知问题、迁移说明和回滚策略；每个候选按受影响范围重跑 source-attested gates。
+- 建立 P0/P1 阻断、已知问题、当前格式说明和回滚策略；第一版公开格式不承担未发行 alpha
+  格式迁移，公开 v1 以后所有兼容性变化再进入强制 migration/拒绝门禁。每个候选按受影响范围
+  重跑 source-attested gates。
 
 ### 5.7 M2 退出门槛
 
@@ -216,7 +221,7 @@ M2 把 M1 的可用闭环提升为可长期日用的 Windows Beta。顺序固定
   音频、UI、保存或当前帧。
 - 发布的颜色、音频、编码和容器目标均具备独立 reference/roundtrip/QC；Preview/Export 无已知
   P0/P1 语义分歧。
-- Windows 候选包在干净机器完成三轮安装→打开旧/新项目→编辑→恢复→双格式交付→卸载闭环，
+- Windows 候选包在干净机器完成三轮安装→创建/打开当前 schema 项目→编辑→恢复→双格式交付→卸载闭环，
   无已知 P0/P1，P2 有明确文档与规避方式。
 
 ---

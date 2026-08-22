@@ -547,20 +547,100 @@ jobs:
           env -i PATH=/usr/bin:/bin HOME="$HOME" "$executable_dir/mondrian" --verify-runtime
           tar -czf "$PACKAGE_PATH" "$stage_dir"
 
+      - name: 生成 Windows 候选包身份
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $package = Get-Item -LiteralPath $env:PACKAGE_PATH -ErrorAction Stop
+          $contractPath = 'tests/validation/windows-candidate-package.json'
+          $manifestPath = "$env:PACKAGE_PATH.candidate.json"
+          $manifest = [ordered]@{
+            schema_version = 1
+            contract = [ordered]@{
+              id = 'windows-portable-candidate-v1'
+              sha256 = (Get-FileHash -LiteralPath $contractPath -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
+            repository = '${{ github.repository }}'
+            source_sha = '${{ github.sha }}'
+            package = [ordered]@{
+              file_name = $package.Name
+              sha256 = (Get-FileHash -LiteralPath $package.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              size_bytes = $package.Length
+            }
+            build = [ordered]@{
+              workflow_run_id = '${{ github.run_id }}'
+              workflow_run_attempt = '${{ github.run_attempt }}'
+              runner_image = [string]$env:ImageOS
+              runner_image_version = [string]$env:ImageVersion
+            }
+            status = 'built'
+          }
+          $manifest | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath $manifestPath -Encoding utf8
+          "CANDIDATE_MANIFEST_PATH=$manifestPath" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: 上传构建产物
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ steps.artifact_meta.outputs.package_name }}
-          path: ${{ steps.artifact_meta.outputs.package_path }}
+          path: |
+            ${{ steps.artifact_meta.outputs.package_path }}
+            ${{ env.CANDIDATE_MANIFEST_PATH }}
           if-no-files-found: error
           retention-days: 30
+
+  # Build once, then qualify those exact immutable ZIP bytes on three independent
+  # clean hosted Windows runners. Each pass verifies the manifest/hash before it
+  # extracts or executes anything and retains source-bound evidence.
+  candidate-package:
+    name: candidate / clean-windows-${{ matrix.pass }}
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        pass: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: 下载唯一候选包
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: mondrian-*
+          path: candidate-dist/
+
+      - name: 验证同哈希候选包
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem -LiteralPath candidate-dist -Recurse -File -Filter '*.zip')
+          $manifests = @(Get-ChildItem -LiteralPath candidate-dist -Recurse -File -Filter '*.candidate.json')
+          if ($packages.Count -ne 1 -or $manifests.Count -ne 1) {
+            throw "Expected exactly one ZIP and one candidate manifest; found $($packages.Count) and $($manifests.Count)."
+          }
+          ./scripts/validation/verify-windows-candidate-package.ps1 `
+            -PackagePath $packages[0].FullName `
+            -ManifestPath $manifests[0].FullName `
+            -ExpectedSourceSha '${{ github.sha }}' `
+            -ExpectedRepository '${{ github.repository }}' `
+            -PassIndex ${{ matrix.pass }} `
+            -OutputPath 'target/validation/candidate/pass-${{ matrix.pass }}.json'
+
+      - name: 上传候选包资格证据
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-candidate-pass-${{ matrix.pass }}-${{ github.sha }}
+          path: target/validation/candidate/pass-${{ matrix.pass }}.json
+          if-no-files-found: error
+          retention-days: 90
 
   # ─────────────────────────────────────────────────────────────────────────
   # 发布 GitHub Release（在所有平台构建完成后执行）
   # ─────────────────────────────────────────────────────────────────────────
   release:
     name: publish / github-release
-    needs: build
+    needs: [build, candidate-package]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -571,6 +651,7 @@ jobs:
       - name: 下载所有制品
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
+          pattern: mondrian-*
           path: dist/
 
       - name: 列出制品
