@@ -78,6 +78,16 @@ jobs:
             throw 'Commercial qualification requires a clean checkout.'
           }
 
+      - name: Prefer Git Bash over WSL
+        shell: pwsh
+        run: |
+          $gitBashDirectory = Join-Path $env:ProgramFiles 'Git\bin'
+          $gitBash = Join-Path $gitBashDirectory 'bash.exe'
+          if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
+            throw "Git Bash is required at '$gitBash'."
+          }
+          $gitBashDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
