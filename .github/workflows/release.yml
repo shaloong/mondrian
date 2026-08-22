@@ -22,6 +22,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   BIN_NAME: mondrian
+  # Pin the immutable vcpkg registry release so CI and Release resolve the
+  # same native dependency graph instead of inheriting the registry HEAD.
+  VCPKG_REF: "2026.07.29"
   # Keep the produced Mach-O deployment contract independent of runner drift.
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   # 启用包级别 LTO，提升发布构建质量
@@ -29,11 +32,59 @@ env:
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
 
 jobs:
+  # A tag is only a name. Release authority comes from a successful CI run for
+  # the exact immutable source SHA on a protected integration branch.
+  qualification:
+    name: qualify / exact-source-ci
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      ci_run_id: ${{ steps.ci.outputs.run_id }}
+      ci_run_url: ${{ steps.ci.outputs.run_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Require successful CI for this exact source SHA
+        id: ci
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $runs = @(
+            gh run list `
+              --workflow ci.yml `
+              --commit $env:GITHUB_SHA `
+              --status success `
+              --limit 50 `
+              --json databaseId,headSha,headBranch,event,conclusion,url |
+              ConvertFrom-Json
+          )
+          $qualified = @(
+            $runs | Where-Object {
+              $_.headSha -eq $env:GITHUB_SHA -and
+              $_.event -eq 'push' -and
+              $_.headBranch -in @('main', 'develop') -and
+              $_.conclusion -eq 'success'
+            }
+          ) | Select-Object -First 1
+          if ($null -eq $qualified) {
+            throw "No successful trusted-branch CI run exists for source SHA $env:GITHUB_SHA."
+          }
+
+          "run_id=$($qualified.databaseId)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "run_url=$($qualified.url)" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Qualified source SHA $env:GITHUB_SHA with CI run $($qualified.url)"
+
   # ─────────────────────────────────────────────────────────────────────────
   # 构建矩阵：每个 Job 构建一个目标平台
   # ─────────────────────────────────────────────────────────────────────────
   build:
     name: build / ${{ matrix.label }}
+    needs: qualification
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -110,20 +161,21 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-release-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-release-
-            ${{ runner.os }}-vcpkg-ffmpeg-release-
-            ${{ runner.os }}-vcpkg-ffmpeg-
+            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not (Test-Path C:\vcpkg)) {
-            git clone https://github.com/microsoft/vcpkg C:\vcpkg
-            & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            git clone --branch $env:VCPKG_REF --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+          } else {
+            git -C C:\vcpkg fetch --depth 1 origin "refs/tags/$env:VCPKG_REF"
+            git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'
@@ -134,7 +186,18 @@ jobs:
 
           # Always reconcile the complete product runtime. A cached libavcodec.pc
           # does not prove CLI tools or Export's software encoders are present.
-          & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse
+          $install = {
+            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
+          }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & $install
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) {
+              Write-Host "vcpkg install attempt $attempt failed; retrying after $($attempt * 20)s"
+              Start-Sleep -Seconds ($attempt * 20)
+            }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg ffmpeg install failed after 3 attempts" }
 
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -219,6 +282,30 @@ jobs:
           "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
+      - name: 写入发行来源证明
+        shell: pwsh
+        run: |
+          $provenance = [ordered]@{
+            schema_version = 1
+            repository = '${{ github.repository }}'
+            source_sha = '${{ github.sha }}'
+            source_ref = '${{ github.ref }}'
+            trusted_ci = [ordered]@{
+              run_id = '${{ needs.qualification.outputs.ci_run_id }}'
+              run_url = '${{ needs.qualification.outputs.ci_run_url }}'
+            }
+            release_workflow = [ordered]@{
+              run_id = '${{ github.run_id }}'
+              run_attempt = '${{ github.run_attempt }}'
+            }
+            native_dependency_registry = [ordered]@{
+              vcpkg_ref = '${{ env.VCPKG_REF }}'
+              overlay_sha256 = '${{ hashFiles('vcpkg-overlay/**') }}'
+            }
+          }
+          $provenance | ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath RELEASE_PROVENANCE.json -Encoding utf8
+
       - name: 构建 release 二进制
         run: |
           cargo build --release --target ${{ matrix.target }} -p mondrian-app
@@ -263,6 +350,7 @@ jobs:
             Copy-Item -LiteralPath $source -Destination $stageDir -Force
           }
           Copy-Item -LiteralPath 'LICENSE' -Destination $stageDir -Force
+          Copy-Item -LiteralPath 'RELEASE_PROVENANCE.json' -Destination $stageDir -Force
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -version |
             Out-File -FilePath (Join-Path $stageDir 'MEDIA_RUNTIME_BUILD.txt') -Encoding utf8
           & (Join-Path $stageDir 'ffmpeg.exe') -hide_banner -buildconf |
@@ -299,6 +387,7 @@ jobs:
           cp -L "$(command -v ffmpeg)" "$stage_dir/ffmpeg"
           cp -L "$(command -v ffprobe)" "$stage_dir/ffprobe"
           cp LICENSE "$stage_dir/LICENSE"
+          cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
 
           for executable in "$stage_dir/mondrian" "$stage_dir/ffmpeg" "$stage_dir/ffprobe"; do
             while IFS= read -r dependency; do
@@ -367,6 +456,7 @@ jobs:
           cp -L "$(command -v ffmpeg)" "$executable_dir/ffmpeg"
           cp -L "$(command -v ffprobe)" "$executable_dir/ffprobe"
           cp LICENSE "$stage_dir/LICENSE"
+          cp RELEASE_PROVENANCE.json "$stage_dir/RELEASE_PROVENANCE.json"
           # One invocation is required: `-od` recreates the destination, so
           # invoking it once per executable would leave only the final tool's
           # dependency closure. Multiple `-x` inputs produce the union closure.
@@ -444,10 +534,16 @@ jobs:
       - name: 列出制品
         run: ls -lh dist/
 
+      - name: 生成发行制品校验和
+        run: |
+          find dist -type f -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+
       - name: 发布 / 上传 Release
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/**/*
+          files: |
+            dist/**/*
+            SHA256SUMS
           generate_release_notes: true
           draft: false
           prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}

@@ -228,6 +228,13 @@ pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1 `
   -FixtureRoot target/validation/golden-fixtures
 ```
 
+Baseline qualification is fail-closed: the repository must be clean at start
+and finish, the exact Git revision must remain unchanged, and the aggregate
+schema-v2 report records that revision plus the SHA-256 of the executable that
+produced all three reports. `-AllowDirtyDiagnostic` is available for local
+investigation, but its report is `passed-diagnostic` and never
+`baseline_eligible`.
+
 The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
 heavy stages, the Rust planner requires every fixture, operation, content item,

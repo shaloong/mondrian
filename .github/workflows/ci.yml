@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Keep native dependency resolution reproducible and identical to Release.
+  VCPKG_REF: "2026.07.29"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
@@ -185,19 +187,21 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v2-
-            ${{ runner.os }}-vcpkg-ffmpeg-
+            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not (Test-Path C:\vcpkg)) {
-            git clone https://github.com/microsoft/vcpkg C:\vcpkg
-            & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            git clone --branch $env:VCPKG_REF --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+          } else {
+            git -C C:\vcpkg fetch --depth 1 origin "refs/tags/$env:VCPKG_REF"
+            git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'

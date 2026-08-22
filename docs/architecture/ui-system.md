@@ -737,7 +737,11 @@ after one final durable reopen. Only then may it emit one
 `complete_golden_project: true`. PowerShell owns only process deadlines,
 schema validation, and consecutive-run classification; it cannot infer
 semantic completion from test names, process exit, or a union of isolated
-Sequences.
+Sequences. Baseline qualification additionally requires a clean and stable Git
+revision for the complete supervisor lifetime. Its aggregate evidence binds
+that revision to the SHA-256 of the exact `mondrian-golden` executable;
+dirty-tree execution is an explicit diagnostic outcome and cannot become
+release evidence.
 
 `GoldenProductWorkflowDriver` is the Headless product composition owner for
 that coordinator. It creates one real `.mdp`, captures its typed `ProjectId`

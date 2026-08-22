@@ -13,9 +13,9 @@ cargo install cargo-nextest    # 更快的测试运行器
 cargo install cargo-audit      # 安全审计
 
 # 3. 安装 FFmpeg（Windows，推荐与 CI 对齐）
-git clone https://github.com/microsoft/vcpkg C:\vcpkg
+git clone --branch 2026.07.29 --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
 C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
-C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse --overlay-ports=vcpkg-overlay
 # 设置环境变量（PowerShell）
 $env:VCPKG_ROOT="C:\vcpkg"
 $env:VCPKGRS_TRIPLET="x64-windows"
@@ -92,6 +92,13 @@ git push origin v0.1.1
 
 说明：
 
+- Tag 本身没有发布权威。Release 只接受同一 source SHA 在 `main` 或
+  `develop` 的 `push` CI 中完整成功的结果；找不到该运行时 fail-closed。
+- CI 与 Release 固定同一不可变 vcpkg registry tag、`Cargo.lock` 和
+  `vcpkg-overlay` 内容，禁止从 vcpkg HEAD 隐式解析不同依赖图。
+- 每个平台包内都包含 `RELEASE_PROVENANCE.json`，绑定 source SHA、可信 CI
+  运行和 native dependency registry；GitHub Release 同时发布
+  `SHA256SUMS`。
 - Release 工作流会为 Linux/macOS/Windows 构建自包含运行时并上传产物。
 - Linux 构建依赖 `libasound2-dev`（用于 `alsa-sys`）。
 - Windows 构建使用 vcpkg 安装完整产品 profile：链接库、`ffmpeg`/`ffprobe`、PNG/EXR decoder，以及 Export 声明的软件编码器；不能用只有 `libavcodec.pc` 的旧缓存冒充。
