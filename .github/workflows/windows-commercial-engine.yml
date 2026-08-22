@@ -32,6 +32,11 @@ jobs:
     # observations can legitimately exceed three hours on the reference host.
     timeout-minutes: 360
     env:
+      # Optional reference-host egress configuration. Keep machine-specific
+      # proxy addresses in repository variables rather than source control.
+      http_proxy: ${{ vars.WINDOWS_REFERENCE_PROXY }}
+      https_proxy: ${{ vars.WINDOWS_REFERENCE_PROXY }}
+      no_proxy: 127.0.0.1,localhost
       QUALIFICATION_SOURCE_SHA: ${{ inputs.source_sha }}
       QUALIFICATION_MACHINE_ID: ${{ inputs.machine_id }}
       QUALIFICATION_REGENERATE_FIXTURES: ${{ inputs.regenerate_generated_fixtures }}
