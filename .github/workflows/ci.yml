@@ -143,6 +143,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          # ffmpeg-sys-next generates bindings from native headers. Keep its
+          # target cache isolated whenever the pinned native manifest changes.
+          key: native-${{ hashFiles('vcpkg.json') }}
 
       # ── Linux ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Linux)
@@ -237,6 +240,10 @@ jobs:
           pkg-config --modversion libavdevice
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
+
+      - name: 重建 FFmpeg Rust 绑定 (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clean -p ffmpeg-sys-next -p ffmpeg-next
 
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
