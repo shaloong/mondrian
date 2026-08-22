@@ -139,12 +139,33 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
     // stays identical, so the working set serves the same evaluation and
     // produced-candidate authority stays generation-scoped.
     let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    // The host profile is an independent picture input: conservative Linux
+    // runners intentionally lower realtime Preview to Half. Pin a Standard
+    // profile so play/pause changes only scheduling state in this test.
+    state.execution_resources =
+        crate::app::execution_resource_coordination::ExecutionResourceCoordinator::new(
+            crate::app::execution_resource_coordination::MachineResourceProfile::from_capacity(
+                Some(16 * 1024 * 1024 * 1024),
+                8,
+            ),
+        );
+    // `play` from Stopped intentionally restarts at frame zero. Establish a
+    // paused transport at the fixture's exact frame so this test varies only
+    // scheduling generation, never semantic frame content.
+    state.play().expect("start transport fixture");
+    state.pause().expect("pause transport fixture");
+    state.seek(4).expect("restore exact fixture frame");
     let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
     let before = evaluation_resolve_count(&runtime);
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
 
-    let _ = state.play();
+    state.play().expect("play from the paused fixture frame");
+    assert_eq!(state.current_frame(), 4);
+    assert_eq!(
+        state.playback_preview_resolution_scale(),
+        mondrian_playback::PreviewResolutionScale::Full
+    );
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(
         evaluation_resolve_count(&runtime) - before,
@@ -152,12 +173,54 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
         "generation rollover on play must reuse the semantically valid evaluation"
     );
 
-    let _ = state.pause();
+    state.pause().expect("pause on the same fixture frame");
+    assert_eq!(state.current_frame(), 4);
+    assert_eq!(
+        state.playback_preview_resolution_scale(),
+        mondrian_playback::PreviewResolutionScale::Full
+    );
     execute_gpu_preview_for_test_app(&runtime, &state);
     assert_eq!(
         evaluation_resolve_count(&runtime) - before,
         1,
         "generation rollover on pause must reuse the semantically valid evaluation"
+    );
+}
+
+#[test]
+fn resource_scale_change_re_resolves_across_generation_rollover() {
+    let mut state = state_with_solid_color_clip(Color::from_hex(0x244C7A));
+    state.execution_resources =
+        crate::app::execution_resource_coordination::ExecutionResourceCoordinator::new(
+            crate::app::execution_resource_coordination::MachineResourceProfile::from_capacity(
+                None, 1,
+            ),
+        );
+    state.play().expect("start conservative transport fixture");
+    state.pause().expect("pause conservative transport fixture");
+    state.seek(4).expect("restore exact conservative fixture frame");
+    assert_eq!(
+        state.playback_preview_resolution_scale(),
+        mondrian_playback::PreviewResolutionScale::Full
+    );
+
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let before = evaluation_resolve_count(&runtime);
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(evaluation_resolve_count(&runtime) - before, 1);
+
+    state.play().expect("play on a conservative machine profile");
+    assert_eq!(state.current_frame(), 4);
+    assert_eq!(
+        state.playback_preview_resolution_scale(),
+        mondrian_playback::PreviewResolutionScale::Half,
+        "conservative realtime policy must lower the semantic Preview scale"
+    );
+    execute_gpu_preview_for_test_app(&runtime, &state);
+    assert_eq!(
+        evaluation_resolve_count(&runtime) - before,
+        2,
+        "a runtime-scale picture change must not reuse the Full evaluation"
     );
 }
 
@@ -278,7 +341,10 @@ fn cancellation_evidence(
 
 #[test]
 fn runtime_diagnostics_exposes_each_bounded_worker_progress_observer() {
-    let runtime = PreviewProductionRuntime::<()>::with_worker_count(preview_decode_cpu_budget(), 2);
+    let runtime = PreviewProductionRuntime::<()>::with_direct_worker_count_for_test(
+        preview_decode_cpu_budget(),
+        2,
+    );
     let watch = runtime.decode_execution_watch();
     let diagnostics = runtime.diagnostics();
 
@@ -10662,7 +10728,8 @@ fn terminal_media_worker_health_refuses_new_pending_admission() {
 
 #[test]
 fn configured_media_result_disconnect_fails_pending_demand_once_and_closes_admission() {
-    let service = WindowPreviewAdapter::with_worker_count(preview_decode_cpu_budget(), 1);
+    let service =
+        WindowPreviewAdapter::with_direct_worker_count_for_test(preview_decode_cpu_budget(), 1);
     let (disconnected_sender, disconnected_receiver) =
         mpsc::sync_channel(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
     service.results.replace(disconnected_receiver);

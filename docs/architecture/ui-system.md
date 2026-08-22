@@ -737,7 +737,11 @@ after one final durable reopen. Only then may it emit one
 `complete_golden_project: true`. PowerShell owns only process deadlines,
 schema validation, and consecutive-run classification; it cannot infer
 semantic completion from test names, process exit, or a union of isolated
-Sequences.
+Sequences. Baseline qualification additionally requires a clean and stable Git
+revision for the complete supervisor lifetime. Its aggregate evidence binds
+that revision to the SHA-256 of the exact `mondrian-golden` executable;
+dirty-tree execution is an explicit diagnostic outcome and cannot become
+release evidence.
 
 `GoldenProductWorkflowDriver` is the Headless product composition owner for
 that coordinator. It creates one real `.mdp`, captures its typed `ProjectId`
@@ -1660,6 +1664,13 @@ timeout rather than dropped normally: Tokio's default runtime drop can wait
 indefinitely for blocking tasks and leave a headless Mondrian process after the
 window has closed. Background operations must therefore treat cancellation as
 cooperative and may not rely on an unbounded runtime drain during process exit.
+The same entrypoint owns the process-lifetime Product Logging Module. It always
+installs a stderr formatting layer and, when the Platform User State Directory
+Adapter is available, a non-blocking daily JSONL writer under
+`Mondrian/logs`. The writer retains a bounded set of matching files and its
+guard is dropped only after ordinary runtime shutdown so queued terminal events
+are flushed. `RUST_LOG` changes filtering only; callers do not own paths,
+rotation, writer threads, or retention policy.
 Once action draining produces a quit command, the host returns it immediately;
 it must not refresh or lay out the widget tree after the preview service and
 project state have already begun shutdown.
@@ -1672,7 +1683,10 @@ GPU driver blocks closure destruction, the watchdog uses the platform's
 no-destructor termination primitive (`TerminateProcess` on Windows, `_exit` on
 Unix) if application-level cleanup does not return in time;
 `std::process::exit` is deliberately not used because DLL detach hooks can
-deadlock on locks held by terminating worker threads. The watchdog is armed
+deadlock on locks held by terminating worker threads. Immediately before that
+fallback, the watchdog emits a terminal product-log event, allows one bounded
+writer interval, and exits with a nonzero forced-termination status so a driver
+hang cannot masquerade as a successful shutdown. The watchdog is armed
 only after the guarded unsaved-work decision and immediately before bounded
 preview/project cleanup begins, so it cannot bypass save/discard/cancel
 semantics but still bounds a cleanup call blocked in a third-party runtime.

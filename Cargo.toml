@@ -82,6 +82,7 @@ sha2             = "0.10"
 # ---- 日志 / 追踪 ----
 tracing          = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender  = "0.2.5"
 
 # ---- GPU 渲染 ----
 wgpu             = { version = "30.0", features = ["naga-ir"] }

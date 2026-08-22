@@ -2,7 +2,8 @@ param(
     [ValidateRange(60, 3600)][int]$ProcessTimeoutSeconds = 600,
     [ValidateRange(0, 60)][int]$NaturalExitGraceSeconds = 5,
     [string]$RunRoot = "target/validation/runs",
-    [string]$FixtureRoot = "tests/fixtures"
+    [string]$FixtureRoot = "tests/fixtures",
+    [switch]$AllowDirtyDiagnostic
 )
 
 Set-StrictMode -Version Latest
@@ -14,6 +15,22 @@ function Resolve-RepositoryPath([string]$Path) {
         return [IO.Path]::GetFullPath($Path)
     }
     return [IO.Path]::GetFullPath((Join-Path $script:repositoryRoot $Path))
+}
+
+function Get-RepositoryRevision([string]$RepositoryRoot) {
+    $revision = @(& git -C $RepositoryRoot rev-parse HEAD)
+    if ($LASTEXITCODE -ne 0 -or $revision.Count -ne 1) {
+        throw "Unable to resolve the repository revision for Golden source attestation."
+    }
+    return ([string]$revision[0]).Trim()
+}
+
+function Get-RepositoryDirty([string]$RepositoryRoot) {
+    $status = @(& git -C $RepositoryRoot status --porcelain --untracked-files=normal)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to inspect the repository state for Golden source attestation."
+    }
+    return $status.Count -gt 0
 }
 
 function Assert-ExactStringSet(
@@ -127,6 +144,8 @@ function Assert-CompleteGoldenReport(
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
+$startingRevision = Get-RepositoryRevision $repositoryRoot
+$startingDirty = Get-RepositoryDirty $repositoryRoot
 $fixtureRoot = Resolve-RepositoryPath $FixtureRoot
 $contractPath = Join-Path $repositoryRoot "tests/validation/golden-project.json"
 $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
@@ -152,6 +171,7 @@ New-Item -ItemType Directory -Force -Path $gateWorkRoot | Out-Null
 $failurePhase = $null
 $failureMessage = $null
 $buildResult = $null
+$builtExecutableSha256 = $null
 $runEvidence = @()
 $reports = @()
 $oldRunRoot = [Environment]::GetEnvironmentVariable(
@@ -167,6 +187,11 @@ $oldFixtureRoot = [Environment]::GetEnvironmentVariable(
     "Process"
 )
 try {
+    $failurePhase = "source-attestation-preflight"
+    if ($startingDirty -and -not $AllowDirtyDiagnostic) {
+        throw "Complete Golden baseline qualification requires a clean repository. Use -AllowDirtyDiagnostic only for non-release diagnostics."
+    }
+
     $failurePhase = "contract-and-fixture-validation"
     $global:LASTEXITCODE = 0
     & (Join-Path $PSScriptRoot "validate-reference-assets.ps1") `
@@ -196,6 +221,9 @@ try {
     if (-not (Test-Path -LiteralPath $goldenExecutable -PathType Leaf)) {
         throw "Complete Golden validation binary is absent after a successful build."
     }
+    $builtExecutableSha256 = (
+        Get-FileHash -LiteralPath $goldenExecutable -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
 
     [Environment]::SetEnvironmentVariable(
         "MONDRIAN_GOLDEN_COMPOSED_RUN_ROOT",
@@ -275,14 +303,29 @@ try {
     )
 }
 
-$passed = $null -eq $failureMessage -and $reports.Count -eq $requiredPasses
+$endingRevision = Get-RepositoryRevision $repositoryRoot
+$endingDirty = Get-RepositoryDirty $repositoryRoot
+$sourceStable = (
+    -not $startingDirty -and
+    -not $endingDirty -and
+    $endingRevision -eq $startingRevision -and
+    -not [string]::IsNullOrWhiteSpace($builtExecutableSha256)
+)
+if ($null -eq $failureMessage -and -not $sourceStable -and -not $AllowDirtyDiagnostic) {
+    $failurePhase = "source-attestation-postflight"
+    $failureMessage = "Repository revision or cleanliness changed during the Complete Golden gate."
+}
+$executionPassed = $null -eq $failureMessage -and $reports.Count -eq $requiredPasses
+$baselineEligible = $executionPassed -and $sourceStable
+$passed = $baselineEligible -or ($executionPassed -and $AllowDirtyDiagnostic)
 $aggregateReport = [ordered]@{
-    schema_version = 1
+    schema_version = 2
     profile = "windows-alpha-complete-golden-project-consecutive"
     scope = "complete-golden-project"
     contract_id = [string]$contract.id
-    status = if ($passed) { "passed" } else { "failed" }
-    complete_golden_project = $passed
+    status = if ($baselineEligible) { "passed" } elseif ($passed) { "passed-diagnostic" } else { "failed" }
+    complete_golden_project = $executionPassed
+    baseline_eligible = $baselineEligible
     required_consecutive_passes = $requiredPasses
     consecutive_passes = $reports.Count
     started_at_utc = $timestamp
@@ -295,6 +338,15 @@ $aggregateReport = [ordered]@{
         elapsed_ms = if ($null -eq $buildResult) { $null } else { [int64]$buildResult.elapsed_ms }
         timed_out = if ($null -eq $buildResult) { $false } else { [bool]$buildResult.timed_out }
         exit_code = if ($null -eq $buildResult) { $null } else { $buildResult.exit_code }
+        executable_sha256 = $builtExecutableSha256
+    }
+    source_attestation = [ordered]@{
+        starting_revision = $startingRevision
+        ending_revision = $endingRevision
+        starting_dirty = $startingDirty
+        ending_dirty = $endingDirty
+        stable = $sourceStable
+        allow_dirty_diagnostic = [bool]$AllowDirtyDiagnostic
     }
     evidence = [ordered]@{
         reference_assets_path = $assetReportPath
