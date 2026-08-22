@@ -88,6 +88,71 @@ jobs:
           }
           $gitBashDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Activate MSVC x64 developer environment
+        shell: pwsh
+        run: |
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} `
+            'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vsWhere -PathType Leaf)) {
+            throw "Visual Studio Installer discovery is required at '$vsWhere'."
+          }
+
+          $installationPath = (& $vsWhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath).Trim()
+          if ([string]::IsNullOrWhiteSpace($installationPath)) {
+            throw 'A Visual Studio installation with the MSVC x64 tools is required.'
+          }
+
+          $vsDevCmd = Join-Path $installationPath 'Common7\Tools\VsDevCmd.bat'
+          $toolsVersionFile = Join-Path $installationPath `
+            'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $toolsVersionFile -PathType Leaf)) {
+            throw "The MSVC developer environment is incomplete at '$installationPath'."
+          }
+
+          $toolsVersion = (Get-Content -LiteralPath $toolsVersionFile -Raw).Trim()
+          $compilerDirectory = Join-Path $installationPath `
+            "VC\Tools\MSVC\$toolsVersion\bin\Hostx64\x64"
+          $compiler = Join-Path $compilerDirectory 'cl.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "The x64 MSVC compiler is required at '$compiler'."
+          }
+
+          $command = 'call "' + $vsDevCmd + `
+            '" -no_logo -arch=x64 -host_arch=x64 >nul && set'
+          $lines = & $env:ComSpec /d /s /c $command
+          if ($LASTEXITCODE -ne 0) {
+            throw "VsDevCmd failed with exit code $LASTEXITCODE."
+          }
+
+          foreach ($name in @('INCLUDE', 'LIB', 'LIBPATH')) {
+            $prefix = "$name="
+            $line = $lines | Where-Object {
+              $_.StartsWith($prefix, [System.StringComparison]::Ordinal)
+            } | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace($line)) {
+              throw "VsDevCmd did not define $name."
+            }
+            $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+          $pathLine = $lines | Where-Object {
+            $_.StartsWith('PATH=', [System.StringComparison]::Ordinal)
+          } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($pathLine)) {
+            throw 'VsDevCmd did not define PATH.'
+          }
+          foreach ($entry in $pathLine.Substring(5).Split(';')) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+              $entry | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+          $compilerDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
