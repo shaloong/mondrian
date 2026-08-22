@@ -27,4 +27,14 @@ highlight = "all"
 version = 2
 ignore = [
     "RUSTSEC-2024-0436",
+    # These quick-xml advisories are reachable only through build-time Linux
+    # XML parsers in wayland-scanner. Mondrian does not pass project or media
+    # input to them. Remove both when the upstream stack accepts quick-xml 0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # The current egui/resvg font stack has no maintained replacement release.
+    # These are unmaintained notices, not known vulnerabilities. Keep them
+    # isolated here until the default branch adopts the maintained UI stack.
+    "RUSTSEC-2026-0192",
+    "RUSTSEC-2026-0206",
 ]

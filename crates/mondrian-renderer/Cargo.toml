@@ -20,5 +20,5 @@ tracing    = { workspace = true }
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }
 serde      = { workspace = true }
-lru        = "0.16"
+lru        = "0.18"
 parking_lot = { workspace = true }

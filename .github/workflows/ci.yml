@@ -9,6 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # Use a modern registry/toolchain while vcpkg.json locks ffmpeg-next 8.1 to
+  # the compatible FFmpeg 6 ABI. The tag is verified against this commit.
+  VCPKG_REF: "2026.07.29"
+  VCPKG_COMMIT: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
@@ -139,6 +143,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          # ffmpeg-sys-next generates bindings from native headers. Keep its
+          # target cache isolated whenever the pinned native manifest changes.
+          key: native-${{ hashFiles('vcpkg.json') }}
 
       # ── Linux ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Linux)
@@ -161,18 +168,25 @@ jobs:
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock', 'vcpkg.json') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg-
+            ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           if (-not (Test-Path C:\vcpkg)) {
-            git clone https://github.com/microsoft/vcpkg C:\vcpkg
-            & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+            git clone --branch $env:VCPKG_REF --depth 1 https://github.com/microsoft/vcpkg C:\vcpkg
+          } else {
+            git -C C:\vcpkg fetch --depth 1 origin "refs/tags/$env:VCPKG_REF"
+            git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
+          $resolvedCommit = git -C C:\vcpkg rev-parse HEAD
+          if ($resolvedCommit -ne $env:VCPKG_COMMIT) {
+            throw "vcpkg ref resolved to $resolvedCommit, expected $env:VCPKG_COMMIT"
+          }
+          & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: 安装 FFmpeg (Windows, vcpkg)
         if: runner.os == 'Windows'
@@ -185,8 +199,12 @@ jobs:
           if (Test-Path $ffmpegInstall) {
             Write-Host '✓ FFmpeg already cached and installed, skipping vcpkg install'
           } else {
-            Write-Host 'Installing FFmpeg via vcpkg (no binary cache available)...'
-            & C:\vcpkg\vcpkg.exe install ffmpeg:x64-windows
+            Write-Host 'Installing manifest-locked FFmpeg via vcpkg...'
+            & C:\vcpkg\vcpkg.exe install `
+              --triplet x64-windows `
+              --x-manifest-root=$PWD `
+              --x-install-root=C:\vcpkg\installed
+            if ($LASTEXITCODE -ne 0) { throw 'vcpkg FFmpeg installation failed' }
           }
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
@@ -212,12 +230,20 @@ jobs:
           Write-Host "FFMPEG_DIR=$env:FFMPEG_DIR"
           Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
           pkg-config --version
-          pkg-config --modversion libavcodec
+          $avcodecVersion = (pkg-config --modversion libavcodec).Trim()
+          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^60\.') {
+            throw "Expected FFmpeg 6 libavcodec ABI 60, found '$avcodecVersion'"
+          }
+          Write-Host "libavcodec $avcodecVersion"
           pkg-config --modversion libavformat
           pkg-config --modversion libavfilter
           pkg-config --modversion libavdevice
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
+
+      - name: 重建 FFmpeg Rust 绑定 (Windows)
+        if: runner.os == 'Windows'
+        run: cargo clean -p ffmpeg-sys-next -p ffmpeg-next
 
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
