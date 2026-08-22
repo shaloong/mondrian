@@ -94,6 +94,9 @@ git push origin v0.1.1
 
 - Tag 本身没有发布权威。Release 只接受同一 source SHA 在 `main` 或
   `develop` 的 `push` CI 中完整成功的结果；找不到该运行时 fail-closed。
+- Tag 和手动 `release_tag` 必须是严格的 `v<major>.<minor>.<patch>` SemVer；
+  workflow 输入只经环境变量进入 PowerShell，制品身份 Module 会在任何目录创建或清理前
+  拒绝脚本元字符、路径分隔符和仓库外解析结果。
 - CI 与 Release 固定同一不可变 vcpkg registry tag、`Cargo.lock` 和
   `vcpkg-overlay` 内容，禁止从 vcpkg HEAD 隐式解析不同依赖图。
 - 所有外部 GitHub Action 必须固定到完整的 40 位提交 SHA；可在同行注释

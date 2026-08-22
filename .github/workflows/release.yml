@@ -291,33 +291,32 @@ jobs:
       - name: 计算包名与路径
         id: artifact_meta
         shell: pwsh
+        env:
+          RELEASE_SOURCE_REF: ${{ github.ref }}
+          RELEASE_SOURCE_REF_NAME: ${{ github.ref_name }}
+          RELEASE_REQUESTED_TAG: ${{ inputs.release_tag }}
+          RELEASE_RUN_NUMBER: ${{ github.run_number }}
+          RELEASE_RUNNER_OS: ${{ runner.os }}
+          RELEASE_TARGET: ${{ matrix.target }}
+          RELEASE_BIN_NAME: ${{ env.BIN_NAME }}
+          RELEASE_ARTIFACT_PLATFORM: ${{ matrix.artifact_platform }}
+          RELEASE_ARTIFACT_ARCH: ${{ matrix.artifact_arch }}
+          RELEASE_EXTENSION: ${{ matrix.ext }}
         run: |
-          $version = ""
-          if ("${{ github.ref }}" -like "refs/tags/v*") {
-            $version = "${{ github.ref_name }}"
-          } elseif ("${{ inputs.release_tag }}" -ne "") {
-            $version = "${{ inputs.release_tag }}"
-          } else {
-            $version = "manual-${{ github.run_number }}"
-          }
-
-          $binName = "${{ env.BIN_NAME }}"
-          if ("${{ runner.os }}" -eq "Windows") {
-            $binPath = "target/${{ matrix.target }}/release/$binName.exe"
-          } else {
-            $binPath = "target/${{ matrix.target }}/release/$binName"
-          }
-
-          $packageName = "$binName-$version-${{ matrix.artifact_platform }}-${{ matrix.artifact_arch }}"
-          $packagePath = "$packageName.${{ matrix.ext }}"
-
-          "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "BIN_PATH=$binPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PACKAGE_NAME=$packageName" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "PACKAGE_PATH=$packagePath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "release_version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "package_name=$packageName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          "package_path=$packagePath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          ./scripts/release/resolve-release-artifact.ps1 `
+            -SourceRef $env:RELEASE_SOURCE_REF `
+            -SourceRefName $env:RELEASE_SOURCE_REF_NAME `
+            -RequestedTag $env:RELEASE_REQUESTED_TAG `
+            -RunNumber ([int]$env:RELEASE_RUN_NUMBER) `
+            -RunnerOs $env:RELEASE_RUNNER_OS `
+            -Target $env:RELEASE_TARGET `
+            -BinName $env:RELEASE_BIN_NAME `
+            -ArtifactPlatform $env:RELEASE_ARTIFACT_PLATFORM `
+            -ArtifactArch $env:RELEASE_ARTIFACT_ARCH `
+            -Extension $env:RELEASE_EXTENSION `
+            -RepositoryRoot $PWD `
+            -GitHubEnvironmentPath $env:GITHUB_ENV `
+            -GitHubOutputPath $env:GITHUB_OUTPUT
 
       - name: 写入发行来源证明
         shell: pwsh
