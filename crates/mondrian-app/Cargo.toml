@@ -73,6 +73,7 @@ mondrian-ui-tooltip   = { workspace = true }
 mondrian-ui-text      = { workspace = true }
 
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 
 rfd       = "0.15"
 image     = { workspace = true }

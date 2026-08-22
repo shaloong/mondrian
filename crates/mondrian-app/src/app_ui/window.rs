@@ -49,6 +49,11 @@ use crate::app_ui::action_queue::PendingUiActions;
 use crate::app_ui::host::{
     AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
 };
+use crate::app_ui::product_logging::init_product_tracing;
+#[cfg(test)]
+use crate::app_ui::product_logging::DEFAULT_APP_UI_LOG_FILTER;
+#[cfg(not(test))]
+use crate::app_ui::product_logging::FORCED_PROCESS_EXIT_CODE;
 use crate::app_ui::rendering::{
     AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
 };
@@ -83,8 +88,6 @@ use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey, ExternalTex
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::ViewerExternalTexturePresentation;
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::EnvFilter;
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -164,7 +167,6 @@ enum ViewerHeterogeneousCompletionPoll {
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(crate) const DEFAULT_APP_UI_LOG_FILTER: &str = "info,wgpu_core=warn,wgpu_hal=warn,naga=warn";
 pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
 const VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV: &str = "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT";
 const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
@@ -1413,9 +1415,10 @@ impl Drop for AppUiWindowSession {
 
 /// Run the app UI Mondrian editor window.
 pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
+    let platform = SystemPlatformService;
+    let tracing_guard = init_product_tracing(&platform);
     let background_runtime = build_app_ui_background_runtime()?;
     let background_runtime_guard = background_runtime.enter();
-    init_app_ui_tracing();
 
     tracing::info!("Mondrian app UI starting");
 
@@ -1496,8 +1499,6 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
     let pending_actions = PendingUiActions::default();
-    let platform = SystemPlatformService;
-
     tracing::info!(
         "UI initialized — {}x{}",
         session.config.width,
@@ -2095,6 +2096,8 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     // so bound shutdown instead of leaving a headless Mondrian process behind.
     drop(background_runtime_guard);
     background_runtime.shutdown_timeout(Duration::from_millis(250));
+    tracing::info!("Mondrian app UI stopped");
+    drop(tracing_guard);
 
     Ok(())
 }
@@ -2109,6 +2112,13 @@ pub(crate) fn arm_process_exit_watchdog() {
         // can itself deadlock when a third-party detach hook needs a lock
         // held by another terminating thread.
         std::thread::sleep(Duration::from_secs(2));
+        tracing::error!(
+            exit_code = FORCED_PROCESS_EXIT_CODE,
+            "process-exit watchdog deadline elapsed; forcing process termination"
+        );
+        // Give the non-blocking product log writer one bounded opportunity to
+        // persist the terminal marker before the no-destructor exit.
+        std::thread::sleep(Duration::from_millis(100));
         terminate_process_without_cleanup();
     });
 }
@@ -2121,7 +2131,7 @@ fn terminate_process_without_cleanup() -> ! {
     // final fallback after the application-level close contract has completed;
     // skipping DLL detach is intentional to avoid third-party teardown locks.
     unsafe {
-        let _ = TerminateProcess(GetCurrentProcess(), 0);
+        let _ = TerminateProcess(GetCurrentProcess(), FORCED_PROCESS_EXIT_CODE);
     }
     std::process::abort()
 }
@@ -2130,23 +2140,12 @@ fn terminate_process_without_cleanup() -> ! {
 fn terminate_process_without_cleanup() -> ! {
     // SAFETY: application-level shutdown has completed. `_exit` deliberately
     // skips process-wide destructors that may be blocked in media/GPU drivers.
-    unsafe { libc::_exit(0) }
+    unsafe { libc::_exit(FORCED_PROCESS_EXIT_CODE as libc::c_int) }
 }
 
 #[cfg(all(not(test), not(any(target_os = "windows", unix))))]
 fn terminate_process_without_cleanup() -> ! {
     std::process::abort()
-}
-
-fn init_app_ui_tracing() {
-    let filter = app_ui_log_filter();
-    if tracing_subscriber::registry().with(filter).try_init().is_err() {
-        tracing::debug!("tracing subscriber already initialized; app UI filter skipped");
-    }
-}
-
-fn app_ui_log_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_APP_UI_LOG_FILTER))
 }
 
 fn build_app_ui_background_runtime() -> std::io::Result<tokio::runtime::Runtime> {
