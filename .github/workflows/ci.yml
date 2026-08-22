@@ -9,10 +9,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # ffmpeg-next 8 targets the FFmpeg 7 ABI. Bind the registry tag to its
-  # immutable commit so hosted-runner or tag drift cannot select ABI 8.
-  VCPKG_REF: "2025.12.12"
-  VCPKG_COMMIT: "84bab45d415d22042bd0b9081aea57f362da3f35"
+  # ffmpeg-next 8.1 targets the FFmpeg 6 ABI. Bind the newest compatible
+  # registry tag to its commit so runner or tag drift cannot select ABI 7/8.
+  VCPKG_REF: "2024.07.12"
+  VCPKG_COMMIT: "1de2026f28ead93ff1773e6e680387643e914ea1"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
@@ -224,8 +224,8 @@ jobs:
           Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
           pkg-config --version
           $avcodecVersion = (pkg-config --modversion libavcodec).Trim()
-          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^61\.') {
-            throw "Expected FFmpeg 7 libavcodec ABI 61, found '$avcodecVersion'"
+          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^60\.') {
+            throw "Expected FFmpeg 6 libavcodec ABI 60, found '$avcodecVersion'"
           }
           Write-Host "libavcodec $avcodecVersion"
           pkg-config --modversion libavformat

@@ -24,8 +24,8 @@ env:
   BIN_NAME: mondrian
   # Keep the Windows native dependency ABI identical to CI and fail closed if
   # the registry tag ever stops resolving to the reviewed commit.
-  VCPKG_REF: "2025.12.12"
-  VCPKG_COMMIT: "84bab45d415d22042bd0b9081aea57f362da3f35"
+  VCPKG_REF: "2024.07.12"
+  VCPKG_COMMIT: "1de2026f28ead93ff1773e6e680387643e914ea1"
   # 启用包级别 LTO，提升发布构建质量
   CARGO_PROFILE_RELEASE_LTO: "thin"
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "1"
@@ -171,8 +171,8 @@ jobs:
 
           pkg-config --version
           $avcodecVersion = (pkg-config --modversion libavcodec).Trim()
-          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^61\.') {
-            throw "Expected FFmpeg 7 libavcodec ABI 61, found '$avcodecVersion'"
+          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^60\.') {
+            throw "Expected FFmpeg 6 libavcodec ABI 60, found '$avcodecVersion'"
           }
           Write-Host "libavcodec $avcodecVersion"
           pkg-config --modversion libavformat
