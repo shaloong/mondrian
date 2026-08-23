@@ -1,0 +1,8841 @@
+use crate::ocio_gpu::{
+    OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget, OcioGpuWgpuWrapperBindGroup,
+};
+use crate::{
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
+    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameReadback,
+    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
+    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
+    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError, GpuCompositeLayer,
+    GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingDiagnostics,
+    GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource, OcioGpuShaderCache,
+    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
+    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
+    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
+    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
+    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindingPlan,
+    RenderColorTransform, RenderColorTransformError, RenderColorTransformGpuOptions,
+    RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
+    RenderEffectColorDomainGpuPlanError, RenderEffectColorDomainGpuPlanner,
+    RenderGpuOutputActiveWorkingSetAdmissionError, RenderGpuOutputExecutionResourceGrant,
+    RenderInputTransform, RenderInputTransformResult, RenderIntermediateColorTransform,
+    RenderOcioDisplayView, RenderOutputTransformFloatResult, RenderOutputTransformResult,
+};
+use mondrian_core::types::{Color, ColorEngine, ColorSpace};
+use mondrian_core::{
+    OutputTransformIntent, OutputTransformIntentResolutionError, WorkingColorSpace,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+/// Preferred execution mode for a renderer color transform stage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RenderColorStageMode {
+    /// Always use the CPU transform executor.
+    CpuOnly,
+    /// Plan a GPU OCIO shader stage and expose required transfer/readback nodes.
+    PreferGpu,
+}
+
+/// One scheduled step in a renderer color transform boundary.
+#[derive(Debug, Clone)]
+pub enum RenderColorStage {
+    /// Upload a CPU-resident boundary frame to a GPU texture before GPU execution.
+    UploadToGpu {
+        /// CPU descriptor consumed by the upload.
+        input: ColorFrameDescriptor,
+        /// GPU descriptor produced by the upload.
+        output: ColorFrameDescriptor,
+    },
+    /// Execute a CPU source/import -> working-space transform.
+    CpuInputTransform {
+        /// Input descriptor.
+        input: ColorFrameDescriptor,
+        /// Output descriptor.
+        output: ColorFrameDescriptor,
+        /// Transform request.
+        transform: RenderInputTransform,
+    },
+    /// Execute a CPU working-space -> display/export transform.
+    CpuOutputTransform {
+        /// Input descriptor.
+        input: ColorFrameDescriptor,
+        /// Output descriptor.
+        output: ColorFrameDescriptor,
+        /// Transform request.
+        transform: RenderColorTransform,
+    },
+    /// Execute or prepare a GPU OCIO color transform.
+    GpuColorTransform {
+        /// GPU descriptor consumed by the color transform.
+        input: ColorFrameDescriptor,
+        /// GPU descriptor produced by the color transform.
+        output: ColorFrameDescriptor,
+        /// GPU transform plan and blockers.
+        plan: Box<RenderColorTransformGpuPlan>,
+    },
+    /// Read back a GPU-resident boundary frame to CPU memory.
+    ReadbackToCpu {
+        /// GPU descriptor consumed by the readback.
+        input: ColorFrameDescriptor,
+        /// CPU descriptor produced by the readback.
+        output: ColorFrameDescriptor,
+    },
+}
+
+impl RenderColorStage {
+    /// Input descriptor consumed by this stage.
+    pub fn input(&self) -> ColorFrameDescriptor {
+        match self {
+            Self::UploadToGpu { input, .. }
+            | Self::CpuInputTransform { input, .. }
+            | Self::CpuOutputTransform { input, .. }
+            | Self::GpuColorTransform { input, .. }
+            | Self::ReadbackToCpu { input, .. } => *input,
+        }
+    }
+
+    /// Output descriptor produced by this stage.
+    pub fn output(&self) -> ColorFrameDescriptor {
+        match self {
+            Self::UploadToGpu { output, .. }
+            | Self::CpuInputTransform { output, .. }
+            | Self::CpuOutputTransform { output, .. }
+            | Self::GpuColorTransform { output, .. }
+            | Self::ReadbackToCpu { output, .. } => *output,
+        }
+    }
+}
+
+/// Scheduled color transform boundary.
+#[derive(Debug, Clone)]
+pub struct RenderColorStagePlan {
+    /// Ordered stages needed to satisfy the transform.
+    pub stages: Vec<RenderColorStage>,
+    /// Final descriptor produced by the last stage.
+    pub final_descriptor: ColorFrameDescriptor,
+}
+
+/// Aggregated diagnostics for a color stage plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderColorStageDiagnostics {
+    /// Total stages in the plan.
+    pub total_stages: u64,
+    /// CPU source/import -> working-space stages.
+    pub cpu_input_stages: u64,
+    /// CPU working-space -> display/export stages.
+    pub cpu_output_stages: u64,
+    /// GPU OCIO color transform stages.
+    pub gpu_color_stages: u64,
+    /// CPU -> GPU upload stages.
+    pub upload_stages: u64,
+    /// GPU -> CPU readback stages.
+    pub readback_stages: u64,
+    /// Native GPU blockers exposed by planned GPU stages.
+    pub gpu_blockers: u64,
+    /// Structured native GPU blocker breakdown.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
+    /// Sum of pixels touched by scheduled stages.
+    pub stage_pixels: u64,
+}
+
+/// Aggregated native GPU blocker reasons in a color stage plan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderColorStageGpuBlockerBreakdown {
+    /// Backend shader module has not been prepared.
+    pub shader_module_not_prepared: u64,
+    /// OCIO LUT/uniform resources are not connected to a concrete bind group.
+    pub ocio_resource_bind_group_not_prepared: u64,
+    /// Fullscreen wrapper shader is missing.
+    pub fullscreen_wrapper_not_prepared: u64,
+    /// Final render pipeline/render-pass node is missing.
+    pub render_pipeline_not_prepared: u64,
+    /// OCIO config is not loaded or unavailable for GPU shader extraction.
+    pub ocio_config_not_loaded: u64,
+    /// OCIO processor could not be created for the requested transform.
+    pub ocio_processor_unavailable: u64,
+    /// OCIO GPU shader extraction failed (transpilation, Naga, or backend error).
+    pub ocio_gpu_shader_extraction_failed: u64,
+}
+
+impl RenderColorStageGpuBlockerBreakdown {
+    /// Total counted native GPU blockers.
+    pub fn total(self) -> u64 {
+        self.shader_module_not_prepared
+            .saturating_add(self.ocio_resource_bind_group_not_prepared)
+            .saturating_add(self.fullscreen_wrapper_not_prepared)
+            .saturating_add(self.render_pipeline_not_prepared)
+            .saturating_add(self.ocio_config_not_loaded)
+            .saturating_add(self.ocio_processor_unavailable)
+            .saturating_add(self.ocio_gpu_shader_extraction_failed)
+    }
+
+    /// Record one native GPU blocker.
+    pub fn record(&mut self, blocker: &OcioGpuWgpuBlocker) {
+        match blocker {
+            OcioGpuWgpuBlocker::ShaderModuleNotPrepared { .. } => {
+                self.shader_module_not_prepared = self.shader_module_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared { .. } => {
+                self.ocio_resource_bind_group_not_prepared =
+                    self.ocio_resource_bind_group_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared => {
+                self.fullscreen_wrapper_not_prepared =
+                    self.fullscreen_wrapper_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::RenderPipelineNotPrepared => {
+                self.render_pipeline_not_prepared =
+                    self.render_pipeline_not_prepared.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioConfigNotLoaded => {
+                self.ocio_config_not_loaded = self.ocio_config_not_loaded.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable => {
+                self.ocio_processor_unavailable = self.ocio_processor_unavailable.saturating_add(1);
+            }
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. } => {
+                self.ocio_gpu_shader_extraction_failed =
+                    self.ocio_gpu_shader_extraction_failed.saturating_add(1);
+            }
+        }
+    }
+
+    /// Add counts from another breakdown.
+    pub fn accumulate(&mut self, other: Self) {
+        self.shader_module_not_prepared =
+            self.shader_module_not_prepared.saturating_add(other.shader_module_not_prepared);
+        self.ocio_resource_bind_group_not_prepared = self
+            .ocio_resource_bind_group_not_prepared
+            .saturating_add(other.ocio_resource_bind_group_not_prepared);
+        self.fullscreen_wrapper_not_prepared = self
+            .fullscreen_wrapper_not_prepared
+            .saturating_add(other.fullscreen_wrapper_not_prepared);
+        self.render_pipeline_not_prepared = self
+            .render_pipeline_not_prepared
+            .saturating_add(other.render_pipeline_not_prepared);
+        self.ocio_config_not_loaded =
+            self.ocio_config_not_loaded.saturating_add(other.ocio_config_not_loaded);
+        self.ocio_processor_unavailable =
+            self.ocio_processor_unavailable.saturating_add(other.ocio_processor_unavailable);
+        self.ocio_gpu_shader_extraction_failed = self
+            .ocio_gpu_shader_extraction_failed
+            .saturating_add(other.ocio_gpu_shader_extraction_failed);
+    }
+}
+
+impl RenderColorStageDiagnostics {
+    /// Add another diagnostics summary into this one.
+    pub fn accumulate(&mut self, other: Self) {
+        self.total_stages = self.total_stages.saturating_add(other.total_stages);
+        self.cpu_input_stages = self.cpu_input_stages.saturating_add(other.cpu_input_stages);
+        self.cpu_output_stages = self.cpu_output_stages.saturating_add(other.cpu_output_stages);
+        self.gpu_color_stages = self.gpu_color_stages.saturating_add(other.gpu_color_stages);
+        self.upload_stages = self.upload_stages.saturating_add(other.upload_stages);
+        self.readback_stages = self.readback_stages.saturating_add(other.readback_stages);
+        self.gpu_blockers = self.gpu_blockers.saturating_add(other.gpu_blockers);
+        self.gpu_blocker_breakdown.accumulate(other.gpu_blocker_breakdown);
+        self.stage_pixels = self.stage_pixels.saturating_add(other.stage_pixels);
+    }
+}
+
+impl RenderColorStagePlan {
+    /// Whether the plan contains a GPU transform stage.
+    pub fn contains_gpu_transform(&self) -> bool {
+        self.stages
+            .iter()
+            .any(|stage| matches!(stage, RenderColorStage::GpuColorTransform { .. }))
+    }
+
+    /// Whether the plan contains an explicit CPU/GPU transfer stage.
+    pub fn contains_transfer(&self) -> bool {
+        self.stages.iter().any(|stage| {
+            matches!(
+                stage,
+                RenderColorStage::UploadToGpu { .. } | RenderColorStage::ReadbackToCpu { .. }
+            )
+        })
+    }
+
+    /// Return an aggregated stage diagnostics summary.
+    pub fn diagnostics(&self) -> RenderColorStageDiagnostics {
+        let mut diagnostics = RenderColorStageDiagnostics::default();
+        for stage in &self.stages {
+            diagnostics.total_stages = diagnostics.total_stages.saturating_add(1);
+            diagnostics.stage_pixels =
+                diagnostics.stage_pixels.saturating_add(stage.output().pixel_count() as u64);
+            match stage {
+                RenderColorStage::UploadToGpu { .. } => {
+                    diagnostics.upload_stages = diagnostics.upload_stages.saturating_add(1);
+                }
+                RenderColorStage::CpuInputTransform { .. } => {
+                    diagnostics.cpu_input_stages = diagnostics.cpu_input_stages.saturating_add(1);
+                }
+                RenderColorStage::CpuOutputTransform { .. } => {
+                    diagnostics.cpu_output_stages = diagnostics.cpu_output_stages.saturating_add(1);
+                }
+                RenderColorStage::GpuColorTransform { plan, .. } => {
+                    diagnostics.gpu_color_stages = diagnostics.gpu_color_stages.saturating_add(1);
+                    diagnostics.gpu_blockers =
+                        diagnostics.gpu_blockers.saturating_add(plan.wgpu.blockers.len() as u64);
+                    for blocker in &plan.wgpu.blockers {
+                        diagnostics.gpu_blocker_breakdown.record(blocker);
+                    }
+                }
+                RenderColorStage::ReadbackToCpu { .. } => {
+                    diagnostics.readback_stages = diagnostics.readback_stages.saturating_add(1);
+                }
+            }
+        }
+        diagnostics
+    }
+}
+
+/// Plans renderer color transform stages without executing them.
+pub struct RenderColorStagePlanner<'a> {
+    mode: RenderColorStageMode,
+    gpu_cache: Option<&'a mut OcioGpuShaderCache>,
+    gpu_options: RenderColorTransformGpuOptions,
+}
+
+/// Executes CPU-only color stage plans.
+pub struct CpuRenderColorStageExecutor;
+
+/// Result of executing a renderer color stage plan.
+#[derive(Debug, Clone)]
+pub struct RenderColorStageExecution<T> {
+    /// Value produced by the selected executor.
+    pub result: T,
+    /// Diagnostics for the stage plan that was executed.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Encoded RGBA8 output plus diagnostics for a final preview/export color boundary.
+#[derive(Debug, Clone)]
+pub struct RenderOutputColorBoundaryRgba8 {
+    /// Encoded RGBA8 pixels produced by the output boundary.
+    pub rgba: Vec<u8>,
+    /// Color transform diagnostics emitted by the boundary executor.
+    pub color_diagnostics: crate::RenderColorTransformDiagnostics,
+    /// Stage diagnostics for the executed boundary plan.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Descriptor of the encoded output frame.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+/// Final output boundary requested by preview or export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderOutputColorBoundaryTarget {
+    /// Viewer/display presentation output.
+    Display,
+    /// Encoded delivery/export output.
+    Export,
+}
+
+/// Renderer-owned description of a working-frame to final-output color boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderOutputColorBoundary {
+    /// Caller-visible output target.
+    pub target: RenderOutputColorBoundaryTarget,
+    /// Destination color space.
+    pub output_color_space: ColorSpace,
+    /// OCIO display/view pair for presentation output.
+    pub display_view: Option<RenderOcioDisplayView>,
+    /// Whether tone mapping is requested.
+    pub tone_map: bool,
+    /// Color engine selected for this output boundary.
+    pub engine: ColorEngine,
+}
+
+impl RenderOutputColorBoundary {
+    /// Resolve a product-level output-transform intent into one renderer-owned
+    /// display or export boundary.
+    ///
+    /// This is the production integration entry point shared by preview and
+    /// export. It prevents callers from separately interpreting Standard,
+    /// explicit OCIO view, and colorimetric modes.
+    pub fn from_intent(
+        target: RenderOutputColorBoundaryTarget,
+        output_color_space: ColorSpace,
+        intent: &OutputTransformIntent,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Result<Self, OutputTransformIntentResolutionError> {
+        let display_view = intent
+            .resolve_display_view(output_color_space, &engine)?
+            .map(|(display, view)| RenderOcioDisplayView::new(display, view));
+        Ok(Self {
+            target,
+            output_color_space,
+            display_view,
+            tone_map,
+            engine,
+        })
+    }
+
+    /// Build a display/viewer output boundary.
+    pub fn display(output_color_space: ColorSpace, tone_map: bool, engine: ColorEngine) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Display,
+            output_color_space,
+            display_view: None,
+            tone_map,
+            engine,
+        }
+    }
+
+    /// Build a display/viewer output boundary through an explicit OCIO display/view pair.
+    pub fn display_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Display,
+            output_color_space,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
+            tone_map,
+            engine,
+        }
+    }
+
+    /// Build an encoded export output boundary.
+    pub fn export(output_color_space: ColorSpace, tone_map: bool, engine: ColorEngine) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Export,
+            output_color_space,
+            display_view: None,
+            tone_map,
+            engine,
+        }
+    }
+
+    /// Build an export delivery boundary through an explicit OCIO
+    /// display/view pair.
+    ///
+    /// This carries the OCIO delivery view transform (which includes tone
+    /// mapping) into the export output boundary. Unlike
+    /// [`Self::display_view`] which targets preview presentation, this
+    /// targets encoded export delivery.
+    pub fn export_view(
+        output_color_space: ColorSpace,
+        display: impl Into<String>,
+        view: impl Into<String>,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::Export,
+            output_color_space,
+            display_view: Some(RenderOcioDisplayView::new(display, view)),
+            tone_map,
+            engine,
+        }
+    }
+
+    fn transform(&self) -> RenderColorTransform {
+        match self.target {
+            RenderOutputColorBoundaryTarget::Display => match &self.display_view {
+                Some(display_view) => RenderColorTransform::display_view(
+                    self.output_color_space,
+                    display_view.display.clone(),
+                    display_view.view.clone(),
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+                None => RenderColorTransform::display(
+                    self.output_color_space,
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+            },
+            RenderOutputColorBoundaryTarget::Export => match &self.display_view {
+                Some(display_view) => RenderColorTransform::delivery_view(
+                    self.output_color_space,
+                    display_view.display.clone(),
+                    display_view.view.clone(),
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+                None => RenderColorTransform::export(
+                    self.output_color_space,
+                    self.tone_map,
+                    self.engine.clone(),
+                ),
+            },
+        }
+    }
+}
+
+/// Planned stage graph for one final output color boundary.
+#[derive(Debug, Clone)]
+pub struct RenderOutputColorBoundaryStagePlan {
+    /// Boundary that produced this stage plan.
+    pub boundary: RenderOutputColorBoundary,
+    /// Ordered renderer stages for the boundary.
+    pub stage_plan: RenderColorStagePlan,
+}
+
+impl RenderOutputColorBoundaryStagePlan {
+    /// Return stage diagnostics for this planned boundary.
+    pub fn diagnostics(&self) -> RenderColorStageDiagnostics {
+        self.stage_plan.diagnostics()
+    }
+
+    /// Build GPU resources for a blocker-free GPU output boundary stage plan.
+    pub fn gpu_resource_plan(
+        &self,
+        ids: &mut GpuColorFrameIdAllocator,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<RenderGpuOutputStageResourcePlan, RenderGpuOutputStageResourcePlanError> {
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            ids,
+            frame,
+            &self.stage_plan,
+            output_texture_format,
+        )
+    }
+
+    /// Build GPU resources and record this final-output boundary into a command encoder.
+    pub fn record_wgpu_output_boundary(
+        &self,
+        request: RenderGpuOutputBoundaryRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRecordError> {
+        let RenderGpuOutputBoundaryRecordRequest { ids, frame, output_texture_format, backend } =
+            request;
+        let resources = self
+            .gpu_resource_plan(ids, frame, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRecordError::ResourcePlan)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest { backend: backend.into() })
+            .map_err(RenderGpuOutputBoundaryRecordError::Record)
+    }
+}
+
+/// Borrowed backend context required to record a final-output GPU color boundary.
+pub struct RenderGpuOutputBoundaryBackendContext<'a> {
+    /// wgpu device used for resource materialization and bind-group creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Prepared OCIO fullscreen render pipeline.
+    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
+    /// Prepared OCIO resource bind group.
+    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Prepared wrapper input layout reused instead of recreated per frame.
+    pub wrapper_input_layout: &'a OcioGpuWgpuPreparedWrapperInputLayout,
+    /// Backend render-pass node for this color transform.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+    /// Shared GPU color frame resource table.
+    pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Per-record backend context for runtime-owned OCIO backend objects.
+///
+/// The output runtime owns OCIO shader extraction, backend preparation, concrete
+/// backend-object caches, frame ids, and frame resources. This context only
+/// supplies objects whose lifetime is tied to the current command submission.
+pub struct RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'a> {
+    /// wgpu device used for resource materialization and backend-object creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Borrowed inputs required to record one final-output GPU color boundary.
+pub struct RenderGpuOutputBoundaryRecordRequest<'a> {
+    /// GPU frame id allocator for upload/output handles.
+    pub ids: &'a mut GpuColorFrameIdAllocator,
+    /// CPU working frame entering the output boundary.
+    pub frame: &'a CpuColorFrame,
+    /// Texture format for the GPU output target.
+    pub output_texture_format: GpuColorFrameTextureFormat,
+    /// Backend context used to materialize resources and record the pass.
+    pub backend: RenderGpuOutputBoundaryBackendContext<'a>,
+}
+
+/// Error returned when a final-output GPU boundary cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputBoundaryRecordError {
+    /// The boundary stage plan could not produce GPU resources.
+    ResourcePlan(RenderGpuOutputStageResourcePlanError),
+    /// Resource materialization, pass recording, or readback recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Error returned when runtime-owned GPU backend objects cannot record a final boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuOutputBoundaryRuntimeRecordError {
+    /// The output boundary could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned boundary could not produce GPU resources.
+    ResourcePlan(RenderGpuOutputStageResourcePlanError),
+    /// Exact active texture/readback demand exceeded the owner-scoped grant.
+    ActiveWorkingSet(RenderGpuOutputActiveWorkingSetAdmissionError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    /// Resource materialization, pass recording, or readback recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Error returned when runtime-owned GPU backend objects cannot record an input stage.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuInputStageRuntimeRecordError {
+    /// The input transform could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned input stage could not produce GPU resources.
+    ResourcePlan(RenderGpuInputStageResourcePlanError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    /// Resource materialization or pass recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Error returned when a runtime-owned in-graph GPU OCIO pass cannot record.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuColorTransformRuntimeRecordError {
+    /// The identity transform could not be planned.
+    Plan(RenderColorTransformError),
+    /// GPU frame resources could not be bound to the transform.
+    ResourcePlan(RenderGpuColorTransformResourcePlanError),
+    /// Pure OCIO backend contracts could not be prepared.
+    BackendPrep(OcioGpuWgpuBackendPrepError),
+    /// Concrete wgpu backend objects could not be prepared.
+    BackendObjects(OcioGpuWgpuBackendObjectError),
+    /// Resource materialization or pass recording failed.
+    Record(RenderGpuOutputStageRecordError),
+}
+
+/// Result of recording OCIO -> point effect -> OCIO entirely on the GPU.
+pub struct RenderGpuEffectDomainRecord {
+    /// Working-to-effect OCIO pass.
+    pub to_processing: RenderGpuColorTransformRecord,
+    /// Standalone point-effect pass in the declared processing domain.
+    pub effect: crate::GpuPointEffectRecord,
+    /// Effect-to-working OCIO pass.
+    pub to_working: RenderGpuColorTransformRecord,
+}
+
+/// Error returned when the GPU effect-domain round trip cannot be recorded.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuEffectDomainRecordError {
+    /// The declared domain could not be resolved through stock OCIO.
+    Plan(RenderEffectColorDomainGpuPlanError),
+    /// Scene-linear plans belong in the fused working compositor.
+    SceneLinearUsesInlineCompositor,
+    /// The working-to-effect pass failed.
+    ToProcessing(RenderGpuColorTransformRuntimeRecordError),
+    /// The point-effect pass failed.
+    PointEffect(GpuCompositeError),
+    /// The effect-to-working pass failed.
+    ToWorking(RenderGpuColorTransformRuntimeRecordError),
+}
+
+/// Result of recording a working composite graph with interleaved effect-domain nodes.
+pub struct RenderGpuCompositeGraphRecord {
+    /// GPU-resident working frame produced by the complete layer graph.
+    pub output: GpuColorFrameHandle,
+    /// Accumulated diagnostics from every working-composite segment.
+    pub compositing_diagnostics: GpuCompositingDiagnostics,
+    /// Accumulated diagnostics from interleaved stock-OCIO transforms.
+    pub color_stage_diagnostics: RenderColorStageDiagnostics,
+    /// Number of adjustment nodes executed outside working-linear space.
+    pub external_adjustment_passes: u64,
+}
+
+/// Error returned while recording an interleaved GPU composite graph.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuCompositeGraphRecordError {
+    /// A working-composite segment could not be recorded.
+    Composite(GpuCompositeError),
+    /// An external-domain adjustment could not be executed.
+    EffectDomain(Box<RenderGpuEffectDomainRecordError>),
+}
+
+/// Result of explicitly uploading one CPU working frame into the shared GPU table.
+pub struct RenderGpuWorkingFrameUploadRecord {
+    /// GPU-resident working frame produced by the upload.
+    pub output: GpuColorFrameHandle,
+    /// Transfer-stage evidence for the explicit boundary.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Error returned when a CPU working frame cannot enter the shared GPU table.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderGpuWorkingFrameUploadError {
+    /// Renderer frame identity allocation is exhausted.
+    FrameId(GpuColorFrameIdAllocationError),
+    /// The CPU frame could not be represented by the working texture contract.
+    Plan(GpuColorFrameUploadError),
+    /// The runtime resource table rejected the uploaded frame.
+    ResourceTable(GpuColorFrameResourceTableError),
+}
+
+/// Renderer-owned state for native GPU final-output color boundaries.
+///
+/// App/export code should hold one runtime per render backend lifetime. The
+/// runtime owns renderer-internal color resources, OCIO shader extraction,
+/// backend-object preparation, and executor-level recording so callers only pass
+/// per-submission wgpu objects.
+pub struct RenderGpuOutputBoundaryRuntime {
+    shader_cache: OcioGpuShaderCache,
+    backend_prep: OcioGpuWgpuBackendPrepRuntime,
+    backend_objects: OcioGpuWgpuBackendObjectRuntime,
+    frame_ids: GpuColorFrameIdAllocator,
+    frame_table: GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    /// Last wall-clock instant a persistent per-frame failure class emitted a
+    /// warn log, so fallback paths cannot flood the log at frame rate.
+    persistent_failure_warned_at: std::cell::Cell<Option<std::time::Instant>>,
+}
+
+impl RenderGpuOutputBoundaryRuntime {
+    /// Create a runtime with default cache capacity and frame ids starting at 1.
+    pub fn new() -> Result<Self, GpuColorFrameIdAllocationError> {
+        Self::with_first_frame_id(1)
+    }
+
+    /// Create a runtime with default cache capacity and a custom first frame id.
+    pub fn with_first_frame_id(
+        first_frame_id: u64,
+    ) -> Result<Self, GpuColorFrameIdAllocationError> {
+        Self::with_first_frame_id_and_resource_pool(
+            first_frame_id,
+            Arc::new(GpuColorFrameWgpuResourcePool::default()),
+        )
+    }
+
+    /// Create a runtime that shares a device-scoped texture pool.
+    pub fn with_resource_pool(
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Result<Self, GpuColorFrameIdAllocationError> {
+        Self::with_first_frame_id_and_resource_pool(1, resource_pool)
+    }
+
+    /// Create a runtime with explicit frame ids and a shared device-scoped texture pool.
+    pub fn with_first_frame_id_and_resource_pool(
+        first_frame_id: u64,
+        resource_pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Result<Self, GpuColorFrameIdAllocationError> {
+        Ok(Self {
+            shader_cache: OcioGpuShaderCache::default(),
+            backend_prep: OcioGpuWgpuBackendPrepRuntime::default(),
+            backend_objects: OcioGpuWgpuBackendObjectRuntime::default(),
+            frame_ids: GpuColorFrameIdAllocator::new(first_frame_id)?,
+            frame_table: GpuColorFrameResourceTable::new(),
+            resource_pool,
+            persistent_failure_warned_at: std::cell::Cell::new(None),
+        })
+    }
+
+    /// Rate-limit warn logging for persistent per-frame failure classes.
+    ///
+    /// A broken import path (for example a driver that cannot expose NV12
+    /// shared textures) otherwise warns once per layer per frame at 30-60 fps.
+    /// The diagnostic counters still record every fallback; only the log is
+    /// throttled to one message per five seconds per runtime.
+    pub(crate) fn log_persistent_failure_warn(&self, message: impl FnOnce() -> String) {
+        const VIEWER_PERSISTENT_FAILURE_WARN_INTERVAL: std::time::Duration =
+            std::time::Duration::from_secs(5);
+        let now = std::time::Instant::now();
+        let already_warned = self.persistent_failure_warned_at.get().is_some_and(|last| {
+            now.saturating_duration_since(last) < VIEWER_PERSISTENT_FAILURE_WARN_INTERVAL
+        });
+        if already_warned {
+            return;
+        }
+        self.persistent_failure_warned_at.set(Some(now));
+        tracing::warn!("{}", message());
+    }
+
+    /// Return point-in-time runtime diagnostics.
+    pub fn diagnostics(&self) -> RenderGpuOutputBoundaryRuntimeDiagnostics {
+        RenderGpuOutputBoundaryRuntimeDiagnostics {
+            shader_cache: self.shader_cache.diagnostics(),
+            backend_prep: self.backend_prep.diagnostics(),
+            backend_objects: self.backend_objects.diagnostics(),
+            next_frame_id: self.frame_ids.next_raw(),
+            frame_table_entries: self.frame_table.len(),
+            resource_pool: self.resource_pool.diagnostics(),
+        }
+    }
+
+    /// Remove all materialized frame resources owned by this runtime.
+    pub fn clear_frame_resources(&mut self) {
+        for resource in self.frame_table.drain() {
+            self.resource_pool.release(resource);
+        }
+    }
+
+    /// Clone the device-scoped texture pool shared by compatible renderer stages.
+    pub fn resource_pool(&self) -> Arc<GpuColorFrameWgpuResourcePool> {
+        Arc::clone(&self.resource_pool)
+    }
+
+    /// Borrow the runtime-owned GPU frame resource table.
+    pub fn frame_table(&self) -> &GpuColorFrameResourceTable<GpuColorFrameWgpuResource> {
+        &self.frame_table
+    }
+
+    /// Mutably borrow the runtime-owned GPU frame resource table.
+    pub fn frame_table_mut(
+        &mut self,
+    ) -> &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource> {
+        &mut self.frame_table
+    }
+
+    /// Detach one exact output resource from this runtime's frame table.
+    ///
+    /// The complete handle contract is validated before ownership moves. A
+    /// mismatch leaves the table unchanged so a presentation adapter cannot
+    /// acquire an allocation through id-only aliasing.
+    pub fn take_frame_resource(
+        &mut self,
+        handle: &GpuColorFrameHandle,
+    ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuColorFrameResourceTableError>
+    {
+        self.frame_table.take(handle)
+    }
+
+    /// Mutably borrow the allocator that owns frame identities for this
+    /// runtime's resource table. Native import plans must allocate from this
+    /// same namespace before their returned resources enter the table.
+    pub fn frame_ids_mut(&mut self) -> &mut GpuColorFrameIdAllocator {
+        &mut self.frame_ids
+    }
+
+    pub(crate) fn frame_table_and_ids_mut(
+        &mut self,
+    ) -> (
+        &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        &mut GpuColorFrameIdAllocator,
+    ) {
+        (&mut self.frame_table, &mut self.frame_ids)
+    }
+
+    /// Borrow the runtime-owned OCIO shader cache.
+    pub fn shader_cache(&self) -> &OcioGpuShaderCache {
+        &self.shader_cache
+    }
+
+    /// Mutably borrow the runtime-owned OCIO shader cache.
+    pub fn shader_cache_mut(&mut self) -> &mut OcioGpuShaderCache {
+        &mut self.shader_cache
+    }
+
+    /// Borrow the runtime-owned pure backend-preparation cache.
+    pub fn backend_prep(&self) -> &OcioGpuWgpuBackendPrepRuntime {
+        &self.backend_prep
+    }
+
+    /// Mutably borrow the runtime-owned pure backend-preparation cache.
+    pub fn backend_prep_mut(&mut self) -> &mut OcioGpuWgpuBackendPrepRuntime {
+        &mut self.backend_prep
+    }
+
+    /// Borrow the runtime-owned concrete backend-object cache.
+    pub fn backend_objects(&self) -> &OcioGpuWgpuBackendObjectRuntime {
+        &self.backend_objects
+    }
+
+    /// Mutably borrow the runtime-owned concrete backend-object cache.
+    pub fn backend_objects_mut(&mut self) -> &mut OcioGpuWgpuBackendObjectRuntime {
+        &mut self.backend_objects
+    }
+
+    /// Record a native GPU working-space composite into this runtime's shared
+    /// frame resource table.
+    ///
+    /// The returned GPU working frame can be passed directly to
+    /// [`Self::record_wgpu_output_boundary_gpu_frame_owned_backend`], avoiding
+    /// the legacy CPU working-frame composite before preview output.
+    pub fn record_wgpu_working_composite(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: GpuCompositeRequest<'_>,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record(
+            device,
+            queue,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            request,
+        )
+    }
+
+    /// Materialize one unblended procedural solid into the shared working-frame table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_solid_source(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+        color: Color,
+    ) -> Result<GpuSolidSourceRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record_solid_source_pass(
+            device,
+            queue,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            width,
+            height,
+            working_color_space,
+            color,
+        )
+    }
+
+    /// Record one typed two-input Cross Dissolve into the shared working-frame table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_cross_dissolve(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        left: &GpuColorFrameHandle,
+        right: &GpuColorFrameHandle,
+        progress: f32,
+        working_color_space: WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        let Self { frame_ids, frame_table, resource_pool, .. } = self;
+        compositor.record_cross_dissolve_pass(
+            device,
+            queue,
+            encoder,
+            frame_ids,
+            frame_table,
+            Some(resource_pool),
+            left,
+            right,
+            progress,
+            working_color_space,
+        )
+    }
+
+    /// Upload one CPU working frame into this runtime's pooled GPU frame table.
+    ///
+    /// This is an explicit source-residency boundary for CPU decode/fallback
+    /// paths that must enter a non-scene-linear GPU effect domain. It records no
+    /// readback and performs no color transform.
+    pub fn upload_wgpu_working_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &CpuColorFrame,
+    ) -> Result<RenderGpuWorkingFrameUploadRecord, RenderGpuWorkingFrameUploadError> {
+        let plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            self.frame_ids.allocate().map_err(RenderGpuWorkingFrameUploadError::FrameId)?,
+            frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "gpu-working-frame-upload",
+        )
+        .map_err(RenderGpuWorkingFrameUploadError::Plan)?;
+        let output = plan.handle.clone();
+        let resource =
+            GpuColorFrameUploader::upload_with_pool(device, queue, &plan, &self.resource_pool);
+        self.frame_table
+            .insert(resource)
+            .map_err(RenderGpuWorkingFrameUploadError::ResourceTable)?;
+        let pixels = output.descriptor().pixel_count() as u64;
+        Ok(RenderGpuWorkingFrameUploadRecord {
+            output,
+            stage_diagnostics: RenderColorStageDiagnostics {
+                total_stages: 1,
+                upload_stages: 1,
+                stage_pixels: pixels,
+                ..RenderColorStageDiagnostics::default()
+            },
+        })
+    }
+
+    /// Plan and record one GPU-resident OCIO identity transform between graph nodes.
+    pub fn record_wgpu_intermediate_color_transform_owned_backend(
+        &mut self,
+        transform: &RenderIntermediateColorTransform,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        let transform_plan = {
+            let mut planner =
+                RenderColorTransformGpuPlanner::new(&mut self.shader_cache, gpu_options);
+            planner
+                .plan_identity_transform(input.descriptor(), transform)
+                .map_err(RenderGpuColorTransformRuntimeRecordError::Plan)?
+        };
+        self.record_wgpu_planned_color_transform_owned_backend(
+            transform_plan,
+            input,
+            output_texture_format,
+            output_label,
+            backend,
+        )
+    }
+
+    /// Record one already-planned GPU-resident OCIO transform.
+    pub fn record_wgpu_planned_color_transform_owned_backend(
+        &mut self,
+        transform_plan: RenderColorTransformGpuPlan,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuColorTransformRuntimeRecordError> {
+        let Self {
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let resources = RenderGpuColorTransformResourcePlan::from_gpu_frame(
+            frame_ids,
+            input,
+            transform_plan,
+            output_texture_format,
+            output_label,
+        )
+        .map_err(RenderGpuColorTransformRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuColorTransformRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuColorTransformRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_color_transform(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuColorTransformRuntimeRecordError::Record)
+    }
+
+    /// Record a non-scene-linear point-effect round trip without CPU transfers.
+    pub fn record_wgpu_effect_domain_round_trip(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        plan: &mondrian_effects::CompiledEffectGpuPlan,
+        input: &GpuColorFrameHandle,
+        engine: ColorEngine,
+        frame_seed: i64,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuEffectDomainRecord, RenderGpuEffectDomainRecordError> {
+        let route = {
+            let mut planner =
+                RenderEffectColorDomainGpuPlanner::new(&mut self.shader_cache, gpu_options);
+            planner
+                .plan(input.descriptor(), plan.processing_domain(), engine)
+                .map_err(RenderGpuEffectDomainRecordError::Plan)?
+        };
+        let (Some(to_processing_plan), Some(to_working_plan)) =
+            (route.to_processing, route.to_working)
+        else {
+            return Err(RenderGpuEffectDomainRecordError::SceneLinearUsesInlineCompositor);
+        };
+        let device = backend.device;
+        let queue = backend.queue;
+        let encoder = backend.encoder;
+        let load_op = backend.load_op;
+        let to_processing = self
+            .record_wgpu_planned_color_transform_owned_backend(
+                to_processing_plan,
+                input,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "effect-domain-processing-input",
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device,
+                    queue,
+                    encoder: &mut *encoder,
+                    load_op,
+                },
+            )
+            .map_err(RenderGpuEffectDomainRecordError::ToProcessing)?;
+        let effect = compositor
+            .record_point_effect_pass(
+                device,
+                queue,
+                &mut *encoder,
+                &mut self.frame_ids,
+                &mut self.frame_table,
+                Some(&self.resource_pool),
+                &to_processing.materialized.output,
+                plan,
+                frame_seed,
+            )
+            .map_err(RenderGpuEffectDomainRecordError::PointEffect)?;
+        let to_working = self
+            .record_wgpu_planned_color_transform_owned_backend(
+                to_working_plan,
+                &effect.output,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "effect-domain-working-output",
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device,
+                    queue,
+                    encoder: &mut *encoder,
+                    load_op,
+                },
+            )
+            .map_err(RenderGpuEffectDomainRecordError::ToWorking)?;
+        Ok(RenderGpuEffectDomainRecord { to_processing, effect, to_working })
+    }
+
+    /// Record a working composite while interleaving external-domain adjustments.
+    ///
+    /// Contiguous ordinary layers remain batched in one compositor call. Before
+    /// each log/display adjustment, the lower accumulator is finalized, routed
+    /// through stock OCIO and the point-effect pass, blended back with the
+    /// adjustment's authored opacity/blend mode, and reused as the next base.
+    /// External-domain media and solids must already be materialized as GPU
+    /// working frames by the source scheduler.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_wgpu_composite_graph(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        request: GpuCompositeRequest<'_>,
+        engine: ColorEngine,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Result<RenderGpuCompositeGraphRecord, RenderGpuCompositeGraphRecordError> {
+        let mut compositing_diagnostics = GpuCompositingDiagnostics::default();
+        let mut color_stage_diagnostics = RenderColorStageDiagnostics::default();
+        let mut external_adjustment_passes = 0_u64;
+        let mut current: Option<GpuColorFrameHandle> = None;
+        let mut segment_start = 0_usize;
+
+        for (index, layer) in request.layers.iter().enumerate() {
+            if layer.opacity.clamp(0.0, 1.0) == 0.0 {
+                continue;
+            }
+            let Some(effect_plan) = layer.effect_plan else {
+                continue;
+            };
+            if !matches!(layer.source, GpuCompositeLayerSource::Adjustment)
+                || effect_plan.processing_domain()
+                    == mondrian_effects::EffectColorDomain::SceneLinearRgb
+            {
+                continue;
+            }
+
+            let lower = self.record_wgpu_composite_segment(
+                compositor,
+                device,
+                queue,
+                encoder,
+                request.width,
+                request.height,
+                request.working_color_space,
+                current.as_ref(),
+                &request.layers[segment_start..index],
+            )?;
+            compositing_diagnostics.accumulate(lower.diagnostics);
+            let base = lower.output;
+            let effect = self
+                .record_wgpu_effect_domain_round_trip(
+                    compositor,
+                    effect_plan,
+                    &base,
+                    engine.clone(),
+                    layer.frame_seed,
+                    gpu_options,
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device,
+                        queue,
+                        encoder: &mut *encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    },
+                )
+                .map_err(|error| {
+                    RenderGpuCompositeGraphRecordError::EffectDomain(Box::new(error))
+                })?;
+            color_stage_diagnostics.accumulate(effect.to_processing.stage_diagnostics);
+            color_stage_diagnostics.accumulate(effect.to_working.stage_diagnostics);
+            let processed = effect.to_working.materialized.output;
+            let blended = {
+                let Self { frame_ids, frame_table, resource_pool, .. } = self;
+                compositor.record_adjustment_blend_pass(
+                    device,
+                    queue,
+                    encoder,
+                    frame_ids,
+                    frame_table,
+                    Some(resource_pool),
+                    &base,
+                    &processed,
+                    layer.opacity,
+                    layer.blend_mode,
+                    layer.frame_seed,
+                    request.working_color_space,
+                )
+            }
+            .map_err(RenderGpuCompositeGraphRecordError::Composite)?;
+            compositing_diagnostics.accumulate(blended.diagnostics);
+            current = Some(blended.output);
+            external_adjustment_passes = external_adjustment_passes.saturating_add(1);
+            segment_start = index.saturating_add(1);
+        }
+
+        let final_segment = self.record_wgpu_composite_segment(
+            compositor,
+            device,
+            queue,
+            encoder,
+            request.width,
+            request.height,
+            request.working_color_space,
+            current.as_ref(),
+            &request.layers[segment_start..],
+        )?;
+        compositing_diagnostics.accumulate(final_segment.diagnostics);
+        Ok(RenderGpuCompositeGraphRecord {
+            output: final_segment.output,
+            compositing_diagnostics,
+            color_stage_diagnostics,
+            external_adjustment_passes,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_wgpu_composite_segment(
+        &mut self,
+        compositor: &GpuFrameCompositor,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+        base: Option<&GpuColorFrameHandle>,
+        layers: &[GpuCompositeLayer<'_>],
+    ) -> Result<GpuCompositeRecord, RenderGpuCompositeGraphRecordError> {
+        let mut scheduled =
+            Vec::with_capacity(layers.len().saturating_add(usize::from(base.is_some())));
+        if let Some(base) = base {
+            scheduled.push(GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(base),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            });
+        }
+        scheduled.extend_from_slice(layers);
+        self.record_wgpu_working_composite(
+            compositor,
+            device,
+            queue,
+            encoder,
+            GpuCompositeRequest {
+                width,
+                height,
+                working_color_space,
+                layers: &scheduled,
+            },
+        )
+        .map_err(RenderGpuCompositeGraphRecordError::Composite)
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU
+    /// source/input color transform from a decoded CPU source into GPU working space.
+    pub fn record_wgpu_input_stage_owned_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        frame: &CpuSourceColorFrame,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
+        let stage_plan = planner
+            .plan_input_to_working(frame.descriptor(), transform)
+            .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(frame_ids, frame, &stage_plan)
+                .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_input_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuInputStageRuntimeRecordError::Record)
+    }
+
+    /// Plan and record the OCIO input transform for an encoded-float source
+    /// frame that is already present in this runtime's GPU resource table.
+    ///
+    /// Native YUV backends use this after their sampling pass. Both handles
+    /// come from the native import plan, so this method validates and preserves
+    /// that plan rather than allocating replacement frame identities.
+    pub fn record_wgpu_input_stage_gpu_frame_owned_backend(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuInputStageRecord, RenderGpuInputStageRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids: _,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
+        let stage_plan = planner
+            .plan_input_to_working(input.descriptor(), transform)
+            .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            input,
+            output,
+            &stage_plan,
+        )
+        .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_input_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuInputStageRuntimeRecordError::Record)
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.
+    pub fn record_wgpu_output_boundary_owned_backend(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        self.record_wgpu_output_boundary_owned_backend_with_grant(
+            boundary,
+            frame,
+            output_texture_format,
+            gpu_options,
+            RenderGpuOutputExecutionResourceGrant::default(),
+            backend,
+        )
+    }
+
+    /// Plan, admit, prepare backend objects, and record a native GPU output boundary.
+    ///
+    /// Admission occurs after pure lowering and before pipeline, texture, or
+    /// readback-buffer materialization. Product Preview/Export owners should
+    /// freeze the supplied grant for the complete accepted execution attempt.
+    pub fn record_wgpu_output_boundary_owned_backend_with_grant(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        frame: &CpuColorFrame,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        active_grant: RenderGpuOutputExecutionResourceGrant,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
+        let plan = planner
+            .plan_descriptor_for_texture(frame.descriptor(), boundary, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
+        let resources = plan
+            .gpu_resource_plan(frame_ids, frame, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
+        active_grant
+            .admit_plan(&resources)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Record)
+    }
+
+    /// Plan, prepare runtime-owned backend objects, and record a native GPU
+    /// output boundary from an upstream GPU-resident working frame.
+    pub fn record_wgpu_output_boundary_gpu_frame_owned_backend(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        self.record_wgpu_output_boundary_gpu_frame_owned_backend_with_grant(
+            boundary,
+            input,
+            output_texture_format,
+            gpu_options,
+            RenderGpuOutputExecutionResourceGrant::default(),
+            backend,
+        )
+    }
+
+    /// Plan, admit, prepare backend objects, and record a GPU-resident output boundary.
+    pub fn record_wgpu_output_boundary_gpu_frame_owned_backend_with_grant(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        input: &GpuColorFrameHandle,
+        output_texture_format: GpuColorFrameTextureFormat,
+        gpu_options: RenderColorTransformGpuOptions,
+        active_grant: RenderGpuOutputExecutionResourceGrant,
+        backend: RenderGpuOutputBoundaryRuntimeOwnedBackendContext<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputBoundaryRuntimeRecordError> {
+        let Self {
+            shader_cache,
+            backend_prep,
+            backend_objects,
+            frame_ids,
+            frame_table,
+            resource_pool,
+            ..
+        } = self;
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(shader_cache, gpu_options);
+        let plan = planner
+            .plan_descriptor_for_texture(input.descriptor(), boundary, output_texture_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Plan)?;
+        let resources = RenderGpuOutputStageResourcePlan::from_gpu_working_frame(
+            frame_ids,
+            input,
+            &plan.stage_plan,
+            output_texture_format,
+        )
+        .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan)?;
+        active_grant
+            .admit_plan(&resources)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendPrep)?;
+        let prepared_backend = backend_objects
+            .prepare_backend_objects(
+                backend.device,
+                backend.queue,
+                &shader_plan,
+                &static_pipeline,
+            )
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::BackendObjects)?;
+        resources
+            .record_wgpu_output_stage(RenderGpuOutputStageRecordRequest {
+                backend: RenderGpuOutputStageBackendContext {
+                    device: backend.device,
+                    queue: backend.queue,
+                    encoder: backend.encoder,
+                    pipeline: &prepared_backend.render_pipeline,
+                    ocio_bind_group: &prepared_backend.ocio_bind_group,
+                    wrapper_input_layout: &prepared_backend.wrapper_input_layout,
+                    pass_node: prepared_backend.pass_node,
+                    table: frame_table,
+                    resource_pool: Some(resource_pool),
+                    load_op: backend.load_op,
+                },
+            })
+            .map_err(RenderGpuOutputBoundaryRuntimeRecordError::Record)
+    }
+}
+
+/// Point-in-time diagnostics for a GPU output boundary runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RenderGpuOutputBoundaryRuntimeDiagnostics {
+    /// OCIO shader extraction cache diagnostics.
+    pub shader_cache: OcioGpuShaderCacheDiagnostics,
+    /// Pure backend-preparation cache diagnostics.
+    pub backend_prep: OcioGpuWgpuBackendPrepRuntimeDiagnostics,
+    /// Concrete backend-object cache diagnostics.
+    pub backend_objects: OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    /// Next GPU color frame id that will be allocated.
+    pub next_frame_id: u64,
+    /// Number of materialized frame resources currently retained.
+    pub frame_table_entries: usize,
+    /// Device-scoped color-frame texture reuse evidence.
+    pub resource_pool: GpuColorFrameWgpuResourcePoolDiagnostics,
+}
+
+/// Schema version for renderer GPU output health reports.
+pub const RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION: u32 = 3;
+
+/// Serializable frame evidence for renderer GPU output diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputFrameReport {
+    /// Output frame width in pixels.
+    pub width: usize,
+    /// Output frame height in pixels.
+    pub height: usize,
+    /// Total pixel count represented by this boundary sample.
+    pub pixel_count: usize,
+    /// Linear working color space entering the output boundary.
+    pub working_color_space: WorkingColorSpace,
+    /// Requested display/export color space leaving the output boundary.
+    pub output_color_space: ColorSpace,
+}
+
+impl RenderGpuOutputFrameReport {
+    /// Return the expected encoded RGBA8 readback byte count for this frame.
+    pub fn expected_readback_bytes(&self) -> usize {
+        self.pixel_count.saturating_mul(4)
+    }
+}
+
+/// Serializable stage evidence for renderer GPU output diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderGpuOutputStageDiagnosticsReport {
+    /// Total scheduled stages for this output boundary.
+    pub total_stages: u64,
+    /// CPU->GPU upload stages.
+    pub upload_stages: u64,
+    /// Native GPU color-transform stages.
+    pub gpu_color_stages: u64,
+    /// GPU->CPU readback stages.
+    pub readback_stages: u64,
+    /// Native GPU blockers exposed by the stage plan.
+    pub gpu_blockers: u64,
+    /// Structured native GPU blocker reasons.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
+    /// Sum of pixels touched by the scheduled stages.
+    pub stage_pixels: u64,
+}
+
+impl From<RenderColorStageDiagnostics> for RenderGpuOutputStageDiagnosticsReport {
+    fn from(diagnostics: RenderColorStageDiagnostics) -> Self {
+        Self {
+            total_stages: diagnostics.total_stages,
+            upload_stages: diagnostics.upload_stages,
+            gpu_color_stages: diagnostics.gpu_color_stages,
+            readback_stages: diagnostics.readback_stages,
+            gpu_blockers: diagnostics.gpu_blockers,
+            gpu_blocker_breakdown: diagnostics.gpu_blocker_breakdown,
+            stage_pixels: diagnostics.stage_pixels,
+        }
+    }
+}
+
+/// Serializable runtime evidence for renderer GPU output diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RenderGpuOutputRuntimeDiagnosticsReport {
+    /// Number of prepared shader-cache entries.
+    pub shader_cache_entries: usize,
+    /// Shader-cache hits observed by the runtime.
+    pub shader_cache_hits: u64,
+    /// Shader-cache misses observed by the runtime.
+    pub shader_cache_misses: u64,
+    /// Shader extraction failures observed by the runtime.
+    pub shader_cache_extraction_failures: u64,
+    /// Number of prepared pure backend resource entries.
+    pub backend_prep_resource_entries: usize,
+    /// Number of complete static-pipeline assemblies retained by the runtime.
+    pub static_pipeline_entries: usize,
+    /// Complete static-pipeline cache hits observed by the runtime.
+    pub static_pipeline_hits: u64,
+    /// Complete static-pipeline cache misses observed by the runtime.
+    pub static_pipeline_misses: u64,
+    /// Number of prepared concrete backend object entries.
+    pub backend_object_entries: usize,
+    /// Concrete backend-object cache hits observed by the runtime.
+    pub backend_object_hits: u64,
+    /// Concrete backend-object cache misses observed by the runtime.
+    pub backend_object_misses: u64,
+    /// Concrete backend-object preparation failures observed by the runtime.
+    pub backend_object_failures: u64,
+    /// OCIO wrapper input bind groups created for frame textures.
+    pub wrapper_input_bind_group_creations: u64,
+    /// OCIO wrapper input bind groups reused from frame textures.
+    pub wrapper_input_bind_group_cache_hits: u64,
+    /// Number of GPU frame-table entries retained by the runtime.
+    pub frame_table_entries: usize,
+    /// Next GPU frame id that will be allocated.
+    pub next_frame_id: u64,
+}
+
+impl From<RenderGpuOutputBoundaryRuntimeDiagnostics> for RenderGpuOutputRuntimeDiagnosticsReport {
+    fn from(diagnostics: RenderGpuOutputBoundaryRuntimeDiagnostics) -> Self {
+        Self {
+            shader_cache_entries: diagnostics.shader_cache.entries,
+            shader_cache_hits: diagnostics.shader_cache.hits,
+            shader_cache_misses: diagnostics.shader_cache.misses,
+            shader_cache_extraction_failures: diagnostics.shader_cache.extraction_failures,
+            backend_prep_resource_entries: diagnostics.backend_prep.resources.entries,
+            static_pipeline_entries: diagnostics.backend_prep.static_pipelines.entries,
+            static_pipeline_hits: diagnostics.backend_prep.static_pipelines.hits,
+            static_pipeline_misses: diagnostics.backend_prep.static_pipelines.misses,
+            backend_object_entries: diagnostics.backend_objects.entries,
+            backend_object_hits: diagnostics.backend_objects.hits,
+            backend_object_misses: diagnostics.backend_objects.misses,
+            backend_object_failures: diagnostics.backend_objects.failures,
+            wrapper_input_bind_group_creations: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .bind_group_creations,
+            wrapper_input_bind_group_cache_hits: diagnostics
+                .backend_objects
+                .wrapper_input_bindings
+                .cache_hits,
+            frame_table_entries: diagnostics.frame_table_entries,
+            next_frame_id: diagnostics.next_frame_id,
+        }
+    }
+}
+
+/// High-level health state derived from one renderer GPU output sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderGpuOutputHealthStatus {
+    /// The smoke could not exercise a real GPU boundary and was skipped.
+    Skipped,
+    /// The GPU boundary completed and matched the CPU reference within tolerance.
+    Passed,
+    /// The GPU boundary produced evidence but violated at least one fail-closed check.
+    Failed,
+}
+
+/// Derived summary for one renderer GPU output sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthSummary {
+    /// High-level sample status.
+    pub status: RenderGpuOutputHealthStatus,
+    /// Whether the real native GPU output boundary was fully ready.
+    pub native_gpu_output_ready: bool,
+    /// Whether the stage sequence contained upload + GPU color + readback.
+    pub complete_stage_sequence: bool,
+    /// Whether the stage plan reported zero native GPU blockers.
+    pub no_gpu_blockers: bool,
+    /// Whether runtime backend preparation/object caches were warmed successfully.
+    pub backend_runtime_ready: bool,
+    /// Whether the OCIO shader cache warmed without extraction failures.
+    pub shader_cache_warmed: bool,
+    /// Whether the observed readback matched the expected byte count.
+    pub readback_complete: bool,
+    /// Whether CPU/GPU parity stayed within the configured tolerance.
+    pub parity_within_tolerance: bool,
+    /// Expected encoded RGBA8 readback bytes for this boundary sample.
+    pub expected_readback_bytes: usize,
+}
+
+impl RenderGpuOutputHealthSummary {
+    /// Evaluate one renderer GPU output sample into the stable summary contract.
+    pub fn evaluate(
+        skipped: bool,
+        frame: &RenderGpuOutputFrameReport,
+        stage: &RenderGpuOutputStageDiagnosticsReport,
+        runtime: &RenderGpuOutputRuntimeDiagnosticsReport,
+        observed_readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+    ) -> Self {
+        let expected_readback_bytes = frame.expected_readback_bytes();
+        let complete_stage_sequence = stage.total_stages == 3
+            && stage.upload_stages == 1
+            && stage.gpu_color_stages == 1
+            && stage.readback_stages == 1;
+        let no_gpu_blockers = stage.gpu_blockers == 0 && stage.gpu_blocker_breakdown.total() == 0;
+        let shader_cache_warmed = runtime.shader_cache_entries > 0
+            && runtime.shader_cache_misses > 0
+            && runtime.shader_cache_extraction_failures == 0;
+        let backend_runtime_ready = runtime.backend_prep_resource_entries > 0
+            && runtime.static_pipeline_entries > 0
+            && runtime.backend_object_entries > 0
+            && runtime.backend_object_misses > 0
+            && runtime.backend_object_failures == 0;
+        let readback_complete =
+            expected_readback_bytes > 0 && observed_readback_bytes == expected_readback_bytes;
+        let parity_within_tolerance = max_rgba_delta <= tolerance;
+        let native_gpu_output_ready = !skipped
+            && complete_stage_sequence
+            && no_gpu_blockers
+            && shader_cache_warmed
+            && backend_runtime_ready
+            && readback_complete;
+        let status = if skipped {
+            RenderGpuOutputHealthStatus::Skipped
+        } else if native_gpu_output_ready && parity_within_tolerance {
+            RenderGpuOutputHealthStatus::Passed
+        } else {
+            RenderGpuOutputHealthStatus::Failed
+        };
+
+        Self {
+            status,
+            native_gpu_output_ready,
+            complete_stage_sequence,
+            no_gpu_blockers,
+            backend_runtime_ready,
+            shader_cache_warmed,
+            readback_complete,
+            parity_within_tolerance,
+            expected_readback_bytes,
+        }
+    }
+}
+
+/// Overall verdict for a renderer GPU output health report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RenderGpuOutputHealthVerdict {
+    /// The sample satisfied all fail-closed checks.
+    Pass,
+    /// The sample violated at least one fail-closed check.
+    Fail,
+}
+
+/// Diagnostic area used by renderer GPU output health checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RenderGpuOutputDiagnosticArea {
+    /// Smoke capture completeness and readback integrity.
+    CaptureIntegrity,
+    /// Renderer GPU stage scheduling and blocker health.
+    GpuColorPath,
+    /// OCIO shader-cache and backend runtime readiness.
+    BackendRuntime,
+    /// CPU/GPU parity against the reference boundary.
+    Parity,
+}
+
+/// Severity for one renderer GPU output health check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum RenderGpuOutputHealthSeverity {
+    /// The check passed.
+    Pass,
+    /// The check failed.
+    Fail,
+}
+
+/// One renderer GPU output health check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthCheck {
+    /// Diagnostic area this check belongs to.
+    pub area: RenderGpuOutputDiagnosticArea,
+    /// Stable machine-readable check code.
+    pub code: &'static str,
+    /// Check severity.
+    pub severity: RenderGpuOutputHealthSeverity,
+    /// Observed value.
+    pub observed: u64,
+    /// Optional threshold or target.
+    pub limit: Option<u64>,
+}
+
+/// One prioritized renderer GPU output root cause.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthRootCause {
+    /// Diagnostic area this root cause belongs to.
+    pub area: RenderGpuOutputDiagnosticArea,
+    /// Stable machine-readable root-cause code.
+    pub code: &'static str,
+    /// Root-cause severity.
+    pub severity: RenderGpuOutputHealthSeverity,
+    /// Compact evidence string.
+    pub evidence: String,
+}
+
+/// One suggested follow-up action for a renderer GPU output sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthAction {
+    /// Diagnostic area this action belongs to.
+    pub area: RenderGpuOutputDiagnosticArea,
+    /// Stable machine-readable action code.
+    pub code: &'static str,
+    /// Human-readable action.
+    pub description: &'static str,
+}
+
+/// Compact evidence payload embedded in renderer GPU output health reports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthEvidence {
+    /// Skip reason when the smoke could not acquire a real adapter.
+    pub skipped_reason: Option<String>,
+    /// Expected encoded RGBA8 readback byte count.
+    pub expected_readback_bytes: usize,
+    /// Observed encoded RGBA8 readback byte count.
+    pub observed_readback_bytes: usize,
+    /// Maximum channel delta observed between CPU and GPU output.
+    pub max_rgba_delta: u8,
+    /// Allowed parity tolerance used for this sample.
+    pub tolerance: u8,
+    /// Structured native GPU blocker breakdown for this sample.
+    pub gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown,
+    /// Number of shader-cache entries retained by the runtime.
+    pub shader_cache_entries: usize,
+    /// Number of concrete backend-object entries retained by the runtime.
+    pub backend_object_entries: usize,
+}
+
+/// Versioned renderer GPU output health report for smoke output and tooling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RenderGpuOutputHealthReport {
+    /// Report schema version.
+    pub schema_version: u32,
+    /// Applied report profile.
+    pub profile: String,
+    /// Overall health verdict.
+    pub verdict: RenderGpuOutputHealthVerdict,
+    /// Structured summary derived from the sample.
+    pub summary: RenderGpuOutputHealthSummary,
+    /// Stable checks that explain the verdict.
+    pub checks: Vec<RenderGpuOutputHealthCheck>,
+    /// Prioritized machine-readable root causes.
+    pub root_causes: Vec<RenderGpuOutputHealthRootCause>,
+    /// Suggested engineering follow-up actions.
+    pub actions: Vec<RenderGpuOutputHealthAction>,
+    /// Compact evidence pointers for dashboards and tooling.
+    pub evidence: RenderGpuOutputHealthEvidence,
+}
+
+impl RenderGpuOutputHealthReport {
+    /// Build the health report for one renderer GPU output sample.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_sample(
+        profile: impl Into<String>,
+        skipped_reason: Option<String>,
+        frame: &RenderGpuOutputFrameReport,
+        stage: &RenderGpuOutputStageDiagnosticsReport,
+        runtime: &RenderGpuOutputRuntimeDiagnosticsReport,
+        observed_readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+    ) -> Self {
+        let summary = RenderGpuOutputHealthSummary::evaluate(
+            skipped_reason.is_some(),
+            frame,
+            stage,
+            runtime,
+            observed_readback_bytes,
+            max_rgba_delta,
+            tolerance,
+        );
+        Self::build(
+            profile,
+            skipped_reason,
+            summary,
+            stage,
+            runtime,
+            observed_readback_bytes,
+            max_rgba_delta,
+            tolerance,
+        )
+    }
+
+    /// Build the health report from a precomputed renderer GPU output summary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build(
+        profile: impl Into<String>,
+        skipped_reason: Option<String>,
+        summary: RenderGpuOutputHealthSummary,
+        stage: &RenderGpuOutputStageDiagnosticsReport,
+        runtime: &RenderGpuOutputRuntimeDiagnosticsReport,
+        observed_readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+    ) -> Self {
+        let mut checks = Vec::new();
+        let mut root_causes = Vec::new();
+        let mut actions = Vec::new();
+
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::CaptureIntegrity,
+            "not_skipped",
+            summary.status != RenderGpuOutputHealthStatus::Skipped,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::GpuColorPath,
+            "native_gpu_output_ready",
+            summary.native_gpu_output_ready,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::GpuColorPath,
+            "complete_stage_sequence",
+            summary.complete_stage_sequence,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::GpuColorPath,
+            "no_gpu_blockers",
+            summary.no_gpu_blockers,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::BackendRuntime,
+            "backend_runtime_ready",
+            summary.backend_runtime_ready,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::BackendRuntime,
+            "shader_cache_warmed",
+            summary.shader_cache_warmed,
+        );
+        push_render_gpu_output_bool_check(
+            &mut checks,
+            RenderGpuOutputDiagnosticArea::CaptureIntegrity,
+            "readback_complete",
+            summary.readback_complete,
+        );
+        checks.push(RenderGpuOutputHealthCheck {
+            area: RenderGpuOutputDiagnosticArea::Parity,
+            code: "parity_within_tolerance",
+            severity: if summary.parity_within_tolerance {
+                RenderGpuOutputHealthSeverity::Pass
+            } else {
+                RenderGpuOutputHealthSeverity::Fail
+            },
+            observed: u64::from(max_rgba_delta),
+            limit: Some(u64::from(tolerance)),
+        });
+
+        push_render_gpu_output_root_causes_and_actions(
+            skipped_reason.clone(),
+            &summary,
+            stage,
+            runtime,
+            observed_readback_bytes,
+            max_rgba_delta,
+            tolerance,
+            &mut root_causes,
+            &mut actions,
+        );
+
+        let verdict =
+            if checks.iter().any(|check| check.severity == RenderGpuOutputHealthSeverity::Fail) {
+                RenderGpuOutputHealthVerdict::Fail
+            } else {
+                RenderGpuOutputHealthVerdict::Pass
+            };
+
+        Self {
+            schema_version: RENDER_GPU_OUTPUT_HEALTH_REPORT_SCHEMA_VERSION,
+            profile: profile.into(),
+            verdict,
+            summary,
+            checks,
+            root_causes,
+            actions,
+            evidence: RenderGpuOutputHealthEvidence {
+                skipped_reason,
+                expected_readback_bytes: summary.expected_readback_bytes,
+                observed_readback_bytes,
+                max_rgba_delta,
+                tolerance,
+                gpu_blocker_breakdown: stage.gpu_blocker_breakdown,
+                shader_cache_entries: runtime.shader_cache_entries,
+                backend_object_entries: runtime.backend_object_entries,
+            },
+        }
+    }
+}
+
+fn push_render_gpu_output_bool_check(
+    checks: &mut Vec<RenderGpuOutputHealthCheck>,
+    area: RenderGpuOutputDiagnosticArea,
+    code: &'static str,
+    passed: bool,
+) {
+    checks.push(RenderGpuOutputHealthCheck {
+        area,
+        code,
+        severity: if passed {
+            RenderGpuOutputHealthSeverity::Pass
+        } else {
+            RenderGpuOutputHealthSeverity::Fail
+        },
+        observed: if passed { 1 } else { 0 },
+        limit: Some(1),
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_render_gpu_output_root_causes_and_actions(
+    skipped_reason: Option<String>,
+    summary: &RenderGpuOutputHealthSummary,
+    stage: &RenderGpuOutputStageDiagnosticsReport,
+    runtime: &RenderGpuOutputRuntimeDiagnosticsReport,
+    observed_readback_bytes: usize,
+    max_rgba_delta: u8,
+    tolerance: u8,
+    root_causes: &mut Vec<RenderGpuOutputHealthRootCause>,
+    actions: &mut Vec<RenderGpuOutputHealthAction>,
+) {
+    if let Some(reason) = skipped_reason {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::CaptureIntegrity,
+            "gpu_adapter_unavailable",
+            reason,
+            "provision_real_wgpu_adapter",
+            "Run the smoke on a machine where wgpu can acquire a real adapter.",
+        );
+    }
+    if !summary.complete_stage_sequence {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::GpuColorPath,
+            "gpu_stage_sequence_incomplete",
+            format!(
+                "total_stages={} upload={} gpu={} readback={}",
+                stage.total_stages,
+                stage.upload_stages,
+                stage.gpu_color_stages,
+                stage.readback_stages
+            ),
+            "inspect_gpu_stage_sequence",
+            "Inspect upload, GPU color, and readback stage sequencing on the real boundary.",
+        );
+    }
+    if !summary.no_gpu_blockers {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::GpuColorPath,
+            "gpu_stage_blocked",
+            format!(
+                "gpu_blockers={} shader={} ocio_resource={} wrapper={} pipeline={} \
+                 ocio_config={} ocio_processor={} shader_extraction={}",
+                stage.gpu_blockers,
+                stage.gpu_blocker_breakdown.shader_module_not_prepared,
+                stage.gpu_blocker_breakdown.ocio_resource_bind_group_not_prepared,
+                stage.gpu_blocker_breakdown.fullscreen_wrapper_not_prepared,
+                stage.gpu_blocker_breakdown.render_pipeline_not_prepared,
+                stage.gpu_blocker_breakdown.ocio_config_not_loaded,
+                stage.gpu_blocker_breakdown.ocio_processor_unavailable,
+                stage.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed
+            ),
+            "inspect_gpu_blocker_breakdown",
+            "Inspect shader module, OCIO resource, fullscreen wrapper, render pipeline, OCIO config, processor, and shader extraction blockers.",
+        );
+    }
+    if !summary.backend_runtime_ready {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::BackendRuntime,
+            "backend_runtime_not_ready",
+            format!(
+                "prep_entries={} static_entries={} static_hits={} static_misses={} backend_entries={} backend_misses={} backend_failures={}",
+                runtime.backend_prep_resource_entries,
+                runtime.static_pipeline_entries,
+                runtime.static_pipeline_hits,
+                runtime.static_pipeline_misses,
+                runtime.backend_object_entries,
+                runtime.backend_object_misses,
+                runtime.backend_object_failures
+            ),
+            "inspect_backend_runtime",
+            "Inspect backend prep/object caches and runtime object materialization for the smoke boundary.",
+        );
+    }
+    if !summary.shader_cache_warmed {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::BackendRuntime,
+            "shader_cache_not_ready",
+            format!(
+                "shader_cache_entries={} hits={} misses={} extraction_failures={}",
+                runtime.shader_cache_entries,
+                runtime.shader_cache_hits,
+                runtime.shader_cache_misses,
+                runtime.shader_cache_extraction_failures
+            ),
+            "inspect_shader_cache_extraction",
+            "Inspect OCIO shader extraction and cache warming for the real GPU output boundary.",
+        );
+    }
+    if !summary.readback_complete {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::CaptureIntegrity,
+            "gpu_readback_incomplete",
+            format!(
+                "observed_readback_bytes={} expected_readback_bytes={}",
+                observed_readback_bytes, summary.expected_readback_bytes
+            ),
+            "inspect_gpu_readback",
+            "Inspect GPU readback byte count and output texture/readback plan compatibility.",
+        );
+    }
+    if !summary.parity_within_tolerance {
+        push_render_gpu_output_root_cause_with_action(
+            root_causes,
+            actions,
+            RenderGpuOutputDiagnosticArea::Parity,
+            "cpu_gpu_parity_out_of_tolerance",
+            format!("max_rgba_delta={} tolerance={}", max_rgba_delta, tolerance),
+            "inspect_cpu_gpu_parity",
+            "Inspect CPU/GPU output parity and verify OCIO + wrapper execution matches the CPU reference path.",
+        );
+    }
+}
+
+fn push_render_gpu_output_root_cause_with_action(
+    root_causes: &mut Vec<RenderGpuOutputHealthRootCause>,
+    actions: &mut Vec<RenderGpuOutputHealthAction>,
+    area: RenderGpuOutputDiagnosticArea,
+    root_code: &'static str,
+    evidence: String,
+    action_code: &'static str,
+    action_description: &'static str,
+) {
+    if !root_causes.iter().any(|root| root.code == root_code) {
+        root_causes.push(RenderGpuOutputHealthRootCause {
+            area,
+            code: root_code,
+            severity: RenderGpuOutputHealthSeverity::Fail,
+            evidence,
+        });
+    }
+    if !actions.iter().any(|action| action.code == action_code) {
+        actions.push(RenderGpuOutputHealthAction {
+            area,
+            code: action_code,
+            description: action_description,
+        });
+    }
+}
+
+/// Strategy-aware planner for preview/export final output color boundaries.
+pub struct RenderOutputColorBoundaryPlanner<'a> {
+    stage_planner: RenderColorStagePlanner<'a>,
+}
+
+impl RenderOutputColorBoundaryPlanner<'_> {
+    /// Create a planner that always chooses the CPU correctness path.
+    pub fn cpu_only() -> Self {
+        Self { stage_planner: RenderColorStagePlanner::cpu_only() }
+    }
+}
+
+impl<'a> RenderOutputColorBoundaryPlanner<'a> {
+    /// Create a planner that asks the renderer GPU backend for an OCIO stage plan.
+    pub fn prefer_gpu(
+        gpu_cache: &'a mut OcioGpuShaderCache,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Self {
+        Self {
+            stage_planner: RenderColorStagePlanner::prefer_gpu(gpu_cache, gpu_options),
+        }
+    }
+
+    /// Plan the final output boundary for a typed working frame.
+    pub fn plan(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        self.plan_descriptor(frame.descriptor(), boundary)
+    }
+
+    /// Plan a final output boundary that retains encoded float samples.
+    pub fn plan_float(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let stage_plan = self
+            .stage_planner
+            .plan_output_transform_float(frame.descriptor(), &boundary.transform())?;
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+
+    /// Plan the final output boundary for an already-described working frame.
+    ///
+    /// This is used by GPU-resident upstream stages that have a
+    /// `GpuColorFrameHandle` but no CPU pixel container.
+    pub fn plan_descriptor(
+        &mut self,
+        descriptor: ColorFrameDescriptor,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let stage_plan =
+            self.stage_planner.plan_output_transform(descriptor, &boundary.transform())?;
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+
+    /// Plan a boundary whose descriptor encoding matches its concrete GPU target.
+    pub fn plan_descriptor_for_texture(
+        &mut self,
+        descriptor: ColorFrameDescriptor,
+        boundary: &RenderOutputColorBoundary,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<RenderOutputColorBoundaryStagePlan, RenderColorTransformError> {
+        let transform = boundary.transform();
+        let stage_plan = match output_texture_format {
+            GpuColorFrameTextureFormat::Rgba8Unorm => {
+                self.stage_planner.plan_output_transform(descriptor, &transform)?
+            }
+            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+                self.stage_planner.plan_output_transform_float(descriptor, &transform)?
+            }
+        };
+        Ok(RenderOutputColorBoundaryStagePlan { boundary: boundary.clone(), stage_plan })
+    }
+}
+
+/// Renderer-owned executor for preview/export final output color boundaries.
+///
+/// This is the call-site boundary for app/export code. Construction selects an
+/// explicit execution strategy; the executor does not silently fall back between
+/// CPU and GPU modes.
+pub struct RenderOutputColorBoundaryExecutor<'a> {
+    planner: RenderOutputColorBoundaryPlanner<'a>,
+}
+
+impl RenderOutputColorBoundaryExecutor<'_> {
+    /// Create a final-output executor that always schedules CPU color stages.
+    pub fn cpu_only() -> Self {
+        Self {
+            planner: RenderOutputColorBoundaryPlanner::cpu_only(),
+        }
+    }
+}
+
+impl<'a> RenderOutputColorBoundaryExecutor<'a> {
+    /// Create a final-output executor that plans native GPU OCIO output stages.
+    pub fn prefer_gpu(
+        gpu_cache: &'a mut OcioGpuShaderCache,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Self {
+        Self {
+            planner: RenderOutputColorBoundaryPlanner::prefer_gpu(gpu_cache, gpu_options),
+        }
+    }
+
+    /// Plan and execute a final display/export output boundary.
+    pub fn execute(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
+        let plan = self.planner.plan(frame, boundary)?;
+        CpuRenderColorStageExecutor::output_transform(frame, &plan.stage_plan)
+    }
+
+    /// Plan and execute through an explicit owner-scoped CPU color Session.
+    pub fn execute_with_session(
+        &mut self,
+        frame: &CpuColorFrame,
+        boundary: &RenderOutputColorBoundary,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
+        let plan = self.planner.plan(frame, boundary)?;
+        CpuRenderColorStageExecutor::output_transform_with_session(frame, &plan.stage_plan, session)
+    }
+
+    /// Plan and record a native GPU final display/export output boundary.
+    pub fn record_wgpu_output_boundary(
+        &mut self,
+        boundary: &RenderOutputColorBoundary,
+        request: RenderGpuOutputBoundaryRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderOutputColorBoundaryGpuRecordError> {
+        let RenderGpuOutputBoundaryRecordRequest { ids, frame, output_texture_format, backend } =
+            request;
+        let plan = self
+            .planner
+            .plan(frame, boundary)
+            .map_err(RenderOutputColorBoundaryGpuRecordError::Plan)?;
+        plan.record_wgpu_output_boundary(RenderGpuOutputBoundaryRecordRequest {
+            ids,
+            frame,
+            output_texture_format,
+            backend,
+        })
+        .map_err(RenderOutputColorBoundaryGpuRecordError::Record)
+    }
+}
+
+/// Error returned when a final-output executor cannot record a GPU boundary.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RenderOutputColorBoundaryGpuRecordError {
+    /// The output boundary could not be planned.
+    Plan(RenderColorTransformError),
+    /// The planned GPU boundary could not be recorded.
+    Record(RenderGpuOutputBoundaryRecordError),
+}
+
+/// Schedulable GPU OCIO color pass with resolved source/target frame handles.
+#[derive(Debug, Clone)]
+pub struct RenderGpuColorPassSchedule {
+    /// GPU source frame consumed by the OCIO pass.
+    pub input: GpuColorFrameHandle,
+    /// GPU target frame produced by the OCIO pass.
+    pub output: GpuColorFrameHandle,
+    /// Renderer GPU transform plan for this color boundary.
+    pub transform: RenderColorTransformGpuPlan,
+    /// Backend render-pass node that records the fullscreen OCIO draw.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+}
+
+/// Resource plan for one GPU-resident OCIO transform between render-graph nodes.
+///
+/// This contract has no implicit transfer boundary: both input and output stay
+/// in the shared renderer resource table and the output texture is reusable.
+#[derive(Debug, Clone)]
+pub struct RenderGpuColorTransformResourcePlan {
+    /// Existing GPU input frame consumed by the color pass.
+    pub input: GpuColorFrameHandle,
+    /// Newly allocated GPU output frame produced by the color pass.
+    pub output: GpuColorFrameHandle,
+    /// Allocation contract for the output texture.
+    pub output_allocation: GpuColorFrameAllocationPlan,
+    /// Executable GPU OCIO transform bound to these descriptors.
+    pub transform: RenderColorTransformGpuPlan,
+}
+
+impl RenderGpuColorTransformResourcePlan {
+    /// Bind a blocker-free GPU transform to an existing input and a new output target.
+    pub fn from_gpu_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        input: &GpuColorFrameHandle,
+        transform: RenderColorTransformGpuPlan,
+        output_texture_format: GpuColorFrameTextureFormat,
+        output_label: impl Into<String>,
+    ) -> Result<Self, RenderGpuColorTransformResourcePlanError> {
+        if !transform.wgpu.can_execute() {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::NativeBlockersRemaining {
+                    blockers: transform.wgpu.blockers.len(),
+                },
+            );
+        }
+        if transform.requires_source_upload || transform.requires_output_readback {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::TransferBoundaryRequired {
+                    source_upload: transform.requires_source_upload,
+                    output_readback: transform.requires_output_readback,
+                },
+            );
+        }
+        if transform.diagnostics.input != input.descriptor() {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::InputDescriptorMismatch {
+                    expected: transform.diagnostics.input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        let output_descriptor = transform.diagnostics.output;
+        if output_descriptor.residency != ColorFrameResidency::Gpu {
+            return Err(
+                RenderGpuColorTransformResourcePlanError::OutputIsNotGpuResident {
+                    descriptor: output_descriptor,
+                },
+            );
+        }
+        validate_gpu_color_target_encoding(output_descriptor.encoding, output_texture_format)?;
+        let output = GpuColorFrameHandle::new(
+            ids.allocate()?,
+            output_descriptor,
+            output_texture_format,
+            output_label,
+        )
+        .map_err(RenderGpuColorTransformResourcePlanError::OutputHandle)?;
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        Ok(Self {
+            input: input.clone(),
+            output,
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Return diagnostics for this single GPU-resident color pass.
+    pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
+        RenderColorStageDiagnostics {
+            total_stages: 1,
+            gpu_color_stages: 1,
+            stage_pixels: self.output.descriptor().pixel_count() as u64,
+            ..RenderColorStageDiagnostics::default()
+        }
+    }
+
+    /// Bind this resource plan to a prepared OCIO render-pass node.
+    pub fn schedule_pass(
+        &self,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError> {
+        RenderGpuColorPassSchedule::new(
+            self.input.clone(),
+            self.output.clone(),
+            self.transform.clone(),
+            pass_node,
+        )
+    }
+
+    /// Allocate the output, record the OCIO pass, and keep both frames GPU-resident.
+    pub fn record_wgpu_color_transform(
+        &self,
+        request: RenderGpuOutputStageRecordRequest<'_>,
+    ) -> Result<RenderGpuColorTransformRecord, RenderGpuOutputStageRecordError> {
+        let stage = RenderGpuOutputStageResourcePlan {
+            input: self.input.clone(),
+            output: self.output.clone(),
+            readback: None,
+            input_upload: None,
+            output_allocation: self.output_allocation.clone(),
+            transform: self.transform.clone(),
+        };
+        let record = stage.record_wgpu_output_stage(request)?;
+        Ok(RenderGpuColorTransformRecord {
+            materialized: record.materialized,
+            stage_diagnostics: self.stage_diagnostics(),
+        })
+    }
+}
+
+/// Result of recording one GPU-resident OCIO transform between graph nodes.
+pub struct RenderGpuColorTransformRecord {
+    /// Existing input and newly materialized output handles.
+    pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Single-pass diagnostics with no upload/readback stages.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Error returned when an in-graph GPU OCIO transform cannot bind resources.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RenderGpuColorTransformResourcePlanError {
+    /// Renderer frame identity allocation is exhausted.
+    #[error(transparent)]
+    FrameId(#[from] GpuColorFrameIdAllocationError),
+    /// OCIO GPU preparation left deterministic native blockers.
+    #[error("GPU color transform has {blockers} unresolved native blockers")]
+    NativeBlockersRemaining {
+        /// Number of blockers reported by the prepared OCIO plan.
+        blockers: usize,
+    },
+    /// The transform still requires a CPU/GPU transfer boundary.
+    #[error(
+        "GPU color transform requires transfer boundary (upload={source_upload}, readback={output_readback})"
+    )]
+    TransferBoundaryRequired {
+        /// Whether a source upload is still required.
+        source_upload: bool,
+        /// Whether an output readback is still required.
+        output_readback: bool,
+    },
+    /// The supplied handle does not satisfy the transform input contract.
+    #[error("GPU color transform input mismatch: expected {expected:?}, actual {actual:?}")]
+    InputDescriptorMismatch {
+        /// Planned input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Supplied handle descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The planned intermediate would leave GPU residency.
+    #[error("GPU color transform output is not GPU-resident: {descriptor:?}")]
+    OutputIsNotGpuResident {
+        /// Invalid planned output descriptor.
+        descriptor: ColorFrameDescriptor,
+    },
+    /// The output encoding cannot be represented by the selected texture format.
+    #[error("GPU color target encoding {encoding:?} does not match {texture_format:?}")]
+    OutputTextureEncodingMismatch {
+        /// Planned pixel encoding.
+        encoding: ColorFrameEncoding,
+        /// Requested texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+    /// The typed output handle could not be constructed.
+    #[error("GPU color transform output handle is invalid: {0}")]
+    OutputHandle(GpuColorFrameHandleError),
+}
+
+fn validate_gpu_color_target_encoding(
+    encoding: ColorFrameEncoding,
+    texture_format: GpuColorFrameTextureFormat,
+) -> Result<(), RenderGpuColorTransformResourcePlanError> {
+    let matches = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+            encoding != ColorFrameEncoding::EncodedRgba8
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            RenderGpuColorTransformResourcePlanError::OutputTextureEncodingMismatch {
+                encoding,
+                texture_format,
+            },
+        )
+    }
+}
+
+/// GPU target texture view borrowed while recording a scheduled OCIO color pass.
+struct RenderGpuColorPassTargetView<'a> {
+    frame: &'a GpuColorFrameHandle,
+    texture_view: &'a wgpu::TextureView,
+    load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Resolved resource-table entries for a scheduled GPU OCIO color pass.
+#[derive(Debug)]
+pub struct RenderGpuColorPassResolvedResources<'a, R> {
+    /// Resolved input frame entry.
+    pub input: &'a GpuColorFrameResource<R>,
+    /// Resolved output frame entry.
+    pub output: &'a GpuColorFrameResource<R>,
+}
+
+/// Resource materialization plan for one GPU output color transform stage.
+#[derive(Debug, Clone)]
+pub struct RenderGpuOutputStageResourcePlan {
+    /// Input GPU frame handle consumed by the color pass.
+    pub input: GpuColorFrameHandle,
+    /// Output GPU frame handle produced by the color pass.
+    pub output: GpuColorFrameHandle,
+    /// Readback contract when the planned output returns to a CPU encoded boundary.
+    pub readback: Option<GpuColorFrameReadbackPlan>,
+    /// Optional upload plan that moves a CPU working frame into the input GPU frame.
+    ///
+    /// This is `None` when the input frame was produced by an upstream GPU
+    /// stage, such as native GPU working-space compositing.
+    pub input_upload: Option<GpuColorFrameUploadPlan>,
+    /// Allocation plan for the output GPU target frame.
+    pub output_allocation: GpuColorFrameAllocationPlan,
+    /// GPU transform plan that these resources satisfy.
+    pub transform: RenderColorTransformGpuPlan,
+}
+
+/// Resource materialization plan for one GPU source/input color transform stage.
+///
+/// This is the renderer-owned path for decoded CPU source frames entering
+/// timeline working space on the GPU: typed CPU source upload ->
+/// native OCIO GPU input transform -> GPU-resident linear working frame.
+#[derive(Debug, Clone)]
+pub struct RenderGpuInputStageResourcePlan {
+    /// Uploaded source GPU frame consumed by the input color pass.
+    pub input: GpuColorFrameHandle,
+    /// GPU working frame produced by the input color pass.
+    pub output: GpuColorFrameHandle,
+    /// Optional upload plan for CPU-decoded sources. Native GPU sources are
+    /// already present in the shared resource table.
+    pub input_upload: Option<GpuColorFrameUploadPlan>,
+    /// Allocation plan for the output GPU working frame.
+    pub output_allocation: GpuColorFrameAllocationPlan,
+    /// GPU transform plan that these resources satisfy.
+    pub transform: RenderColorTransformGpuPlan,
+}
+
+/// Result of recording one materialized GPU input color stage.
+pub struct RenderGpuInputStageRecord {
+    /// Resources materialized into the shared GPU frame table.
+    pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Diagnostics for the GPU color stage shape that was recorded.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+}
+
+/// Handles materialized into a GPU frame resource table for one output stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderGpuOutputStageMaterializedResources {
+    /// Input GPU frame inserted into the table.
+    pub input: GpuColorFrameHandle,
+    /// Output GPU frame inserted into the table.
+    pub output: GpuColorFrameHandle,
+}
+
+/// Result of recording one materialized GPU output color stage.
+pub struct RenderGpuOutputStageRecord {
+    /// Resources materialized into the shared GPU frame table.
+    pub materialized: RenderGpuOutputStageMaterializedResources,
+    /// Diagnostics for the GPU color stage shape that was recorded.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Optional readback buffer recorded for CPU output boundaries.
+    pub readback_buffer: Option<wgpu::Buffer>,
+}
+
+/// Borrowed backend objects required to record one GPU output color stage.
+pub struct RenderGpuOutputStageBackendContext<'a> {
+    /// wgpu device used for resource materialization and bind-group creation.
+    pub device: &'a wgpu::Device,
+    /// wgpu queue used for upload writes.
+    pub queue: &'a wgpu::Queue,
+    /// Command encoder receiving the color pass and optional readback copy.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// Prepared OCIO fullscreen render pipeline.
+    pub pipeline: &'a OcioGpuWgpuRenderPipeline,
+    /// Prepared OCIO resource bind group.
+    pub ocio_bind_group: &'a OcioGpuWgpuOcioBindGroup,
+    /// Prepared wrapper input layout reused for this frame's input bind group.
+    pub wrapper_input_layout: &'a OcioGpuWgpuPreparedWrapperInputLayout,
+    /// Backend render-pass node for this color transform.
+    pub pass_node: OcioGpuWgpuRenderPassNodePlan,
+    /// Shared GPU color frame resource table.
+    pub table: &'a mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    /// Optional device-scoped exact-contract resource pool.
+    pub resource_pool: Option<&'a GpuColorFrameWgpuResourcePool>,
+    /// Load operation for the output color attachment.
+    pub load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// Borrowed inputs required to record one GPU output color stage.
+pub struct RenderGpuOutputStageRecordRequest<'a> {
+    /// Backend context used to materialize resources and record the pass.
+    pub backend: RenderGpuOutputStageBackendContext<'a>,
+}
+
+impl<'a> From<RenderGpuOutputBoundaryBackendContext<'a>>
+    for RenderGpuOutputStageBackendContext<'a>
+{
+    fn from(context: RenderGpuOutputBoundaryBackendContext<'a>) -> Self {
+        Self {
+            device: context.device,
+            queue: context.queue,
+            encoder: context.encoder,
+            pipeline: context.pipeline,
+            ocio_bind_group: context.ocio_bind_group,
+            wrapper_input_layout: context.wrapper_input_layout,
+            pass_node: context.pass_node,
+            table: context.table,
+            resource_pool: None,
+            load_op: context.load_op,
+        }
+    }
+}
+
+impl RenderGpuOutputStageResourcePlan {
+    /// Return the stage diagnostics represented by this executable GPU output resource plan.
+    pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
+        let mut diagnostics = RenderColorStageDiagnostics {
+            total_stages: 1 + u64::from(self.input_upload.is_some()),
+            upload_stages: u64::from(self.input_upload.is_some()),
+            gpu_color_stages: 1,
+            stage_pixels: self.output.descriptor().pixel_count().saturating_add(
+                self.input_upload.as_ref().map_or(0, |_| self.input.descriptor().pixel_count()),
+            ) as u64,
+            ..RenderColorStageDiagnostics::default()
+        };
+        if let Some(readback) = &self.readback {
+            diagnostics.total_stages = diagnostics.total_stages.saturating_add(1);
+            diagnostics.readback_stages = diagnostics.readback_stages.saturating_add(1);
+            diagnostics.stage_pixels = diagnostics
+                .stage_pixels
+                .saturating_add(readback.output_descriptor.pixel_count() as u64);
+        }
+        diagnostics
+    }
+
+    /// Build resource plans for a CPU working frame entering a planned native GPU output transform.
+    pub fn from_cpu_working_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        frame: &CpuColorFrame,
+        stage_plan: &RenderColorStagePlan,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<Self, RenderGpuOutputStageResourcePlanError> {
+        let planned = planned_gpu_upload_transform_readback(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.upload_input != frame.descriptor() {
+            return Err(
+                RenderGpuOutputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.upload_input,
+                    actual: frame.descriptor(),
+                },
+            );
+        }
+        validate_output_texture_encoding(planned.gpu_output.encoding, output_texture_format)?;
+        let input_upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
+            ids.allocate().map_err(RenderGpuOutputStageResourcePlanError::FrameId)?,
+            frame,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "color-stage-working-input",
+        )
+        .map_err(RenderGpuOutputStageResourcePlanError::InputUpload)?;
+        if input_upload.handle.descriptor() != planned.gpu_input {
+            return Err(
+                RenderGpuOutputStageResourcePlanError::UploadOutputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input_upload.handle.descriptor(),
+                },
+            );
+        }
+        let output = GpuColorFrameHandle::new(
+            ids.allocate().map_err(RenderGpuOutputStageResourcePlanError::FrameId)?,
+            planned.gpu_output,
+            output_texture_format,
+            "color-stage-output-target",
+        )
+        .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
+        let readback = if planned.readback_output.is_some() {
+            Some(output_readback_plan(output.clone())?)
+        } else {
+            None
+        };
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input_upload.handle.clone(),
+            output,
+            readback,
+            input_upload: Some(input_upload),
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Build resource plans for an already GPU-resident working frame entering
+    /// a planned native GPU output transform.
+    pub fn from_gpu_working_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        input: &GpuColorFrameHandle,
+        stage_plan: &RenderColorStagePlan,
+        output_texture_format: GpuColorFrameTextureFormat,
+    ) -> Result<Self, RenderGpuOutputStageResourcePlanError> {
+        let planned = planned_gpu_transform_readback(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.gpu_input != input.descriptor() {
+            return Err(
+                RenderGpuOutputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        validate_output_texture_encoding(planned.gpu_output.encoding, output_texture_format)?;
+        let output = GpuColorFrameHandle::new(
+            ids.allocate().map_err(RenderGpuOutputStageResourcePlanError::FrameId)?,
+            planned.gpu_output,
+            output_texture_format,
+            "color-stage-output-target",
+        )
+        .map_err(RenderGpuOutputStageResourcePlanError::OutputHandle)?;
+        let readback = if planned.readback_output.is_some() {
+            Some(output_readback_plan(output.clone())?)
+        } else {
+            None
+        };
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input.clone(),
+            output,
+            readback,
+            input_upload: None,
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Insert already-materialized resources into a GPU color frame resource table.
+    pub fn insert_resources<R>(
+        &self,
+        table: &mut GpuColorFrameResourceTable<R>,
+        input: GpuColorFrameResource<R>,
+        output: GpuColorFrameResource<R>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        if input.handle() != &self.input {
+            return Err(
+                RenderGpuOutputStageMaterializeError::InputResourceMismatch {
+                    expected: Box::new(self.input.clone()),
+                    actual: Box::new(input.handle().clone()),
+                },
+            );
+        }
+        if output.handle() != &self.output {
+            return Err(
+                RenderGpuOutputStageMaterializeError::OutputResourceMismatch {
+                    expected: Box::new(self.output.clone()),
+                    actual: Box::new(output.handle().clone()),
+                },
+            );
+        }
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        table
+            .insert(input)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        table
+            .insert(output)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        Ok(RenderGpuOutputStageMaterializedResources {
+            input: self.input.clone(),
+            output: self.output.clone(),
+        })
+    }
+
+    /// Upload/allocate this stage's wgpu resources and insert them into a resource table.
+    pub fn materialize_wgpu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        self.materialize_wgpu_with_pool(device, queue, table, None)
+    }
+
+    fn materialize_wgpu_with_pool(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        let output = resource_pool.map_or_else(
+            || GpuColorFrameUploader::allocate(device, &self.output_allocation),
+            |pool| pool.acquire(device, &self.output_allocation),
+        );
+        if let Some(input_upload) = &self.input_upload {
+            let input = resource_pool.map_or_else(
+                || GpuColorFrameUploader::upload(device, queue, input_upload),
+                |pool| GpuColorFrameUploader::upload_with_pool(device, queue, input_upload, pool),
+            );
+            self.insert_resources(table, input, output)
+        } else {
+            table
+                .get(&self.input)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            table
+                .insert(output)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            Ok(RenderGpuOutputStageMaterializedResources {
+                input: self.input.clone(),
+                output: self.output.clone(),
+            })
+        }
+    }
+
+    /// Build a schedulable color pass for these materialized frame handles.
+    pub fn schedule_pass(
+        &self,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError> {
+        RenderGpuColorPassSchedule::new(
+            self.input.clone(),
+            self.output.clone(),
+            self.transform.clone(),
+            pass_node,
+        )
+    }
+
+    /// Materialize resources, record the GPU color pass, then record optional readback.
+    pub fn record_wgpu_output_stage(
+        &self,
+        request: RenderGpuOutputStageRecordRequest<'_>,
+    ) -> Result<RenderGpuOutputStageRecord, RenderGpuOutputStageRecordError> {
+        let RenderGpuOutputStageRecordRequest { backend } = request;
+        let schedule = self
+            .schedule_pass(backend.pass_node)
+            .map_err(|error| RenderGpuOutputStageRecordError::Schedule(Box::new(error)))?;
+        let materialized = self
+            .materialize_wgpu_with_pool(
+                backend.device,
+                backend.queue,
+                backend.table,
+                backend.resource_pool,
+            )
+            .map_err(|error| RenderGpuOutputStageRecordError::Materialize(Box::new(error)))?;
+        schedule
+            .record_wgpu_from_resources(
+                backend.device,
+                backend.encoder,
+                backend.pipeline,
+                backend.ocio_bind_group,
+                backend.wrapper_input_layout,
+                backend.table,
+                backend.load_op,
+            )
+            .map_err(|error| RenderGpuOutputStageRecordError::Pass(Box::new(error)))?;
+        let readback_buffer = self
+            .record_readback_wgpu(backend.device, backend.encoder, backend.table)
+            .map_err(|error| RenderGpuOutputStageRecordError::Readback(Box::new(error)))?;
+        Ok(RenderGpuOutputStageRecord {
+            materialized,
+            stage_diagnostics: self.stage_diagnostics(),
+            readback_buffer,
+        })
+    }
+
+    /// Resolve the materialized output resource used by this stage's optional readback.
+    pub fn resolve_readback_resource<'a, R>(
+        &self,
+        table: &'a GpuColorFrameResourceTable<R>,
+    ) -> Result<Option<&'a GpuColorFrameResource<R>>, RenderGpuOutputStageReadbackError> {
+        let Some(readback) = &self.readback else {
+            return Ok(None);
+        };
+        table
+            .get(&readback.handle)
+            .map(Some)
+            .map_err(RenderGpuOutputStageReadbackError::ResourceTable)
+    }
+
+    /// Record this stage's optional GPU-to-CPU readback copy into an encoder.
+    pub fn record_readback_wgpu(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        table: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    ) -> Result<Option<wgpu::Buffer>, RenderGpuOutputStageReadbackError> {
+        let Some(readback) = &self.readback else {
+            return Ok(None);
+        };
+        match self.resolve_readback_resource(table)? {
+            Some(resource) => {
+                GpuColorFrameReadback::record_copy(device, encoder, readback, resource)
+                    .map(Some)
+                    .map_err(RenderGpuOutputStageReadbackError::Copy)
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+fn validate_output_texture_encoding(
+    encoding: ColorFrameEncoding,
+    texture_format: GpuColorFrameTextureFormat,
+) -> Result<(), RenderGpuOutputStageResourcePlanError> {
+    let matches = match texture_format {
+        GpuColorFrameTextureFormat::Rgba8Unorm => encoding == ColorFrameEncoding::EncodedRgba8,
+        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+            encoding == ColorFrameEncoding::EncodedFloat
+        }
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(
+            RenderGpuOutputStageResourcePlanError::OutputTextureEncodingMismatch {
+                encoding,
+                texture_format,
+            },
+        )
+    }
+}
+
+fn output_readback_plan(
+    output: GpuColorFrameHandle,
+) -> Result<GpuColorFrameReadbackPlan, RenderGpuOutputStageResourcePlanError> {
+    match output.texture_format() {
+        GpuColorFrameTextureFormat::Rgba8Unorm => GpuColorFrameReadbackPlan::encoded_rgba8(output),
+        GpuColorFrameTextureFormat::Rgba16Float => {
+            GpuColorFrameReadbackPlan::encoded_rgba16float(output)
+        }
+        GpuColorFrameTextureFormat::Rgba32Float => {
+            GpuColorFrameReadbackPlan::encoded_rgba32float(output)
+        }
+    }
+    .map_err(RenderGpuOutputStageResourcePlanError::OutputReadback)
+}
+
+impl RenderGpuInputStageResourcePlan {
+    /// Return the stage diagnostics represented by this executable GPU input resource plan.
+    pub fn stage_diagnostics(&self) -> RenderColorStageDiagnostics {
+        RenderColorStageDiagnostics {
+            total_stages: 1 + u64::from(self.input_upload.is_some()),
+            upload_stages: u64::from(self.input_upload.is_some()),
+            gpu_color_stages: 1,
+            stage_pixels: self.output.descriptor().pixel_count().saturating_add(
+                self.input_upload.as_ref().map_or(0, |_| self.input.descriptor().pixel_count()),
+            ) as u64,
+            ..RenderColorStageDiagnostics::default()
+        }
+    }
+
+    /// Build resource plans for a decoded CPU source frame entering a
+    /// planned native GPU input transform.
+    pub fn from_cpu_source_frame(
+        ids: &mut GpuColorFrameIdAllocator,
+        frame: &CpuSourceColorFrame,
+        stage_plan: &RenderColorStagePlan,
+    ) -> Result<Self, RenderGpuInputStageResourcePlanError> {
+        let planned = planned_gpu_source_upload_transform(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuInputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.upload_input != frame.descriptor() {
+            return Err(
+                RenderGpuInputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.upload_input,
+                    actual: frame.descriptor(),
+                },
+            );
+        }
+        let input_upload = match frame {
+            CpuSourceColorFrame::EncodedRgba8(frame) => {
+                GpuColorFrameUploadPlan::from_cpu_encoded_frame(
+                    ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+                    frame,
+                    GpuColorFrameTextureFormat::Rgba8Unorm,
+                    "color-stage-source-rgba8-input",
+                )
+            }
+            CpuSourceColorFrame::LinearFloat(frame) => {
+                GpuColorFrameUploadPlan::from_linear_float_source(
+                    ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+                    frame,
+                    "color-stage-source-rgba32float-input",
+                )
+            }
+        }
+        .map_err(RenderGpuInputStageResourcePlanError::InputUpload)?;
+        if input_upload.handle.descriptor() != planned.gpu_input {
+            return Err(
+                RenderGpuInputStageResourcePlanError::UploadOutputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input_upload.handle.descriptor(),
+                },
+            );
+        }
+        let output = GpuColorFrameHandle::new(
+            ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+            planned.gpu_output,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "color-stage-working-output",
+        )
+        .map_err(RenderGpuInputStageResourcePlanError::OutputHandle)?;
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input_upload.handle.clone(),
+            output,
+            input_upload: Some(input_upload),
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Build resource plans for an already GPU-resident encoded source frame
+    /// entering the OCIO input transform.
+    pub fn from_gpu_encoded_source_frame(
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        stage_plan: &RenderColorStagePlan,
+    ) -> Result<Self, RenderGpuInputStageResourcePlanError> {
+        let planned = planned_gpu_source_transform(stage_plan)?;
+        if !planned.transform.wgpu.can_execute() {
+            let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+            for blocker in &planned.transform.wgpu.blockers {
+                breakdown.record(blocker);
+            }
+            return Err(
+                RenderGpuInputStageResourcePlanError::NativeBlockersRemaining {
+                    blockers: planned.transform.wgpu.blockers.len(),
+                    breakdown,
+                },
+            );
+        }
+        if planned.gpu_input != input.descriptor() {
+            return Err(
+                RenderGpuInputStageResourcePlanError::InputDescriptorMismatch {
+                    expected: planned.gpu_input,
+                    actual: input.descriptor(),
+                },
+            );
+        }
+        if input.descriptor().encoding != ColorFrameEncoding::EncodedFloat {
+            return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "native GPU input transform requires an encoded-float source frame",
+            });
+        }
+        if input.texture_format() != GpuColorFrameTextureFormat::Rgba16Float {
+            return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "native encoded-float source must use Rgba16Float",
+            });
+        }
+        if planned.gpu_output != output.descriptor() {
+            return Err(
+                RenderGpuInputStageResourcePlanError::OutputDescriptorMismatch {
+                    expected: planned.gpu_output,
+                    actual: output.descriptor(),
+                },
+            );
+        }
+        if output.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(
+                RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
+                    texture_format: output.texture_format(),
+                },
+            );
+        }
+        let output_allocation = GpuColorFrameAllocationPlan::for_handle(output.clone());
+        let mut transform = (*planned.transform).clone();
+        transform.diagnostics.input = planned.gpu_input;
+        transform.diagnostics.output = planned.gpu_output;
+        transform.requires_source_upload = false;
+        transform.requires_output_readback = false;
+        Ok(Self {
+            input: input.clone(),
+            output: output.clone(),
+            input_upload: None,
+            output_allocation,
+            transform,
+        })
+    }
+
+    /// Upload/allocate this input stage's wgpu resources and insert them into a resource table.
+    pub fn materialize_wgpu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        self.materialize_wgpu_with_pool(device, queue, table, None)
+    }
+
+    fn materialize_wgpu_with_pool(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        let output = resource_pool.map_or_else(
+            || GpuColorFrameUploader::allocate(device, &self.output_allocation),
+            |pool| pool.acquire(device, &self.output_allocation),
+        );
+        if let Some(input_upload) = &self.input_upload {
+            let input = resource_pool.map_or_else(
+                || GpuColorFrameUploader::upload(device, queue, input_upload),
+                |pool| GpuColorFrameUploader::upload_with_pool(device, queue, input_upload, pool),
+            );
+            self.insert_resources(table, input, output)
+        } else {
+            table
+                .get(&self.input)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            table
+                .insert(output)
+                .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+            Ok(RenderGpuOutputStageMaterializedResources {
+                input: self.input.clone(),
+                output: self.output.clone(),
+            })
+        }
+    }
+
+    /// Insert already-materialized resources into a GPU color frame resource table.
+    pub fn insert_resources<R>(
+        &self,
+        table: &mut GpuColorFrameResourceTable<R>,
+        input: GpuColorFrameResource<R>,
+        output: GpuColorFrameResource<R>,
+    ) -> Result<RenderGpuOutputStageMaterializedResources, RenderGpuOutputStageMaterializeError>
+    {
+        if input.handle() != &self.input {
+            return Err(
+                RenderGpuOutputStageMaterializeError::InputResourceMismatch {
+                    expected: Box::new(self.input.clone()),
+                    actual: Box::new(input.handle().clone()),
+                },
+            );
+        }
+        if output.handle() != &self.output {
+            return Err(
+                RenderGpuOutputStageMaterializeError::OutputResourceMismatch {
+                    expected: Box::new(self.output.clone()),
+                    actual: Box::new(output.handle().clone()),
+                },
+            );
+        }
+        validate_materialization_table_slot(table, &self.input)?;
+        validate_materialization_table_slot(table, &self.output)?;
+        table
+            .insert(input)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        table
+            .insert(output)
+            .map_err(RenderGpuOutputStageMaterializeError::ResourceTable)?;
+        Ok(RenderGpuOutputStageMaterializedResources {
+            input: self.input.clone(),
+            output: self.output.clone(),
+        })
+    }
+
+    /// Build a schedulable color pass for these materialized frame handles.
+    pub fn schedule_pass(
+        &self,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<RenderGpuColorPassSchedule, RenderGpuColorPassScheduleError> {
+        RenderGpuColorPassSchedule::new(
+            self.input.clone(),
+            self.output.clone(),
+            self.transform.clone(),
+            pass_node,
+        )
+    }
+
+    /// Materialize resources, then record the GPU input color pass.
+    pub fn record_wgpu_input_stage(
+        &self,
+        request: RenderGpuOutputStageRecordRequest<'_>,
+    ) -> Result<RenderGpuInputStageRecord, RenderGpuOutputStageRecordError> {
+        let RenderGpuOutputStageRecordRequest { backend } = request;
+        let schedule = self
+            .schedule_pass(backend.pass_node)
+            .map_err(|error| RenderGpuOutputStageRecordError::Schedule(Box::new(error)))?;
+        let materialized = self
+            .materialize_wgpu_with_pool(
+                backend.device,
+                backend.queue,
+                backend.table,
+                backend.resource_pool,
+            )
+            .map_err(|error| RenderGpuOutputStageRecordError::Materialize(Box::new(error)))?;
+        schedule
+            .record_wgpu_from_resources(
+                backend.device,
+                backend.encoder,
+                backend.pipeline,
+                backend.ocio_bind_group,
+                backend.wrapper_input_layout,
+                backend.table,
+                backend.load_op,
+            )
+            .map_err(|error| RenderGpuOutputStageRecordError::Pass(Box::new(error)))?;
+        Ok(RenderGpuInputStageRecord {
+            materialized,
+            stage_diagnostics: self.stage_diagnostics(),
+        })
+    }
+}
+
+/// Error returned when GPU output stage resources cannot be planned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageResourcePlanError {
+    /// Renderer frame identity allocation is exhausted.
+    FrameId(GpuColorFrameIdAllocationError),
+    /// Native GPU blockers remain.
+    NativeBlockersRemaining {
+        /// Number of blockers in the GPU execution plan.
+        blockers: usize,
+        /// Structured blocker breakdown from the planned GPU transform.
+        breakdown: RenderColorStageGpuBlockerBreakdown,
+    },
+    /// The stage plan is not a supported upload -> GPU transform shape.
+    UnsupportedStagePlan {
+        /// Human-readable reason.
+        reason: &'static str,
+    },
+    /// The CPU working frame does not match the transform input descriptor.
+    InputDescriptorMismatch {
+        /// Expected transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual CPU frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The input upload did not produce the GPU descriptor consumed by the transform.
+    UploadOutputDescriptorMismatch {
+        /// Expected GPU transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual upload output descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The input upload plan failed.
+    InputUpload(GpuColorFrameUploadError),
+    /// The output GPU handle could not be created.
+    OutputHandle(crate::GpuColorFrameHandleError),
+    /// The output GPU frame cannot be read back into the requested CPU boundary.
+    OutputReadback(GpuColorFrameReadbackError),
+    /// The planned encoded sample representation does not match the target texture.
+    OutputTextureEncodingMismatch {
+        /// Encoding declared by the stage plan.
+        encoding: ColorFrameEncoding,
+        /// Concrete target texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+}
+
+/// Error returned when GPU input stage resources cannot be planned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuInputStageResourcePlanError {
+    /// Renderer frame identity allocation is exhausted.
+    FrameId(GpuColorFrameIdAllocationError),
+    /// Native GPU blockers remain.
+    NativeBlockersRemaining {
+        /// Number of blockers in the GPU execution plan.
+        blockers: usize,
+        /// Structured blocker breakdown from the planned GPU transform.
+        breakdown: RenderColorStageGpuBlockerBreakdown,
+    },
+    /// The stage plan is not a supported source upload -> GPU transform shape.
+    UnsupportedStagePlan {
+        /// Human-readable reason.
+        reason: &'static str,
+    },
+    /// The CPU source frame does not match the transform input descriptor.
+    InputDescriptorMismatch {
+        /// Expected transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual CPU frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The planned GPU working output does not match the supplied output handle.
+    OutputDescriptorMismatch {
+        /// Descriptor required by the OCIO stage plan.
+        expected: ColorFrameDescriptor,
+        /// Descriptor carried by the supplied output handle.
+        actual: ColorFrameDescriptor,
+    },
+    /// The input upload did not produce the GPU descriptor consumed by the transform.
+    UploadOutputDescriptorMismatch {
+        /// Expected GPU transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual upload output descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The input upload plan failed.
+    InputUpload(GpuColorFrameUploadError),
+    /// The output GPU handle could not be created.
+    OutputHandle(crate::GpuColorFrameHandleError),
+    /// The requested output texture format cannot carry a linear working frame.
+    UnsupportedOutputTextureFormat {
+        /// Requested texture format.
+        texture_format: GpuColorFrameTextureFormat,
+    },
+}
+
+/// Error returned when planned GPU output stage resources cannot be materialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageMaterializeError {
+    /// The provided input resource does not match the planned input handle.
+    InputResourceMismatch {
+        /// Expected planned handle.
+        expected: Box<GpuColorFrameHandle>,
+        /// Actual resource handle.
+        actual: Box<GpuColorFrameHandle>,
+    },
+    /// The provided output resource does not match the planned output handle.
+    OutputResourceMismatch {
+        /// Expected planned handle.
+        expected: Box<GpuColorFrameHandle>,
+        /// Actual resource handle.
+        actual: Box<GpuColorFrameHandle>,
+    },
+    /// Resource table rejected one of the materialized resources.
+    ResourceTable(GpuColorFrameResourceTableError),
+}
+
+/// Error returned when a GPU output stage readback cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageReadbackError {
+    /// Resource table rejected the readback target lookup.
+    ResourceTable(GpuColorFrameResourceTableError),
+    /// Typed resource did not match the readback plan.
+    Copy(GpuColorFrameReadbackError),
+}
+
+/// Error returned when a full GPU output stage cannot be recorded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuOutputStageRecordError {
+    /// The pass could not be scheduled from the planned handles and backend node.
+    Schedule(Box<RenderGpuColorPassScheduleError>),
+    /// The stage resources could not be materialized.
+    Materialize(Box<RenderGpuOutputStageMaterializeError>),
+    /// The color pass could not be recorded.
+    Pass(Box<RenderGpuColorPassExecutionError>),
+    /// The optional readback could not be recorded.
+    Readback(Box<RenderGpuOutputStageReadbackError>),
+}
+
+impl RenderGpuColorPassSchedule {
+    /// Build a schedulable GPU OCIO color pass after descriptor and backend-node validation.
+    pub fn new(
+        input: GpuColorFrameHandle,
+        output: GpuColorFrameHandle,
+        transform: RenderColorTransformGpuPlan,
+        pass_node: OcioGpuWgpuRenderPassNodePlan,
+    ) -> Result<Self, RenderGpuColorPassScheduleError> {
+        if transform.requires_source_upload {
+            return Err(RenderGpuColorPassScheduleError::UploadStillRequired);
+        }
+        if transform.requires_output_readback {
+            return Err(RenderGpuColorPassScheduleError::ReadbackStillRequired);
+        }
+        if !transform.wgpu.can_execute() {
+            return Err(RenderGpuColorPassScheduleError::NativeBlockersRemaining {
+                blockers: transform.wgpu.blockers.len(),
+            });
+        }
+        if input.descriptor() != transform.diagnostics.input {
+            return Err(RenderGpuColorPassScheduleError::InputDescriptorMismatch {
+                expected: transform.diagnostics.input,
+                actual: input.descriptor(),
+            });
+        }
+        if output.descriptor() != transform.diagnostics.output {
+            return Err(RenderGpuColorPassScheduleError::OutputDescriptorMismatch {
+                expected: transform.diagnostics.output,
+                actual: output.descriptor(),
+            });
+        }
+        if input.descriptor().residency != ColorFrameResidency::Gpu {
+            return Err(RenderGpuColorPassScheduleError::InputNotGpuResident {
+                actual: input.descriptor().residency,
+            });
+        }
+        if output.descriptor().residency != ColorFrameResidency::Gpu {
+            return Err(RenderGpuColorPassScheduleError::OutputNotGpuResident {
+                actual: output.descriptor().residency,
+            });
+        }
+        if input.descriptor().width != output.descriptor().width
+            || input.descriptor().height != output.descriptor().height
+        {
+            return Err(RenderGpuColorPassScheduleError::ExtentMismatch {
+                input: input.descriptor(),
+                output: output.descriptor(),
+            });
+        }
+        if pass_node.resource_key != transform.wgpu.resources.resource_key {
+            return Err(RenderGpuColorPassScheduleError::PassResourceKeyMismatch {
+                expected: transform.wgpu.resources.resource_key,
+                actual: pass_node.resource_key,
+            });
+        }
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&transform.wgpu.resources.wrapper_contract);
+        let wrapper_layout_hash =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
+                .layout_hash;
+        if pass_node.wrapper_layout_hash != wrapper_layout_hash {
+            return Err(
+                RenderGpuColorPassScheduleError::PassWrapperLayoutHashMismatch {
+                    expected: wrapper_layout_hash,
+                    actual: pass_node.wrapper_layout_hash,
+                },
+            );
+        }
+        let output_format = color_target_format_for_gpu_frame(&output);
+        if pass_node.output_format != output_format {
+            return Err(
+                RenderGpuColorPassScheduleError::TargetTextureFormatMismatch {
+                    expected: pass_node.output_format,
+                    actual: output.texture_format(),
+                },
+            );
+        }
+
+        Ok(Self { input, output, transform, pass_node })
+    }
+
+    /// Return the wrapper input binding contract used by this scheduled pass.
+    pub fn wrapper_binding_plan(&self) -> OcioGpuWgpuWrapperBindingPlan {
+        OcioGpuWgpuWrapperBindingPlan::for_contract(&self.transform.wgpu.resources.wrapper_contract)
+    }
+
+    /// Validate that a resolved renderer input frame belongs to this scheduled pass.
+    pub fn validate_input_frame(
+        &self,
+        frame: &GpuColorFrameHandle,
+    ) -> Result<(), RenderGpuColorPassExecutionError> {
+        validate_execution_frame(
+            &self.input,
+            frame,
+            RenderGpuColorPassExecutionFrameRole::Input,
+        )
+    }
+
+    /// Validate that a resolved renderer output frame belongs to this scheduled pass.
+    pub fn validate_output_frame(
+        &self,
+        frame: &GpuColorFrameHandle,
+    ) -> Result<(), RenderGpuColorPassExecutionError> {
+        validate_execution_frame(
+            &self.output,
+            frame,
+            RenderGpuColorPassExecutionFrameRole::Output,
+        )
+    }
+
+    /// Resolve source and target entries from a shared GPU frame resource table.
+    pub fn resolve_resources<'a, R>(
+        &self,
+        resources: &'a GpuColorFrameResourceTable<R>,
+    ) -> Result<RenderGpuColorPassResolvedResources<'a, R>, RenderGpuColorPassExecutionError> {
+        let input = resources
+            .get(&self.input)
+            .map_err(RenderGpuColorPassExecutionError::ResourceTable)?;
+        let output = resources
+            .get(&self.output)
+            .map_err(RenderGpuColorPassExecutionError::ResourceTable)?;
+        Ok(RenderGpuColorPassResolvedResources { input, output })
+    }
+
+    fn prepare_cached_wrapper_bind_group(
+        &self,
+        device: &wgpu::Device,
+        prepared_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
+        input_frame: &GpuColorFrameHandle,
+        input: &GpuColorFrameWgpuResource,
+    ) -> Result<OcioGpuWgpuWrapperBindGroup, RenderGpuColorPassExecutionError> {
+        self.validate_input_frame(input_frame)?;
+        let wrapper_layout = self.wrapper_binding_plan();
+        let wrapper_layout_hash =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout)
+                .layout_hash;
+        if wrapper_layout_hash != prepared_layout.layout_hash
+            || self.pass_node.wrapper_layout_hash != prepared_layout.layout_hash
+        {
+            return Err(
+                RenderGpuColorPassExecutionError::WrapperLayoutHashMismatch {
+                    expected: self.pass_node.wrapper_layout_hash,
+                    actual: prepared_layout.layout_hash,
+                },
+            );
+        }
+        if !prepared_layout.matches_wrapper_binding(&wrapper_layout) {
+            return Err(RenderGpuColorPassExecutionError::WrapperLayoutIdentityMismatch);
+        }
+        Ok(prepared_layout.prepare_cached_bind_group(device, input))
+    }
+
+    fn record_wgpu(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_bind_group: &OcioGpuWgpuWrapperBindGroup,
+        target: RenderGpuColorPassTargetView<'_>,
+    ) -> Result<(), RenderGpuColorPassExecutionError> {
+        self.validate_output_frame(target.frame)?;
+        OcioGpuWgpuRenderPassRecorder::record(
+            encoder,
+            &self.pass_node,
+            pipeline,
+            ocio_bind_group,
+            wrapper_bind_group,
+            OcioGpuWgpuRenderPassTarget::for_plan(
+                &self.pass_node,
+                color_target_format_for_gpu_frame(target.frame),
+                target.texture_view,
+                target.load_op,
+            ),
+        )
+        .map_err(RenderGpuColorPassExecutionError::RenderPass)
+    }
+
+    /// Resolve GPU frame resources, prepare the wrapper bind group, and record this pass.
+    pub fn record_wgpu_from_resources(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        pipeline: &OcioGpuWgpuRenderPipeline,
+        ocio_bind_group: &OcioGpuWgpuOcioBindGroup,
+        wrapper_input_layout: &OcioGpuWgpuPreparedWrapperInputLayout,
+        resources: &GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        load_op: wgpu::LoadOp<wgpu::Color>,
+    ) -> Result<(), RenderGpuColorPassExecutionError> {
+        let resolved = self.resolve_resources(resources)?;
+        let input = resolved.input.resource();
+        let wrapper_bind_group = self.prepare_cached_wrapper_bind_group(
+            device,
+            wrapper_input_layout,
+            resolved.input.handle(),
+            input,
+        )?;
+        let output = resolved.output.resource();
+        self.record_wgpu(
+            encoder,
+            pipeline,
+            ocio_bind_group,
+            &wrapper_bind_group,
+            RenderGpuColorPassTargetView {
+                frame: resolved.output.handle(),
+                texture_view: &output.texture_view,
+                load_op,
+            },
+        )
+    }
+}
+
+/// Error returned when a GPU OCIO color pass cannot be scheduled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuColorPassScheduleError {
+    /// The stage still requires an upload before GPU execution.
+    UploadStillRequired,
+    /// The stage still requires a readback after GPU execution.
+    ReadbackStillRequired,
+    /// Native backend blockers remain.
+    NativeBlockersRemaining {
+        /// Number of blockers in the GPU execution plan.
+        blockers: usize,
+    },
+    /// The source frame descriptor does not match the transform input.
+    InputDescriptorMismatch {
+        /// Expected transform input descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual source frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The target frame descriptor does not match the transform output.
+    OutputDescriptorMismatch {
+        /// Expected transform output descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual target frame descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The source frame is not GPU-resident.
+    InputNotGpuResident {
+        /// Actual source residency.
+        actual: ColorFrameResidency,
+    },
+    /// The target frame is not GPU-resident.
+    OutputNotGpuResident {
+        /// Actual target residency.
+        actual: ColorFrameResidency,
+    },
+    /// Source and target frame extents differ.
+    ExtentMismatch {
+        /// Source frame descriptor.
+        input: ColorFrameDescriptor,
+        /// Target frame descriptor.
+        output: ColorFrameDescriptor,
+    },
+    /// Backend render-pass node belongs to a different OCIO resource plan.
+    PassResourceKeyMismatch {
+        /// Expected resource key from the transform's wgpu plan.
+        expected: u64,
+        /// Actual resource key from the pass node.
+        actual: u64,
+    },
+    /// Backend render-pass node was built for a different wrapper input layout.
+    PassWrapperLayoutHashMismatch {
+        /// Expected wrapper layout hash from the transform resource contract.
+        expected: u64,
+        /// Actual wrapper layout hash from the pass node.
+        actual: u64,
+    },
+    /// Backend render-pass target format differs from the target frame format.
+    TargetTextureFormatMismatch {
+        /// Expected render-pass output format.
+        expected: OcioGpuWgpuColorTargetFormat,
+        /// Actual target frame texture format.
+        actual: GpuColorFrameTextureFormat,
+    },
+}
+
+/// Error returned when a scheduled GPU color pass cannot bind or record backend resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGpuColorPassExecutionError {
+    /// The resolved input frame id differs from the scheduled input.
+    InputFrameIdMismatch {
+        /// Expected scheduled frame id.
+        expected: GpuColorFrameId,
+        /// Actual resolved frame id.
+        actual: GpuColorFrameId,
+    },
+    /// The resolved output frame id differs from the scheduled output.
+    OutputFrameIdMismatch {
+        /// Expected scheduled frame id.
+        expected: GpuColorFrameId,
+        /// Actual resolved frame id.
+        actual: GpuColorFrameId,
+    },
+    /// The resolved input frame descriptor differs from the scheduled input.
+    InputDescriptorMismatch {
+        /// Expected scheduled descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual resolved descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The resolved output frame descriptor differs from the scheduled output.
+    OutputDescriptorMismatch {
+        /// Expected scheduled descriptor.
+        expected: ColorFrameDescriptor,
+        /// Actual resolved descriptor.
+        actual: ColorFrameDescriptor,
+    },
+    /// The resolved input frame texture format differs from the scheduled input.
+    InputTextureFormatMismatch {
+        /// Expected scheduled texture format.
+        expected: GpuColorFrameTextureFormat,
+        /// Actual resolved texture format.
+        actual: GpuColorFrameTextureFormat,
+    },
+    /// The resolved output frame texture format differs from the scheduled output.
+    OutputTextureFormatMismatch {
+        /// Expected scheduled texture format.
+        expected: GpuColorFrameTextureFormat,
+        /// Actual resolved texture format.
+        actual: GpuColorFrameTextureFormat,
+    },
+    /// The wrapper bind-group layout no longer matches the scheduled pass node.
+    WrapperLayoutHashMismatch {
+        /// Expected wrapper layout hash from the pass node.
+        expected: u64,
+        /// Actual wrapper layout hash from the transform resource contract.
+        actual: u64,
+    },
+    /// Prepared wrapper layout differs despite a compact layout-hash match.
+    WrapperLayoutIdentityMismatch,
+    /// Source or target frame resolution failed against the shared GPU resource table.
+    ResourceTable(GpuColorFrameResourceTableError),
+    /// The backend render-pass recorder rejected the concrete wgpu resources.
+    RenderPass(OcioGpuWgpuRenderPassError),
+}
+
+impl CpuRenderColorStageExecutor {
+    /// Execute a CPU source/import -> working-space stage plan.
+    pub fn input_to_working(
+        frame: &CpuEncodedColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let mut session = crate::RenderCpuColorExecutionSession::new(0);
+        Self::input_to_working_with_session(frame, plan, &mut session)
+    }
+
+    /// Execute a CPU source/import stage through an explicit color Session.
+    pub fn input_to_working_with_session(
+        frame: &CpuEncodedColorFrame,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuInputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution only supports CPU input transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result =
+            CpuColorTransformExecutor::input_to_working_with_session(frame, transform, session)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
+    /// Execute a CPU working-space -> display/export stage plan.
+    pub fn output_transform(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
+        let mut session = crate::RenderCpuColorExecutionSession::new(0);
+        Self::output_transform_with_session(frame, plan, &mut session)
+    }
+
+    /// Execute a CPU working-to-output stage through an explicit color Session.
+    pub fn output_transform_with_session(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError>
+    {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuOutputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution only supports CPU output transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::transform_with_session(frame, transform, session)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
+    /// Execute a CPU working-space -> display/export stage plan, returning
+    /// float output without u8 quantization.
+    ///
+    /// The stage plan must explicitly declare an `EncodedFloat` output. This
+    /// keeps display/export transfer semantics visible to downstream cache,
+    /// readback, and delivery code.
+    pub fn output_transform_float(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+    ) -> Result<
+        RenderColorStageExecution<RenderOutputTransformFloatResult>,
+        RenderColorTransformError,
+    > {
+        let mut session = crate::RenderCpuColorExecutionSession::new(0);
+        Self::output_transform_float_with_session(frame, plan, &mut session)
+    }
+
+    /// Execute a float working-to-output stage through an explicit color Session.
+    pub fn output_transform_float_with_session(
+        frame: &CpuColorFrame,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<
+        RenderColorStageExecution<RenderOutputTransformFloatResult>,
+        RenderColorTransformError,
+    > {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuOutputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "output stage execution only supports CPU output transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result =
+            CpuColorTransformExecutor::transform_float_with_session(frame, transform, session)?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
+    /// Execute a CPU source/import -> working-space stage plan from a linear
+    /// float source, bypassing RGBA8 quantization.
+    pub fn input_to_working_float(
+        frame: &LinearFloatSource,
+        plan: &RenderColorStagePlan,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let mut session = crate::RenderCpuColorExecutionSession::new(0);
+        Self::input_to_working_float_with_session(frame, plan, &mut session)
+    }
+
+    /// Execute a float source/import stage through an explicit color Session.
+    pub fn input_to_working_float_with_session(
+        frame: &LinearFloatSource,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuInputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution only supports CPU input transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::input_to_working_float_with_session(
+            frame, transform, session,
+        )?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+}
+
+/// Plan and execute a CPU source/import -> working-space color stage.
+pub fn execute_cpu_input_stage(
+    frame: &CpuEncodedColorFrame,
+    transform: &RenderInputTransform,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_input_stage_with_session(frame, transform, &mut session)
+}
+
+/// Plan and execute a CPU source/import stage through an explicit color Session.
+pub fn execute_cpu_input_stage_with_session(
+    frame: &CpuEncodedColorFrame,
+    transform: &RenderInputTransform,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::input_to_working_with_session(frame, &plan, session)
+}
+
+/// Plan and execute a CPU input stage from a linear float source, bypassing
+/// RGBA8 quantization entirely.
+pub fn execute_cpu_input_stage_float(
+    frame: &LinearFloatSource,
+    transform: &RenderInputTransform,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_input_stage_float_with_session(frame, transform, &mut session)
+}
+
+/// Plan and execute a float CPU input stage through an explicit color Session.
+pub fn execute_cpu_input_stage_float_with_session(
+    frame: &LinearFloatSource,
+    transform: &RenderInputTransform,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::input_to_working_float_with_session(frame, &plan, session)
+}
+
+/// Plan and execute the CPU fallback for any supported decoded source payload.
+pub fn execute_cpu_source_input_stage(
+    frame: &CpuSourceColorFrame,
+    transform: &RenderInputTransform,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_source_input_stage_with_session(frame, transform, &mut session)
+}
+
+/// Execute any supported decoded source payload through an explicit color Session.
+pub fn execute_cpu_source_input_stage_with_session(
+    frame: &CpuSourceColorFrame,
+    transform: &RenderInputTransform,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    match frame {
+        CpuSourceColorFrame::EncodedRgba8(frame) => {
+            execute_cpu_input_stage_with_session(frame, transform, session)
+        }
+        CpuSourceColorFrame::LinearFloat(frame) => {
+            execute_cpu_input_stage_float_with_session(frame, transform, session)
+        }
+    }
+}
+
+/// Convert a CPU working frame into another linear working identity through OCIO.
+pub fn execute_cpu_working_transform(
+    frame: &CpuColorFrame,
+    destination: WorkingColorSpace,
+    engine: ColorEngine,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_working_transform_with_session(frame, destination, engine, &mut session)
+}
+
+/// Convert a CPU working frame through an explicit color execution Session.
+pub fn execute_cpu_working_transform_with_session(
+    frame: &CpuColorFrame,
+    destination: WorkingColorSpace,
+    engine: ColorEngine,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError> {
+    let descriptor = frame.descriptor();
+    let source = descriptor.color_space.working().ok_or(
+        RenderColorTransformError::UnsupportedWorkingIdentity { identity: descriptor.color_space },
+    )?;
+    let data = frame.rgba_f32().data.iter().flat_map(|pixel| pixel.iter().copied()).collect();
+    let source = LinearFloatSource::new(descriptor.width, descriptor.height, source, data);
+    execute_cpu_input_stage_float_with_session(
+        &source,
+        &RenderInputTransform::to_working(destination, false, engine),
+        session,
+    )
+}
+
+/// Plan and execute a CPU working-space -> display/export color stage.
+pub fn execute_cpu_output_stage(
+    frame: &CpuColorFrame,
+    transform: &RenderColorTransform,
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_output_stage_with_session(frame, transform, &mut session)
+}
+
+/// Plan and execute a CPU output stage through an explicit color Session.
+pub fn execute_cpu_output_stage_with_session(
+    frame: &CpuColorFrame,
+    transform: &RenderColorTransform,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
+    let mut planner = RenderColorStagePlanner::cpu_only();
+    let plan = planner.plan_output_transform(frame.descriptor(), transform)?;
+    CpuRenderColorStageExecutor::output_transform_with_session(frame, &plan, session)
+}
+
+/// Plan and execute a CPU final-output boundary described by preview/export intent.
+pub fn execute_cpu_output_boundary(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_output_boundary_with_session(frame, boundary, &mut session)
+}
+
+/// Execute a final CPU output boundary through an explicit color Session.
+pub fn execute_cpu_output_boundary_with_session(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderColorStageExecution<RenderOutputTransformResult>, RenderColorTransformError> {
+    let mut executor = RenderOutputColorBoundaryExecutor::cpu_only();
+    executor.execute_with_session(frame, boundary, session)
+}
+
+/// Plan and execute a CPU final-output boundary, returning encoded RGBA8 pixels.
+pub fn execute_cpu_output_boundary_rgba8(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderOutputColorBoundaryRgba8, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_output_boundary_rgba8_with_session(frame, boundary, &mut session)
+}
+
+/// Execute an RGBA8 output boundary through an explicit color Session.
+pub fn execute_cpu_output_boundary_rgba8_with_session(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderOutputColorBoundaryRgba8, RenderColorTransformError> {
+    let output = execute_cpu_output_boundary_with_session(frame, boundary, session)?;
+    let output_descriptor = output.result.frame.descriptor();
+    Ok(RenderOutputColorBoundaryRgba8 {
+        rgba: output.result.frame.into_rgba(),
+        color_diagnostics: output.result.diagnostics,
+        stage_diagnostics: output.stage_diagnostics,
+        output_descriptor,
+    })
+}
+
+/// Float output plus diagnostics for a final preview/export color boundary.
+///
+/// This is the precision-preserving alternative to [`RenderOutputColorBoundaryRgba8`].
+/// The caller receives a float display/export frame with the output transform
+/// applied, avoiding an intermediate u8 quantization round-trip.
+#[derive(Debug)]
+pub struct RenderOutputColorBoundaryFloat {
+    /// Float display/export frame with output transform applied.
+    pub frame: crate::CpuEncodedFloatColorFrame,
+    /// Color transform diagnostics emitted by the boundary executor.
+    pub color_diagnostics: crate::RenderColorTransformDiagnostics,
+    /// Stage diagnostics for the executed boundary plan.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Descriptor of the output frame.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+impl RenderOutputColorBoundaryFloat {
+    /// Measure video scopes from this exact display/export-encoded output.
+    ///
+    /// Keeping this method on the final float boundary prevents callers from
+    /// accidentally measuring working-linear pixels, a monitor-adapted UI
+    /// raster, or an RGBA8-quantized HDR signal.
+    pub fn program_scopes(
+        &self,
+        waveform_mode: mondrian_core::WaveformMode,
+        bins: usize,
+    ) -> Result<mondrian_core::ColorScopes, mondrian_core::ProgramColorScopeError> {
+        let frame = self.frame.rgba_f32();
+        mondrian_core::compute_program_color_scopes_rgba_f32(
+            &frame.data,
+            frame.width,
+            frame.height,
+            frame.color_space,
+            waveform_mode,
+            bins,
+        )
+    }
+}
+
+/// Plan and execute a CPU final-output boundary, returning float output without
+/// u8 quantization.
+///
+/// This is the renderer-owned CPU float/high-bit output boundary for
+/// 10-bit delivery. It applies the working -> output color transform
+/// through OCIO float processors, preserving HDR/wide-gamut precision.
+///
+/// For export use: the caller can flatten the float frame into `[f32]` and use
+/// `ExportFrameContract::pack_rgba_f32()` to produce `rgba64le` pipe bytes
+/// without an intermediate RGBA8 round-trip.
+///
+/// For display/view use: the caller receives the same float precision without
+/// an intermediate u8 boundary, but must still encode for presentation.
+pub fn execute_cpu_output_boundary_float(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+) -> Result<RenderOutputColorBoundaryFloat, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_output_boundary_float_with_session(frame, boundary, &mut session)
+}
+
+/// Execute a float output boundary through an explicit color Session.
+pub fn execute_cpu_output_boundary_float_with_session(
+    frame: &CpuColorFrame,
+    boundary: &RenderOutputColorBoundary,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderOutputColorBoundaryFloat, RenderColorTransformError> {
+    let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+    let plan = planner.plan_float(frame, boundary)?;
+    let output = CpuRenderColorStageExecutor::output_transform_float_with_session(
+        frame,
+        &plan.stage_plan,
+        session,
+    )?;
+    let output_descriptor = output.result.frame.descriptor();
+    Ok(RenderOutputColorBoundaryFloat {
+        frame: output.result.frame,
+        color_diagnostics: output.result.diagnostics,
+        stage_diagnostics: output.stage_diagnostics,
+        output_descriptor,
+    })
+}
+
+/// CPU fallback result retaining Program Output before preview-only adaptation.
+#[derive(Debug)]
+pub struct RenderProgramMonitorBoundaryRgba8 {
+    /// Exact float Program Output shared with export/scopes semantics.
+    pub program_output: RenderOutputColorBoundaryFloat,
+    /// Optional diagnostics for a non-identity monitor adaptation.
+    pub monitor_color_diagnostics: Option<crate::RenderColorTransformDiagnostics>,
+    /// Aggregate Program Output plus monitor-adaptation stage diagnostics.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Final monitor/surface encoded RGBA8 presentation pixels.
+    pub rgba: Vec<u8>,
+    /// Descriptor of the final RGBA8 presentation boundary.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+/// Presentation-only CPU fallback result.
+///
+/// Unlike [`RenderProgramMonitorBoundaryRgba8`], this contract retains only
+/// Program Output metadata and diagnostics. Its pixels are consumed in place
+/// by monitor adaptation, allowing one owned Float32 raster to serve both
+/// exact OCIO stages before final RGBA8 quantization.
+#[derive(Debug)]
+pub struct RenderProgramMonitorPresentationRgba8 {
+    /// Program Output transform diagnostics shared with Export/scopes semantics.
+    pub program_color_diagnostics: crate::RenderColorTransformDiagnostics,
+    /// Descriptor of the exact encoded-float Program Output before monitor adaptation.
+    pub program_output_descriptor: ColorFrameDescriptor,
+    /// Optional diagnostics for a non-identity monitor adaptation.
+    pub monitor_color_diagnostics: Option<crate::RenderColorTransformDiagnostics>,
+    /// Aggregate Program Output plus monitor-adaptation stage diagnostics.
+    pub stage_diagnostics: RenderColorStageDiagnostics,
+    /// Final monitor/surface encoded RGBA8 presentation pixels.
+    pub rgba: Vec<u8>,
+    /// Descriptor of the final RGBA8 presentation boundary.
+    pub output_descriptor: ColorFrameDescriptor,
+}
+
+/// Execute CPU fallback as Program Output followed by preview-only monitor
+/// adaptation, quantizing only after both OCIO float stages are complete.
+pub fn execute_cpu_program_monitor_boundary_rgba8(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+) -> Result<RenderProgramMonitorBoundaryRgba8, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_program_monitor_boundary_rgba8_with_session(
+        frame,
+        program_boundary,
+        adaptation,
+        &mut session,
+    )
+}
+
+/// Execute Program Output plus monitor adaptation through one color Session.
+pub fn execute_cpu_program_monitor_boundary_rgba8_with_session(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderProgramMonitorBoundaryRgba8, RenderColorTransformError> {
+    validate_program_monitor_boundary(frame, program_boundary, adaptation)?;
+
+    let program_output =
+        execute_cpu_output_boundary_float_with_session(frame, program_boundary, session)?;
+    let mut stage_diagnostics = program_output.stage_diagnostics;
+    let (monitor_frame, monitor_color_diagnostics) = if adaptation.requires_pass() {
+        let result = crate::CpuColorTransformExecutor::monitor_adaptation_float_with_session(
+            &program_output.frame,
+            adaptation,
+            session,
+        )?;
+        stage_diagnostics.accumulate(RenderColorStageDiagnostics {
+            total_stages: 1,
+            cpu_output_stages: 1,
+            stage_pixels: result.diagnostics.pixel_count as u64,
+            ..RenderColorStageDiagnostics::default()
+        });
+        (result.frame, Some(result.diagnostics))
+    } else {
+        (program_output.frame.clone(), None)
+    };
+    let rgba = quantize_encoded_float_frame_rgba8(&monitor_frame);
+    let descriptor = monitor_frame.descriptor();
+    let output_descriptor = ColorFrameDescriptor {
+        encoding: ColorFrameEncoding::EncodedRgba8,
+        ..descriptor
+    };
+    Ok(RenderProgramMonitorBoundaryRgba8 {
+        program_output,
+        monitor_color_diagnostics,
+        stage_diagnostics,
+        rgba,
+        output_descriptor,
+    })
+}
+
+/// Execute the presentation-only CPU Program Output plus monitor path.
+pub fn execute_cpu_program_monitor_presentation_rgba8(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+) -> Result<RenderProgramMonitorPresentationRgba8, RenderColorTransformError> {
+    let mut session = crate::RenderCpuColorExecutionSession::new(0);
+    execute_cpu_program_monitor_presentation_rgba8_with_session(
+        frame,
+        program_boundary,
+        adaptation,
+        &mut session,
+    )
+}
+
+/// Execute the presentation-only path through one owner-scoped color Session.
+pub fn execute_cpu_program_monitor_presentation_rgba8_with_session(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderProgramMonitorPresentationRgba8, RenderColorTransformError> {
+    validate_program_monitor_boundary(frame, program_boundary, adaptation)?;
+
+    let RenderOutputColorBoundaryFloat {
+        frame: program_frame,
+        color_diagnostics: program_color_diagnostics,
+        mut stage_diagnostics,
+        output_descriptor: program_output_descriptor,
+    } = execute_cpu_output_boundary_float_with_session(frame, program_boundary, session)?;
+    let (monitor_frame, monitor_color_diagnostics) = if adaptation.requires_pass() {
+        let result = crate::CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
+            program_frame,
+            adaptation,
+            session,
+        )?;
+        stage_diagnostics.accumulate(RenderColorStageDiagnostics {
+            total_stages: 1,
+            cpu_output_stages: 1,
+            stage_pixels: result.diagnostics.pixel_count as u64,
+            ..RenderColorStageDiagnostics::default()
+        });
+        (result.frame, Some(result.diagnostics))
+    } else {
+        (program_frame, None)
+    };
+    let rgba = quantize_encoded_float_frame_rgba8(&monitor_frame);
+    let descriptor = monitor_frame.descriptor();
+    let output_descriptor = ColorFrameDescriptor {
+        encoding: ColorFrameEncoding::EncodedRgba8,
+        ..descriptor
+    };
+    Ok(RenderProgramMonitorPresentationRgba8 {
+        program_color_diagnostics,
+        program_output_descriptor,
+        monitor_color_diagnostics,
+        stage_diagnostics,
+        rgba,
+        output_descriptor,
+    })
+}
+
+fn validate_program_monitor_boundary(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+) -> Result<(), RenderColorTransformError> {
+    if program_boundary.output_color_space != adaptation.program_output_color_space() {
+        let input = frame.descriptor();
+        return Err(RenderColorTransformError::execution_failed(
+            crate::RenderColorTransformDirection::Intermediate,
+            input,
+            ColorFrameDescriptor {
+                width: input.width,
+                height: input.height,
+                color_space: adaptation.monitor_color_space().into(),
+                domain: ColorFrameDomain::Display,
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                residency: ColorFrameResidency::Cpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            format!(
+                "Program Output {:?} does not match monitor adaptation input {:?}",
+                program_boundary.output_color_space,
+                adaptation.program_output_color_space()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn quantize_encoded_float_frame_rgba8(frame: &crate::CpuEncodedFloatColorFrame) -> Vec<u8> {
+    let pixels = &frame.rgba_f32().data;
+    let mut rgba = Vec::with_capacity(pixels.len().saturating_mul(4));
+    for pixel in pixels {
+        for channel in pixel {
+            rgba.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+        }
+    }
+    rgba
+}
+
+impl<'a> RenderColorStagePlanner<'a> {
+    /// Create a planner that always schedules CPU color transforms.
+    pub fn cpu_only() -> Self {
+        Self {
+            mode: RenderColorStageMode::CpuOnly,
+            gpu_cache: None,
+            gpu_options: RenderColorTransformGpuOptions::default(),
+        }
+    }
+
+    /// Create a planner that prefers GPU OCIO shader stages.
+    pub fn prefer_gpu(
+        gpu_cache: &'a mut OcioGpuShaderCache,
+        gpu_options: RenderColorTransformGpuOptions,
+    ) -> Self {
+        Self {
+            mode: RenderColorStageMode::PreferGpu,
+            gpu_cache: Some(gpu_cache),
+            gpu_options,
+        }
+    }
+
+    /// Plan source/import -> timeline working-space color processing.
+    pub fn plan_input_to_working(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderInputTransform,
+    ) -> Result<RenderColorStagePlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Source {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
+
+        match self.mode {
+            RenderColorStageMode::CpuOnly => Ok(self.cpu_input_stage(input, transform)),
+            RenderColorStageMode::PreferGpu => {
+                let plan = self.gpu_planner()?.plan_input_to_working(input, transform)?;
+                Ok(Self::gpu_stage_plan(plan))
+            }
+        }
+    }
+
+    /// Plan timeline working-space -> display/export color processing.
+    pub fn plan_output_transform(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+    ) -> Result<RenderColorStagePlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
+
+        match self.mode {
+            RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage(input, transform)),
+            RenderColorStageMode::PreferGpu => {
+                let plan = self.gpu_planner()?.plan_output_transform(input, transform)?;
+                Ok(Self::gpu_stage_plan(plan))
+            }
+        }
+    }
+
+    /// Plan timeline working-space -> display/export processing while
+    /// preserving the destination encoding in floating-point samples.
+    pub fn plan_output_transform_float(
+        &mut self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+    ) -> Result<RenderColorStagePlan, RenderColorTransformError> {
+        if input.domain != ColorFrameDomain::Working {
+            return Err(RenderColorTransformError::UnsupportedInputDomain { domain: input.domain });
+        }
+        crate::color_transform::require_straight_compatible_color_alpha(input)?;
+
+        match self.mode {
+            RenderColorStageMode::CpuOnly => Ok(self.cpu_output_stage_with_encoding(
+                input,
+                transform,
+                ColorFrameEncoding::EncodedFloat,
+            )),
+            RenderColorStageMode::PreferGpu => {
+                let plan = self.gpu_planner()?.plan_output_transform_with_encoding(
+                    input,
+                    transform,
+                    ColorFrameEncoding::EncodedFloat,
+                )?;
+                Ok(Self::gpu_stage_plan(plan))
+            }
+        }
+    }
+
+    fn gpu_planner(
+        &mut self,
+    ) -> Result<RenderColorTransformGpuPlanner<'_>, RenderColorTransformError> {
+        let cache = self
+            .gpu_cache
+            .as_deref_mut()
+            .ok_or(RenderColorTransformError::GpuPlannerUnavailable)?;
+        Ok(RenderColorTransformGpuPlanner::new(cache, self.gpu_options))
+    }
+
+    fn cpu_input_stage(
+        &self,
+        input: ColorFrameDescriptor,
+        transform: &RenderInputTransform,
+    ) -> RenderColorStagePlan {
+        let output = ColorFrameDescriptor {
+            width: input.width,
+            height: input.height,
+            color_space: transform.working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        RenderColorStagePlan {
+            stages: vec![RenderColorStage::CpuInputTransform {
+                input,
+                output,
+                transform: transform.clone(),
+            }],
+            final_descriptor: output,
+        }
+    }
+
+    fn cpu_output_stage(
+        &self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+    ) -> RenderColorStagePlan {
+        self.cpu_output_stage_with_encoding(input, transform, ColorFrameEncoding::EncodedRgba8)
+    }
+
+    fn cpu_output_stage_with_encoding(
+        &self,
+        input: ColorFrameDescriptor,
+        transform: &RenderColorTransform,
+        encoding: ColorFrameEncoding,
+    ) -> RenderColorStagePlan {
+        let output = ColorFrameDescriptor {
+            width: input.width,
+            height: input.height,
+            color_space: transform.output_color_space.into(),
+            domain: transform.output_domain,
+            encoding,
+            residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        RenderColorStagePlan {
+            stages: vec![RenderColorStage::CpuOutputTransform {
+                input,
+                output,
+                transform: transform.clone(),
+            }],
+            final_descriptor: output,
+        }
+    }
+
+    fn gpu_stage_plan(plan: RenderColorTransformGpuPlan) -> RenderColorStagePlan {
+        let mut stages = Vec::with_capacity(3);
+        let gpu_input = plan.diagnostics.input.with_residency(ColorFrameResidency::Gpu);
+        if plan.requires_source_upload {
+            stages.push(RenderColorStage::UploadToGpu {
+                input: plan.diagnostics.input,
+                output: gpu_input,
+            });
+        }
+
+        let gpu_output = plan.diagnostics.output.with_residency(ColorFrameResidency::Gpu);
+        let final_descriptor = plan.diagnostics.output;
+        stages.push(RenderColorStage::GpuColorTransform {
+            input: gpu_input,
+            output: gpu_output,
+            plan: Box::new(plan),
+        });
+
+        if final_descriptor.residency == ColorFrameResidency::Cpu {
+            stages.push(RenderColorStage::ReadbackToCpu {
+                input: gpu_output,
+                output: final_descriptor,
+            });
+        }
+
+        RenderColorStagePlan { stages, final_descriptor }
+    }
+}
+
+fn validate_descriptor(
+    expected: ColorFrameDescriptor,
+    actual: ColorFrameDescriptor,
+) -> Result<(), RenderColorTransformError> {
+    if expected != actual {
+        return Err(RenderColorTransformError::StageDescriptorMismatch { expected, actual });
+    }
+    Ok(())
+}
+
+fn color_target_format_for_gpu_frame(frame: &GpuColorFrameHandle) -> OcioGpuWgpuColorTargetFormat {
+    match frame.texture_format() {
+        GpuColorFrameTextureFormat::Rgba8Unorm => OcioGpuWgpuColorTargetFormat::Rgba8Unorm,
+        GpuColorFrameTextureFormat::Rgba16Float => OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        GpuColorFrameTextureFormat::Rgba32Float => OcioGpuWgpuColorTargetFormat::Rgba32Float,
+    }
+}
+
+struct PlannedGpuUploadTransform<'a> {
+    upload_input: ColorFrameDescriptor,
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    readback_output: Option<ColorFrameDescriptor>,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
+struct PlannedGpuSourceUploadTransform<'a> {
+    upload_input: ColorFrameDescriptor,
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
+struct PlannedGpuSourceTransform<'a> {
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
+struct PlannedGpuTransform<'a> {
+    gpu_input: ColorFrameDescriptor,
+    gpu_output: ColorFrameDescriptor,
+    readback_output: Option<ColorFrameDescriptor>,
+    transform: &'a RenderColorTransformGpuPlan,
+}
+
+fn planned_gpu_source_upload_transform(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuSourceUploadTransform<'_>, RenderGpuInputStageResourcePlanError> {
+    let stages = stage_plan.stages.as_slice();
+    let [upload @ RenderColorStage::UploadToGpu { .. }, transform @ RenderColorStage::GpuColorTransform { .. }] =
+        stages
+    else {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input resources require UploadToGpu -> GpuColorTransform",
+        });
+    };
+
+    let RenderColorStage::UploadToGpu { input: upload_input, output: upload_output } = upload
+    else {
+        unreachable!("matched upload stage")
+    };
+    let RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    } = transform
+    else {
+        unreachable!("matched GPU transform stage")
+    };
+    if upload_output != gpu_input {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "upload output descriptor must equal GPU transform input descriptor",
+        });
+    }
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_output.residency != ColorFrameResidency::Gpu
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU transform input and output descriptors must be GPU-resident",
+        });
+    }
+    let supported_source_encoding = matches!(
+        upload_input.encoding,
+        ColorFrameEncoding::EncodedRgba8 | ColorFrameEncoding::LinearFloat
+    );
+    if upload_input.domain != ColorFrameDomain::Source
+        || !supported_source_encoding
+        || upload_input.residency != ColorFrameResidency::Cpu
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input upload must consume CPU RGBA8 or scene-linear float source data",
+        });
+    }
+    if gpu_output.domain != ColorFrameDomain::Working
+        || gpu_output.encoding != ColorFrameEncoding::LinearFloat
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input transform must produce a linear working frame",
+        });
+    }
+    if stage_plan.final_descriptor != *gpu_output {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input final descriptor must be the GPU working output descriptor",
+        });
+    }
+    Ok(PlannedGpuSourceUploadTransform {
+        upload_input: *upload_input,
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        transform,
+    })
+}
+
+fn planned_gpu_source_transform(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuSourceTransform<'_>, RenderGpuInputStageResourcePlanError> {
+    let [RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    }] = stage_plan.stages.as_slice()
+    else {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU-resident input resources require one GpuColorTransform stage",
+        });
+    };
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_input.domain != ColorFrameDomain::Source
+        || gpu_input.encoding != ColorFrameEncoding::EncodedFloat
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input transform must consume a GPU encoded-float source frame",
+        });
+    }
+    if gpu_output.residency != ColorFrameResidency::Gpu
+        || gpu_output.domain != ColorFrameDomain::Working
+        || gpu_output.encoding != ColorFrameEncoding::LinearFloat
+    {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input transform must produce a GPU linear working frame",
+        });
+    }
+    if stage_plan.final_descriptor != *gpu_output {
+        return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
+            reason: "GPU input final descriptor must be the GPU working output descriptor",
+        });
+    }
+    Ok(PlannedGpuSourceTransform {
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        transform,
+    })
+}
+
+fn planned_gpu_upload_transform_readback(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuUploadTransform<'_>, RenderGpuOutputStageResourcePlanError> {
+    let stages = stage_plan.stages.as_slice();
+    let (upload, transform, readback) = match stages {
+        [upload @ RenderColorStage::UploadToGpu { .. }, transform @ RenderColorStage::GpuColorTransform { .. }] => {
+            (upload, transform, None)
+        }
+        [upload @ RenderColorStage::UploadToGpu { .. }, transform @ RenderColorStage::GpuColorTransform { .. }, readback @ RenderColorStage::ReadbackToCpu { .. }] => {
+            (upload, transform, Some(readback))
+        }
+        _ => {
+            return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU output resources require UploadToGpu -> GpuColorTransform with optional ReadbackToCpu",
+            });
+        }
+    };
+
+    let RenderColorStage::UploadToGpu { input: upload_input, output: upload_output } = upload
+    else {
+        unreachable!("matched upload stage")
+    };
+    let RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    } = transform
+    else {
+        unreachable!("matched GPU transform stage")
+    };
+    if upload_output != gpu_input {
+        return Err(
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "upload output descriptor must equal GPU transform input descriptor",
+            },
+        );
+    }
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_output.residency != ColorFrameResidency::Gpu
+    {
+        return Err(
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU transform input and output descriptors must be GPU-resident",
+            },
+        );
+    }
+    match readback {
+        Some(RenderColorStage::ReadbackToCpu { input, output }) => {
+            if input != gpu_output || *output != stage_plan.final_descriptor {
+                return Err(
+                    RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                        reason: "readback descriptors must connect GPU output to final descriptor",
+                    },
+                );
+            }
+        }
+        None => {
+            if *gpu_output != stage_plan.final_descriptor {
+                return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                    reason: "GPU output descriptor must equal final descriptor when there is no readback",
+                });
+            }
+        }
+        Some(_) => unreachable!("matched optional readback stage"),
+    }
+
+    Ok(PlannedGpuUploadTransform {
+        upload_input: *upload_input,
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        readback_output: readback.map(|stage| match stage {
+            RenderColorStage::ReadbackToCpu { output, .. } => *output,
+            _ => unreachable!("matched optional readback stage"),
+        }),
+        transform,
+    })
+}
+
+fn planned_gpu_transform_readback(
+    stage_plan: &RenderColorStagePlan,
+) -> Result<PlannedGpuTransform<'_>, RenderGpuOutputStageResourcePlanError> {
+    let stages = stage_plan.stages.as_slice();
+    let (transform, readback) = match stages {
+        [transform @ RenderColorStage::GpuColorTransform { .. }] => (transform, None),
+        [transform @ RenderColorStage::GpuColorTransform { .. }, readback @ RenderColorStage::ReadbackToCpu { .. }] => {
+            (transform, Some(readback))
+        }
+        _ => {
+            return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU-resident output resources require GpuColorTransform with optional ReadbackToCpu",
+            });
+        }
+    };
+
+    let RenderColorStage::GpuColorTransform {
+        input: gpu_input,
+        output: gpu_output,
+        plan: transform,
+    } = transform
+    else {
+        unreachable!("matched GPU transform stage")
+    };
+    if gpu_input.residency != ColorFrameResidency::Gpu
+        || gpu_output.residency != ColorFrameResidency::Gpu
+    {
+        return Err(
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                reason: "GPU transform input and output descriptors must be GPU-resident",
+            },
+        );
+    }
+    match readback {
+        Some(RenderColorStage::ReadbackToCpu { input, output }) => {
+            if input != gpu_output || *output != stage_plan.final_descriptor {
+                return Err(
+                    RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                        reason: "readback descriptors must connect GPU output to final descriptor",
+                    },
+                );
+            }
+        }
+        None => {
+            if *gpu_output != stage_plan.final_descriptor {
+                return Err(RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan {
+                    reason: "GPU output descriptor must equal final descriptor when there is no readback",
+                });
+            }
+        }
+        Some(_) => unreachable!("matched optional readback stage"),
+    }
+
+    Ok(PlannedGpuTransform {
+        gpu_input: *gpu_input,
+        gpu_output: *gpu_output,
+        readback_output: readback.map(|stage| match stage {
+            RenderColorStage::ReadbackToCpu { output, .. } => *output,
+            _ => unreachable!("matched optional readback stage"),
+        }),
+        transform,
+    })
+}
+
+fn validate_materialization_table_slot<R>(
+    table: &GpuColorFrameResourceTable<R>,
+    handle: &GpuColorFrameHandle,
+) -> Result<(), RenderGpuOutputStageMaterializeError> {
+    match table.get(handle) {
+        Ok(_) | Err(GpuColorFrameResourceTableError::MissingFrame { .. }) => Ok(()),
+        Err(err) => Err(RenderGpuOutputStageMaterializeError::ResourceTable(err)),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RenderGpuColorPassExecutionFrameRole {
+    Input,
+    Output,
+}
+
+fn validate_execution_frame(
+    expected: &GpuColorFrameHandle,
+    actual: &GpuColorFrameHandle,
+    role: RenderGpuColorPassExecutionFrameRole,
+) -> Result<(), RenderGpuColorPassExecutionError> {
+    if expected.id() != actual.id() {
+        return Err(match role {
+            RenderGpuColorPassExecutionFrameRole::Input => {
+                RenderGpuColorPassExecutionError::InputFrameIdMismatch {
+                    expected: expected.id(),
+                    actual: actual.id(),
+                }
+            }
+            RenderGpuColorPassExecutionFrameRole::Output => {
+                RenderGpuColorPassExecutionError::OutputFrameIdMismatch {
+                    expected: expected.id(),
+                    actual: actual.id(),
+                }
+            }
+        });
+    }
+    if expected.descriptor() != actual.descriptor() {
+        return Err(match role {
+            RenderGpuColorPassExecutionFrameRole::Input => {
+                RenderGpuColorPassExecutionError::InputDescriptorMismatch {
+                    expected: expected.descriptor(),
+                    actual: actual.descriptor(),
+                }
+            }
+            RenderGpuColorPassExecutionFrameRole::Output => {
+                RenderGpuColorPassExecutionError::OutputDescriptorMismatch {
+                    expected: expected.descriptor(),
+                    actual: actual.descriptor(),
+                }
+            }
+        });
+    }
+    if expected.texture_format() != actual.texture_format() {
+        return Err(match role {
+            RenderGpuColorPassExecutionFrameRole::Input => {
+                RenderGpuColorPassExecutionError::InputTextureFormatMismatch {
+                    expected: expected.texture_format(),
+                    actual: actual.texture_format(),
+                }
+            }
+            RenderGpuColorPassExecutionFrameRole::Output => {
+                RenderGpuColorPassExecutionError::OutputTextureFormatMismatch {
+                    expected: expected.texture_format(),
+                    actual: actual.texture_format(),
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        GpuColorFrameId, GpuColorFrameIdAllocator, GpuColorFrameReadbackPlan,
+        GpuColorFrameTextureFormat, GpuContext, OcioGpuShaderRequest, OcioGpuWgpuBlocker,
+        RenderColorTransformBackend, RenderIntermediateColorTransform,
+    };
+    use mondrian_core::types::{AcesConfigPreset, ColorEngine, ColorSpace};
+    use mondrian_core::WorkingColorSpace;
+    use mondrian_core::WorkingRgbaF32Frame;
+    use mondrian_core::{ensure_mondrian_default_ocio_loaded, GpuLanguage, OutputTransformIntent};
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputBoundarySmokeReport {
+        scenario: &'static str,
+        skipped: Option<String>,
+        adapter: Option<GpuOutputAdapterReport>,
+        frame: RenderGpuOutputFrameReport,
+        output_texture_format: &'static str,
+        health_report: RenderGpuOutputHealthReport,
+        stage: RenderGpuOutputStageDiagnosticsReport,
+        runtime: RenderGpuOutputRuntimeDiagnosticsReport,
+        readback_bytes: usize,
+        max_rgba_delta: u8,
+        tolerance: u8,
+    }
+
+    #[derive(Debug, serde::Serialize)]
+    struct GpuOutputAdapterReport {
+        name: String,
+        backend: String,
+        device_type: String,
+        driver: String,
+        driver_info: String,
+    }
+
+    #[test]
+    fn output_boundary_resolves_product_intent_for_display_and_export() {
+        let intent = OutputTransformIntent::mondrian_standard();
+        let engine = ColorEngine::mondrian_standard();
+        let display = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec2100Pq,
+            &intent,
+            true,
+            engine.clone(),
+        )
+        .expect("display boundary");
+        let export = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Export,
+            ColorSpace::Rec2100Pq,
+            &intent,
+            true,
+            engine,
+        )
+        .expect("export boundary");
+
+        assert_eq!(display.target, RenderOutputColorBoundaryTarget::Display);
+        assert_eq!(export.target, RenderOutputColorBoundaryTarget::Export);
+        assert_eq!(display.display_view, export.display_view);
+        let view = display.display_view.expect("Standard PQ view");
+        assert_eq!(view.display, "Rec.2100-PQ - Display");
+        assert_eq!(view.view, "Mondrian Standard HDR 1000 nits v1");
+    }
+
+    #[test]
+    fn gpu_output_health_report_classifies_native_path() {
+        let frame = RenderGpuOutputFrameReport {
+            width: 2,
+            height: 2,
+            pixel_count: 4,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = RenderGpuOutputStageDiagnosticsReport {
+            total_stages: 3,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            readback_stages: 1,
+            gpu_blockers: 0,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown::default(),
+            stage_pixels: 12,
+        };
+        let runtime = RenderGpuOutputRuntimeDiagnosticsReport {
+            shader_cache_entries: 1,
+            shader_cache_hits: 0,
+            shader_cache_misses: 1,
+            shader_cache_extraction_failures: 0,
+            backend_prep_resource_entries: 1,
+            static_pipeline_entries: 1,
+            static_pipeline_hits: 1,
+            static_pipeline_misses: 1,
+            backend_object_entries: 1,
+            backend_object_hits: 0,
+            backend_object_misses: 1,
+            backend_object_failures: 0,
+            wrapper_input_bind_group_creations: 1,
+            wrapper_input_bind_group_cache_hits: 0,
+            frame_table_entries: 2,
+            next_frame_id: 3,
+        };
+
+        let passed =
+            RenderGpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 16, 2, 3);
+        let passed_report = RenderGpuOutputHealthReport::build(
+            "renderer_gpu_output_boundary",
+            None,
+            passed,
+            &stage,
+            &runtime,
+            16,
+            2,
+            3,
+        );
+        assert_eq!(passed_report.verdict, RenderGpuOutputHealthVerdict::Pass);
+        assert_eq!(
+            passed_report.summary.status,
+            RenderGpuOutputHealthStatus::Passed
+        );
+        assert!(passed_report.summary.native_gpu_output_ready);
+        assert!(passed_report.summary.parity_within_tolerance);
+        assert_eq!(passed_report.summary.expected_readback_bytes, 16);
+        assert!(passed_report.root_causes.is_empty());
+        assert!(passed_report.actions.is_empty());
+
+        let incomplete_readback =
+            RenderGpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 12, 2, 3);
+        let incomplete_readback_report = RenderGpuOutputHealthReport::build(
+            "renderer_gpu_output_boundary",
+            None,
+            incomplete_readback,
+            &stage,
+            &runtime,
+            12,
+            2,
+            3,
+        );
+        assert_eq!(
+            incomplete_readback_report.verdict,
+            RenderGpuOutputHealthVerdict::Fail
+        );
+        assert_eq!(
+            incomplete_readback_report.summary.status,
+            RenderGpuOutputHealthStatus::Failed
+        );
+        assert!(!incomplete_readback_report.summary.readback_complete);
+        assert!(!incomplete_readback_report.summary.native_gpu_output_ready);
+        assert!(incomplete_readback_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "gpu_readback_incomplete"));
+
+        let skipped =
+            RenderGpuOutputHealthSummary::evaluate(true, &frame, &stage, &runtime, 16, 2, 3);
+        let skipped_report = RenderGpuOutputHealthReport::build(
+            "renderer_gpu_output_boundary",
+            Some("no GPU adapter available".to_owned()),
+            skipped,
+            &stage,
+            &runtime,
+            16,
+            2,
+            3,
+        );
+        assert_eq!(skipped_report.verdict, RenderGpuOutputHealthVerdict::Fail);
+        assert_eq!(
+            skipped_report.summary.status,
+            RenderGpuOutputHealthStatus::Skipped
+        );
+        assert!(!skipped_report.summary.native_gpu_output_ready);
+        assert!(skipped_report
+            .root_causes
+            .iter()
+            .any(|root| root.code == "gpu_adapter_unavailable"));
+    }
+
+    #[test]
+    fn gpu_output_smoke_report_serializes_health_report() {
+        let frame = RenderGpuOutputFrameReport {
+            width: 2,
+            height: 2,
+            pixel_count: 4,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = RenderGpuOutputStageDiagnosticsReport {
+            total_stages: 3,
+            upload_stages: 1,
+            gpu_color_stages: 1,
+            readback_stages: 1,
+            gpu_blockers: 0,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown::default(),
+            stage_pixels: 12,
+        };
+        let runtime = RenderGpuOutputRuntimeDiagnosticsReport {
+            shader_cache_entries: 1,
+            shader_cache_hits: 0,
+            shader_cache_misses: 1,
+            shader_cache_extraction_failures: 0,
+            backend_prep_resource_entries: 1,
+            static_pipeline_entries: 1,
+            static_pipeline_hits: 1,
+            static_pipeline_misses: 1,
+            backend_object_entries: 1,
+            backend_object_hits: 0,
+            backend_object_misses: 1,
+            backend_object_failures: 0,
+            wrapper_input_bind_group_creations: 1,
+            wrapper_input_bind_group_cache_hits: 0,
+            frame_table_entries: 2,
+            next_frame_id: 3,
+        };
+        let health =
+            RenderGpuOutputHealthSummary::evaluate(false, &frame, &stage, &runtime, 16, 2, 3);
+        let report = GpuOutputBoundarySmokeReport {
+            scenario: "renderer_gpu_output_boundary",
+            skipped: None,
+            adapter: None,
+            frame,
+            output_texture_format: "Rgba8Unorm",
+            health_report: RenderGpuOutputHealthReport::build(
+                "renderer_gpu_output_boundary",
+                None,
+                health,
+                &stage,
+                &runtime,
+                16,
+                2,
+                3,
+            ),
+            stage,
+            runtime,
+            readback_bytes: 16,
+            max_rgba_delta: 2,
+            tolerance: 3,
+        };
+
+        let json = serde_json::to_value(&report).expect("serialize renderer smoke report");
+        assert!(json.get("health").is_none());
+        assert!(json.get("health_failures").is_none());
+        assert!(json.get("passed").is_none());
+        assert_eq!(json["health_report"]["schema_version"], 3);
+        assert_eq!(json["health_report"]["verdict"], "Pass");
+        assert_eq!(
+            json["health_report"]["summary"]["expected_readback_bytes"],
+            16
+        );
+    }
+
+    fn source_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
+        ColorFrameDescriptor {
+            width: 1280,
+            height: 720,
+            color_space: ColorSpace::SonySLog3SGamut3Cine.into(),
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedRgba8,
+            residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        }
+    }
+
+    fn working_descriptor(residency: ColorFrameResidency) -> ColorFrameDescriptor {
+        ColorFrameDescriptor {
+            width: 1920,
+            height: 1080,
+            color_space: WorkingColorSpace::LinearRec709.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        }
+    }
+
+    #[test]
+    fn cpu_input_plan_uses_single_cpu_stage() {
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderColorStagePlanner::cpu_only();
+
+        let plan = planner
+            .plan_input_to_working(source_descriptor(ColorFrameResidency::Cpu), &transform)
+            .expect("CPU input plan");
+
+        assert_eq!(plan.stages.len(), 1);
+        assert!(!plan.contains_gpu_transform());
+        assert!(!plan.contains_transfer());
+        assert_eq!(plan.final_descriptor.residency, ColorFrameResidency::Cpu);
+        assert_eq!(plan.final_descriptor.domain, ColorFrameDomain::Working);
+    }
+
+    #[test]
+    fn cpu_stage_executor_runs_input_plan_and_validates_descriptors() {
+        let source = CpuEncodedColorFrame::source_rgba8(
+            1280,
+            720,
+            ColorSpace::SonySLog3SGamut3Cine,
+            vec![128; 1280 * 720 * 4],
+        );
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("CPU input plan");
+
+        let result = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
+            .expect("execute CPU input plan");
+
+        assert_eq!(result.result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.result.diagnostics.input, source.descriptor());
+        assert_eq!(result.result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.stage_diagnostics, plan.diagnostics());
+    }
+
+    #[test]
+    fn cpu_stage_executor_rejects_gpu_plan() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let source = CpuEncodedColorFrame::source_rgba8(
+            1280,
+            720,
+            ColorSpace::SonySLog3SGamut3Cine,
+            vec![128; 1280 * 720 * 4],
+        );
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("GPU input plan");
+
+        let err = CpuRenderColorStageExecutor::input_to_working(&source, &plan)
+            .expect_err("CPU executor must reject GPU plans");
+
+        assert!(matches!(
+            err,
+            RenderColorTransformError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn cpu_stage_executor_runs_output_plan_and_validates_descriptors() {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 1920,
+            height: 1080,
+            data: vec![[0.25, 0.5, 0.75, 1.0]; 1920 * 1080],
+            color_space: WorkingColorSpace::LinearRec709,
+        });
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let plan = planner
+            .plan_output_transform(frame.descriptor(), &transform)
+            .expect("CPU output plan");
+
+        let result = CpuRenderColorStageExecutor::output_transform(&frame, &plan)
+            .expect("execute CPU output plan");
+
+        assert_eq!(result.result.frame.descriptor(), plan.final_descriptor);
+        assert_eq!(result.result.diagnostics.input, frame.descriptor());
+        assert_eq!(result.result.diagnostics.output, plan.final_descriptor);
+        assert_eq!(result.stage_diagnostics, plan.diagnostics());
+    }
+
+    #[test]
+    fn cpu_stage_helpers_plan_and_execute_transforms() {
+        let source =
+            CpuEncodedColorFrame::source_rgba8(2, 2, ColorSpace::Rec709, vec![96; 2 * 2 * 4]);
+        let input_transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let working = execute_cpu_input_stage(&source, &input_transform)
+            .expect("helper should execute input stage");
+        assert_eq!(
+            working.result.frame.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(working.stage_diagnostics.cpu_input_stages, 1);
+
+        let output_transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let output = execute_cpu_output_stage(&working.result.frame, &output_transform)
+            .expect("helper should execute output stage");
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.frame.descriptor().residency,
+            ColorFrameResidency::Cpu
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_executes_display_target() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let output = execute_cpu_output_boundary(&frame, &boundary)
+            .expect("display boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.diagnostics.direction,
+            crate::RenderColorTransformDirection::WorkingToOutput
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_rgba8_helper_returns_pixels_and_diagnostics() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let output = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("display boundary should encode RGBA8");
+
+        assert_eq!(output.output_descriptor.domain, ColorFrameDomain::Display);
+        assert_eq!(
+            output.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedRgba8
+        );
+        assert_eq!(
+            output.rgba.len(),
+            output.output_descriptor.pixel_count() * 4
+        );
+        assert_eq!(output.color_diagnostics.input, frame.descriptor());
+        assert_eq!(output.color_diagnostics.output, output.output_descriptor);
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(output.stage_diagnostics.gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn output_boundary_executor_cpu_only_executes_display_target() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut executor = RenderOutputColorBoundaryExecutor::cpu_only();
+
+        let output = executor.execute(&frame, &boundary).expect("display boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            output.result.diagnostics.direction,
+            crate::RenderColorTransformDirection::WorkingToOutput
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+        assert_eq!(output.stage_diagnostics.gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn gpu_output_boundary_runtime_owns_shader_cache_and_frame_ids() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(900).expect("GPU output runtime");
+
+        assert_eq!(
+            runtime.diagnostics(),
+            RenderGpuOutputBoundaryRuntimeDiagnostics {
+                shader_cache: OcioGpuShaderCache::default().diagnostics(),
+                backend_prep: OcioGpuWgpuBackendPrepRuntime::default().diagnostics(),
+                backend_objects: OcioGpuWgpuBackendObjectRuntime::default().diagnostics(),
+                next_frame_id: 900,
+                frame_table_entries: 0,
+                resource_pool: GpuColorFrameWgpuResourcePoolDiagnostics::default(),
+            }
+        );
+
+        runtime
+            .shader_cache_mut()
+            .get_or_extract(OcioGpuShaderRequest::ColorSpace {
+                engine: ColorEngine::mondrian_standard(),
+                src: ColorSpace::SonySLog3SGamut3Cine.into(),
+                dst: ColorSpace::Rec709.into(),
+                language: GpuLanguage::Glsl4_0,
+            })
+            .expect("shader extraction");
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.shader_cache.entries, 1);
+        assert_eq!(diagnostics.shader_cache.misses, 1);
+        assert_eq!(diagnostics.backend_prep.resources.entries, 0);
+        assert_eq!(diagnostics.backend_objects.entries, 0);
+        assert_eq!(diagnostics.next_frame_id, 900);
+        assert_eq!(diagnostics.frame_table_entries, 0);
+
+        runtime.clear_frame_resources();
+        assert_eq!(runtime.diagnostics().frame_table_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn gpu_output_boundary_take_transfers_only_the_exact_frame_resource() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping output boundary take test: no GPU adapter");
+            return;
+        };
+        let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::default());
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(&resource_pool))
+                .expect("GPU output boundary runtime");
+        let descriptor = ColorFrameDescriptor {
+            width: 2,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        let id = runtime.frame_ids_mut().allocate().expect("frame identity");
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "presentation-output",
+        )
+        .expect("presentation handle");
+        let mismatched = GpuColorFrameHandle::new(
+            id,
+            ColorFrameDescriptor {
+                color_space: WorkingColorSpace::LinearRec2020.into(),
+                ..descriptor
+            },
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "mismatched-presentation-output",
+        )
+        .expect("mismatched presentation handle");
+        let resource = resource_pool.acquire(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(handle.clone()),
+        );
+        runtime.frame_table_mut().insert(resource).expect("insert presentation output");
+
+        assert!(matches!(
+            runtime.take_frame_resource(&mismatched),
+            Err(GpuColorFrameResourceTableError::ContractMismatch { .. })
+        ));
+        assert_eq!(runtime.frame_table().len(), 1);
+        let detached = runtime.take_frame_resource(&handle).expect("exact presentation output");
+        assert_eq!(detached.handle(), &handle);
+        assert!(runtime.frame_table().is_empty());
+        runtime.clear_frame_resources();
+        assert_eq!(resource_pool.diagnostics().retained_resources, 0);
+        resource_pool.release(detached);
+        assert_eq!(resource_pool.diagnostics().retained_resources, 1);
+    }
+
+    #[test]
+    fn gpu_output_boundary_plans_explicit_working_to_encoded_processor() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            runtime.shader_cache_mut(),
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+
+        let plan = planner
+            .plan(&frame, &boundary)
+            .expect("linear working GPU output boundary should plan diagnostics");
+        assert_eq!(
+            plan.stage_plan.diagnostics().gpu_color_stages,
+            1,
+            "the GPU output stage remains visible with its wrapper color contract"
+        );
+        let RenderColorStage::GpuColorTransform { plan: gpu_plan, .. } = &plan.stage_plan.stages[1]
+        else {
+            panic!("expected upload -> GPU transform -> readback stage shape");
+        };
+        assert!(gpu_plan.wgpu.blockers.is_empty());
+        assert!(gpu_plan.wgpu.can_execute());
+
+        let mut ids = GpuColorFrameIdAllocator::new(1_000).expect("frame id allocator");
+        let resources = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect("linear-aware GPU output resources should materialize");
+        assert!(matches!(
+            resources.transform.wgpu.shader_plan.request,
+            crate::OcioGpuShaderRequest::ColorSpace {
+                src: mondrian_core::OcioColorSpaceIdentity::Working(
+                    mondrian_core::WorkingColorSpace::LinearRec709
+                ),
+                dst: mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Srgb),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn gpu_output_boundary_runtime_matches_cpu_output_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu output parity test: no GPU adapter available");
+            return;
+        };
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU display boundary should encode RGBA8");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-output-boundary-parity"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU output boundary should record");
+        let readback_buffer = record
+            .readback_buffer
+            .expect("CPU-resident GPU output boundary should record readback");
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            .expect("GPU output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("readback should unpack into encoded frame");
+        readback_buffer.unmap();
+
+        assert_srgb_display_accurate(&expected.rgba, actual.rgba());
+        assert_eq!(record.stage_diagnostics.total_stages, 3);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_runtime_records_source_upload_and_working_output_on_real_wgpu_device()
+    {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu input stage test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_300).expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-input-stage"),
+        });
+
+        let record = runtime
+            .record_wgpu_input_stage_owned_backend(
+                &transform,
+                &source,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU input stage should record");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(record.materialized.input.id().raw(), 1_300);
+        assert_eq!(record.materialized.output.id().raw(), 1_301);
+        assert_eq!(record.stage_diagnostics.total_stages, 2);
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 0);
+        assert_eq!(
+            record.materialized.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            record.materialized.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert!(runtime.frame_table().get(&record.materialized.input).is_ok());
+        assert!(runtime.frame_table().get(&record.materialized.output).is_ok());
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.next_frame_id, 1_302);
+        assert_eq!(diagnostics.frame_table_entries, 2);
+        assert_eq!(diagnostics.shader_cache.entries, 1);
+        assert_eq!(diagnostics.backend_prep.resources.entries, 1);
+        assert_eq!(diagnostics.backend_objects.entries, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_runtime_accepts_scene_linear_float_source_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu float input stage test: no GPU adapter available");
+            return;
+        };
+        let source = CpuSourceColorFrame::LinearFloat(LinearFloatSource::new(
+            2,
+            1,
+            ColorSpace::LinearRec2020,
+            vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25],
+        ));
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_325).expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-float-input-stage"),
+        });
+
+        let record = runtime
+            .record_wgpu_input_stage_owned_backend(
+                &transform,
+                &source,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("scene-linear float GPU input stage should record");
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        assert_eq!(
+            record.materialized.input.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            record.materialized.input.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(
+            record.materialized.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(record.stage_diagnostics.upload_stages, 1);
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_input_stage_reuses_exact_working_texture_after_ordered_submit() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu resource-pool test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_350).expect("GPU output runtime");
+
+        for _ in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-input-resource-pool"),
+                });
+            runtime
+                .record_wgpu_input_stage_owned_backend(
+                    &transform,
+                    &source,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU input stage should record");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            runtime.clear_frame_resources();
+        }
+
+        let runtime_diagnostics = runtime.diagnostics();
+        let diagnostics = runtime_diagnostics.resource_pool;
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.releases, 4);
+        assert_eq!(diagnostics.evictions, 0);
+        assert_eq!(diagnostics.retained_resources, 2);
+        assert_eq!(
+            runtime_diagnostics.backend_objects.wrapper_input_bindings.bind_group_creations,
+            1
+        );
+        assert_eq!(
+            runtime_diagnostics.backend_objects.wrapper_input_bindings.cache_hits,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_input_composite_chain_reuses_pooled_resources_without_layout_collisions_on_real_wgpu_device(
+    ) {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu input-to-composite test: no GPU adapter available");
+            return;
+        };
+        let source = cpu_source_frame();
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut effect_graph = mondrian_effects::EffectGraphBuilderState::new();
+        effect_graph.append_unary(mondrian_effects::EffectRenderOp::ColorAdjust {
+            exposure: 0.25,
+            contrast: 1.1,
+            saturation: 0.9,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        });
+        effect_graph.append_unary(mondrian_effects::EffectRenderOp::Grain { amount: 0.05 });
+        let compiled_effect_graph =
+            mondrian_effects::compile_reference_render_graph(effect_graph.finish())
+                .expect("valid GPU effect graph");
+        let effect_plan = mondrian_effects::lower_effect_graph_to_gpu_plan(&compiled_effect_graph)
+            .expect("supported GPU effect graph");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_400).expect("GPU output runtime");
+        for frame in 0..3 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-input-to-composite-resource-reuse"),
+                });
+            let input_record = runtime
+                .record_wgpu_input_stage_owned_backend(
+                    &transform,
+                    &source,
+                    RenderColorTransformGpuOptions::default(),
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU input stage should record");
+            let media_handle = input_record.materialized.output.clone();
+            let layers = [crate::GpuCompositeLayer {
+                source: crate::GpuCompositeLayerSource::GpuFrame(&media_handle),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&effect_plan),
+                frame_seed: frame,
+            }];
+
+            let composite = runtime
+                .record_wgpu_working_composite(
+                    &compositor,
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    GpuCompositeRequest {
+                        width: source.descriptor().width,
+                        height: source.descriptor().height,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &layers,
+                    },
+                )
+                .expect("GPU input output should feed GPU compositor");
+            context.queue.submit(std::iter::once(encoder.finish()));
+
+            assert_eq!(composite.diagnostics.gpu_native_composites, 1);
+            assert_eq!(composite.diagnostics.gpu_with_upload_composites, 0);
+            assert_eq!(composite.diagnostics.cpu_fallback_composites, 0);
+            assert_eq!(
+                composite.output.descriptor().domain,
+                ColorFrameDomain::Working
+            );
+            assert_eq!(
+                composite.output.descriptor().residency,
+                ColorFrameResidency::Gpu
+            );
+            runtime.clear_frame_resources();
+        }
+
+        let diagnostics = runtime.diagnostics().resource_pool;
+        assert!(
+            diagnostics.hits > 0,
+            "the test must exercise pooled resources"
+        );
+        assert_eq!(runtime.diagnostics().frame_table_entries, 0);
+    }
+
+    #[tokio::test]
+    async fn gpu_compositor_reuses_both_accumulation_targets_after_ordered_submit() {
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu compositor-pool test: no GPU adapter available");
+            return;
+        };
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let effect_graph = mondrian_effects::EffectGraphBuilderState::new();
+        let compiled_effect_graph =
+            mondrian_effects::compile_reference_render_graph(effect_graph.finish())
+                .expect("valid identity GPU effect graph");
+        let effect_plan = mondrian_effects::lower_effect_graph_to_gpu_plan(&compiled_effect_graph)
+            .expect("supported identity GPU effect graph");
+        let layer = crate::GpuCompositeLayer {
+            source: crate::GpuCompositeLayerSource::SolidColor(mondrian_core::types::Color::WHITE),
+            opacity: 1.0,
+            blend_mode: mondrian_core::types::BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&effect_plan),
+            frame_seed: 0,
+        };
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_450).expect("GPU output runtime");
+
+        for _ in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-compositor-resource-pool"),
+                });
+            runtime
+                .record_wgpu_working_composite(
+                    &compositor,
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    GpuCompositeRequest {
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: std::slice::from_ref(&layer),
+                    },
+                )
+                .expect("GPU solid composite should record");
+            context.queue.submit(std::iter::once(encoder.finish()));
+            runtime.clear_frame_resources();
+        }
+
+        let diagnostics = runtime.diagnostics().resource_pool;
+        assert_eq!(diagnostics.hits, 2);
+        assert_eq!(diagnostics.misses, 2);
+        assert_eq!(diagnostics.releases, 4);
+        assert_eq!(diagnostics.retained_resources, 2);
+    }
+
+    #[tokio::test]
+    async fn gpu_output_boundary_runtime_matches_cpu_for_all_standard_views_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu display/view parity test: no GPU adapter available");
+            return;
+        };
+        let frame = standard_view_parity_working_frame();
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200).expect("GPU output runtime");
+        for output in [
+            ColorSpace::Srgb,
+            ColorSpace::Rec709,
+            ColorSpace::Rec2020,
+            ColorSpace::DisplayP3,
+            ColorSpace::Rec2100Hlg,
+            ColorSpace::Rec2100Pq,
+        ] {
+            let boundary = RenderOutputColorBoundary::from_intent(
+                RenderOutputColorBoundaryTarget::Display,
+                output,
+                &OutputTransformIntent::mondrian_standard(),
+                true,
+                ColorEngine::mondrian_standard(),
+            )
+            .expect("Standard display/view boundary");
+            let expected = execute_cpu_output_boundary_float(&frame, &boundary)
+                .expect("CPU Standard display/view boundary");
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("mondrian-test-gpu-display-view-boundary-parity"),
+                });
+
+            let record = runtime
+                .record_wgpu_output_boundary_owned_backend(
+                    &boundary,
+                    &frame,
+                    GpuColorFrameTextureFormat::Rgba16Float,
+                    RenderColorTransformGpuOptions {
+                        output_residency: ColorFrameResidency::Cpu,
+                        ..RenderColorTransformGpuOptions::default()
+                    },
+                    RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                        device: &context.device,
+                        queue: &context.queue,
+                        encoder: &mut encoder,
+                        load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    },
+                )
+                .expect("runtime-owned GPU Standard display/view boundary should record");
+            let readback_buffer = record
+                .readback_buffer
+                .expect("CPU-resident GPU display/view boundary should record readback");
+
+            context.queue.submit(std::iter::once(encoder.finish()));
+            let readback_plan =
+                GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                    .expect("GPU display/view output should be readable as RGBA16F");
+            let mapped = map_readback_buffer(&context.device, &readback_buffer);
+            let actual = readback_plan
+                .unpack_mapped_rgba16float(&mapped)
+                .expect("display/view readback should unpack into float samples");
+            readback_buffer.unmap();
+
+            let expected =
+                expected.frame.rgba_f32().data.iter().flatten().copied().collect::<Vec<_>>();
+            assert_eq!(
+                actual.len(),
+                expected.len(),
+                "{output:?} readback sample count"
+            );
+            let max_delta = expected
+                .iter()
+                .copied()
+                .zip(actual.iter().copied())
+                .map(|(expected, actual)| (expected - actual).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(
+                max_delta <= 0.001,
+                "{output:?} Standard GPU/CPU max float delta {max_delta} exceeds RGBA16F budget"
+            );
+            assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+            assert_eq!(record.stage_diagnostics.readback_stages, 1);
+            runtime.clear_frame_resources();
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_standard_rec709_view_matches_cpu_rgba8_on_real_wgpu_device() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu Standard Rec.709 RGBA8 parity test: no GPU adapter");
+            return;
+        };
+        let frame = standard_view_parity_working_frame();
+        let boundary = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec709,
+            &OutputTransformIntent::mondrian_standard(),
+            true,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("Standard Rec.709 display/view boundary");
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU Standard Rec.709 RGBA8 boundary");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_250).expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-standard-rec709-rgba8-parity"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("GPU Standard Rec.709 RGBA8 boundary");
+        let readback_buffer = record.readback_buffer.expect("RGBA8 readback buffer");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            .expect("Standard Rec.709 output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("Standard Rec.709 readback should unpack");
+        readback_buffer.unmap();
+
+        assert!(
+            max_rgba_delta(&expected.rgba, actual.rgba()) <= 1,
+            "Standard Rec.709 GPU RGBA8 output diverged from CPU reference"
+        );
+    }
+
+    async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
+        engine: ColorEngine,
+        intent: OutputTransformIntent,
+        first_frame_id: u64,
+    ) {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping real wgpu PQ display/view accuracy test: no GPU adapter available");
+            return;
+        };
+        let frame = pq_accuracy_working_frame();
+        let boundary = RenderOutputColorBoundary::from_intent(
+            RenderOutputColorBoundaryTarget::Display,
+            ColorSpace::Rec2100Pq,
+            &intent,
+            true,
+            engine,
+        )
+        .expect("typed PQ output intent");
+        let expected = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("CPU PQ display/view boundary");
+        let mut runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(first_frame_id)
+            .expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-test-gpu-pq-display-view-accuracy"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba16Float,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .expect("runtime-owned GPU PQ display/view boundary should record");
+        let readback_buffer = record.readback_buffer.expect("PQ float readback buffer");
+        assert_eq!(
+            record.materialized.output.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan =
+            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+                .expect("PQ output should be readable as RGBA16F");
+        let mapped = map_readback_buffer(&context.device, &readback_buffer);
+        let actual_flat = readback_plan
+            .unpack_mapped_rgba16float(&mapped)
+            .expect("PQ readback should unpack");
+        readback_buffer.unmap();
+        let actual: Vec<[f32; 4]> = actual_flat
+            .chunks_exact(4)
+            .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]])
+            .collect();
+        let report = crate::compare_pq_hdr_display_rgba(
+            &expected.frame.rgba_f32().data,
+            &actual,
+            // RGBA16F is the production HDR intermediate. A 0.55 ΔEITP
+            // single-pixel ceiling covers its measured quantization envelope;
+            // the mean and p99 limits still reject broad processor drift.
+            crate::PqHdrDisplayAccuracyBudget::new(0.55, 0.2, 0.5, 0.001),
+        )
+        .expect("valid PQ display accuracy report");
+
+        let worst = usize::try_from(report.statistics.worst_pixel_index)
+            .expect("test image pixel index should fit usize");
+        assert!(
+            report.within_budget,
+            "{report:#?}\nworst_expected={:?}\nworst_actual={:?}",
+            expected.frame.rgba_f32().data[worst],
+            actual[worst]
+        );
+        assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
+        assert_eq!(record.stage_diagnostics.readback_stages, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        assert_gpu_pq_view_meets_delta_e_itp_budget(
+            ColorEngine::mondrian_standard(),
+            OutputTransformIntent::mondrian_standard(),
+            1_250,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gpu_aces_pq_intent_meets_delta_e_itp_budget_on_real_wgpu_device() {
+        let preset = AcesConfigPreset::StudioV4Aces2Ocio25;
+        assert_gpu_pq_view_meets_delta_e_itp_budget(
+            ColorEngine::Aces { preset },
+            OutputTransformIntent::aces_preset(preset),
+            1_251,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "manual renderer GPU output boundary smoke report; requires a real wgpu adapter"]
+    async fn gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device() -> anyhow::Result<()> {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let tolerance = 3;
+        let context = match GpuContext::new().await {
+            Ok(context) => context,
+            Err(err) => {
+                let skipped_runtime = RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000)
+                    .expect("GPU output runtime");
+                let frame_report = RenderGpuOutputFrameReport {
+                    width: 0,
+                    height: 0,
+                    pixel_count: 0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    output_color_space: ColorSpace::Srgb,
+                };
+                let stage_report: RenderGpuOutputStageDiagnosticsReport =
+                    RenderColorStageDiagnostics::default().into();
+                let runtime_report: RenderGpuOutputRuntimeDiagnosticsReport =
+                    skipped_runtime.diagnostics().into();
+                let skipped_reason = format!("no GPU adapter available: {err}");
+                let report = GpuOutputBoundarySmokeReport {
+                    scenario: "renderer_gpu_output_boundary",
+                    skipped: Some(skipped_reason.clone()),
+                    adapter: None,
+                    frame: frame_report,
+                    output_texture_format: "Rgba8Unorm",
+                    health_report: RenderGpuOutputHealthReport::from_sample(
+                        "renderer_gpu_output_boundary",
+                        Some(skipped_reason),
+                        &frame_report,
+                        &stage_report,
+                        &runtime_report,
+                        0,
+                        0,
+                        tolerance,
+                    ),
+                    stage: stage_report,
+                    runtime: runtime_report,
+                    readback_bytes: 0,
+                    max_rgba_delta: 0,
+                    tolerance,
+                };
+                emit_gpu_output_smoke_report(&report)?;
+                return Ok(());
+            }
+        };
+        let adapter_info = context.adapter.get_info();
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let expected = execute_cpu_output_boundary_rgba8(&frame, &boundary)
+            .expect("CPU display boundary should encode RGBA8");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("mondrian-smoke-gpu-output-boundary"),
+        });
+
+        let record = runtime
+            .record_wgpu_output_boundary_owned_backend(
+                &boundary,
+                &frame,
+                GpuColorFrameTextureFormat::Rgba8Unorm,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Cpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+            .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+        let readback_buffer = record
+            .readback_buffer
+            .as_ref()
+            .expect("CPU-resident GPU output boundary should record readback");
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let readback_plan =
+            GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output.clone())
+                .expect("GPU output should be readable as RGBA8");
+        let mapped = map_readback_buffer(&context.device, readback_buffer);
+        let actual = readback_plan
+            .unpack_mapped_rgba8(&mapped)
+            .expect("readback should unpack into encoded frame");
+        readback_buffer.unmap();
+
+        let max_rgba_delta = max_rgba_delta(&expected.rgba, actual.rgba());
+        let stage_diagnostics = record.stage_diagnostics;
+        let runtime_diagnostics = runtime.diagnostics();
+        let frame_report = RenderGpuOutputFrameReport {
+            width: frame.descriptor().width as usize,
+            height: frame.descriptor().height as usize,
+            pixel_count: frame.descriptor().pixel_count(),
+            working_color_space: frame
+                .descriptor()
+                .color_space
+                .working()
+                .expect("GPU output boundary input must be working-linear"),
+            output_color_space: boundary.output_color_space,
+        };
+        let stage_report = RenderGpuOutputStageDiagnosticsReport::from(stage_diagnostics);
+        let runtime_report = RenderGpuOutputRuntimeDiagnosticsReport::from(runtime_diagnostics);
+        let health_report = RenderGpuOutputHealthReport::from_sample(
+            "renderer_gpu_output_boundary",
+            None,
+            &frame_report,
+            &stage_report,
+            &runtime_report,
+            actual.rgba().len(),
+            max_rgba_delta,
+            tolerance,
+        );
+        let passed = health_report.verdict == RenderGpuOutputHealthVerdict::Pass;
+        let report = GpuOutputBoundarySmokeReport {
+            scenario: "renderer_gpu_output_boundary",
+            skipped: None,
+            adapter: Some(GpuOutputAdapterReport {
+                name: adapter_info.name,
+                backend: format!("{:?}", adapter_info.backend),
+                device_type: format!("{:?}", adapter_info.device_type),
+                driver: adapter_info.driver,
+                driver_info: adapter_info.driver_info,
+            }),
+            frame: frame_report,
+            output_texture_format: "Rgba8Unorm",
+            health_report,
+            stage: stage_report,
+            runtime: runtime_report,
+            readback_bytes: actual.rgba().len(),
+            max_rgba_delta,
+            tolerance,
+        };
+        emit_gpu_output_smoke_report(&report)?;
+
+        assert!(passed, "GPU output boundary smoke failed: {report:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn output_boundary_cpu_planner_produces_cpu_stage_plan() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+
+        let plan = planner.plan(&frame, &boundary).expect("CPU output boundary plan");
+
+        assert_eq!(plan.boundary, boundary);
+        assert_eq!(plan.stage_plan.stages.len(), 1);
+        assert!(matches!(
+            plan.stage_plan.stages[0],
+            RenderColorStage::CpuOutputTransform { .. }
+        ));
+        assert_eq!(plan.diagnostics().cpu_output_stages, 1);
+        assert_eq!(plan.diagnostics().gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn output_boundary_prefer_gpu_planner_builds_backend_ready_stage_plan() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+
+        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let diagnostics = plan.diagnostics();
+
+        assert_eq!(plan.boundary, boundary);
+        assert!(plan.stage_plan.contains_gpu_transform());
+        assert!(plan.stage_plan.contains_transfer());
+        assert_eq!(diagnostics.cpu_output_stages, 0);
+        assert_eq!(diagnostics.upload_stages, 1);
+        assert_eq!(diagnostics.gpu_color_stages, 1);
+        assert_eq!(diagnostics.readback_stages, 1);
+        assert_eq!(diagnostics.gpu_blockers, 0);
+    }
+
+    #[test]
+    fn color_stage_diagnostics_break_down_gpu_blocker_reasons() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let mut plan = gpu_output_stage_plan_for_frame(&frame);
+        add_gpu_stage_blocker_reason(
+            &mut plan,
+            OcioGpuWgpuBlocker::ShaderModuleNotPrepared { language: GpuLanguage::Glsl4_0 },
+        );
+        add_gpu_stage_blocker_reason(
+            &mut plan,
+            OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared {
+                texture_2d_count: 2,
+                texture_3d_count: 1,
+                uniform_buffers: 1,
+            },
+        );
+        add_gpu_stage_blocker_reason(&mut plan, OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared);
+        add_gpu_stage_blocker_reason(&mut plan, OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+
+        let diagnostics = plan.diagnostics();
+
+        assert_eq!(diagnostics.gpu_blockers, 4);
+        assert_eq!(diagnostics.gpu_blocker_breakdown.total(), 4);
+        assert_eq!(
+            diagnostics.gpu_blocker_breakdown,
+            RenderColorStageGpuBlockerBreakdown {
+                shader_module_not_prepared: 1,
+                ocio_resource_bind_group_not_prepared: 1,
+                fullscreen_wrapper_not_prepared: 1,
+                render_pipeline_not_prepared: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
+            }
+        );
+    }
+
+    #[test]
+    fn output_boundary_cpu_stage_plan_rejects_gpu_resource_bridge() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderOutputColorBoundaryPlanner::cpu_only();
+        let plan = planner.plan(&frame, &boundary).expect("CPU output boundary plan");
+        let mut ids = GpuColorFrameIdAllocator::new(700).expect("frame id allocator");
+
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba16Float)
+            .expect_err("CPU output boundary cannot build GPU resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn output_boundary_gpu_stage_plan_reports_blockers_before_resource_bridge() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        let mut plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        add_gpu_stage_blocker(&mut plan.stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(710).expect("frame id allocator");
+
+        let err = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect_err("blocked GPU output boundary cannot build resources");
+
+        match err {
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                blockers,
+                breakdown,
+            } => {
+                assert!(blockers > 0);
+                assert_eq!(breakdown.total(), blockers as u64);
+                assert!(breakdown.render_pipeline_not_prepared > 0);
+            }
+            other => panic!("expected native blockers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn output_boundary_gpu_stage_plan_builds_resource_plan_when_blockers_clear() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        let plan = planner.plan(&frame, &boundary).expect("GPU output boundary plan");
+        let mut ids = GpuColorFrameIdAllocator::new(720).expect("frame id allocator");
+
+        let resources = plan
+            .gpu_resource_plan(&mut ids, &frame, GpuColorFrameTextureFormat::Rgba8Unorm)
+            .expect("blocker-free GPU output boundary resources");
+
+        assert_eq!(
+            resources.transform.diagnostics.input,
+            resources.input.descriptor()
+        );
+        assert_eq!(
+            resources.transform.diagnostics.output,
+            resources.output.descriptor()
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba8Unorm
+        );
+        assert!(resources.readback.is_some());
+    }
+
+    #[test]
+    fn cpu_output_boundary_executes_export_target() {
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let output =
+            execute_cpu_output_boundary(&frame, &boundary).expect("export boundary should execute");
+
+        assert_eq!(
+            output.result.frame.descriptor().domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(
+            output.result.frame.descriptor().color_space,
+            ColorSpace::Rec709.into()
+        );
+        assert_eq!(output.stage_diagnostics.cpu_output_stages, 1);
+    }
+
+    #[test]
+    fn cpu_output_boundary_display_and_export_targets_match_pixels_for_same_transform() {
+        let frame = cpu_working_frame();
+        let display = execute_cpu_output_boundary(
+            &frame,
+            &RenderOutputColorBoundary::display(
+                ColorSpace::Srgb,
+                false,
+                ColorEngine::mondrian_standard(),
+            ),
+        )
+        .expect("display output boundary");
+        let export = execute_cpu_output_boundary(
+            &frame,
+            &RenderOutputColorBoundary::export(
+                ColorSpace::Srgb,
+                false,
+                ColorEngine::mondrian_standard(),
+            ),
+        )
+        .expect("export output boundary");
+
+        assert_eq!(display.result.frame.rgba(), export.result.frame.rgba());
+        assert_eq!(
+            display.result.frame.descriptor().domain,
+            ColorFrameDomain::Display
+        );
+        assert_eq!(
+            export.result.frame.descriptor().domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(
+            display.result.diagnostics.output.color_space,
+            export.result.diagnostics.output.color_space
+        );
+        assert_eq!(
+            display.stage_diagnostics.cpu_output_stages,
+            export.stage_diagnostics.cpu_output_stages
+        );
+        assert_eq!(
+            display.stage_diagnostics.stage_pixels,
+            export.stage_diagnostics.stage_pixels
+        );
+    }
+
+    #[test]
+    fn gpu_input_plan_adds_upload_for_cpu_source() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+
+        let plan = planner
+            .plan_input_to_working(source_descriptor(ColorFrameResidency::Cpu), &transform)
+            .expect("GPU input plan");
+
+        assert_eq!(plan.stages.len(), 2);
+        assert!(matches!(
+            plan.stages[0],
+            RenderColorStage::UploadToGpu { .. }
+        ));
+        assert!(matches!(
+            plan.stages[1],
+            RenderColorStage::GpuColorTransform { .. }
+        ));
+        assert_stage_chain_is_contiguous(&plan);
+        assert!(plan.contains_gpu_transform());
+        assert!(plan.contains_transfer());
+        assert_eq!(plan.final_descriptor.residency, ColorFrameResidency::Gpu);
+    }
+
+    #[test]
+    fn gpu_output_plan_adds_readback_when_cpu_output_is_requested() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderColorTransform::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+
+        let plan = planner
+            .plan_output_transform(working_descriptor(ColorFrameResidency::Gpu), &transform)
+            .expect("GPU output plan");
+
+        assert_eq!(plan.stages.len(), 2);
+        assert!(matches!(
+            plan.stages[0],
+            RenderColorStage::GpuColorTransform { .. }
+        ));
+        assert!(matches!(
+            plan.stages[1],
+            RenderColorStage::ReadbackToCpu { .. }
+        ));
+        assert_stage_chain_is_contiguous(&plan);
+        assert!(plan.contains_gpu_transform());
+        assert!(plan.contains_transfer());
+        assert_eq!(plan.final_descriptor.residency, ColorFrameResidency::Cpu);
+        assert_eq!(plan.final_descriptor.domain, ColorFrameDomain::Export);
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_binds_handles_transform_and_pass_node() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(1, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(2, transform.diagnostics.output, "display-output");
+        let pass_node = pass_node_for_transform(&transform);
+
+        let schedule = RenderGpuColorPassSchedule::new(
+            input.clone(),
+            output.clone(),
+            transform.clone(),
+            pass_node,
+        )
+        .expect("schedulable GPU color pass");
+
+        assert_eq!(schedule.input, input);
+        assert_eq!(schedule.output, output);
+        assert_eq!(schedule.transform.diagnostics, transform.diagnostics);
+        assert_eq!(
+            schedule.pass_node.resource_key,
+            transform.wgpu.resources.resource_key
+        );
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_remaining_native_blockers() {
+        let transform = blocked_gpu_output_plan();
+        let input = gpu_handle(3, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(4, transform.diagnostics.output, "display-output");
+        let pass_node = pass_node_for_transform(&transform);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("blocked GPU plan must not schedule");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::NativeBlockersRemaining { blockers } if blockers > 0
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_target_descriptor() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(5, transform.diagnostics.input, "working-input");
+        let mut wrong_output_descriptor = transform.diagnostics.output;
+        wrong_output_descriptor.color_space = ColorSpace::Rec2020.into();
+        let output = gpu_handle(6, wrong_output_descriptor, "wrong-display-output");
+        let pass_node = pass_node_for_transform(&transform);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("output descriptor mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::OutputDescriptorMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_pass_resource_key() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(7, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(8, transform.diagnostics.output, "display-output");
+        let mut pass_node = pass_node_for_transform(&transform);
+        pass_node.resource_key = transform.wgpu.resources.resource_key.wrapping_add(1);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("pass resource mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::PassResourceKeyMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_target_texture_format() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(9, transform.diagnostics.input, "working-input");
+        let output = gpu_handle_with_format(
+            10,
+            transform.diagnostics.output,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+            "display-output-rgba8",
+        );
+        let pass_node = pass_node_for_transform(&transform);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("target texture format mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::TargetTextureFormatMismatch {
+                expected: crate::OcioGpuWgpuColorTargetFormat::Rgba16Float,
+                actual: GpuColorFrameTextureFormat::Rgba8Unorm
+            }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_rejects_mismatched_wrapper_layout_hash() {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(11, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(12, transform.diagnostics.output, "display-output");
+        let mut pass_node = pass_node_for_transform(&transform);
+        pass_node.wrapper_layout_hash = pass_node.wrapper_layout_hash.wrapping_add(1);
+
+        let err = RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect_err("wrapper layout mismatch must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::PassWrapperLayoutHashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_validates_resolved_input_frame() {
+        let schedule = executable_gpu_output_schedule(13, 14);
+        let wrong_input = gpu_handle(15, schedule.input.descriptor(), "wrong-input");
+
+        let err = schedule
+            .validate_input_frame(&wrong_input)
+            .expect_err("wrong input frame id must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassExecutionError::InputFrameIdMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_validates_resolved_output_frame() {
+        let schedule = executable_gpu_output_schedule(16, 17);
+        let wrong_output = gpu_handle_with_format(
+            17,
+            schedule.output.descriptor(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "wrong-output-format",
+        );
+
+        let err = schedule
+            .validate_output_frame(&wrong_output)
+            .expect_err("wrong output texture format must fail");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassExecutionError::OutputTextureFormatMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_resolves_matching_frame_resources() {
+        let schedule = executable_gpu_output_schedule(18, 19);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(
+                schedule.input.clone(),
+                "input-texture",
+            ))
+            .expect("insert input");
+        table
+            .insert(GpuColorFrameResource::new(
+                schedule.output.clone(),
+                "output-texture",
+            ))
+            .expect("insert output");
+
+        let resolved = schedule.resolve_resources(&table).expect("resolve scheduled resources");
+
+        assert_eq!(resolved.input.resource(), &"input-texture");
+        assert_eq!(resolved.output.resource(), &"output-texture");
+        assert_eq!(resolved.input.handle(), &schedule.input);
+        assert_eq!(resolved.output.handle(), &schedule.output);
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_reports_missing_resource_table_frame() {
+        let schedule = executable_gpu_output_schedule(20, 21);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(schedule.input.clone(), "input"))
+            .expect("insert input");
+
+        let err = schedule
+            .resolve_resources(&table)
+            .expect_err("missing output must fail before recording");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassExecutionError::ResourceTable(
+                GpuColorFrameResourceTableError::MissingFrame { id }
+            ) if id == schedule.output.id()
+        ));
+    }
+
+    #[test]
+    fn gpu_color_pass_schedule_reports_stale_resource_table_contract() {
+        let schedule = executable_gpu_output_schedule(22, 23);
+        let stale_output = gpu_handle_with_format(
+            23,
+            schedule.output.descriptor(),
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "stale-output",
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(schedule.input.clone(), "input"))
+            .expect("insert input");
+        table
+            .insert(GpuColorFrameResource::new(
+                stale_output.clone(),
+                "stale-output",
+            ))
+            .expect("insert stale output");
+
+        let err = schedule
+            .resolve_resources(&table)
+            .expect_err("stale output contract must fail before recording");
+
+        assert_eq!(
+            err,
+            RenderGpuColorPassExecutionError::ResourceTable(
+                GpuColorFrameResourceTableError::ContractMismatch {
+                    id: schedule.output.id(),
+                    expected: schedule.output.contract(),
+                    actual: stale_output.contract()
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_materializes_upload_allocation_and_schedulable_transform() {
+        let frame = cpu_working_frame();
+        let stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        let mut ids = GpuColorFrameIdAllocator::new(500).expect("frame id allocator");
+
+        let resources = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect("GPU output stage resources");
+
+        assert_eq!(resources.input.id().raw(), 500);
+        assert_eq!(resources.output.id().raw(), 501);
+        assert_eq!(ids.next_raw(), 502);
+        let input_upload = resources
+            .input_upload
+            .as_ref()
+            .expect("CPU working frame path must include upload");
+        assert_eq!(input_upload.handle, resources.input);
+        assert_eq!(
+            input_upload.texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(resources.output_allocation.handle, resources.output);
+        assert_eq!(
+            resources.output_allocation.texture_format,
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert!(!resources.transform.requires_source_upload);
+        assert!(!resources.transform.requires_output_readback);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
+        assert_eq!(
+            resources.transform.diagnostics.input,
+            resources.input.descriptor()
+        );
+        assert_eq!(
+            resources.transform.diagnostics.output,
+            resources.output.descriptor()
+        );
+
+        let pass_node = pass_node_for_transform(&resources.transform);
+        RenderGpuColorPassSchedule::new(
+            resources.input,
+            resources.output,
+            resources.transform,
+            pass_node,
+        )
+        .expect("resource-planned transform should schedule");
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_accepts_gpu_resident_working_input_without_upload() {
+        let frame = cpu_working_frame();
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        let input = gpu_handle_with_format(
+            600,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "gpu-composited-working",
+        );
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_output_transform(input_descriptor, &transform)
+            .expect("GPU-resident output stage plan");
+        let mut ids = GpuColorFrameIdAllocator::new(601).expect("frame id allocator");
+
+        let resources = RenderGpuOutputStageResourcePlan::from_gpu_working_frame(
+            &mut ids,
+            &input,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU-resident working frame output resources");
+
+        assert_eq!(resources.input, input);
+        assert!(resources.input_upload.is_none());
+        assert_eq!(resources.output.id().raw(), 601);
+        assert_eq!(ids.next_raw(), 602);
+        let diagnostics = resources.stage_diagnostics();
+        assert_eq!(diagnostics.upload_stages, 0);
+        assert_eq!(diagnostics.gpu_color_stages, 1);
+        assert_eq!(diagnostics.readback_stages, 0);
+    }
+
+    #[test]
+    fn gpu_intermediate_resource_plan_allocates_float_target_without_transfers() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = ColorFrameDescriptor {
+            width: 3840,
+            height: 2160,
+            color_space: WorkingColorSpace::LinearRec2020.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        let input = gpu_handle_with_format(
+            650,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "effect-input",
+        );
+        let transform = RenderIntermediateColorTransform {
+            output_identity: mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            output_domain: ColorFrameDomain::Effect,
+            output_encoding: ColorFrameEncoding::EncodedFloat,
+            engine: ColorEngine::mondrian_standard(),
+        };
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let transform_plan = planner
+            .plan_identity_transform(input_descriptor, &transform)
+            .expect("effect-domain transform plan");
+        let mut ids = GpuColorFrameIdAllocator::new(651).expect("frame id allocator");
+
+        let resources = RenderGpuColorTransformResourcePlan::from_gpu_frame(
+            &mut ids,
+            &input,
+            transform_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "effect-domain-target",
+        )
+        .expect("GPU intermediate resources");
+
+        assert_eq!(resources.input, input);
+        assert_eq!(resources.output.id().raw(), 651);
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Effect
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float
+        );
+        assert!(!resources.transform.requires_source_upload);
+        assert!(!resources.transform.requires_output_readback);
+        assert_eq!(ids.next_raw(), 652);
+        let pass_node = pass_node_for_transform(&resources.transform);
+        let schedule = resources.schedule_pass(pass_node).expect("intermediate pass schedule");
+        assert_eq!(schedule.input, resources.input);
+        assert_eq!(schedule.output, resources.output);
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_uploads_cpu_source_and_outputs_gpu_working_frame() {
+        let source = cpu_source_frame();
+        let stage_plan = gpu_input_stage_plan_for_source(&source);
+        let mut ids = GpuColorFrameIdAllocator::new(700).expect("frame id allocator");
+
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect("GPU input stage resources");
+
+        assert_eq!(resources.input.id().raw(), 700);
+        assert_eq!(resources.output.id().raw(), 701);
+        assert_eq!(ids.next_raw(), 702);
+        let input_upload = resources.input_upload.as_ref().expect("CPU source upload");
+        assert_eq!(input_upload.handle, resources.input);
+        assert_eq!(
+            input_upload.texture_format,
+            GpuColorFrameTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(resources.output_allocation.handle, resources.output);
+        assert_eq!(
+            resources.output_allocation.texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+        assert_eq!(
+            resources.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert!(!resources.transform.requires_source_upload);
+        assert!(!resources.transform.requires_output_readback);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
+
+        let mut pass_node = pass_node_for_transform(&resources.transform);
+        pass_node.output_format = OcioGpuWgpuColorTargetFormat::Rgba32Float;
+        RenderGpuColorPassSchedule::new(
+            resources.input,
+            resources.output,
+            resources.transform,
+            pass_node,
+        )
+        .expect("resource-planned GPU input transform should schedule");
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_uploads_scene_linear_float_without_quantization() {
+        let samples = Arc::new(vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25]);
+        let source = CpuSourceColorFrame::LinearFloat(LinearFloatSource::new_shared(
+            2,
+            1,
+            ColorSpace::LinearRec2020,
+            Arc::clone(&samples),
+        ));
+        let stage_plan = gpu_input_stage_plan_for_source(&source);
+        let mut ids = GpuColorFrameIdAllocator::new(705).expect("frame id allocator");
+
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect("GPU float input stage resources");
+
+        let upload = resources.input_upload.expect("float source upload");
+        assert_eq!(
+            upload.texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(upload.bytes()),
+            samples.as_slice()
+        );
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            resources.output.texture_format(),
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_accepts_encoded_float_gpu_source_without_upload() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let input_descriptor = ColorFrameDescriptor {
+            width: 1920,
+            height: 1080,
+            color_space: ColorSpace::Rec2100Pq.into(),
+            domain: ColorFrameDomain::Source,
+            encoding: ColorFrameEncoding::EncodedFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        let input = gpu_handle_with_format(
+            710,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            "native-yuv-encoded-source",
+        );
+        let transform = RenderInputTransform::to_working_gpu(
+            WorkingColorSpace::LinearRec2020,
+            true,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let stage_plan = planner
+            .plan_input_to_working(input_descriptor, &transform)
+            .expect("GPU-resident encoded source input plan");
+        assert!(!stage_plan.contains_transfer());
+        let output = gpu_handle_with_format(
+            711,
+            stage_plan.final_descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "native-yuv-working-output",
+        );
+
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            &input,
+            &output,
+            &stage_plan,
+        )
+        .expect("GPU-resident encoded source resources");
+
+        assert_eq!(resources.input, input);
+        assert!(resources.input_upload.is_none());
+        assert_eq!(resources.output, output);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
+        assert_eq!(resources.stage_diagnostics().upload_stages, 0);
+        assert_eq!(
+            resources.output.descriptor().domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
+        );
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_rejects_cpu_only_plan() {
+        let source = cpu_source_frame();
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let stage_plan = planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("CPU input stage plan");
+        let mut ids = GpuColorFrameIdAllocator::new(710).expect("frame id allocator");
+
+        let err =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect_err("CPU-only input plan cannot materialize GPU resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuInputStageResourcePlanError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_rejects_native_blockers() {
+        let source = cpu_source_frame();
+        let mut stage_plan = gpu_input_stage_plan_for_source(&source);
+        add_gpu_stage_blocker(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(720).expect("frame id allocator");
+
+        let err =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect_err("blocked GPU input stage cannot materialize executable resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuInputStageResourcePlanError::NativeBlockersRemaining { blockers, .. } if blockers > 0
+        ));
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_inserts_materialized_resources() {
+        let resources = executable_gpu_input_stage_resources(730);
+        let mut table = GpuColorFrameResourceTable::new();
+
+        let materialized = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(resources.input.clone(), "source-input"),
+                GpuColorFrameResource::new(resources.output.clone(), "working-output"),
+            )
+            .expect("insert materialized input resources");
+
+        assert_eq!(materialized.input, resources.input);
+        assert_eq!(materialized.output, resources.output);
+        assert_eq!(
+            table.get(&resources.input).expect("input").resource(),
+            &"source-input"
+        );
+        assert_eq!(
+            table.get(&resources.output).expect("output").resource(),
+            &"working-output"
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_cpu_only_stage_plan() {
+        let frame = cpu_working_frame();
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut planner = RenderColorStagePlanner::cpu_only();
+        let stage_plan = planner
+            .plan_output_transform(frame.descriptor(), &transform)
+            .expect("CPU stage plan");
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
+
+        let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect_err("CPU-only plan cannot materialize GPU resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::UnsupportedStagePlan { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_native_blockers() {
+        let frame = cpu_working_frame();
+        let mut stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        add_gpu_stage_blocker(&mut stage_plan);
+        let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
+
+        let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect_err("blocked GPU stage cannot materialize executable resources");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining { blockers, .. } if blockers > 0
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_inserts_materialized_resources() {
+        let resources = executable_gpu_output_stage_resources(600);
+        let mut table = GpuColorFrameResourceTable::new();
+
+        let materialized = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(resources.input.clone(), "input-resource"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect("insert materialized resources");
+
+        assert_eq!(materialized.input, resources.input);
+        assert_eq!(materialized.output, resources.output);
+        assert_eq!(
+            table.get(&resources.input).expect("input").resource(),
+            &"input-resource"
+        );
+        assert_eq!(
+            table.get(&resources.output).expect("output").resource(),
+            &"output-resource"
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_builds_pass_schedule() {
+        let resources = executable_gpu_output_stage_resources(605);
+        let pass_node = pass_node_for_transform(&resources.transform);
+
+        let schedule = resources
+            .schedule_pass(pass_node)
+            .expect("stage resources should schedule pass");
+
+        assert_eq!(schedule.input, resources.input);
+        assert_eq!(schedule.output, resources.output);
+        assert_eq!(
+            schedule.transform.wgpu.resources.resource_key,
+            resources.transform.wgpu.resources.resource_key
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_mismatched_pass_schedule() {
+        let resources = executable_gpu_output_stage_resources(606);
+        let mut pass_node = pass_node_for_transform(&resources.transform);
+        pass_node.resource_key = pass_node.resource_key.wrapping_add(1);
+
+        let err = resources
+            .schedule_pass(pass_node)
+            .expect_err("mismatched pass node must not schedule");
+
+        assert!(matches!(
+            err,
+            RenderGpuColorPassScheduleError::PassResourceKeyMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_mismatched_materialized_input() {
+        let resources = executable_gpu_output_stage_resources(610);
+        let wrong_input = gpu_handle(
+            999,
+            resources.input.descriptor(),
+            "wrong-materialized-input",
+        );
+        let mut table = GpuColorFrameResourceTable::new();
+
+        let err = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(wrong_input.clone(), "wrong-input"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect_err("wrong input handle must fail");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageMaterializeError::InputResourceMismatch {
+                expected: Box::new(resources.input),
+                actual: Box::new(wrong_input)
+            }
+        );
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_surfaces_resource_table_conflicts() {
+        let resources = executable_gpu_output_stage_resources(620);
+        let mut stale_descriptor = resources.output.descriptor();
+        stale_descriptor.color_space = ColorSpace::Rec2020.into();
+        let stale_output = GpuColorFrameHandle::new(
+            resources.output.id(),
+            stale_descriptor,
+            resources.output.texture_format(),
+            "stale-output",
+        )
+        .expect("stale output fixture");
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(stale_output.clone(), "stale"))
+            .expect("insert stale output");
+
+        let err = resources
+            .insert_resources(
+                &mut table,
+                GpuColorFrameResource::new(resources.input.clone(), "input-resource"),
+                GpuColorFrameResource::new(resources.output.clone(), "output-resource"),
+            )
+            .expect_err("table conflict must surface");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageMaterializeError::ResourceTable(
+                GpuColorFrameResourceTableError::ContractMismatch {
+                    id: resources.output.id(),
+                    expected: resources.output.contract(),
+                    actual: stale_output.contract()
+                }
+            )
+        );
+        assert!(matches!(
+            table.get(&resources.input),
+            Err(GpuColorFrameResourceTableError::MissingFrame { .. })
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_carries_cpu_boundary_readback_plan() {
+        let frame = cpu_working_frame();
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        let mut ids = GpuColorFrameIdAllocator::new(630).expect("frame id allocator");
+
+        let resources = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU output resources with readback");
+
+        let readback = resources.readback.as_ref().expect("CPU boundary readback");
+        assert_eq!(readback.handle, resources.output);
+        assert_eq!(readback.output_descriptor, stage_plan.final_descriptor);
+        assert_eq!(
+            readback.texture_format,
+            GpuColorFrameTextureFormat::Rgba8Unorm
+        );
+        assert_eq!(
+            resources.output.descriptor().residency,
+            ColorFrameResidency::Gpu
+        );
+        assert_eq!(
+            stage_plan.final_descriptor.residency,
+            ColorFrameResidency::Cpu
+        );
+        assert!(!resources.transform.requires_output_readback);
+        assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
+    }
+
+    #[test]
+    fn gpu_output_stage_resource_plan_rejects_unsupported_cpu_boundary_texture_format() {
+        let frame = cpu_working_frame();
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        let mut ids = GpuColorFrameIdAllocator::new(640).expect("frame id allocator");
+
+        let err = RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect_err("CPU boundary readback requires an encoded RGBA8 target");
+
+        assert!(matches!(
+            err,
+            RenderGpuOutputStageResourcePlanError::OutputTextureEncodingMismatch {
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                texture_format: GpuColorFrameTextureFormat::Rgba16Float
+            }
+        ));
+    }
+
+    #[test]
+    fn gpu_output_stage_readback_resource_resolves_from_materialized_table() {
+        let resources = executable_gpu_output_stage_resources_with_readback(650);
+        let mut table = GpuColorFrameResourceTable::new();
+        table
+            .insert(GpuColorFrameResource::new(
+                resources.output.clone(),
+                "readback-target",
+            ))
+            .expect("insert output resource");
+
+        let resolved = resources
+            .resolve_readback_resource(&table)
+            .expect("resolve readback resource")
+            .expect("readback resource");
+
+        assert_eq!(resolved.handle(), &resources.output);
+        assert_eq!(resolved.resource(), &"readback-target");
+    }
+
+    #[test]
+    fn gpu_output_stage_readback_resource_reports_missing_output() {
+        let resources = executable_gpu_output_stage_resources_with_readback(660);
+        let table = GpuColorFrameResourceTable::<&'static str>::new();
+
+        let err = resources
+            .resolve_readback_resource(&table)
+            .expect_err("missing readback target must surface");
+
+        assert_eq!(
+            err,
+            RenderGpuOutputStageReadbackError::ResourceTable(
+                GpuColorFrameResourceTableError::MissingFrame { id: resources.output.id() }
+            )
+        );
+    }
+
+    #[test]
+    fn gpu_output_stage_without_cpu_boundary_has_no_readback_resource() {
+        let resources = executable_gpu_output_stage_resources(670);
+        let table = GpuColorFrameResourceTable::<&'static str>::new();
+
+        assert!(resources
+            .resolve_readback_resource(&table)
+            .expect("resolve no-readback resource")
+            .is_none());
+    }
+
+    fn assert_stage_chain_is_contiguous(plan: &RenderColorStagePlan) {
+        for pair in plan.stages.windows(2) {
+            assert_eq!(pair[0].output(), pair[1].input());
+        }
+        assert_eq!(
+            plan.stages.last().expect("stage plan should not be empty").output(),
+            plan.final_descriptor
+        );
+    }
+
+    fn blocked_gpu_output_plan() -> RenderColorTransformGpuPlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorTransformGpuPlanner::new(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let mut plan = planner
+            .plan_output_transform(working_descriptor(ColorFrameResidency::Gpu), &transform)
+            .expect("GPU output plan");
+        plan.wgpu.blockers.push(OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+        plan
+    }
+
+    fn executable_gpu_output_plan() -> RenderColorTransformGpuPlan {
+        let mut plan = blocked_gpu_output_plan();
+        plan.wgpu.blockers.clear();
+        plan
+    }
+
+    fn executable_gpu_output_schedule(input_id: u64, output_id: u64) -> RenderGpuColorPassSchedule {
+        let transform = executable_gpu_output_plan();
+        let input = gpu_handle(input_id, transform.diagnostics.input, "working-input");
+        let output = gpu_handle(output_id, transform.diagnostics.output, "display-output");
+        let pass_node = pass_node_for_transform(&transform);
+        RenderGpuColorPassSchedule::new(input, output, transform, pass_node)
+            .expect("schedulable GPU color pass")
+    }
+
+    fn cpu_working_frame() -> CpuColorFrame {
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 2,
+            data: vec![[0.25, 0.5, 0.75, 1.0]; 8],
+            color_space: WorkingColorSpace::LinearRec709,
+        })
+    }
+
+    fn standard_view_parity_working_frame() -> CpuColorFrame {
+        let data = vec![
+            [-0.05, 0.0, 0.001, 1.0],
+            [0.001, 0.001, 0.001, 0.875],
+            [0.18, 0.18, 0.18, 0.75],
+            [1.0, 1.0, 1.0, 0.625],
+            [1.0, 0.0, 0.0, 0.5],
+            [0.0, 1.0, 0.0, 0.375],
+            [0.0, 0.0, 1.0, 0.25],
+            [4.0, 2.0, 0.5, 0.125],
+            [16.0, 16.0, 16.0, 1.0],
+        ];
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: u32::try_from(data.len()).expect("parity corpus width"),
+            height: 1,
+            data,
+            color_space: WorkingColorSpace::LinearRec2020,
+        })
+    }
+
+    fn pq_accuracy_working_frame() -> CpuColorFrame {
+        const WIDTH: u32 = 64;
+        const HEIGHT: u32 = 64;
+        let mut data = vec![
+            [0.1, 0.2, 0.3, 1.0],
+            [0.1, 0.3, 0.2, 1.0],
+            [0.2, 0.1, 0.3, 1.0],
+            [0.2, 0.3, 0.1, 1.0],
+            [0.3, 0.1, 0.2, 1.0],
+            [0.3, 0.2, 0.1, 1.0],
+            [-0.05, 0.0, 0.001, 1.0],
+            [32.0, 8.0, 0.18, 1.0],
+        ];
+        let mut state = 0x6d6f_6e64_u32;
+        while data.len() < (WIDTH * HEIGHT) as usize {
+            let mut pixel = [0.0_f32; 4];
+            for channel in &mut pixel[..3] {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let unit = (state >> 8) as f32 / (u32::MAX >> 8) as f32;
+                let stops = -10.0 + unit * 15.0;
+                *channel = 0.18 * 2.0_f32.powf(stops);
+                if state & 0x1f == 0 {
+                    *channel = -*channel;
+                }
+            }
+            pixel[3] = 0.125 + ((state & 7) as f32 / 8.0);
+            data.push(pixel);
+        }
+        CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            data,
+            color_space: WorkingColorSpace::LinearRec2020,
+        })
+    }
+
+    fn cpu_source_frame() -> CpuSourceColorFrame {
+        CpuEncodedColorFrame::source_rgba8(
+            4,
+            2,
+            ColorSpace::SonySLog3SGamut3Cine,
+            [96, 128, 160, 255].repeat(8),
+        )
+        .into()
+    }
+
+    fn gpu_input_stage_plan_for_source(source: &CpuSourceColorFrame) -> RenderColorStagePlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        planner
+            .plan_input_to_working(source.descriptor(), &transform)
+            .expect("GPU input stage plan")
+    }
+
+    fn gpu_output_stage_plan_for_frame(frame: &CpuColorFrame) -> RenderColorStagePlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        planner
+            .plan_output_transform_float(frame.descriptor(), &transform)
+            .expect("GPU output stage plan")
+    }
+
+    fn gpu_output_stage_plan_for_cpu_output(frame: &CpuColorFrame) -> RenderColorStagePlan {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let transform = RenderColorTransform::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderColorStagePlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions {
+                output_residency: ColorFrameResidency::Cpu,
+                ..RenderColorTransformGpuOptions::default()
+            },
+        );
+        planner
+            .plan_output_transform(frame.descriptor(), &transform)
+            .expect("GPU output stage plan")
+    }
+
+    fn add_gpu_stage_blocker(stage_plan: &mut RenderColorStagePlan) {
+        add_gpu_stage_blocker_reason(stage_plan, OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+    }
+
+    fn add_gpu_stage_blocker_reason(
+        stage_plan: &mut RenderColorStagePlan,
+        blocker: OcioGpuWgpuBlocker,
+    ) {
+        for stage in &mut stage_plan.stages {
+            if let RenderColorStage::GpuColorTransform { plan, .. } = stage {
+                plan.wgpu.blockers.push(blocker.clone());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_effect_domain_round_trip_matches_stock_ocio_cpu_reference() {
+        use mondrian_effects::{
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU effect-domain round-trip test: no GPU adapter available");
+            return;
+        };
+        let engine = ColorEngine::mondrian_standard();
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_reference_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan");
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 40.0;
+                [value, value * 0.7, value * 0.4, 0.25 + value]
+            })
+            .collect::<Vec<_>>();
+        let mut expected = data.iter().flatten().copied().collect::<Vec<_>>();
+        engine
+            .convert_identity_float(
+                &mut expected,
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            )
+            .expect("CPU working to encoded reference");
+        let exposure = 2.0_f32.powf(0.5);
+        for pixel in expected.chunks_exact_mut(4) {
+            pixel[0] *= exposure;
+            pixel[1] *= exposure;
+            pixel[2] *= exposure;
+        }
+        engine
+            .convert_identity_float(
+                &mut expected,
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            )
+            .expect("CPU encoded to working reference");
+
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_000).expect("GPU output runtime");
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate().expect("input frame id"),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "effect-round-trip-working-input",
+        )
+        .expect("working input handle");
+        let input_allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        let input_resource = GpuColorFrameUploader::allocate(&context.device, &input_allocation);
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        runtime.frame_table_mut().insert(input_resource).expect("insert working input");
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("effect-domain-stock-ocio-round-trip"),
+        });
+        let record = runtime
+            .record_wgpu_effect_domain_round_trip(
+                &compositor,
+                &plan,
+                &input,
+                engine,
+                17,
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &context.device,
+                    queue: &context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                },
+            )
+            .expect("record effect-domain GPU round trip");
+        assert_eq!(record.to_processing.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.to_processing.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.to_working.stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.to_working.stage_diagnostics.readback_stages, 0);
+        assert_eq!(record.effect.processed_pixels, 16);
+        let output_handle = &record.to_working.materialized.output;
+        assert_eq!(output_handle.descriptor().domain, ColorFrameDomain::Working);
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("effect-domain-round-trip-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = runtime.frame_table().get(output_handle).expect("round-trip output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = mapped
+            .chunks_exact(256)
+            .take(4)
+            .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+            .collect::<Vec<_>>();
+        readback.unmap();
+
+        let max_delta = expected
+            .iter()
+            .zip(&actual)
+            .map(|(expected, actual)| (expected - actual).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_delta <= 3.0e-5,
+            "GPU/CPU round-trip max delta {max_delta}"
+        );
+    }
+
+    #[tokio::test]
+    async fn gpu_composite_graph_external_adjustment_matches_cpu_reference() {
+        use mondrian_effects::{
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping GPU external adjustment parity test: no GPU adapter available");
+            return;
+        };
+        let engine = ColorEngine::mondrian_standard();
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_reference_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain adjustment graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU adjustment plan");
+        let data = (0..16)
+            .map(|index| {
+                let value = index as f32 / 40.0;
+                [value, value * 0.7, value * 0.4, 1.0]
+            })
+            .collect::<Vec<_>>();
+        let mut processed = data.iter().flatten().copied().collect::<Vec<_>>();
+        engine
+            .convert_identity_float(
+                &mut processed,
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+            )
+            .expect("CPU working to encoded reference");
+        let exposure = 2.0_f32.powf(0.5);
+        for pixel in processed.chunks_exact_mut(4) {
+            pixel[0] *= exposure;
+            pixel[1] *= exposure;
+            pixel[2] *= exposure;
+        }
+        engine
+            .convert_identity_float(
+                &mut processed,
+                mondrian_core::OcioColorSpaceIdentity::Color(ColorSpace::Rec709),
+                mondrian_core::OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec709),
+            )
+            .expect("CPU encoded to working reference");
+        let opacity = 0.6_f32;
+        let expected = data
+            .iter()
+            .zip(processed.chunks_exact(4))
+            .flat_map(|(base, adjusted)| {
+                [
+                    base[0] * (1.0 - opacity) + adjusted[0] * opacity,
+                    base[1] * (1.0 - opacity) + adjusted[1] * opacity,
+                    base[2] * (1.0 - opacity) + adjusted[2] * opacity,
+                    1.0,
+                ]
+            })
+            .collect::<Vec<_>>();
+
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_100).expect("GPU output runtime");
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate().expect("input frame id"),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "external-adjustment-working-input",
+        )
+        .expect("working input handle");
+        let allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        let input_resource = GpuColorFrameUploader::allocate(&context.device, &allocation);
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        runtime.frame_table_mut().insert(input_resource).expect("insert working input");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(&input),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 19,
+            },
+        ];
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("external-adjustment-composite-graph"),
+        });
+        let record = runtime
+            .record_wgpu_composite_graph(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                },
+                engine,
+                RenderColorTransformGpuOptions::default(),
+            )
+            .expect("record external adjustment composite graph");
+        assert_eq!(record.external_adjustment_passes, 1);
+        assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 2);
+        assert_eq!(record.color_stage_diagnostics.upload_stages, 0);
+        assert_eq!(record.color_stage_diagnostics.readback_stages, 0);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 2);
+        let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("external-adjustment-readback"),
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let output = runtime.frame_table().get(&record.output).expect("graph output");
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &output.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(4),
+                },
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        context.queue.submit(std::iter::once(encoder.finish()));
+        let mapped = map_readback_buffer(&context.device, &readback);
+        let actual = mapped
+            .chunks_exact(256)
+            .take(4)
+            .flat_map(|row| bytemuck::cast_slice::<u8, f32>(&row[..64]).iter().copied())
+            .collect::<Vec<_>>();
+        readback.unmap();
+        let max_delta = expected
+            .iter()
+            .zip(&actual)
+            .map(|(expected, actual)| (expected - actual).abs())
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_delta <= 3.0e-5,
+            "GPU/CPU adjustment max delta {max_delta}"
+        );
+    }
+
+    fn map_readback_buffer(device: &wgpu::Device, readback: &wgpu::Buffer) -> Vec<u8> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slice = readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        let _ = device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.recv()
+            .expect("readback map callback should run")
+            .expect("readback map should succeed");
+        slice.get_mapped_range().expect("gpu readback mapped range").to_vec()
+    }
+
+    fn max_rgba_delta(expected: &[u8], actual: &[u8]) -> u8 {
+        expected
+            .iter()
+            .zip(actual)
+            .map(|(&expected, &actual)| expected.abs_diff(actual))
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn assert_srgb_display_accurate(expected: &[u8], actual: &[u8]) {
+        let report = crate::compare_srgb_display_rgba8(
+            expected,
+            actual,
+            crate::SrgbDisplayAccuracyBudget::new(0.75, 0.20, 0.50, 0),
+        )
+        .expect("valid encoded sRGB output buffers");
+        assert!(
+            report.within_budget,
+            "sRGB display accuracy budget exceeded: {report:#?}"
+        );
+    }
+
+    #[test]
+    fn cpu_float_output_boundary_returns_float_frame_without_rgba8_quantization() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("float output boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Export);
+        assert_eq!(result.output_descriptor.domain, ColorFrameDomain::Export);
+        assert_eq!(
+            result.color_diagnostics.input.domain,
+            ColorFrameDomain::Working
+        );
+        assert_eq!(
+            result.color_diagnostics.output.domain,
+            ColorFrameDomain::Export
+        );
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+        assert_eq!(
+            result.color_diagnostics.backend,
+            RenderColorTransformBackend::CpuOcioFloat
+        );
+        let pixels = &result.frame.rgba_f32().data;
+        assert_eq!(pixels.len(), 8);
+        for px in pixels {
+            let [r, g, b, a] = *px;
+            assert!((0.0..=1.0).contains(&r));
+            assert!((0.0..=1.0).contains(&g));
+            assert!((0.0..=1.0).contains(&b));
+            assert!((0.0..=1.0).contains(&a));
+        }
+        let scopes = result
+            .program_scopes(mondrian_core::WaveformMode::RgbParade, 1024)
+            .expect("float program-output scopes");
+        assert_eq!(scopes.signal_color_space, ColorSpace::Rec709);
+        assert_eq!(scopes.sample_count, 8);
+        assert_eq!(scopes.histogram.red.iter().sum::<u32>(), 8);
+        assert_eq!(scopes.waveform.values.iter().sum::<u32>(), 24);
+    }
+
+    #[test]
+    fn cpu_program_monitor_boundary_quantizes_only_after_monitor_adaptation() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+
+        let result = execute_cpu_program_monitor_boundary_rgba8(&frame, &boundary, &adaptation)
+            .expect("CPU Program Output plus monitor adaptation");
+        let presentation =
+            execute_cpu_program_monitor_presentation_rgba8(&frame, &boundary, &adaptation)
+                .expect("owned CPU Program Output plus monitor adaptation");
+
+        assert_eq!(
+            result.program_output.output_descriptor.color_space,
+            ColorSpace::Rec709.into()
+        );
+        assert_eq!(
+            result.program_output.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            result.output_descriptor.color_space,
+            ColorSpace::Srgb.into()
+        );
+        assert_eq!(
+            result.output_descriptor.encoding,
+            ColorFrameEncoding::EncodedRgba8
+        );
+        assert_eq!(result.rgba.len(), 8 * 4);
+        let monitor = result.monitor_color_diagnostics.expect("monitor pass diagnostics");
+        assert_eq!(
+            monitor.direction,
+            crate::RenderColorTransformDirection::Intermediate
+        );
+        assert!(!monitor.used_rgba8_boundary);
+        assert_eq!(result.stage_diagnostics.cpu_output_stages, 2);
+        assert_eq!(result.stage_diagnostics.stage_pixels, 16);
+        assert_eq!(presentation.rgba, result.rgba);
+        assert_eq!(
+            presentation.program_output_descriptor,
+            result.program_output.output_descriptor
+        );
+        assert_eq!(
+            presentation.program_color_diagnostics,
+            result.program_output.color_diagnostics
+        );
+        assert_eq!(
+            presentation.monitor_color_diagnostics,
+            result.monitor_color_diagnostics
+        );
+        assert_eq!(presentation.stage_diagnostics, result.stage_diagnostics);
+        assert_eq!(presentation.output_descriptor, result.output_descriptor);
+    }
+
+    #[test]
+    fn cpu_float_output_boundary_display_view_returns_float_frame() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            display,
+            view,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("float display/view output boundary");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn export_view_boundary_target_is_export_with_display_view() {
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
+        );
+
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.display_view.is_some());
+        let dv = boundary.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(boundary.tone_map);
+    }
+
+    #[test]
+    fn export_view_boundary_uses_delivery_view_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
+        );
+
+        let transform = boundary.transform();
+        assert_eq!(transform.output_domain, crate::ColorFrameDomain::Export);
+        assert!(transform.display_view.is_some());
+        let dv = transform.display_view.as_ref().unwrap();
+        assert_eq!(dv.display, "sRGB - Display");
+        assert_eq!(dv.view, "ACES 2.0 - SDR 100 nits (Rec.709)");
+        assert!(transform.tone_map);
+    }
+
+    #[test]
+    fn export_view_boundary_float_path_uses_display_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export_view(
+            ColorSpace::Srgb,
+            "sRGB - Display",
+            "ACES 2.0 - SDR 100 nits (Rec.709)",
+            true,
+            ColorEngine::Aces { preset: AcesConfigPreset::StudioV4Aces2Ocio25 },
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("export view float boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(result.color_diagnostics.pixel_count, 8);
+        assert_eq!(
+            result.color_diagnostics.backend,
+            crate::RenderColorTransformBackend::CpuOcioFloat
+        );
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn export_plain_boundary_no_view_uses_pipeline_transform() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::export(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let result = execute_cpu_output_boundary_float(&frame, &boundary)
+            .expect("plain export boundary should execute");
+
+        assert_eq!(
+            result.frame.descriptor().encoding,
+            crate::ColorFrameEncoding::EncodedFloat
+        );
+        assert!(!result.color_diagnostics.used_rgba8_boundary);
+    }
+
+    #[test]
+    fn preview_display_view_boundary_uses_display_target() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let (display, view) = ColorEngine::mondrian_standard()
+            .default_display_view()
+            .expect("default display/view");
+        let boundary = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            display,
+            view,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Display);
+        let transform = boundary.transform();
+        assert_eq!(transform.output_domain, crate::ColorFrameDomain::Display);
+    }
+
+    fn emit_gpu_output_smoke_report(report: &GpuOutputBoundarySmokeReport) -> anyhow::Result<()> {
+        let report_json = serde_json::to_string(report)?;
+        eprintln!("MONDRIAN_RENDERER_GPU_OUTPUT_JSON={report_json}");
+        if let Some(path) = renderer_gpu_output_smoke_output_path() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+            writeln!(file, "{report_json}")?;
+        }
+        Ok(())
+    }
+
+    fn renderer_gpu_output_smoke_output_path() -> Option<PathBuf> {
+        std::env::var_os("MONDRIAN_RENDERER_GPU_OUTPUT_SMOKE_OUTPUT").map(PathBuf::from)
+    }
+
+    fn executable_gpu_output_stage_resources(first_id: u64) -> RenderGpuOutputStageResourcePlan {
+        let frame = cpu_working_frame();
+        let stage_plan = gpu_output_stage_plan_for_frame(&frame);
+        let mut ids = GpuColorFrameIdAllocator::new(first_id).expect("frame id allocator");
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba16Float,
+        )
+        .expect("GPU output stage resources")
+    }
+
+    fn executable_gpu_output_stage_resources_with_readback(
+        first_id: u64,
+    ) -> RenderGpuOutputStageResourcePlan {
+        let frame = cpu_working_frame();
+        let stage_plan = gpu_output_stage_plan_for_cpu_output(&frame);
+        let mut ids = GpuColorFrameIdAllocator::new(first_id).expect("frame id allocator");
+        RenderGpuOutputStageResourcePlan::from_cpu_working_frame(
+            &mut ids,
+            &frame,
+            &stage_plan,
+            GpuColorFrameTextureFormat::Rgba8Unorm,
+        )
+        .expect("GPU output stage resources with readback")
+    }
+
+    fn executable_gpu_input_stage_resources(first_id: u64) -> RenderGpuInputStageResourcePlan {
+        let source = cpu_source_frame();
+        let stage_plan = gpu_input_stage_plan_for_source(&source);
+        let mut ids = GpuColorFrameIdAllocator::new(first_id).expect("frame id allocator");
+        RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+            .expect("GPU input stage resources")
+    }
+
+    fn gpu_handle(
+        id: u64,
+        descriptor: ColorFrameDescriptor,
+        label: &'static str,
+    ) -> GpuColorFrameHandle {
+        gpu_handle_with_format(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba16Float,
+            label,
+        )
+    }
+
+    fn gpu_handle_with_format(
+        id: u64,
+        descriptor: ColorFrameDescriptor,
+        texture_format: GpuColorFrameTextureFormat,
+        label: &'static str,
+    ) -> GpuColorFrameHandle {
+        GpuColorFrameHandle::new(
+            GpuColorFrameId::from_raw(id),
+            descriptor,
+            texture_format,
+            label,
+        )
+        .expect("GPU frame handle")
+    }
+
+    fn pass_node_for_transform(
+        transform: &RenderColorTransformGpuPlan,
+    ) -> OcioGpuWgpuRenderPassNodePlan {
+        let wrapper_layout =
+            OcioGpuWgpuWrapperBindingPlan::for_contract(&transform.wgpu.resources.wrapper_contract);
+        let wrapper_layout_descriptor =
+            OcioGpuWgpuBindGroupLayoutDescriptorPlan::for_wrapper_input(&wrapper_layout);
+        OcioGpuWgpuRenderPassNodePlan::for_test_contract(
+            transform.wgpu.resources.resource_key,
+            11,
+            12,
+            13,
+            wrapper_layout_descriptor.layout_hash,
+            crate::OcioGpuWgpuColorTargetFormat::Rgba16Float,
+        )
+    }
+
+    #[test]
+    fn classify_ocio_shader_error_maps_known_error_messages() {
+        // Verify the error classifier correctly maps known OCIO error messages
+        // to typed blockers.
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "no OCIO config loaded (call ensure_ocio_loaded first)"
+            ),
+            OcioGpuWgpuBlocker::OcioConfigNotLoaded
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO processor 'srgb' -> 'rec709': processor not found"
+            ),
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO display processor 'srgb' -> 'srgb/view': failed"
+            ),
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+        ));
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error(
+                "OCIO GPU shader extraction returned empty shader text"
+            ),
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+        // Unknown error messages fall through to ExtractionFailed.
+        assert!(matches!(
+            crate::ocio_gpu::classify_ocio_shader_error("some unknown error"),
+            OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn prepare_wgpu_execution_never_propagates_extraction_error() {
+        // Core invariant: prepare_wgpu_execution must always return Ok,
+        // converting extraction failures into blocked plans with typed
+        // blockers. This ensures the stage plan is always produced and
+        // diagnostics always have evidence.
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let mut cache = OcioGpuShaderCache::default();
+        // Use a nonexistent display/view to trigger extraction failure.
+        let result = cache.prepare_wgpu_execution(OcioGpuShaderRequest::DisplayView {
+            engine: ColorEngine::mondrian_standard(),
+            src: ColorSpace::Rec709.into(),
+            display: "nonexistent_display_for_structural_test".to_owned(),
+            view: "nonexistent_view_for_structural_test".to_owned(),
+            language: GpuLanguage::Glsl4_0,
+        });
+        // Must always be Ok - extraction errors become blocked plans.
+        let plan = result.expect("prepare_wgpu_execution must never return Err");
+        // The display/view doesn't exist, so we should have blockers.
+        assert!(
+            !plan.can_execute(),
+            "nonexistent display/view should produce blockers"
+        );
+        assert!(!plan.blockers.is_empty());
+        assert!(matches!(
+            plan.blockers[0],
+            OcioGpuWgpuBlocker::OcioProcessorUnavailable
+                | OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed { .. }
+        ));
+    }
+
+    #[test]
+    fn gpu_shader_extraction_failure_does_not_mask_cpu_fallback_path() {
+        // When the GPU path fails with a blocker, the CPU path should still
+        // be available and produce a clean result without GPU stages.
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Srgb,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        // CPU-only path should work regardless of GPU state.
+        let cpu_output =
+            execute_cpu_output_boundary(&frame, &boundary).expect("CPU boundary should succeed");
+        assert_eq!(cpu_output.stage_diagnostics.gpu_color_stages, 0);
+        assert_eq!(cpu_output.stage_diagnostics.gpu_blockers, 0);
+        assert_eq!(
+            cpu_output.stage_diagnostics.gpu_blocker_breakdown.total(),
+            0
+        );
+
+        // The GPU path with a nonexistent display/view should produce a blocked plan.
+        let mut cache = OcioGpuShaderCache::default();
+        let mut planner = RenderOutputColorBoundaryPlanner::prefer_gpu(
+            &mut cache,
+            RenderColorTransformGpuOptions::default(),
+        );
+        let boundary_blocked = RenderOutputColorBoundary::display_view(
+            ColorSpace::Srgb,
+            "nonexistent_display_for_cpu_mask_test",
+            "nonexistent_view_for_cpu_mask_test",
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let gpu_plan = planner.plan(&frame, &boundary_blocked).expect("GPU plan");
+        // If it contains GPU transform, it must have blockers.
+        if gpu_plan.stage_plan.contains_gpu_transform() {
+            let d = gpu_plan.stage_plan.diagnostics();
+            assert!(d.gpu_blockers > 0, "blocked GPU plan should have blockers");
+        }
+
+        // The CPU path diagnostics must not show GPU stages.
+        assert_eq!(cpu_output.stage_diagnostics.gpu_color_stages, 0);
+    }
+
+    #[test]
+    fn gpu_plan_blocker_breakdown_records_all_renderer_blocker_types() {
+        // Verify that the breakdown correctly accumulates all 7 renderer-level
+        // blocker types through the record() method.
+        let mut breakdown = RenderColorStageGpuBlockerBreakdown::default();
+
+        breakdown.record(&OcioGpuWgpuBlocker::OcioConfigNotLoaded);
+        breakdown.record(&OcioGpuWgpuBlocker::OcioProcessorUnavailable);
+        breakdown.record(&OcioGpuWgpuBlocker::OcioGpuShaderExtractionFailed {
+            reason: "test".to_owned(),
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::ShaderModuleNotPrepared {
+            language: GpuLanguage::Glsl4_0,
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::OcioResourceBindGroupNotPrepared {
+            texture_2d_count: 0,
+            texture_3d_count: 0,
+            uniform_buffers: 0,
+        });
+        breakdown.record(&OcioGpuWgpuBlocker::FullscreenWrapperNotPrepared);
+        breakdown.record(&OcioGpuWgpuBlocker::RenderPipelineNotPrepared);
+
+        assert_eq!(breakdown.total(), 7);
+        assert_eq!(breakdown.ocio_config_not_loaded, 1);
+        assert_eq!(breakdown.ocio_processor_unavailable, 1);
+        assert_eq!(breakdown.ocio_gpu_shader_extraction_failed, 1);
+        assert_eq!(breakdown.shader_module_not_prepared, 1);
+        assert_eq!(breakdown.ocio_resource_bind_group_not_prepared, 1);
+        assert_eq!(breakdown.fullscreen_wrapper_not_prepared, 1);
+        assert_eq!(breakdown.render_pipeline_not_prepared, 1);
+    }
+
+    #[tokio::test]
+    async fn gpu_composite_graph_skips_zero_opacity_external_adjustment() {
+        use mondrian_effects::{
+            compile_reference_effect_graph_in_domain, lower_effect_graph_to_gpu_plan,
+            EffectColorDomain, EffectColorDomainContract, EffectRenderOp, EffectRenderPlan,
+        };
+
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let Ok(context) = GpuContext::new().await else {
+            eprintln!("skipping zero-opacity adjustment test: no GPU adapter available");
+            return;
+        };
+        let domain = EffectColorDomain::DisplayEncodedRgb { color_space: ColorSpace::Rec709 };
+        let graph = compile_reference_effect_graph_in_domain(
+            &EffectRenderPlan {
+                ops: vec![EffectRenderOp::ColorAdjust {
+                    exposure: 0.5,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                }],
+            },
+            EffectColorDomainContract::preserving(domain),
+        )
+        .expect("valid display-domain adjustment graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU adjustment plan");
+        let mut runtime =
+            RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200).expect("GPU output runtime");
+        let input = GpuColorFrameHandle::new(
+            runtime.frame_ids_mut().allocate().expect("input frame id"),
+            ColorFrameDescriptor {
+                width: 4,
+                height: 4,
+                color_space: WorkingColorSpace::LinearRec709.into(),
+                domain: ColorFrameDomain::Working,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: crate::ColorFrameAlpha::StraightCoverage,
+            },
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "zero-opacity-adjustment-input",
+        )
+        .expect("working input handle");
+        let allocation = GpuColorFrameAllocationPlan::for_handle(input.clone());
+        runtime
+            .frame_table_mut()
+            .insert(GpuColorFrameUploader::allocate(
+                &context.device,
+                &allocation,
+            ))
+            .expect("insert working input");
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::GpuFrame(&input),
+                opacity: 1.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::Adjustment,
+                opacity: 0.0,
+                blend_mode: mondrian_core::types::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: Some(&plan),
+                frame_seed: 19,
+            },
+        ];
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("zero-opacity-adjustment-composite-graph"),
+        });
+
+        let record = runtime
+            .record_wgpu_composite_graph(
+                &compositor,
+                &context.device,
+                &context.queue,
+                &mut encoder,
+                GpuCompositeRequest {
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &layers,
+                },
+                ColorEngine::mondrian_standard(),
+                RenderColorTransformGpuOptions::default(),
+            )
+            .expect("record zero-opacity adjustment graph");
+
+        assert_eq!(record.output.id(), input.id());
+        assert_eq!(record.external_adjustment_passes, 0);
+        assert_eq!(record.color_stage_diagnostics.gpu_color_stages, 0);
+        assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 1);
+        assert_eq!(compositor.uniform_arena_diagnostics().uniform_writes, 0);
+    }
+
+    #[test]
+    fn gpu_output_health_report_classifies_extraction_failure() {
+        // Verify that the health report correctly classifies a sample with
+        // OcioGpuShaderExtractionFailed as Failed.
+        let frame = RenderGpuOutputFrameReport {
+            width: 64,
+            height: 64,
+            pixel_count: 4096,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            output_color_space: ColorSpace::Srgb,
+        };
+        let stage = RenderGpuOutputStageDiagnosticsReport {
+            total_stages: 1,
+            gpu_color_stages: 1,
+            gpu_blockers: 1,
+            gpu_blocker_breakdown: RenderColorStageGpuBlockerBreakdown {
+                ocio_gpu_shader_extraction_failed: 1,
+                ..RenderColorStageGpuBlockerBreakdown::default()
+            },
+            ..RenderGpuOutputStageDiagnosticsReport::default()
+        };
+        let runtime = RenderGpuOutputRuntimeDiagnosticsReport::default();
+
+        let report = RenderGpuOutputHealthReport::from_sample(
+            "test-extraction-failure",
+            None,
+            &frame,
+            &stage,
+            &runtime,
+            0,
+            0,
+            0,
+        );
+
+        assert_eq!(report.verdict, RenderGpuOutputHealthVerdict::Fail);
+        assert!(!report.summary.native_gpu_output_ready);
+        assert!(!report.summary.no_gpu_blockers);
+        assert!(report.evidence.gpu_blocker_breakdown.ocio_gpu_shader_extraction_failed > 0);
+        assert!(report.root_causes.iter().any(|rc| rc.code == "gpu_stage_blocked"));
+    }
+}

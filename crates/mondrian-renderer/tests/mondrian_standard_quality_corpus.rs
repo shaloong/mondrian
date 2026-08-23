@@ -1,0 +1,476 @@
+use mondrian_core::{
+    bt2100_hlg_1000_nit_to_display_linear_rgb, bt2100_pq_to_display_linear_rgb,
+    ensure_mondrian_default_ocio_loaded, ColorEngine, ColorSpace, MondrianStandardPackageIdentity,
+    OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
+};
+use mondrian_renderer::{
+    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
+    execute_cpu_source_input_stage, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
+    RenderInputTransform, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+};
+use std::collections::BTreeSet;
+
+#[path = "support/quality_corpus.rs"]
+mod quality_corpus;
+
+use quality_corpus::{QualityCase, QualityCorpus};
+
+const NORMALIZED_SIGNAL_EPSILON: f32 = 1.0 / 4_095.0;
+const STANDARD_OUTPUT_TARGETS: [ColorSpace; 6] = [
+    ColorSpace::Srgb,
+    ColorSpace::Rec709,
+    ColorSpace::Rec2020,
+    ColorSpace::DisplayP3,
+    ColorSpace::Rec2100Hlg,
+    ColorSpace::Rec2100Pq,
+];
+
+const CORPUS_JSON: &str =
+    include_str!("../../../tests/fixtures/color/metadata/mondrian-standard-quality-corpus-v1.json");
+
+#[test]
+fn quality_corpus_contract_is_complete_independently_sourced_and_package_pinned() {
+    let corpus = parse_corpus();
+    assert_eq!(corpus.schema_version, 1);
+    assert_eq!(corpus.corpus_id, "mondrian-standard-quality-v1");
+    assert_eq!(
+        corpus.package_sha256,
+        MondrianStandardPackageIdentity::V3.package_sha256()
+    );
+
+    let required = corpus.required_categories.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    assert_eq!(corpus.category_set(), required);
+    assert_eq!(required.len(), 22);
+
+    let mut case_ids = BTreeSet::new();
+    for case in &corpus.cases {
+        assert!(
+            case_ids.insert(case.id.as_str()),
+            "duplicate case id {}",
+            case.id
+        );
+        assert!(
+            !case.categories.is_empty(),
+            "{} has no quality category",
+            case.id
+        );
+        assert!(
+            !corpus.pixels_for(case).is_empty(),
+            "{} has no generated samples",
+            case.id
+        );
+    }
+
+    let color_checker = corpus
+        .source_references
+        .iter()
+        .find(|reference| reference.id == "colour-science-colorchecker-2005-xyy")
+        .expect("ColorChecker reference");
+    assert!(color_checker.source_uri.starts_with("https://"));
+    assert_eq!(color_checker.producer, "Colour Developers");
+    assert_eq!(color_checker.producer_version, "0.4.7");
+    assert_eq!(
+        color_checker.coordinate_space,
+        "CIE xyY; ColorChecker 2005; D50"
+    );
+    assert_eq!(color_checker.license, "BSD-3-Clause");
+    assert!(color_checker.license_uri.starts_with("https://"));
+    assert!(color_checker.copyright_notice.contains("Colour Developers"));
+    assert_eq!(color_checker.patches.len(), 24);
+    let patch_ids = color_checker
+        .patches
+        .iter()
+        .map(|patch| patch.id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(patch_ids.len(), 24);
+    assert!(color_checker
+        .patches
+        .iter()
+        .all(|patch| patch.coordinates.iter().all(|value| value.is_finite())));
+
+    let color_checker_case = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "color-checker-2005")
+        .expect("ColorChecker stimulus");
+    assert_eq!(corpus.pixels_for(color_checker_case).len(), 24);
+
+    let ten_bit = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "ten-bit-neutral-gradient")
+        .expect("10-bit neutral ramp");
+    let ten_bit_pixels = corpus.pixels_for(ten_bit);
+    assert_eq!(ten_bit_pixels.len(), 1_024);
+    assert_eq!(ten_bit_pixels.first(), Some(&[0.0, 0.0, 0.0, 1.0]));
+    assert_eq!(ten_bit_pixels.last(), Some(&[1.0, 1.0, 1.0, 1.0]));
+
+    let range = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "ten-bit-video-range-contract")
+        .expect("10-bit legal/full range contract");
+    assert!(!range.render_through_standard);
+    assert_eq!(
+        corpus.pixels_for(range),
+        vec![
+            [64.0 / 1_023.0, 64.0 / 1_023.0, 64.0 / 1_023.0, 1.0],
+            [940.0 / 1_023.0, 940.0 / 1_023.0, 940.0 / 1_023.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ]
+    );
+}
+
+#[test]
+fn production_standard_views_satisfy_objective_corpus_invariants() {
+    ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
+    let corpus = parse_corpus();
+
+    for case in corpus.cases.iter().filter(|case| case.render_through_standard) {
+        let input = corpus.pixels_for(case);
+        for output in STANDARD_OUTPUT_TARGETS {
+            let rendered = render_standard(&input, output);
+            assert_eq!(rendered.len(), input.len(), "{} {output:?}", case.id);
+            for (pixel_index, (source, result)) in input.iter().zip(&rendered).enumerate() {
+                assert!(
+                    result.iter().all(|value| value.is_finite()),
+                    "{} {output:?} produced non-finite pixel {pixel_index}: {result:?}",
+                    case.id
+                );
+                assert!(
+                    result[..3].iter().all(|value| {
+                        (-NORMALIZED_SIGNAL_EPSILON..=1.0 + NORMALIZED_SIGNAL_EPSILON)
+                            .contains(value)
+                    }),
+                    "{} {output:?} produced out-of-domain pixel {pixel_index}: {result:?}",
+                    case.id
+                );
+                assert!(
+                    (result[3] - source[3]).abs() <= 1.0e-6,
+                    "{} {output:?} changed alpha at pixel {pixel_index}: {} -> {}",
+                    case.id,
+                    source[3],
+                    result[3]
+                );
+            }
+        }
+    }
+
+    let neutral = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "neutral-stop-ramp")
+        .expect("neutral stop ramp");
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_neutral_monotonic(&corpus, neutral, output, 5.0e-4);
+    }
+
+    let hue_boundary = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "high-saturation-hue-boundary-sweep")
+        .expect("high-saturation hue boundary sweep");
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_hue_boundary_continuity(&corpus, hue_boundary, output);
+    }
+
+    let negative_boundary = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "negative-channel-zero-boundary-line")
+        .expect("negative-channel boundary line");
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_local_continuity(&corpus, negative_boundary, output, 0.005);
+    }
+
+    let ten_bit = corpus
+        .cases
+        .iter()
+        .find(|case| case.id == "ten-bit-neutral-gradient")
+        .expect("10-bit neutral gradient");
+    for output in STANDARD_OUTPUT_TARGETS {
+        assert_ten_bit_gradient_resolution(&corpus, ten_bit, output);
+    }
+}
+
+#[test]
+fn production_hlg_and_pq_outputs_match_in_absolute_display_luminance() {
+    ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
+    let corpus = parse_corpus();
+
+    for case in corpus.cases.iter().filter(|case| case.render_through_standard) {
+        let input = corpus.pixels_for(case);
+        let hlg = render_standard(&input, ColorSpace::Rec2100Hlg);
+        let pq = render_standard(&input, ColorSpace::Rec2100Pq);
+
+        for (pixel_index, (hlg_pixel, pq_pixel)) in hlg.iter().zip(&pq).enumerate() {
+            let hlg_linear = bt2100_hlg_1000_nit_to_display_linear_rgb([
+                f64::from(hlg_pixel[0]),
+                f64::from(hlg_pixel[1]),
+                f64::from(hlg_pixel[2]),
+            ])
+            .unwrap_or_else(|error| {
+                panic!("{} HLG pixel {pixel_index} is invalid: {error}", case.id)
+            });
+            let pq_linear = bt2100_pq_to_display_linear_rgb([
+                f64::from(pq_pixel[0]),
+                f64::from(pq_pixel[1]),
+                f64::from(pq_pixel[2]),
+            ])
+            .unwrap_or_else(|error| {
+                panic!("{} PQ pixel {pixel_index} is invalid: {error}", case.id)
+            });
+
+            for (channel, (actual, expected)) in hlg_linear
+                .components_nits()
+                .into_iter()
+                .zip(pq_linear.components_nits())
+                .enumerate()
+            {
+                let tolerance_nits = 0.02_f64.max(expected.abs() * 2.0e-4);
+                assert!(
+                    (actual - expected).abs() <= tolerance_nits,
+                    "{} HLG/PQ absolute display mismatch at pixel {pixel_index}, channel {channel}: expected {expected} cd/m2 from PQ, got {actual} cd/m2 from HLG (tolerance {tolerance_nits})",
+                    case.id
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn standard_sdr_view_preserves_normal_rec709_within_one_code_value() {
+    ensure_mondrian_default_ocio_loaded().expect("Mondrian Standard OCIO package");
+
+    let source_rgba = normal_rec709_stimulus();
+    let source = CpuSourceColorFrame::from(CpuEncodedColorFrame::source_rgba8(
+        u32::try_from(source_rgba.len() / 4).expect("normal Rec.709 stimulus width"),
+        1,
+        ColorSpace::Rec709,
+        source_rgba.clone(),
+    ));
+    let working = execute_cpu_source_input_stage(
+        &source,
+        &RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec2020,
+            false,
+            ColorEngine::mondrian_standard(),
+        ),
+    )
+    .expect("production Rec.709 input boundary")
+    .result
+    .frame;
+    let boundary = RenderOutputColorBoundary::from_intent(
+        RenderOutputColorBoundaryTarget::Display,
+        ColorSpace::Rec709,
+        &OutputTransformIntent::mondrian_standard(),
+        false,
+        ColorEngine::mondrian_standard(),
+    )
+    .expect("default Mondrian Standard output intent");
+    let observed = execute_cpu_output_boundary_rgba8(&working, &boundary)
+        .expect("production colorimetric Rec.709 output boundary")
+        .rgba;
+
+    let mut max_code_delta = 0_u8;
+    let mut worst_pixel = 0_usize;
+    for (pixel_index, (expected, observed)) in
+        source_rgba.chunks_exact(4).zip(observed.chunks_exact(4)).enumerate()
+    {
+        assert_eq!(
+            expected[3], observed[3],
+            "alpha changed at pixel {pixel_index}"
+        );
+        for channel in 0..3 {
+            let delta = expected[channel].abs_diff(observed[channel]);
+            if delta > max_code_delta {
+                max_code_delta = delta;
+                worst_pixel = pixel_index;
+            }
+        }
+    }
+    assert!(
+        max_code_delta <= 1,
+        "Rec.709 round trip exceeded one code value: max={max_code_delta}, pixel={worst_pixel}, source={:?}, observed={:?}",
+        &source_rgba[worst_pixel * 4..worst_pixel * 4 + 4],
+        &observed[worst_pixel * 4..worst_pixel * 4 + 4]
+    );
+}
+
+fn normal_rec709_stimulus() -> Vec<u8> {
+    let mut rgba = Vec::new();
+    for code in 0..=u8::MAX {
+        rgba.extend_from_slice(&[code, code, code, u8::MAX]);
+    }
+    for red in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+        for green in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+            for blue in [0, 32, 64, 96, 128, 160, 192, 224, 255] {
+                rgba.extend_from_slice(&[red, green, blue, u8::MAX]);
+            }
+        }
+    }
+    rgba
+}
+
+fn parse_corpus() -> QualityCorpus {
+    serde_json::from_str(CORPUS_JSON).expect("strict Mondrian Standard quality corpus")
+}
+
+fn render_standard(input: &[[f32; 4]], output: ColorSpace) -> Vec<[f32; 4]> {
+    let width = u32::try_from(input.len()).expect("quality corpus width");
+    let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+        width,
+        height: 1,
+        data: input.to_vec(),
+        color_space: WorkingColorSpace::LinearRec2020,
+    });
+    let boundary = RenderOutputColorBoundary::from_intent(
+        RenderOutputColorBoundaryTarget::Display,
+        output,
+        &OutputTransformIntent::mondrian_standard(),
+        false,
+        ColorEngine::mondrian_standard(),
+    )
+    .expect("Standard output intent");
+    execute_cpu_output_boundary_float(&frame, &boundary)
+        .expect("production CPU OCIO output boundary")
+        .frame
+        .rgba_f32()
+        .data
+        .clone()
+}
+
+fn assert_neutral_monotonic(
+    corpus: &QualityCorpus,
+    case: &QualityCase,
+    output: ColorSpace,
+    spread_limit: f32,
+) {
+    let rendered = render_standard(&corpus.pixels_for(case), output);
+    let mut previous = f32::NEG_INFINITY;
+    for (pixel_index, pixel) in rendered.iter().enumerate() {
+        let minimum = pixel[..3].iter().copied().fold(f32::INFINITY, f32::min);
+        let maximum = pixel[..3].iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            maximum - minimum <= spread_limit,
+            "{output:?} neutral spread at {pixel_index}: {pixel:?}"
+        );
+        assert!(
+            pixel[1] + 1.0e-6 >= previous,
+            "{output:?} tone reversal at {pixel_index}: {previous} -> {}",
+            pixel[1]
+        );
+        previous = pixel[1];
+    }
+}
+
+fn assert_hue_boundary_continuity(corpus: &QualityCorpus, case: &QualityCase, output: ColorSpace) {
+    let source = corpus.pixels_for(case);
+    let rendered = render_standard(&source, output);
+    let mut max_adjacent_delta = 0.0_f32;
+    let mut worst_adjacent_index = 0;
+    let mut max_hue_delta_degrees = 0.0_f32;
+    let mut worst_hue_index = 0;
+    for index in 0..source.len() {
+        let next = (index + 1) % source.len();
+        let adjacent_delta = rendered[index][..3]
+            .iter()
+            .zip(&rendered[next][..3])
+            .map(|(left, right)| (left - right).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        if adjacent_delta > max_adjacent_delta {
+            max_adjacent_delta = adjacent_delta;
+            worst_adjacent_index = index;
+        }
+
+        let source_hue = opponent_hue(source[index]);
+        let rendered_hue = opponent_hue(rendered[index]);
+        let hue_delta = wrapped_angle_delta(source_hue, rendered_hue).to_degrees();
+        if hue_delta > max_hue_delta_degrees {
+            max_hue_delta_degrees = hue_delta;
+            worst_hue_index = index;
+        }
+    }
+    eprintln!(
+        "{output:?} hue boundary: max_adjacent_delta={max_adjacent_delta:.6} at {worst_adjacent_index}, source={:?}->{:?}, output={:?}->{:?}; max_hue_delta_degrees={max_hue_delta_degrees:.3} at {worst_hue_index}, source={:?}, output={:?}",
+        source[worst_adjacent_index],
+        source[(worst_adjacent_index + 1) % source.len()],
+        rendered[worst_adjacent_index],
+        rendered[(worst_adjacent_index + 1) % rendered.len()],
+        source[worst_hue_index],
+        rendered[worst_hue_index]
+    );
+    assert!(
+        max_adjacent_delta <= 0.025,
+        "{output:?} gamut boundary discontinuity: {max_adjacent_delta}"
+    );
+    assert!(
+        max_hue_delta_degrees <= 30.0,
+        "{output:?} severe hue rotation: {max_hue_delta_degrees} degrees"
+    );
+}
+
+fn assert_local_continuity(
+    corpus: &QualityCorpus,
+    case: &QualityCase,
+    output: ColorSpace,
+    limit: f32,
+) {
+    let rendered = render_standard(&corpus.pixels_for(case), output);
+    let max_adjacent_delta = rendered
+        .windows(2)
+        .map(|pair| {
+            pair[0][..3]
+                .iter()
+                .zip(&pair[1][..3])
+                .map(|(left, right)| (left - right).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        })
+        .fold(0.0_f32, f32::max);
+    eprintln!(
+        "{} {output:?} local continuity: max_adjacent_delta={max_adjacent_delta:.8}",
+        case.id
+    );
+    assert!(
+        max_adjacent_delta <= limit,
+        "{} {output:?} local discontinuity: {max_adjacent_delta} > {limit}",
+        case.id
+    );
+}
+
+fn assert_ten_bit_gradient_resolution(
+    corpus: &QualityCorpus,
+    case: &QualityCase,
+    output: ColorSpace,
+) {
+    let rendered = render_standard(&corpus.pixels_for(case), output);
+    let positive_steps = rendered.windows(2).filter(|pair| pair[1][1] > pair[0][1]).count();
+    let reversals = rendered.windows(2).filter(|pair| pair[1][1] < pair[0][1]).count();
+    eprintln!(
+        "{} {output:?} gradient resolution: positive_steps={positive_steps}, reversals={reversals}",
+        case.id
+    );
+    assert_eq!(reversals, 0, "{} {output:?} has tone reversals", case.id);
+    assert!(
+        positive_steps >= 1_010,
+        "{} {output:?} preserves only {positive_steps}/1023 input transitions",
+        case.id
+    );
+}
+
+fn opponent_hue(pixel: [f32; 4]) -> f32 {
+    let x = 2.0 * pixel[0] - pixel[1] - pixel[2];
+    let y = 3.0_f32.sqrt() * (pixel[1] - pixel[2]);
+    y.atan2(x)
+}
+
+fn wrapped_angle_delta(first: f32, second: f32) -> f32 {
+    let mut delta = (first - second).abs() % std::f32::consts::TAU;
+    if delta > std::f32::consts::PI {
+        delta = std::f32::consts::TAU - delta;
+    }
+    delta
+}

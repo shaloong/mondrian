@@ -1,91 +1,141 @@
-//! 项目数据模型
+//! 项目共享数据模型
 //!
-//! `Project` 是最顶层的容器，包含多个 `Sequence`（时间线）和全局项目设置。
+//! 持久化项目文档由 `mondrian-project` 定义；这里保留跨 crate 共享的
+//! 项目元数据和项目级设置。
 
 use crate::types::*;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// 序列（Sequence）设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceSettings {
-    pub resolution: Resolution,
-    pub frame_rate: Rational,
-    pub sample_rate: u32,   // 音频采样率（Hz），通常 48000
-    pub audio_channels: u8, // 声道数（2 = 立体声）
-    pub color_space: ColorSpace,
-    pub pixel_aspect: Rational, // 像素宽高比（通常 1:1）
-}
-
-impl Default for SequenceSettings {
-    fn default() -> Self {
-        Self {
-            resolution: Resolution::FHD,
-            frame_rate: Rational::FPS_25,
-            sample_rate: 48_000,
-            audio_channels: 2,
-            color_space: ColorSpace::Rec709,
-            pixel_aspect: Rational::new(1, 1),
-        }
-    }
-}
-
 /// 项目元数据
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectMeta {
-    pub id: ProjectId,
+    /// User-facing project name.
     pub name: String,
+    /// Optional user-facing project description.
     pub description: String,
+    /// Optional user-facing project author.
     pub author: String,
+    /// UTC timestamp when the project document was created.
     pub created_at: DateTime<Utc>,
+    /// UTC timestamp when the project metadata was last touched.
     pub updated_at: DateTime<Utc>,
-    pub version: u32, // 保存版本，用于迁移
 }
 
 impl ProjectMeta {
     pub fn new(name: impl Into<String>) -> Self {
         let now = Utc::now();
         Self {
-            id: ProjectId::new(),
             name: name.into(),
             description: String::new(),
             author: String::new(),
             created_at: now,
             updated_at: now,
-            version: 1,
         }
+    }
+
+    pub fn touch(&mut self) {
+        self.updated_at = Utc::now();
+    }
+
+    /// Compare user-authored metadata while ignoring publication timestamp evidence.
+    pub fn author_state_eq_ignoring_updated_at(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            description,
+            author,
+            created_at,
+            updated_at: _,
+        } = self;
+        let Self {
+            name: other_name,
+            description: other_description,
+            author: other_author,
+            created_at: other_created_at,
+            updated_at: _,
+        } = other;
+        name == other_name
+            && description == other_description
+            && author == other_author
+            && created_at == other_created_at
     }
 }
 
-/// 项目（顶层容器）
+/// Project-wide color transform vocabulary and execution engine.
 ///
-/// 一个 `.mondrian` 文件对应一个 `Project`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Project {
-    pub meta: ProjectMeta,
-    pub sequences: Vec<SequenceRef>, // 序列引用（完整数据在 timeline crate）
-    pub active_sequence: Option<SequenceId>,
-    pub settings: ProjectSettings,
-    pub save_path: Option<PathBuf>,
+/// Every Sequence in a Project selects working and output spaces from this
+/// exact, version-pinned engine. A Sequence never overrides or inherits an
+/// engine, which keeps nested evaluation and cache identity unambiguous.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectColorEnvironment {
+    /// Mondrian Standard, ACES, or a pinned Custom OCIO configuration.
+    engine: ColorEngine,
 }
 
-/// 序列引用（轻量）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SequenceRef {
-    pub id: SequenceId,
-    pub name: String,
-    pub settings: SequenceSettings,
+impl ProjectColorEnvironment {
+    /// Create a Project color environment around one exact product engine.
+    pub const fn new(engine: ColorEngine) -> Self {
+        Self { engine }
+    }
+
+    /// Exact Mondrian Standard, ACES, or Custom OCIO engine owned by the Project.
+    pub const fn engine(&self) -> &ColorEngine {
+        &self.engine
+    }
+
+    /// Consume the environment and return its exact product engine.
+    pub fn into_engine(self) -> ColorEngine {
+        self.engine
+    }
+
+    /// Pin one Custom OCIO environment for the complete Project color usage.
+    ///
+    /// The future-Sequence template and every existing Sequence contribute one
+    /// working/output pair. The current Custom identity deliberately covers
+    /// exactly one working space, while every distinct Program Output is bound
+    /// atomically. A partial environment is never returned.
+    pub fn custom_ocio(
+        source: OcioConfigSource,
+        sequence_color_contracts: &[(WorkingColorSpace, ColorSpace)],
+    ) -> Result<Self, String> {
+        if sequence_color_contracts.is_empty() {
+            return Err(
+                "Custom OCIO project requires at least one Sequence color contract".to_owned(),
+            );
+        }
+        let mut working_spaces = Vec::new();
+        let mut output_color_spaces = Vec::new();
+        for (working_space, output_color_space) in sequence_color_contracts {
+            if !working_spaces.contains(working_space) {
+                working_spaces.push(*working_space);
+            }
+            if !output_color_spaces.contains(output_color_space) {
+                output_color_spaces.push(*output_color_space);
+            }
+        }
+        let [working_space] = working_spaces.as_slice() else {
+            return Err(format!(
+                "Custom OCIO project identity requires exactly one working space, got {working_spaces:?}; unify the future-Sequence template and all existing Sequences first"
+            ));
+        };
+        ColorEngine::custom_ocio_for_outputs(source, *working_space, &output_color_spaces)
+            .map(Self::new)
+    }
 }
 
 /// 项目全局设置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProjectSettings {
+    /// Whether automatic proxy generation and proxy-aware workflows are enabled.
     pub proxy_enabled: bool,
+    /// Default proxy resolution for generated proxy media.
     pub proxy_resolution: Resolution,
+    /// Optional project cache directory override.
     pub cache_dir: Option<PathBuf>,
-    pub auto_save_interval: u32, // 自动保存间隔（秒）
-    pub color_management: bool,
+    /// Autosave interval in seconds.
+    pub auto_save_interval: u32,
 }
 
 impl Default for ProjectSettings {
@@ -94,38 +144,66 @@ impl Default for ProjectSettings {
             proxy_enabled: true,
             proxy_resolution: Resolution::HD,
             cache_dir: None,
-            auto_save_interval: 300, // 5 分钟
-            color_management: true,
+            auto_save_interval: 300,
         }
     }
 }
 
-impl Project {
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            meta: ProjectMeta::new(name),
-            sequences: Vec::new(),
-            active_sequence: None,
-            settings: ProjectSettings::default(),
-            save_path: None,
-        }
+impl crate::AuthoringFootprint for ProjectMeta {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            name,
+            description,
+            author,
+            created_at: _,
+            updated_at: _,
+        } = self;
+        collector.collect(name)?;
+        collector.collect(description)?;
+        collector.collect(author)
     }
+}
 
-    pub fn add_sequence(
-        &mut self,
-        name: impl Into<String>,
-        settings: SequenceSettings,
-    ) -> SequenceId {
-        let id = SequenceId::new();
-        self.sequences.push(SequenceRef { id, name: name.into(), settings });
-        if self.active_sequence.is_none() {
-            self.active_sequence = Some(id);
-        }
-        id
+impl crate::AuthoringFootprint for ProjectColorEnvironment {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { engine } = self;
+        collector.collect(engine)
     }
+}
 
-    pub fn touch(&mut self) {
-        self.meta.updated_at = Utc::now();
-        self.meta.version += 1;
+impl crate::AuthoringFootprint for ProjectSettings {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self {
+            proxy_enabled: _,
+            proxy_resolution: _,
+            cache_dir,
+            auto_save_interval: _,
+        } = self;
+        collector.collect(cache_dir)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_meta_author_comparison_ignores_only_publication_timestamp() {
+        let meta = ProjectMeta::new("Project");
+        let mut publication = meta.clone();
+        publication.updated_at += chrono::Duration::seconds(1);
+        assert!(meta.author_state_eq_ignoring_updated_at(&publication));
+
+        publication.name = "Renamed outside authoring".to_owned();
+        assert!(!meta.author_state_eq_ignoring_updated_at(&publication));
     }
 }

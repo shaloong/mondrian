@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "id": "windows-alpha-stress-v1",
+  "kind": "stress",
+  "timeline": { "duration_frames": 90000, "frame_rate": "25/1", "minimum_video_tracks": 8, "minimum_audio_tracks": 8, "minimum_clips": 500 },
+  "required_fixture_purposes": ["long-gop-seek", "4k60-playback", "10-bit-decode"],
+  "scenarios": [
+    { "id": "continuous-playback", "duration_minutes": 30, "av_drift_max_ms": 20, "sustained_underrun_allowed": false },
+    { "id": "cross-region-seek", "iterations": 100, "accurate_seek_p95_max_ms": 500, "stale_publish_allowed": false },
+    { "id": "cache-pressure", "proxy_switches": 20, "memory_must_return_to_budget": true, "monotonic_growth_allowed": false },
+    { "id": "save-recovery-export", "save_reopen_cycles": 10, "required_exports": 3, "manual_project_repair_allowed": false }
+  ]
+}

@@ -1,0 +1,588 @@
+//! App composition seam for Sequence audio authoring.
+//!
+//! UI Adapters submit the closed product action; Timeline Modules own Channel
+//! Strip/Rack mutation and validation; App owns transaction and execution refresh.
+
+use mondrian_core::{MondrianError, Result};
+use mondrian_timeline::audio::{
+    AudioComponentSource, AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID,
+    BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID,
+};
+use mondrian_timeline::{
+    apply_audio_automation_edit, apply_audio_channel_strip_edit, apply_audio_component_edit,
+    apply_audio_processor_rack_edit, apply_audio_routing_edit, inspect_audio_component,
+    AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditBlocker,
+    AudioComponentEditRequest, AudioComponentMutation, AudioProcessorRackEdit,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest,
+};
+
+use super::product_action::{AudioProcessorBuiltInPreset, AudioProductAction};
+use super::AppState;
+
+impl AppState {
+    pub(super) fn dispatch_audio_product_action(
+        &mut self,
+        action: AudioProductAction,
+    ) -> Result<()> {
+        match action {
+            AudioProductAction::SetTrackSolo(payload) => self.set_audio_track_solo(payload),
+            AudioProductAction::EditAutomation(request) => self.edit_audio_automation(request),
+            AudioProductAction::EditComponent(request) => self.edit_audio_component(request),
+            AudioProductAction::EditProcessorRack(request) => {
+                self.edit_audio_processor_rack(request)
+            }
+            AudioProductAction::InsertBuiltInProcessor(payload) => {
+                let definition_id = match payload.preset {
+                    AudioProcessorBuiltInPreset::Gain => BUILTIN_GAIN_DEFINITION_ID,
+                    AudioProcessorBuiltInPreset::LookaheadLimiter => {
+                        BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID
+                    }
+                };
+                self.edit_audio_processor_rack(AudioProcessorRackEditRequest {
+                    address: payload.address,
+                    edit: AudioProcessorRackEdit::Insert {
+                        processor: AudioProcessorInstance::built_in(definition_id, 1),
+                        placement: payload.placement,
+                    },
+                })
+            }
+            AudioProductAction::EditChannelStrip(request) => self.edit_audio_channel_strip(request),
+            AudioProductAction::EditRouting(request) => self.edit_audio_routing(request),
+        }
+    }
+
+    fn edit_audio_automation(&mut self, request: AudioAutomationEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_automation".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome =
+            self.commit_sequence_edit(sequence_id, "编辑音频自动化", |sequence| {
+                apply_audio_automation_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "audio_edit_automation".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_edit_automation");
+        }
+        Ok(())
+    }
+
+    fn edit_audio_component(&mut self, request: AudioComponentEditRequest) -> Result<()> {
+        self.validate_audio_component_source_dependency(&request)?;
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_component".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome =
+            self.commit_sequence_edit(sequence_id, "调整片段音频 Component", |sequence| {
+                apply_audio_component_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "audio_edit_component".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if !outcome.changed {
+            return Err(MondrianError::ActionNotExecuted {
+                action: "audio_edit_component".to_owned(),
+                reason: "Audio Component already has the requested value".to_owned(),
+            });
+        }
+        self.reconcile_audio_after_committed_authoring_change("audio_edit_component");
+        Ok(())
+    }
+
+    fn validate_audio_component_source_dependency(
+        &self,
+        request: &AudioComponentEditRequest,
+    ) -> Result<()> {
+        const STEP_ID: &str = "audio_edit_component";
+        let AudioComponentMutation::SetSource { value } = &request.mutation else {
+            return Ok(());
+        };
+        let sequence = self.active_sequence().ok_or_else(|| MondrianError::WorkflowStepFailed {
+            step_id: STEP_ID.to_owned(),
+            reason: "当前没有活动序列".to_owned(),
+        })?;
+        let inspection = inspect_audio_component(sequence, request.address).map_err(|error| {
+            MondrianError::WorkflowStepFailed {
+                step_id: STEP_ID.to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        if let Some(AudioComponentEditBlocker::LockedTrack(track_id)) = inspection.edit_blocker() {
+            return Err(MondrianError::TrackLocked { track_id: track_id.to_string() });
+        }
+        if &inspection.component().source == value {
+            return Ok(());
+        }
+
+        let clip = inspection.owning_clip();
+        match value {
+            AudioComponentSource::Media { component_id } => {
+                let asset_id =
+                    clip.media_asset_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "only a media Clip can select an Asset audio Component".to_owned(),
+                    })?;
+                let library =
+                    self.asset_library().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "asset library is unavailable".to_owned(),
+                    })?;
+                let asset = library.get_asset(asset_id)?.ok_or_else(|| {
+                    MondrianError::AssetNotFound { asset_id: asset_id.to_string() }
+                })?;
+                asset.audio_components.validate().map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!("invalid Asset audio Component catalog: {error}"),
+                    }
+                })?;
+                if !asset
+                    .audio_components
+                    .components
+                    .iter()
+                    .any(|component| component.id == *component_id)
+                {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!(
+                            "Asset {asset_id} does not expose audio Component {component_id}"
+                        ),
+                    });
+                }
+            }
+            AudioComponentSource::NestedOutput { output_id } => {
+                let child_id =
+                    clip.nested_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: "only a nested Sequence Clip can select a child Program Output"
+                            .to_owned(),
+                    })?;
+                let child =
+                    self.sequences().iter().find(|candidate| candidate.id == child_id).ok_or_else(
+                        || MondrianError::WorkflowStepFailed {
+                            step_id: STEP_ID.to_owned(),
+                            reason: format!("nested Sequence {child_id} is unavailable"),
+                        },
+                    )?;
+                if !child.audio_program.outputs.iter().any(|output| output.id == *output_id) {
+                    return Err(MondrianError::WorkflowStepFailed {
+                        step_id: STEP_ID.to_owned(),
+                        reason: format!(
+                            "nested Sequence {child_id} does not expose output {output_id}"
+                        ),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn edit_audio_routing(&mut self, request: AudioRoutingEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_routing".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome = self.commit_sequence_edit(sequence_id, "编辑音频路由", |sequence| {
+            apply_audio_routing_edit(sequence, &request).map_err(|error| {
+                MondrianError::WorkflowStepFailed {
+                    step_id: "audio_edit_routing".to_owned(),
+                    reason: error.to_string(),
+                }
+            })
+        })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_edit_routing");
+        }
+        Ok(())
+    }
+
+    fn edit_audio_channel_strip(&mut self, request: AudioChannelStripEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_edit_channel_strip".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome =
+            self.commit_sequence_edit(sequence_id, "编辑音频通道条", |sequence| {
+                apply_audio_channel_strip_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "audio_edit_channel_strip".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_edit_channel_strip");
+        }
+        Ok(())
+    }
+
+    fn edit_audio_processor_rack(&mut self, request: AudioProcessorRackEditRequest) -> Result<()> {
+        let sequence_id =
+            self.active_sequence_id().ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "audio_processor_edit_rack".to_owned(),
+                reason: "当前没有活动序列".to_owned(),
+            })?;
+        let outcome =
+            self.commit_sequence_edit(sequence_id, "编辑音频处理器", |sequence| {
+                apply_audio_processor_rack_edit(sequence, &request).map_err(|error| {
+                    MondrianError::WorkflowStepFailed {
+                        step_id: "audio_processor_edit_rack".to_owned(),
+                        reason: error.to_string(),
+                    }
+                })
+            })?;
+        if outcome.changed {
+            self.reconcile_audio_after_committed_authoring_change("audio_processor_edit_rack");
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::product_action::{
+        AudioProcessorBuiltInPreset, AudioProcessorInsertBuiltInPayload,
+    };
+    use crate::app::ui_actions::{
+        audio_automation_edit_action, audio_channel_strip_edit_action,
+        audio_processor_insert_built_in_action, audio_processor_rack_edit_action,
+        audio_routing_edit_action,
+    };
+    use mondrian_core::ParameterId;
+    use mondrian_timeline::audio::{
+        AudioProcessorInstance, BUILTIN_GAIN_DEFINITION_ID, GAIN_DB_PARAMETER_ID,
+    };
+    use mondrian_timeline::{
+        audio_channel_strip, audio_processor_rack, sequence::Sequence, AudioAutomationEdit,
+        AudioAutomationEditRequest, AudioAutomationTarget, AudioChannelStripEdit,
+        AudioChannelStripEditRequest, AudioChannelStripOwner, AudioChannelStripRack,
+        AudioProcessorRackAddress, AudioProcessorRackEdit, AudioProcessorRackPlacement,
+        AudioRouteDestination, AudioRoutingEdit, AudioRoutingEditRequest,
+    };
+
+    fn request(
+        address: AudioProcessorRackAddress,
+        edit: AudioProcessorRackEdit,
+    ) -> AudioProcessorRackEditRequest {
+        AudioProcessorRackEditRequest { address, edit }
+    }
+
+    #[test]
+    fn typed_rack_actions_commit_once_and_round_trip_through_undo_redo() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Processor authoring");
+        let track_id = sequence.audio_tracks[0].id;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let initial_generation = state.project_author_generation();
+
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        state
+            .dispatch_action(audio_processor_rack_edit_action(request(
+                address,
+                AudioProcessorRackEdit::Insert {
+                    processor,
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )))
+            .expect("insert through typed product action");
+
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+        assert!(state.can_undo_action());
+        assert_eq!(
+            audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Track Rack")
+                .processors[0]
+                .id,
+            processor_id
+        );
+
+        state
+            .dispatch_action(audio_processor_rack_edit_action(request(
+                address,
+                AudioProcessorRackEdit::SetParameterStaticValue {
+                    processor_id,
+                    parameter_id: ParameterId::new_static(GAIN_DB_PARAMETER_ID),
+                    value: -6.0,
+                },
+            )))
+            .expect("parameter edit through same Interface");
+        assert_eq!(state.project_author_generation(), initial_generation + 2);
+
+        assert!(state.undo_timeline().expect("undo parameter edit"));
+        let gain =
+            &audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Track Rack")
+                .processors[0];
+        assert_eq!(
+            gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
+                .automation
+                .default_value,
+            0.0
+        );
+        assert!(state.undo_timeline().expect("undo insert"));
+        assert!(
+            audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Track Rack")
+                .processors
+                .is_empty()
+        );
+
+        assert!(state.redo_timeline().expect("redo insert"));
+        assert!(state.redo_timeline().expect("redo parameter edit"));
+        let gain =
+            &audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Track Rack")
+                .processors[0];
+        assert_eq!(
+            gain.parameters[&ParameterId::new_static(GAIN_DB_PARAMETER_ID)]
+                .automation
+                .default_value,
+            -6.0
+        );
+    }
+
+    #[test]
+    fn typed_channel_strip_action_commits_once_and_round_trips_through_undo_redo() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Channel Strip authoring");
+        let owner = AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id };
+        state.test_set_sequence(Some(sequence));
+        let initial_generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_channel_strip_edit_action(
+                AudioChannelStripEditRequest {
+                    owner,
+                    edit: AudioChannelStripEdit::SetFaderDb { value: -6.0 },
+                },
+            ))
+            .expect("fader through typed product action");
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+        assert_eq!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("Track strip")
+                .fader_db,
+            -6.0
+        );
+
+        assert!(state.undo_timeline().expect("undo fader"));
+        assert_eq!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("Track strip")
+                .fader_db,
+            0.0
+        );
+        assert!(state.redo_timeline().expect("redo fader"));
+        assert_eq!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("Track strip")
+                .fader_db,
+            -6.0
+        );
+    }
+
+    #[test]
+    fn typed_automation_action_commits_once_and_round_trips_through_undo_redo() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Automation authoring");
+        let owner = AudioChannelStripOwner::Track { track_id: sequence.audio_tracks[0].id };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+        let keyframe =
+            mondrian_core::ExactAutomationKeyframe::linear(mondrian_core::TimelineTime::ONE, -6.0);
+        let keyframe_id = keyframe.id;
+
+        state
+            .dispatch_action(audio_automation_edit_action(AudioAutomationEditRequest {
+                target: AudioAutomationTarget::ChannelFader { owner },
+                edit: AudioAutomationEdit::UpsertKeyframe { keyframe },
+            }))
+            .expect("automation through typed product action");
+        assert_eq!(state.project_author_generation(), generation + 1);
+        assert_eq!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("strip")
+                .fader_automation
+                .as_ref()
+                .expect("curve")
+                .keyframes[0]
+                .id,
+            keyframe_id
+        );
+
+        assert!(state.undo_timeline().expect("undo automation"));
+        assert!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("strip")
+                .fader_automation
+                .is_none()
+        );
+        assert!(state.redo_timeline().expect("redo automation"));
+        assert_eq!(
+            audio_channel_strip(state.active_sequence().expect("Sequence"), owner)
+                .expect("strip")
+                .fader_automation
+                .as_ref()
+                .expect("curve")
+                .keyframes[0]
+                .id,
+            keyframe_id
+        );
+    }
+
+    #[test]
+    fn typed_routing_action_commits_bus_and_route_once_and_round_trips_undo_redo() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Routing authoring");
+        let output_id = sequence.audio_program.outputs[0].id;
+        state.test_set_sequence(Some(sequence));
+        let initial_generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_routing_edit_action(AudioRoutingEditRequest {
+                edit: AudioRoutingEdit::CreateBus {
+                    name: "Dialogue".to_owned(),
+                    route_to: Some(AudioRouteDestination::Output(output_id)),
+                },
+            }))
+            .expect("create Bus through typed product action");
+        assert_eq!(state.project_author_generation(), initial_generation + 1);
+        let sequence = state.active_sequence().expect("Sequence");
+        assert_eq!(sequence.audio_program.buses.len(), 1);
+        assert_eq!(sequence.audio_program.buses[0].name, "Dialogue");
+        assert!(sequence.audio_program.routes.iter().any(|route| {
+            matches!(route.source, mondrian_timeline::AudioRouteSource::Bus { bus_id, .. }
+                if bus_id == sequence.audio_program.buses[0].id)
+                && route.destination == AudioRouteDestination::Output(output_id)
+        }));
+
+        assert!(state.undo_timeline().expect("undo Bus creation"));
+        assert!(state.active_sequence().expect("Sequence").audio_program.buses.is_empty());
+        assert!(state.redo_timeline().expect("redo Bus creation"));
+        assert_eq!(
+            state.active_sequence().expect("Sequence").audio_program.buses.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn product_builtin_insertion_resolves_canonical_instance_at_dispatch() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Product Processor insertion");
+        let track_id = sequence.audio_tracks[0].id;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_processor_insert_built_in_action(
+                AudioProcessorInsertBuiltInPayload {
+                    address,
+                    preset: AudioProcessorBuiltInPreset::LookaheadLimiter,
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            ))
+            .expect("insert canonical built-in");
+
+        let processor =
+            &audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Rack")
+                .processors[0];
+        assert!(matches!(
+            &processor.definition,
+            mondrian_timeline::audio::AudioProcessorDefinitionRef::BuiltIn {
+                definition_id,
+                schema_version: 1,
+            } if definition_id == BUILTIN_LOOKAHEAD_LIMITER_DEFINITION_ID
+        ));
+        assert_eq!(processor.parameters.len(), 3);
+        assert_eq!(state.project_author_generation(), generation + 1);
+    }
+
+    #[test]
+    fn no_op_rack_action_does_not_advance_author_generation() {
+        let mut state = AppState::new();
+        let sequence = Sequence::new("Processor no-op");
+        let track_id = sequence.audio_tracks[0].id;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PostFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let processor_id = processor.id;
+        state
+            .dispatch_action(audio_processor_rack_edit_action(request(
+                address,
+                AudioProcessorRackEdit::Insert {
+                    processor,
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )))
+            .expect("insert Processor");
+        let generation = state.project_author_generation();
+
+        state
+            .dispatch_action(audio_processor_rack_edit_action(request(
+                address,
+                AudioProcessorRackEdit::SetBypassed { processor_id, bypassed: false },
+            )))
+            .expect("idempotent bypass edit");
+
+        assert_eq!(state.project_author_generation(), generation);
+    }
+
+    #[test]
+    fn rejected_locked_track_action_does_not_commit_partial_author_state() {
+        let mut state = AppState::new();
+        let mut sequence = Sequence::new("Locked Processor Rack");
+        let track_id = sequence.audio_tracks[0].id;
+        sequence.audio_tracks[0].is_locked = true;
+        let address = AudioProcessorRackAddress::ChannelStrip {
+            owner: AudioChannelStripOwner::Track { track_id },
+            rack: AudioChannelStripRack::PreFader,
+        };
+        state.test_set_sequence(Some(sequence));
+        let generation = state.project_author_generation();
+
+        let error = state
+            .dispatch_action(audio_processor_rack_edit_action(request(
+                address,
+                AudioProcessorRackEdit::Insert {
+                    processor: AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1),
+                    placement: AudioProcessorRackPlacement::End,
+                },
+            )))
+            .expect_err("locked Track rejects Rack mutation");
+
+        assert!(error.to_string().contains("locked Track"));
+        assert_eq!(state.project_author_generation(), generation);
+        assert!(!state.can_undo_action());
+        assert!(
+            audio_processor_rack(state.active_sequence().expect("active Sequence"), &address)
+                .expect("Track Rack")
+                .processors
+                .is_empty()
+        );
+    }
+}

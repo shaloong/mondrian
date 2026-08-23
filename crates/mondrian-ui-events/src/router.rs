@@ -1,0 +1,3413 @@
+//! 事件路由器
+//!
+//! 管理 hover/focus/capture 状态，将事件分发给正确的 Widget。
+//! 使用真实的 FocusManager + ShortcutManager 实现。
+
+use mondrian_editor_state::state::PanelKind;
+use mondrian_editor_state::Action;
+use mondrian_platform_core::{NoopPlatformService, PlatformService};
+use mondrian_ui_core::focus::FocusManager;
+use mondrian_ui_core::shortcut::{ShortcutContext, ShortcutManager};
+use mondrian_ui_core::tooltip::{TooltipManager, TooltipState};
+use mondrian_ui_core::types::{
+    DragPayload, EventResult, FocusSource, KeyCode, Modifiers, MouseButton, Point, UiEvent,
+    WidgetId,
+};
+use mondrian_ui_core::widget::{
+    CursorRequest, DragRequest, EventContext, EventRequests, EyedropperRequest, ImeRequest,
+};
+use mondrian_ui_core::{TreeWalker, Widget, WidgetTree};
+
+use crate::capture::PointerCaptureState;
+use crate::focus_manager::FocusManagerImpl;
+use crate::hit_test::{hit_test_deepest, overlay_hit_test_deepest};
+use crate::shortcut_manager::ShortcutManagerImpl;
+
+/// Diagnostics accumulated while routing UI events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventRouteDiagnostics {
+    /// Shortcut-like key chords that reached shortcut resolution but had no binding.
+    pub unmatched_shortcut_chords: u32,
+    /// Captured widgets that disappeared from the widget tree and were released.
+    pub stale_captured_widgets: u32,
+    /// Hovered widgets that disappeared from the widget tree and were cleared.
+    pub stale_hovered_widgets: u32,
+    /// Drag targets that disappeared from the widget tree and were cleared.
+    pub stale_drag_targets: u32,
+    /// Focused widgets that disappeared from the widget tree and were cleared.
+    pub stale_focused_widgets: u32,
+    /// Focused widgets that became unfocusable and were blurred.
+    pub unfocusable_focused_widgets: u32,
+    /// Pointer captures preempted by a top-level overlay hit.
+    pub overlay_capture_preemptions: u32,
+}
+
+impl EventRouteDiagnostics {
+    /// Whether any route diagnostic event was recorded.
+    pub fn has_events(self) -> bool {
+        self.unmatched_shortcut_chords > 0
+            || self.stale_captured_widgets > 0
+            || self.stale_hovered_widgets > 0
+            || self.stale_drag_targets > 0
+            || self.stale_focused_widgets > 0
+            || self.unfocusable_focused_widgets > 0
+            || self.overlay_capture_preemptions > 0
+    }
+}
+
+/// 事件路由器
+///
+/// 拥有 FocusManager + ShortcutManager，在 route() 时将其注入 EventContext。
+pub struct EventRouter {
+    #[allow(dead_code)]
+    root_widget_id: WidgetId,
+    hovered: Option<WidgetId>,
+    focused: Option<WidgetId>,
+    capture: PointerCaptureState,
+    active_drag: Option<ActiveDrag>,
+
+    focus_mgr: FocusManagerImpl,
+    shortcut_mgr: ShortcutManagerImpl,
+    platform: Box<dyn PlatformService>,
+    tooltip: Box<dyn TooltipManager>,
+    last_ime_request: Option<ImeRequest>,
+    last_cursor_request: Option<CursorRequest>,
+    last_eyedropper_request: Option<EyedropperRequest>,
+    repaint_requested: bool,
+    diagnostics: EventRouteDiagnostics,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveDrag {
+    payload: DragPayload,
+    target: Option<WidgetId>,
+}
+
+struct NoopTooltip;
+impl TooltipManager for NoopTooltip {
+    fn show(&mut self, _: String, _: Point) {}
+    fn hide(&mut self) {}
+    fn current(&self) -> Option<&TooltipState> {
+        None
+    }
+    fn update(&mut self, _: u64) {}
+}
+
+impl EventRouter {
+    pub fn new(root_widget_id: WidgetId) -> Self {
+        Self {
+            root_widget_id,
+            hovered: None,
+            focused: None,
+            capture: PointerCaptureState::default(),
+            active_drag: None,
+            focus_mgr: FocusManagerImpl::new(),
+            shortcut_mgr: ShortcutManagerImpl::new(),
+            platform: Box::new(NoopPlatformService),
+            tooltip: Box::new(NoopTooltip),
+            last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
+        }
+    }
+
+    pub fn with_platform(root_widget_id: WidgetId, platform: Box<dyn PlatformService>) -> Self {
+        Self {
+            root_widget_id,
+            hovered: None,
+            focused: None,
+            capture: PointerCaptureState::default(),
+            active_drag: None,
+            focus_mgr: FocusManagerImpl::new(),
+            shortcut_mgr: ShortcutManagerImpl::new(),
+            platform,
+            tooltip: Box::new(NoopTooltip),
+            last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
+        }
+    }
+
+    /// Create a router with explicit platform and tooltip services.
+    ///
+    /// App shells use this when they want widget tooltip requests to be backed
+    /// by a real tooltip manager instead of the default no-op service.
+    pub fn with_platform_and_tooltip(
+        root_widget_id: WidgetId,
+        platform: Box<dyn PlatformService>,
+        tooltip: Box<dyn TooltipManager>,
+    ) -> Self {
+        Self {
+            root_widget_id,
+            hovered: None,
+            focused: None,
+            capture: PointerCaptureState::default(),
+            active_drag: None,
+            focus_mgr: FocusManagerImpl::new(),
+            shortcut_mgr: ShortcutManagerImpl::new(),
+            platform,
+            tooltip,
+            last_ime_request: None,
+            last_cursor_request: None,
+            last_eyedropper_request: None,
+            repaint_requested: false,
+            diagnostics: EventRouteDiagnostics::default(),
+        }
+    }
+
+    pub fn hovered(&self) -> Option<WidgetId> {
+        self.hovered
+    }
+    pub fn focused(&self) -> Option<WidgetId> {
+        self.focused
+    }
+    pub fn captured(&self) -> Option<WidgetId> {
+        self.capture.owner()
+    }
+
+    pub fn active_drag_payload(&self) -> Option<&DragPayload> {
+        self.active_drag.as_ref().map(|drag| &drag.payload)
+    }
+
+    /// Take the latest platform IME request emitted by a widget event.
+    ///
+    /// The router owns focus and capture state, but the application owns the
+    /// native window, so IME requests are exposed for the app shell to apply to
+    /// winit or another platform backend.
+    pub fn take_ime_request(&mut self) -> Option<ImeRequest> {
+        self.last_ime_request.take()
+    }
+
+    /// Take the latest cursor request emitted by a widget event.
+    pub fn take_cursor_request(&mut self) -> Option<CursorRequest> {
+        self.last_cursor_request.take()
+    }
+
+    /// Take the latest eyedropper request emitted by a widget event.
+    pub fn take_eyedropper_request(&mut self) -> Option<EyedropperRequest> {
+        self.last_eyedropper_request.take()
+    }
+
+    /// Peek the latest eyedropper request without consuming it.
+    pub fn peek_eyedropper_request(&self) -> Option<&EyedropperRequest> {
+        self.last_eyedropper_request.as_ref()
+    }
+
+    /// Take whether any widget requested another frame since the last call.
+    pub fn take_repaint_request(&mut self) -> bool {
+        let requested = self.repaint_requested;
+        self.repaint_requested = false;
+        requested
+    }
+
+    /// Take route diagnostics accumulated since the last call.
+    pub fn take_diagnostics(&mut self) -> EventRouteDiagnostics {
+        std::mem::take(&mut self.diagnostics)
+    }
+
+    pub fn set_capture(&mut self, widget: Option<WidgetId>) {
+        self.capture.set_owner(widget);
+    }
+
+    pub fn focus_manager(&self) -> &FocusManagerImpl {
+        &self.focus_mgr
+    }
+    pub fn focus_manager_mut(&mut self) -> &mut FocusManagerImpl {
+        &mut self.focus_mgr
+    }
+    pub fn shortcut_manager(&self) -> &ShortcutManagerImpl {
+        &self.shortcut_mgr
+    }
+    pub fn shortcut_manager_mut(&mut self) -> &mut ShortcutManagerImpl {
+        &mut self.shortcut_mgr
+    }
+
+    /// Return the currently visible tooltip, if the injected manager has one.
+    pub fn current_tooltip(&self) -> Option<&TooltipState> {
+        self.tooltip.current()
+    }
+
+    /// Advance tooltip timers in the injected manager.
+    pub fn update_tooltip(&mut self, delta_ms: u64) {
+        self.tooltip.update(delta_ms);
+    }
+
+    /// Return when the injected tooltip manager next needs a timer update.
+    pub fn next_tooltip_update_in_ms(&self) -> Option<u64> {
+        self.tooltip.next_update_in_ms()
+    }
+
+    /// 将事件路由到正确的 Widget
+    pub fn route(
+        &mut self,
+        event: UiEvent,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        self.prune_stale_widget_state(tree, dispatch);
+        if matches!(&event, UiEvent::FocusLost) {
+            return self.route_window_focus_lost(tree, dispatch);
+        }
+        if self.active_drag.is_some() {
+            match &event {
+                UiEvent::MouseMove { position, .. } => {
+                    return self.route_active_drag_move(*position, tree, dispatch);
+                }
+                UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                    return self.route_active_drag_drop(*position, tree, dispatch);
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.cancel_active_drag(tree, dispatch);
+                    return EventResult::Handled;
+                }
+                _ => {}
+            }
+        }
+        match &event {
+            UiEvent::MouseMove { position, .. } => {
+                let target = self.pointer_target(tree, *position);
+
+                if target != self.hovered {
+                    if let Some(old_id) = self.hovered
+                        && let Some(old) = tree.get_mut(old_id)
+                    {
+                        let mut requests = EventRequests::default();
+                        {
+                            let mut ctx = self.make_event_context(dispatch, &mut requests);
+                            old.event(&event, &mut ctx);
+                        }
+                        self.apply_event_requests(requests);
+                    }
+                    self.hovered = target;
+                }
+                if let Some(target_id) = target {
+                    if self.capture.is_idle()
+                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    {
+                        return EventResult::Handled;
+                    }
+                    let mut current = Some(target_id);
+                    while let Some(id) = current {
+                        if let Some(widget) = tree.get_mut(id) {
+                            let mut requests = EventRequests::default();
+                            let result = {
+                                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                                widget.event(&event, &mut ctx)
+                            };
+                            self.sync_focus_from_manager();
+                            self.apply_event_requests(requests);
+                            normalize_focused_panel(&mut self.focus_mgr, tree);
+                            match result {
+                                EventResult::Handled => {
+                                    self.after_child_handled(tree, id, &event, dispatch);
+                                    return EventResult::Handled;
+                                }
+                                EventResult::Ignored => {
+                                    current = tree.parent_id(id);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                EventResult::Ignored
+            }
+            _ => {
+                // ── Tab / Shift+Tab: framework-level focus traversal ──────────
+                if let UiEvent::KeyDown { key: KeyCode::Tab, modifiers } = &event
+                    && let Some(reverse) = tab_traversal_reverse(*modifiers)
+                {
+                    let current = self.focus_mgr.focused_widget();
+                    let traversal_origin = current.unwrap_or_default();
+                    let next = if reverse {
+                        TreeWalker::focus_prev(tree, traversal_origin)
+                    } else {
+                        TreeWalker::focus_next(tree, traversal_origin)
+                    };
+                    if next.is_none() {
+                        self.sync_focus_from_manager();
+                        return EventResult::Ignored;
+                    }
+                    if next == current {
+                        self.sync_focus_from_manager();
+                        return EventResult::Handled;
+                    }
+                    if let Some(next_id) = next {
+                        self.move_focus_to(tree, next_id, FocusSource::Keyboard, dispatch);
+                    }
+                    return EventResult::Handled;
+                }
+
+                let position = match &event {
+                    UiEvent::MouseDown { position, .. }
+                    | UiEvent::MouseUp { position, .. }
+                    | UiEvent::MouseWheel { position, .. }
+                    | UiEvent::DragEnter { position, .. }
+                    | UiEvent::DragOver { position, .. }
+                    | UiEvent::Drop { position, .. } => *position,
+                    _ => Point::ZERO,
+                };
+
+                let is_keyboard = matches!(
+                    &event,
+                    UiEvent::KeyDown { .. }
+                        | UiEvent::KeyUp { .. }
+                        | UiEvent::TextInput(_)
+                        | UiEvent::ImePreedit(_)
+                        | UiEvent::ImeCommit(_)
+                        | UiEvent::ImeCancel
+                );
+
+                let target = if is_keyboard {
+                    // Keyboard events go to the focused widget, not hit-tested
+                    self.focus_mgr.focused_widget()
+                } else {
+                    self.pointer_target(tree, position)
+                };
+
+                if matches!(&event, UiEvent::MouseDown { .. }) {
+                    let current_focused = self.focus_mgr.focused_widget();
+                    let target_is_focusable =
+                        target.is_some_and(|id| tree.get(id).is_some_and(|w| w.can_focus()));
+                    if let Some(clicked_id) = target {
+                        if Some(clicked_id) != current_focused {
+                            if target_is_focusable {
+                                // Click-to-focus: blur old, focus new before
+                                // delivering MouseDown so widgets can set their
+                                // internal focused state while MouseDown can
+                                // still suppress keyboard-only focus rings.
+                                self.move_focus_to(
+                                    tree,
+                                    clicked_id,
+                                    FocusSource::Pointer,
+                                    dispatch,
+                                );
+                            } else if let Some(old) = current_focused {
+                                let clicked_inside_focus =
+                                    self.is_ancestor_or_self(tree, old, clicked_id);
+                                if !clicked_inside_focus {
+                                    self.blur_focus(tree, old, dispatch);
+                                }
+                            }
+                        }
+                    } else if let Some(old) = current_focused {
+                        self.blur_focus(tree, old, dispatch);
+                    }
+                }
+
+                if let Some(target_id) = target {
+                    if self.capture.is_idle()
+                        && !is_keyboard
+                        && self.before_child_event(tree, target_id, &event, dispatch)
+                    {
+                        return EventResult::Handled;
+                    }
+                    let mut current = Some(target_id);
+                    while let Some(id) = current {
+                        if let Some(widget) = tree.get_mut(id) {
+                            let mut requests = EventRequests::default();
+                            let result = {
+                                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                                widget.event(&event, &mut ctx)
+                            };
+                            self.sync_focus_from_manager();
+                            self.apply_event_requests(requests);
+                            normalize_focused_panel(&mut self.focus_mgr, tree);
+                            match result {
+                                EventResult::Handled => {
+                                    self.after_child_handled(tree, id, &event, dispatch);
+                                    return EventResult::Handled;
+                                }
+                                EventResult::Ignored => {
+                                    current = tree.parent_id(id);
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                if let UiEvent::KeyDown { key, modifiers } = &event {
+                    let shortcut_context = ShortcutContext::new(
+                        self.focus_mgr.focused_widget(),
+                        self.focus_mgr.focused_panel(),
+                    );
+                    if !focused_text_input_owns_key(
+                        tree,
+                        self.focus_mgr.focused_widget(),
+                        *key,
+                        *modifiers,
+                    ) {
+                        if let Some(action) =
+                            self.shortcut_mgr.resolve(*key, *modifiers, shortcut_context)
+                        {
+                            dispatch(action);
+                            return EventResult::Handled;
+                        } else if should_diagnose_unmatched_shortcut(*key, *modifiers) {
+                            self.diagnostics.unmatched_shortcut_chords =
+                                self.diagnostics.unmatched_shortcut_chords.saturating_add(1);
+                        }
+                    }
+                }
+
+                EventResult::Ignored
+            }
+        }
+    }
+
+    fn route_active_drag_move(
+        &mut self,
+        position: Point,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(payload) = self.active_drag.as_ref().map(|drag| drag.payload.clone()) else {
+            return EventResult::Ignored;
+        };
+        let target =
+            overlay_hit_test_deepest(tree, position).or_else(|| hit_test_deepest(tree, position));
+        let old_target = self.active_drag.as_ref().and_then(|drag| drag.target);
+        if old_target != target {
+            if let Some(old) = old_target {
+                self.dispatch_direct_event(tree, old, &UiEvent::DragLeave, dispatch);
+            }
+            if let Some(new_target) = target {
+                self.dispatch_bubbling_event(
+                    tree,
+                    new_target,
+                    &UiEvent::DragEnter { payload, position },
+                    dispatch,
+                );
+            }
+            if let Some(drag) = self.active_drag.as_mut() {
+                drag.target = target;
+            }
+        } else if let Some(target) = target {
+            self.dispatch_bubbling_event(tree, target, &UiEvent::DragOver { position }, dispatch);
+        }
+        EventResult::Handled
+    }
+
+    fn route_window_focus_lost(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        self.cancel_active_drag(tree, dispatch);
+        self.hovered = None;
+        self.tooltip.hide();
+
+        self.clear_focus_for_window_loss(tree, dispatch);
+        self.capture.clear();
+        self.repaint_requested = true;
+
+        EventResult::Handled
+    }
+
+    fn route_active_drag_drop(
+        &mut self,
+        position: Point,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(active_drag) = self.active_drag.take() else {
+            return EventResult::Ignored;
+        };
+        self.capture.clear();
+        let target = overlay_hit_test_deepest(tree, position)
+            .or_else(|| hit_test_deepest(tree, position))
+            .or(active_drag.target);
+        if let Some(target) = target {
+            return self.dispatch_bubbling_event(
+                tree,
+                target,
+                &UiEvent::Drop { payload: active_drag.payload, position },
+                dispatch,
+            );
+        }
+        EventResult::Handled
+    }
+
+    fn cancel_active_drag(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        if let Some(active_drag) = self.active_drag.take()
+            && let Some(target) = active_drag.target
+        {
+            self.dispatch_direct_event(tree, target, &UiEvent::DragLeave, dispatch);
+        }
+        self.capture.clear();
+    }
+
+    fn dispatch_direct_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        target: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let Some(widget) = tree.get_mut(target) else {
+            return EventResult::Ignored;
+        };
+        let mut requests = EventRequests::default();
+        let result = {
+            let mut ctx = self.make_event_context(dispatch, &mut requests);
+            widget.event(event, &mut ctx)
+        };
+        self.sync_focus_from_manager();
+        self.apply_event_requests(requests);
+        result
+    }
+
+    fn dispatch_bubbling_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        target: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> EventResult {
+        let mut current = Some(target);
+        while let Some(id) = current {
+            let parent = tree.parent_id(id);
+            if self.dispatch_direct_event(tree, id, event, dispatch) == EventResult::Handled {
+                self.after_child_handled(tree, id, event, dispatch);
+                return EventResult::Handled;
+            }
+            current = parent;
+        }
+        EventResult::Ignored
+    }
+
+    fn is_ancestor_or_self(
+        &self,
+        tree: &dyn WidgetTree,
+        maybe_ancestor: WidgetId,
+        mut child: WidgetId,
+    ) -> bool {
+        loop {
+            if child == maybe_ancestor {
+                return true;
+            }
+            let Some(parent) = tree.parent_id(child) else {
+                return false;
+            };
+            child = parent;
+        }
+    }
+
+    fn pointer_target(&mut self, tree: &dyn WidgetTree, position: Point) -> Option<WidgetId> {
+        let overlay_target = overlay_hit_test_deepest(tree, position);
+        let Some(captured) = self.capture.owner() else {
+            return overlay_target.or_else(|| hit_test_deepest(tree, position));
+        };
+
+        match overlay_target {
+            Some(overlay)
+                if overlay != captured && !self.is_ancestor_or_self(tree, overlay, captured) =>
+            {
+                self.capture.clear();
+                self.diagnostics.overlay_capture_preemptions =
+                    self.diagnostics.overlay_capture_preemptions.saturating_add(1);
+                Some(overlay)
+            }
+            _ => Some(captured),
+        }
+    }
+
+    fn prune_stale_widget_state(&mut self, tree: &mut dyn WidgetTree, dispatch: &dyn Fn(Action)) {
+        if self.capture.clear_if_stale(|id| tree.get(id).is_some()) {
+            self.diagnostics.stale_captured_widgets =
+                self.diagnostics.stale_captured_widgets.saturating_add(1);
+        }
+        if self.hovered.is_some_and(|id| tree.get(id).is_none()) {
+            self.hovered = None;
+            self.diagnostics.stale_hovered_widgets =
+                self.diagnostics.stale_hovered_widgets.saturating_add(1);
+        }
+        if self
+            .active_drag
+            .as_ref()
+            .and_then(|drag| drag.target)
+            .is_some_and(|id| tree.get(id).is_none())
+        {
+            if let Some(drag) = self.active_drag.as_mut() {
+                drag.target = None;
+            }
+            self.diagnostics.stale_drag_targets =
+                self.diagnostics.stale_drag_targets.saturating_add(1);
+        }
+        if let Some(focused) = self.focus_mgr.focused_widget() {
+            match tree.get(focused) {
+                Some(widget) if widget.can_focus() => {}
+                Some(_) => {
+                    self.blur_focus(tree, focused, dispatch);
+                    self.disable_ime_for_cleared_focus();
+                    self.diagnostics.unfocusable_focused_widgets =
+                        self.diagnostics.unfocusable_focused_widgets.saturating_add(1);
+                }
+                None => {
+                    self.drop_stale_focus(focused);
+                    self.diagnostics.stale_focused_widgets =
+                        self.diagnostics.stale_focused_widgets.saturating_add(1);
+                }
+            }
+        }
+        normalize_focused_panel(&mut self.focus_mgr, tree);
+        self.sync_focus_from_manager();
+    }
+
+    fn move_focus_to(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        next: WidgetId,
+        source: FocusSource,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if self.focus_mgr.focused_widget() == Some(next) {
+            self.sync_focus_from_manager();
+            return;
+        }
+        if let Some(current) = self.focus_mgr.focused_widget() {
+            self.send_focus_lost(tree, current, dispatch);
+        }
+        self.send_focus_gained(tree, next, source, dispatch);
+        let panel = panel_kind_for_widget(tree, next).or_else(|| self.focus_mgr.focused_panel());
+        self.focus_mgr.set_focused_widget(Some(next), panel);
+        self.sync_focus_from_manager();
+    }
+
+    fn blur_focus(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        focused: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        self.send_focus_lost(tree, focused, dispatch);
+        self.focus_mgr.release_focus(focused);
+        self.sync_focus_from_manager();
+    }
+
+    fn clear_focus_for_window_loss(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if let Some(focused) = self.focus_mgr.focused_widget() {
+            self.send_focus_lost(tree, focused, dispatch);
+        }
+        self.focus_mgr.clear_focus();
+        self.sync_focus_from_manager();
+        self.disable_ime_for_cleared_focus();
+    }
+
+    fn drop_stale_focus(&mut self, focused: WidgetId) {
+        self.focus_mgr.release_focus(focused);
+        self.sync_focus_from_manager();
+        self.disable_ime_for_cleared_focus();
+    }
+
+    fn disable_ime_for_cleared_focus(&mut self) {
+        self.last_ime_request = Some(ImeRequest { enabled: false, cursor_area: None });
+    }
+
+    fn sync_focus_from_manager(&mut self) {
+        self.focused = self.focus_mgr.focused_widget();
+    }
+
+    fn send_focus_lost(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        widget_id: WidgetId,
+        dispatch: &dyn Fn(Action),
+    ) {
+        let result = if let Some(widget) = tree.get_mut(widget_id) {
+            let mut requests = EventRequests::default();
+            let result = {
+                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                widget.event(&UiEvent::FocusLost, &mut ctx)
+            };
+            self.apply_event_requests(requests);
+            result
+        } else {
+            EventResult::Ignored
+        };
+        if result == EventResult::Handled {
+            self.after_child_handled(tree, widget_id, &UiEvent::FocusLost, dispatch);
+        }
+    }
+
+    fn send_focus_gained(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        widget_id: WidgetId,
+        source: FocusSource,
+        dispatch: &dyn Fn(Action),
+    ) {
+        if let Some(widget) = tree.get_mut(widget_id) {
+            let mut requests = EventRequests::default();
+            {
+                let mut ctx = self.make_event_context(dispatch, &mut requests);
+                widget.event(&UiEvent::FocusGained { source }, &mut ctx);
+            }
+            self.apply_event_requests(requests);
+        }
+    }
+
+    fn make_event_context<'a>(
+        &'a mut self,
+        dispatch: &'a dyn Fn(Action),
+        requests: &'a mut EventRequests,
+    ) -> EventContext<'a> {
+        EventContext {
+            focus: &mut self.focus_mgr,
+            shortcut: &mut self.shortcut_mgr,
+            tooltip: self.tooltip.as_mut(),
+            dispatch,
+            platform: self.platform.as_ref(),
+            requests,
+        }
+    }
+
+    fn apply_event_requests(&mut self, requests: EventRequests) {
+        if let Some(ime) = requests.ime {
+            self.last_ime_request = Some(ime);
+        }
+        if let Some(cursor) = requests.cursor {
+            self.last_cursor_request = Some(cursor);
+        }
+        if let Some(eyedropper) = requests.eyedropper {
+            self.last_eyedropper_request = Some(eyedropper);
+        }
+        if requests.repaint {
+            self.repaint_requested = true;
+        }
+        if let Some(request) = requests.pointer_capture {
+            self.capture.apply_request(request);
+        }
+        match requests.drag {
+            Some(DragRequest::Begin(payload)) => {
+                self.active_drag = Some(ActiveDrag { payload, target: None });
+                self.capture.clear();
+                self.repaint_requested = true;
+            }
+            Some(DragRequest::Cancel) => {
+                self.active_drag = None;
+                self.capture.clear();
+                self.repaint_requested = true;
+            }
+            None => {}
+        }
+    }
+
+    fn after_child_handled(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        child_id: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) {
+        let mut current = tree.parent_id(child_id);
+        while let Some(id) = current {
+            let parent_id = tree.parent_id(id);
+            if let Some(widget) = tree.get_mut(id) {
+                let mut requests = EventRequests::default();
+                {
+                    let mut ctx = self.make_event_context(dispatch, &mut requests);
+                    let _ = widget.after_child_event(event, &mut ctx);
+                }
+                self.sync_focus_from_manager();
+                self.apply_event_requests(requests);
+            }
+            current = parent_id;
+        }
+    }
+
+    fn before_child_event(
+        &mut self,
+        tree: &mut dyn WidgetTree,
+        child_id: WidgetId,
+        event: &UiEvent,
+        dispatch: &dyn Fn(Action),
+    ) -> bool {
+        let mut current = tree.parent_id(child_id);
+        while let Some(id) = current {
+            let parent_id = tree.parent_id(id);
+            if let Some(widget) = tree.get_mut(id) {
+                let mut requests = EventRequests::default();
+                let result = {
+                    let mut ctx = self.make_event_context(dispatch, &mut requests);
+                    widget.before_child_event(event, &mut ctx)
+                };
+                self.sync_focus_from_manager();
+                self.apply_event_requests(requests);
+                if result == EventResult::Handled {
+                    return true;
+                }
+            }
+            current = parent_id;
+        }
+        false
+    }
+}
+
+fn tab_traversal_reverse(modifiers: Modifiers) -> Option<bool> {
+    (!modifiers.ctrl && !modifiers.alt && !modifiers.meta).then_some(modifiers.shift)
+}
+
+fn panel_kind_for_widget(tree: &dyn WidgetTree, widget: WidgetId) -> Option<PanelKind> {
+    let mut current = Some(widget);
+    while let Some(id) = current {
+        if let Some(kind) = tree.get(id).and_then(Widget::panel_kind) {
+            return Some(kind);
+        }
+        current = tree.parent_id(id);
+    }
+    None
+}
+
+fn normalize_focused_panel(focus: &mut FocusManagerImpl, tree: &dyn WidgetTree) {
+    let Some(focused) = focus.focused_widget() else {
+        return;
+    };
+    if let Some(panel) = panel_kind_for_widget(tree, focused)
+        && focus.focused_panel() != Some(panel)
+    {
+        focus.set_focused_widget(Some(focused), Some(panel));
+    }
+}
+
+fn focused_text_input_owns_key(
+    tree: &dyn WidgetTree,
+    focused: Option<WidgetId>,
+    key: KeyCode,
+    modifiers: Modifiers,
+) -> bool {
+    focused
+        .and_then(|id| tree.get(id))
+        .is_some_and(|widget| widget.accepts_text_input())
+        && is_text_entry_key(key)
+        && !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.meta
+}
+
+fn should_diagnose_unmatched_shortcut(key: KeyCode, modifiers: Modifiers) -> bool {
+    modifiers.ctrl
+        || modifiers.alt
+        || modifiers.meta
+        || matches!(
+            key,
+            KeyCode::F1
+                | KeyCode::F2
+                | KeyCode::F3
+                | KeyCode::F4
+                | KeyCode::F5
+                | KeyCode::F6
+                | KeyCode::F7
+                | KeyCode::F8
+                | KeyCode::F9
+                | KeyCode::F10
+                | KeyCode::F11
+                | KeyCode::F12
+                | KeyCode::Escape
+                | KeyCode::Delete
+                | KeyCode::Insert
+                | KeyCode::Home
+                | KeyCode::End
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+        )
+}
+
+fn is_text_entry_key(key: KeyCode) -> bool {
+    matches!(
+        key,
+        KeyCode::A
+            | KeyCode::B
+            | KeyCode::C
+            | KeyCode::D
+            | KeyCode::E
+            | KeyCode::F
+            | KeyCode::G
+            | KeyCode::H
+            | KeyCode::I
+            | KeyCode::J
+            | KeyCode::K
+            | KeyCode::L
+            | KeyCode::M
+            | KeyCode::N
+            | KeyCode::O
+            | KeyCode::P
+            | KeyCode::Q
+            | KeyCode::R
+            | KeyCode::S
+            | KeyCode::T
+            | KeyCode::U
+            | KeyCode::V
+            | KeyCode::W
+            | KeyCode::X
+            | KeyCode::Y
+            | KeyCode::Z
+            | KeyCode::Digit0
+            | KeyCode::Digit1
+            | KeyCode::Digit2
+            | KeyCode::Digit3
+            | KeyCode::Digit4
+            | KeyCode::Digit5
+            | KeyCode::Digit6
+            | KeyCode::Digit7
+            | KeyCode::Digit8
+            | KeyCode::Digit9
+            | KeyCode::Space
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::types::AssetId;
+    use mondrian_editor_state::state::PanelKind;
+    use mondrian_ui_core::focus::FocusManager;
+    use mondrian_ui_core::shortcut::ShortcutManager;
+    use mondrian_ui_core::types::{LayoutConstraint, MouseButton, Rect, Size};
+    use mondrian_ui_core::widget::PaintContext;
+    use mondrian_ui_core::Widget;
+    use std::cell::{Cell, RefCell};
+    use std::collections::HashMap;
+    use std::rc::Rc;
+
+    #[test]
+    fn tab_traversal_only_accepts_unmodified_tab_or_shift_tab() {
+        assert_eq!(tab_traversal_reverse(Modifiers::none()), Some(false));
+        assert_eq!(tab_traversal_reverse(Modifiers::shift()), Some(true));
+        assert_eq!(tab_traversal_reverse(Modifiers::ctrl()), None);
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { alt: true, ..Modifiers::none() }),
+            None
+        );
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { meta: true, ..Modifiers::none() }),
+            None
+        );
+        assert_eq!(
+            tab_traversal_reverse(Modifiers { ctrl: true, shift: true, ..Modifiers::none() }),
+            None
+        );
+    }
+
+    #[test]
+    fn router_new_has_no_hover() {
+        let router = EventRouter::new(WidgetId::new());
+        assert_eq!(router.hovered(), None);
+    }
+
+    #[test]
+    fn router_focus_manager_accessible() {
+        let mut router = EventRouter::new(WidgetId::new());
+        let id = WidgetId::new();
+        router.focus_manager_mut().set_focused_widget(Some(id), Some(PanelKind::Viewer));
+        assert_eq!(router.focus_manager().focused_widget(), Some(id));
+    }
+
+    #[test]
+    fn router_shortcut_manager_accessible() {
+        let mut router = EventRouter::new(WidgetId::new());
+        use mondrian_ui_core::shortcut::ShortcutBinding;
+        router.shortcut_manager_mut().register_global(
+            ShortcutBinding::ctrl(mondrian_ui_core::types::KeyCode::S),
+            Action::SaveProject,
+        );
+        let found = router.shortcut_manager().resolve(
+            mondrian_ui_core::types::KeyCode::S,
+            mondrian_ui_core::types::Modifiers::ctrl(),
+            ShortcutContext::default(),
+        );
+        assert_eq!(found, Some(Action::SaveProject));
+    }
+
+    struct RecordingWidget {
+        id: WidgetId,
+        bounds: Rect,
+        log: Rc<RefCell<Vec<String>>>,
+        focusable: Rc<Cell<bool>>,
+    }
+
+    impl RecordingWidget {
+        fn new(bounds: Rect, log: Rc<RefCell<Vec<String>>>) -> Self {
+            Self {
+                id: WidgetId::new(),
+                bounds,
+                log,
+                focusable: Rc::new(Cell::new(true)),
+            }
+        }
+
+        fn with_focusable_flag(
+            bounds: Rect,
+            log: Rc<RefCell<Vec<String>>>,
+            focusable: Rc<Cell<bool>>,
+        ) -> Self {
+            Self { id: WidgetId::new(), bounds, log, focusable }
+        }
+    }
+
+    impl Widget for RecordingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseDown { .. } => {
+                    ctx.focus.request_focus(self.id);
+                    ctx.request_pointer_capture(self.id);
+                    ctx.set_ime_enabled(true, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
+                    self.log.borrow_mut().push("down".into());
+                    EventResult::Handled
+                }
+                UiEvent::MouseMove { position, .. } => {
+                    ctx.tooltip.show("tip".into(), *position);
+                    ctx.request_repaint();
+                    self.log.borrow_mut().push("move".into());
+                    EventResult::Handled
+                }
+                UiEvent::MouseUp { .. } => {
+                    ctx.release_pointer_capture(self.id);
+                    self.log.borrow_mut().push("up".into());
+                    EventResult::Handled
+                }
+                UiEvent::ImeCommit(text) => {
+                    self.log.borrow_mut().push(format!("commit:{text}"));
+                    EventResult::Handled
+                }
+                UiEvent::ImeCancel => {
+                    self.log.borrow_mut().push("ime-cancel".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push("drag-enter".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push("drag-over".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragLeave => {
+                    self.log.borrow_mut().push("drag-leave".into());
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push("drop".into());
+                    EventResult::Handled
+                }
+                UiEvent::FocusLost => {
+                    ctx.set_ime_enabled(false, None);
+                    self.log.borrow_mut().push("focus-lost".into());
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            self.focusable.get()
+        }
+    }
+
+    struct OverlayRecordingWidget {
+        id: WidgetId,
+        label: &'static str,
+        bounds: Rect,
+        overlay_hit: bool,
+        capture_on_down: bool,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl OverlayRecordingWidget {
+        fn new(
+            label: &'static str,
+            bounds: Rect,
+            overlay_hit: bool,
+            capture_on_down: bool,
+            log: Rc<RefCell<Vec<String>>>,
+        ) -> Self {
+            Self {
+                id: WidgetId::new(),
+                label,
+                bounds,
+                overlay_hit,
+                capture_on_down,
+                log,
+            }
+        }
+    }
+
+    impl Widget for OverlayRecordingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseDown { .. } => {
+                    if self.capture_on_down {
+                        ctx.request_pointer_capture(self.id);
+                    }
+                    self.log.borrow_mut().push(format!("{}:down", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::MouseMove { .. } => {
+                    self.log.borrow_mut().push(format!("{}:move", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drag-enter", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drag-over", self.label));
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push(format!("{}:drop", self.label));
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn overlay_hit_test(&self, _point: Point) -> bool {
+            self.overlay_hit
+        }
+    }
+
+    struct DropIgnoringWidget {
+        id: WidgetId,
+        bounds: Rect,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl DropIgnoringWidget {
+        fn new(bounds: Rect, log: Rc<RefCell<Vec<String>>>) -> Self {
+            Self { id: WidgetId::new(), bounds, log }
+        }
+    }
+
+    impl Widget for DropIgnoringWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseMove { .. } => {
+                    self.log.borrow_mut().push("mouse-move".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragEnter { .. } => {
+                    self.log.borrow_mut().push("drag-enter".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragOver { .. } => {
+                    self.log.borrow_mut().push("drag-over".into());
+                    EventResult::Handled
+                }
+                UiEvent::DragLeave => {
+                    self.log.borrow_mut().push("drag-leave".into());
+                    EventResult::Handled
+                }
+                UiEvent::Drop { .. } => {
+                    self.log.borrow_mut().push("drop-ignored".into());
+                    EventResult::Ignored
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    struct TestTree {
+        root: WidgetId,
+        nodes: HashMap<WidgetId, Box<dyn Widget>>,
+        parents: HashMap<WidgetId, WidgetId>,
+        children: HashMap<WidgetId, Vec<WidgetId>>,
+    }
+
+    impl TestTree {
+        fn single(widget: impl Widget + 'static) -> Self {
+            let root = widget.id();
+            let mut nodes = HashMap::new();
+            nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
+            Self {
+                root,
+                nodes,
+                parents: HashMap::new(),
+                children: HashMap::new(),
+            }
+        }
+
+        fn parent_child(parent: impl Widget + 'static, child: impl Widget + 'static) -> Self {
+            let root = parent.id();
+            let child_id = child.id();
+            let mut nodes = HashMap::new();
+            nodes.insert(root, Box::new(parent) as Box<dyn Widget>);
+            nodes.insert(child_id, Box::new(child) as Box<dyn Widget>);
+            Self {
+                root,
+                nodes,
+                parents: HashMap::from([(child_id, root)]),
+                children: HashMap::from([(root, vec![child_id])]),
+            }
+        }
+    }
+
+    impl WidgetTree for TestTree {
+        fn get(&self, id: WidgetId) -> Option<&dyn Widget> {
+            self.nodes.get(&id).map(|w| w.as_ref())
+        }
+
+        fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
+            match self.nodes.get_mut(&id) {
+                Some(widget) => Some(widget.as_mut()),
+                None => None,
+            }
+        }
+
+        fn root_id(&self) -> WidgetId {
+            self.root
+        }
+
+        fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
+            self.parents.get(&id).copied()
+        }
+
+        fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
+            self.children.get(&id).cloned().unwrap_or_default()
+        }
+    }
+
+    struct PanelBoundaryWidget {
+        id: WidgetId,
+        bounds: Rect,
+        panel: PanelKind,
+    }
+
+    impl PanelBoundaryWidget {
+        fn new(bounds: Rect, panel: PanelKind) -> Self {
+            Self { id: WidgetId::new(), bounds, panel }
+        }
+    }
+
+    impl Widget for PanelBoundaryWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn panel_kind(&self) -> Option<PanelKind> {
+            Some(self.panel)
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    struct KeyHandlingWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl KeyHandlingWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for KeyHandlingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::KeyDown { .. } => EventResult::Handled,
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
+    struct FocusOnMoveWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl FocusOnMoveWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for FocusOnMoveWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::MouseMove { .. } => {
+                    ctx.focus.request_focus(self.id);
+                    EventResult::Handled
+                }
+                _ => EventResult::Ignored,
+            }
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
+    struct TextAcceptingWidget {
+        id: WidgetId,
+        bounds: Rect,
+    }
+
+    impl TextAcceptingWidget {
+        fn new(bounds: Rect) -> Self {
+            Self { id: WidgetId::new(), bounds }
+        }
+    }
+
+    impl Widget for TextAcceptingWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+
+        fn accepts_text_input(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct ImmediateTooltip {
+        state: Option<TooltipState>,
+    }
+
+    impl TooltipManager for ImmediateTooltip {
+        fn show(&mut self, text: String, position: Point) {
+            self.state = Some(TooltipState { text, position, visible: true });
+        }
+
+        fn hide(&mut self) {
+            self.state = None;
+        }
+
+        fn current(&self) -> Option<&TooltipState> {
+            self.state.as_ref()
+        }
+
+        fn update(&mut self, _delta_ms: u64) {}
+    }
+
+    #[test]
+    fn router_sends_ime_commit_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(root));
+        let ime = router.take_ime_request().expect("focused text widget should enable IME");
+        assert!(ime.enabled);
+        assert_eq!(ime.cursor_area, Some(Rect::new(1.0, 2.0, 3.0, 4.0)));
+        assert!(router.take_ime_request().is_none());
+
+        let result = router.route(UiEvent::ImeCommit("你好".into()), &mut tree, &|_| {});
+        assert_eq!(result, EventResult::Handled);
+        assert!(log.borrow().contains(&"commit:你好".into()));
+    }
+
+    #[test]
+    fn router_sends_ime_cancel_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        let _ = router.take_ime_request();
+
+        let result = router.route(UiEvent::ImeCancel, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(log.borrow().contains(&"ime-cancel".into()));
+    }
+
+    #[test]
+    fn router_dispatches_shortcut_when_keydown_is_unhandled() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::S,
+                modifiers: mondrian_ui_core::types::Modifiers::ctrl(),
+            },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(dispatched.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn router_leaves_unmatched_shortcut_chords_unhandled() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        for (key, modifiers) in [
+            (
+                KeyCode::F,
+                Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            ),
+            (KeyCode::Space, Modifiers::ctrl()),
+            (
+                KeyCode::Space,
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+            (
+                KeyCode::LeftShift,
+                Modifiers { alt: true, shift: true, ..Modifiers::none() },
+            ),
+        ] {
+            let result = router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &|action| {
+                dispatched.borrow_mut().push(action)
+            });
+
+            assert_eq!(
+                result,
+                EventResult::Ignored,
+                "unmatched shortcut chord {modifiers:?}+{key:?} should not be consumed"
+            );
+        }
+        assert!(dispatched.borrow().is_empty());
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unmatched_shortcut_chords: 4,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+        assert_eq!(router.take_diagnostics(), EventRouteDiagnostics::default());
+    }
+
+    #[test]
+    fn router_keeps_printable_shortcuts_out_of_focused_text_input() {
+        let widget = TextAcceptingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let root = widget.id();
+        let mut tree = TestTree::single(RecordingWidget::new(
+            Rect::new(200.0, 200.0, 10.0, 10.0),
+            Rc::new(RefCell::new(Vec::new())),
+        ));
+        tree.root = root;
+        tree.nodes.clear();
+        tree.nodes.insert(root, Box::new(widget));
+        let mut router = EventRouter::new(root);
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Viewer));
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::key_only(KeyCode::S),
+            Action::SaveProject,
+        );
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::new(KeyCode::S, Modifiers::shift()),
+            Action::SaveProject,
+        );
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        for modifiers in [Modifiers::none(), Modifiers::shift()] {
+            let result = router.route(
+                UiEvent::KeyDown { key: KeyCode::S, modifiers },
+                &mut tree,
+                &|action| dispatched.borrow_mut().push(action),
+            );
+            assert_eq!(result, EventResult::Ignored);
+        }
+        assert!(dispatched.borrow().is_empty());
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::S, modifiers: Modifiers::ctrl() },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(dispatched.borrow().as_slice(), &[Action::SaveProject]);
+    }
+
+    #[test]
+    fn router_does_not_dispatch_shortcut_when_focused_widget_handles_keydown() {
+        let widget = KeyHandlingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0));
+        let root = widget.id();
+        let mut tree = TestTree::single(RecordingWidget::new(
+            Rect::new(200.0, 200.0, 10.0, 10.0),
+            Rc::new(RefCell::new(Vec::new())),
+        ));
+        tree.root = root;
+        tree.nodes.clear();
+        tree.nodes.insert(root, Box::new(widget));
+        let mut router = EventRouter::new(root);
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Export));
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::ctrl(KeyCode::S),
+            Action::SaveProject,
+        );
+        let dispatched = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::S,
+                modifiers: mondrian_ui_core::types::Modifiers::ctrl(),
+            },
+            &mut tree,
+            &|action| dispatched.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(dispatched.borrow().is_empty());
+    }
+
+    #[test]
+    fn router_blurs_focused_widget_on_pointer_down_outside() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), None);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(router.focused(), None);
+        assert!(log.borrow().contains(&"focus-lost".into()));
+        let ime = router.take_ime_request().expect("blur should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_clears_focus_capture_and_ime_on_window_focus_loss() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        assert_eq!(router.captured(), Some(root));
+        let ime = router.take_ime_request().expect("focused widget should enable IME");
+        assert!(ime.enabled);
+        assert!(ime.cursor_area.is_some());
+        log.borrow_mut().clear();
+
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(router.captured(), None);
+        assert_eq!(router.hovered(), None);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost"]);
+        let ime = router.take_ime_request().expect("window blur should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+        assert!(router.take_repaint_request());
+    }
+
+    #[test]
+    fn router_cancels_active_drag_on_window_focus_loss() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        let asset_id = AssetId::new();
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(asset_id),
+            target: Some(root),
+        });
+        router.set_capture(Some(root));
+
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["drag-leave"]);
+        assert!(router.active_drag_payload().is_none());
+        assert_eq!(router.captured(), None);
+        let ime = router.take_ime_request().expect("window blur should disable IME");
+        assert!(!ime.enabled);
+    }
+
+    #[test]
+    fn router_derives_focused_panel_from_clicked_widget_ancestors() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(10.0, 10.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let panel =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 240.0, 120.0), PanelKind::Inspector);
+        let root = panel.id();
+        let mut tree = TestTree::parent_child(panel, child);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(20.0, 20.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Inspector)
+        );
+        assert!(log.borrow().contains(&"down".into()));
+    }
+
+    #[test]
+    fn router_tab_focus_derives_panel_from_next_widget_ancestors() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(10.0, 10.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let panel =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 240.0, 120.0), PanelKind::Timeline);
+        let root = panel.id();
+        let mut tree = TestTree::parent_child(panel, child);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Timeline)
+        );
+    }
+
+    #[test]
+    fn router_leaves_modified_tab_for_shortcut_resolution() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.shortcut_manager_mut().register_global(
+            mondrian_ui_core::shortcut::ShortcutBinding::new(KeyCode::Tab, Modifiers::ctrl()),
+            Action::SaveProject,
+        );
+        let actions = RefCell::new(Vec::new());
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::ctrl() },
+            &mut tree,
+            &|action| actions.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(actions.borrow().as_slice(), &[Action::SaveProject]);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert!(log.borrow().is_empty());
+    }
+
+    #[test]
+    fn router_keeps_pointer_events_on_captured_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), Some(root));
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert!(log.borrow().contains(&"move".into()));
+
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_routes_pointer_to_top_overlay_and_clears_stale_sibling_capture() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let modal = OverlayRecordingWidget::new(
+            "modal",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let modal_id = modal.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+                (modal_id, Box::new(modal) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(captured_id, root_id), (modal_id, root_id)]),
+            children: HashMap::from([(root_id, vec![captured_id, modal_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.set_capture(Some(captured_id));
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(50.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["modal:down"]);
+        assert_eq!(router.captured(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                overlay_capture_preemptions: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn router_release_smoke_preserves_platform_pass_through_and_overlay_capture_contracts() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(0.0, 0.0, 100.0, 100.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let overlay = OverlayRecordingWidget::new(
+            "overlay",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let overlay_id = overlay.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+                (overlay_id, Box::new(overlay) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(captured_id, root_id), (overlay_id, root_id)]),
+            children: HashMap::from([(root_id, vec![captured_id, overlay_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        let actions = RefCell::new(Vec::new());
+
+        for (key, modifiers) in [
+            (
+                KeyCode::F,
+                Modifiers { ctrl: true, alt: true, ..Modifiers::none() },
+            ),
+            (KeyCode::Tab, Modifiers::ctrl()),
+            (
+                KeyCode::Space,
+                Modifiers { meta: true, ..Modifiers::none() },
+            ),
+        ] {
+            let result = router.route(UiEvent::KeyDown { key, modifiers }, &mut tree, &|action| {
+                actions.borrow_mut().push(action)
+            });
+
+            assert_eq!(
+                result,
+                EventResult::Ignored,
+                "unmatched modified chord {modifiers:?}+{key:?} must remain available to the platform"
+            );
+        }
+        assert!(actions.borrow().is_empty());
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.captured(), None);
+
+        router.set_capture(Some(captured_id));
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(50.0, 50.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|action| actions.borrow_mut().push(action),
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["overlay:down"]);
+        assert_eq!(router.captured(), None);
+
+        router.set_capture(Some(overlay_id));
+        let result = router.route(UiEvent::FocusLost, &mut tree, &|action| {
+            actions.borrow_mut().push(action)
+        });
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.captured(), None);
+        assert_eq!(router.focused(), None);
+        let ime = router.take_ime_request().expect("window blur should always disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+        assert!(router.take_repaint_request());
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unmatched_shortcut_chords: 3,
+                overlay_capture_preemptions: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn router_preserves_capture_inside_ancestor_overlay() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let modal = OverlayRecordingWidget::new(
+            "modal",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let modal_id = modal.id();
+        let captured = OverlayRecordingWidget::new(
+            "captured",
+            Rect::new(40.0, 40.0, 80.0, 80.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let captured_id = captured.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (modal_id, Box::new(modal) as Box<dyn Widget>),
+                (captured_id, Box::new(captured) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(modal_id, root_id), (captured_id, modal_id)]),
+            children: HashMap::from([(root_id, vec![modal_id]), (modal_id, vec![captured_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.set_capture(Some(captured_id));
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(300.0, 300.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["captured:move"]);
+    }
+
+    #[test]
+    fn router_routes_active_drag_to_hit_target_until_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        let asset_id = AssetId::new();
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(asset_id),
+            target: None,
+        });
+        router.set_capture(Some(WidgetId::new()));
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            router.active_drag.as_ref().and_then(|drag| drag.target),
+            Some(root)
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+        assert_eq!(
+            router.active_drag_payload(),
+            Some(&DragPayload::Asset(asset_id))
+        );
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(20.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over"]);
+
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drag-over", "drop"]);
+        assert!(router.active_drag_payload().is_none());
+        assert_eq!(router.captured(), None);
+    }
+
+    #[test]
+    fn router_ends_active_drag_even_when_drop_target_ignores_drop() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = DropIgnoringWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(AssetId::new()),
+            target: None,
+        });
+        router.set_capture(Some(WidgetId::new()));
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(10.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseUp {
+                    position: Point::new(10.0, 10.0),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(log.borrow().as_slice(), ["drag-enter", "drop-ignored"]);
+        assert!(router.active_drag_payload().is_none());
+        assert_eq!(router.captured(), None);
+
+        assert_eq!(
+            router.route(
+                UiEvent::MouseMove {
+                    position: Point::new(20.0, 10.0),
+                    modifiers: Modifiers::none(),
+                },
+                &mut tree,
+                &|_| {},
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["drag-enter", "drop-ignored", "mouse-move"]
+        );
+    }
+
+    #[test]
+    fn router_routes_active_drag_to_overlay_target_before_normal_content() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let root = OverlayRecordingWidget::new(
+            "root",
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            false,
+            false,
+            Rc::clone(&log),
+        );
+        let root_id = root.id();
+        let overlay = OverlayRecordingWidget::new(
+            "overlay",
+            Rect::new(900.0, 900.0, 80.0, 80.0),
+            true,
+            false,
+            Rc::clone(&log),
+        );
+        let overlay_id = overlay.id();
+        let mut tree = TestTree {
+            root: root_id,
+            nodes: HashMap::from([
+                (root_id, Box::new(root) as Box<dyn Widget>),
+                (overlay_id, Box::new(overlay) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(overlay_id, root_id)]),
+            children: HashMap::from([(root_id, vec![overlay_id])]),
+        };
+        let mut router = EventRouter::new(root_id);
+        router.active_drag = Some(ActiveDrag {
+            payload: DragPayload::Asset(AssetId::new()),
+            target: None,
+        });
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(20.0, 20.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            router.active_drag.as_ref().and_then(|drag| drag.target),
+            Some(overlay_id)
+        );
+        assert_eq!(log.borrow().as_slice(), ["overlay:drag-enter"]);
+
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(20.0, 20.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["overlay:drag-enter", "overlay:drop"]
+        );
+        assert!(router.active_drag_payload().is_none());
+    }
+
+    #[test]
+    fn router_clears_stale_capture_when_widget_tree_rebuilds() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), Some(root));
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(500.0, 500.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.captured(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                stale_captured_widgets: 1,
+                stale_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn router_clears_stale_focus_when_widget_tree_rebuilds() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(root), Some(PanelKind::Export));
+        assert_eq!(router.focus_manager().focused_widget(), Some(root));
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(UiEvent::ImeCommit("ignored".into()), &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                stale_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+    }
+
+    #[test]
+    fn router_disables_ime_when_focused_widget_disappears() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(root));
+        let ime = router.take_ime_request().expect("focused text input should enable IME");
+        assert!(ime.enabled);
+        assert!(ime.cursor_area.is_some());
+
+        tree.nodes.remove(&root);
+
+        let result = router.route(UiEvent::ImeCommit("ignored".into()), &mut tree, &|_| {});
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        let ime = router.take_ime_request().expect("stale focused widget should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_releases_focus_when_focused_widget_becomes_unfocusable() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(true));
+        let widget = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        log.borrow_mut().clear();
+
+        focusable.set(false);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Enter,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost"]);
+        assert_eq!(
+            router.take_diagnostics(),
+            EventRouteDiagnostics {
+                unfocusable_focused_widgets: 1,
+                ..EventRouteDiagnostics::default()
+            }
+        );
+        let ime = router
+            .take_ime_request()
+            .expect("unfocusable focused widget should disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
+
+    #[test]
+    fn router_normalizes_stale_focused_panel_before_routing() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let parent =
+            PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 200.0, 120.0), PanelKind::Timeline);
+        let child = RecordingWidget::new(Rect::new(20.0, 20.0, 80.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let mut tree = TestTree::parent_child(parent, child);
+        let mut router = EventRouter::new(tree.root_id());
+        router
+            .focus_manager_mut()
+            .set_focused_widget(Some(child_id), Some(PanelKind::Export));
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::F1,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Timeline)
+        );
+    }
+
+    #[test]
+    fn router_normalizes_focused_panel_after_mouse_move_focus_request() {
+        let parent = PanelBoundaryWidget::new(Rect::new(0.0, 0.0, 200.0, 120.0), PanelKind::Assets);
+        let child = FocusOnMoveWidget::new(Rect::new(20.0, 20.0, 80.0, 30.0));
+        let child_id = child.id();
+        let mut tree = TestTree::parent_child(parent, child);
+        let mut router = EventRouter::new(tree.root_id());
+
+        let result = router.route(
+            UiEvent::MouseMove {
+                position: Point::new(30.0, 30.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(child_id));
+        assert_eq!(
+            router.focus_manager().focused_panel(),
+            Some(PanelKind::Assets)
+        );
+    }
+
+    #[test]
+    fn router_tab_to_same_single_focusable_keeps_focus_stable() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(root));
+        let _ = router.take_ime_request();
+        log.borrow_mut().clear();
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(root));
+        assert!(log.borrow().is_empty());
+        assert!(router.take_ime_request().is_none());
+    }
+
+    #[test]
+    fn router_tab_without_focusable_target_is_ignored() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(false));
+        let widget = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::KeyDown {
+                key: KeyCode::Tab,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(router.focused(), None);
+        assert_eq!(router.focus_manager().focused_widget(), None);
+        assert!(log.borrow().is_empty());
+    }
+
+    #[test]
+    fn router_exposes_repaint_request_until_taken() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert!(router.take_repaint_request());
+        assert!(!router.take_repaint_request());
+    }
+
+    #[test]
+    fn router_uses_injected_tooltip_manager() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let root = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::with_platform_and_tooltip(
+            root,
+            Box::new(NoopPlatformService),
+            Box::new(ImmediateTooltip::default()),
+        );
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 20.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        let tooltip = router.current_tooltip().expect("tooltip should be visible");
+        assert_eq!(tooltip.text, "tip");
+        assert_eq!(tooltip.position, Point::new(10.0, 20.0));
+        assert!(tooltip.visible);
+    }
+
+    struct FocusEventWidget {
+        id: WidgetId,
+        bounds: Rect,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for FocusEventWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            match event {
+                UiEvent::FocusGained { source } => {
+                    self.log.borrow_mut().push(format!("focus-gained:{source:?}"))
+                }
+                UiEvent::FocusLost => self.log.borrow_mut().push("focus-lost".into()),
+                _ => {}
+            }
+            EventResult::Ignored
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+
+        fn can_focus(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn router_mouse_hover_does_not_send_focus_gained() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let root = widget.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
+        let mut tree = TestTree {
+            root,
+            nodes,
+            parents: HashMap::new(),
+            children: HashMap::new(),
+        };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseMove {
+                position: Point::new(10.0, 10.0),
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert!(log.borrow().is_empty());
+        assert_eq!(router.focused(), None);
+    }
+
+    #[test]
+    fn router_click_to_focus_sends_focus_gained_before_mouse_down() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let root = widget.id;
+        let mut nodes = HashMap::new();
+        nodes.insert(root, Box::new(widget) as Box<dyn Widget>);
+        let mut tree = TestTree {
+            root,
+            nodes,
+            parents: HashMap::new(),
+            children: HashMap::new(),
+        };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(router.focused(), Some(root));
+        assert_eq!(log.borrow().as_slice(), ["focus-gained:Pointer"]);
+    }
+
+    #[test]
+    fn router_tab_focus_blurs_old_widget_before_focusing_next() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let first = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let first_id = first.id;
+        let second = FocusEventWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 40.0, 100.0, 30.0),
+            log: Rc::clone(&log),
+        };
+        let second_id = second.id;
+        let mut tree = TestTree::parent_child(first, second);
+        let mut router = EventRouter::new(first_id);
+        router.focus_manager_mut().set_focused_widget(Some(first_id), None);
+
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(router.focused(), Some(second_id));
+        assert_eq!(
+            log.borrow().as_slice(),
+            ["focus-lost", "focus-gained:Keyboard"]
+        );
+    }
+
+    struct ParentPostWidget {
+        id: WidgetId,
+        bounds: Rect,
+        child_id: WidgetId,
+        handle_before: bool,
+        log: Rc<RefCell<Vec<String>>>,
+    }
+
+    impl Widget for ParentPostWidget {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+
+        fn measure(&self, _constraint: LayoutConstraint) -> Size {
+            Size::new(self.bounds.width, self.bounds.height)
+        }
+
+        fn layout(&mut self, bounds: Rect) {
+            self.bounds = bounds;
+        }
+
+        fn event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            EventResult::Ignored
+        }
+
+        fn before_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            if self.handle_before {
+                self.log.borrow_mut().push("parent-before".into());
+                EventResult::Handled
+            } else {
+                EventResult::Ignored
+            }
+        }
+
+        fn after_child_event(&mut self, _event: &UiEvent, _ctx: &mut EventContext) -> EventResult {
+            self.log.borrow_mut().push("parent-after".into());
+            EventResult::Handled
+        }
+
+        fn paint(&self, _ctx: &mut PaintContext) {}
+
+        fn hit_test(&self, point: Point) -> bool {
+            self.bounds.contains(point)
+        }
+    }
+
+    struct ParentChildTree {
+        parent: ParentPostWidget,
+        child: RecordingWidget,
+    }
+
+    impl WidgetTree for ParentChildTree {
+        fn get(&self, id: WidgetId) -> Option<&dyn Widget> {
+            if id == self.parent.id {
+                Some(&self.parent)
+            } else if id == self.child.id {
+                Some(&self.child)
+            } else {
+                None
+            }
+        }
+
+        fn get_mut(&mut self, id: WidgetId) -> Option<&mut dyn Widget> {
+            if id == self.parent.id {
+                Some(&mut self.parent)
+            } else if id == self.child.id {
+                Some(&mut self.child)
+            } else {
+                None
+            }
+        }
+
+        fn root_id(&self) -> WidgetId {
+            self.parent.id
+        }
+
+        fn parent_id(&self, id: WidgetId) -> Option<WidgetId> {
+            if id == self.child.id {
+                Some(self.parent.id)
+            } else {
+                None
+            }
+        }
+
+        fn children_ids(&self, id: WidgetId) -> Vec<WidgetId> {
+            if id == self.parent.id {
+                vec![self.parent.child_id]
+            } else {
+                vec![]
+            }
+        }
+    }
+
+    #[test]
+    fn router_calls_parent_after_child_event() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            handle_before: false,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(log.borrow().contains(&"parent-after".into()));
+    }
+
+    #[test]
+    fn router_calls_parent_after_child_focus_lost() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            handle_before: false,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let _ = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(child_id));
+        let _ = router.route(
+            UiEvent::MouseUp {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(200.0, 200.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert_eq!(log.borrow().as_slice(), ["focus-lost", "parent-after"]);
+    }
+
+    #[test]
+    fn router_allows_parent_before_child_to_handle_pointer_event() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let child = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let child_id = child.id();
+        let parent = ParentPostWidget {
+            id: WidgetId::new(),
+            bounds: Rect::new(0.0, 0.0, 100.0, 30.0),
+            child_id,
+            handle_before: true,
+            log: Rc::clone(&log),
+        };
+        let root = parent.id;
+        let mut tree = ParentChildTree { parent, child };
+        let mut router = EventRouter::new(root);
+
+        let result = router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: mondrian_ui_core::types::Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(log.borrow().as_slice(), ["parent-before"]);
+    }
+
+    // ── Keyboard-only traversal smoke matrix ────────────────────────────────────
+
+    #[test]
+    fn keyboard_tab_traverses_focusable_siblings_in_order() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let a = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let a_id = a.id();
+        let b = RecordingWidget::new(Rect::new(0.0, 40.0, 100.0, 30.0), Rc::clone(&log));
+        let b_id = b.id();
+        let c = RecordingWidget::new(Rect::new(0.0, 80.0, 100.0, 30.0), Rc::clone(&log));
+        let c_id = c.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([
+                (a_id, Box::new(a) as Box<dyn Widget>),
+                (b_id, Box::new(b) as Box<dyn Widget>),
+                (c_id, Box::new(c) as Box<dyn Widget>),
+            ]),
+            parents: HashMap::from([(b_id, root), (c_id, root)]),
+            children: HashMap::from([(root, vec![b_id, c_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        // Click to focus first widget
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Tab → next focusable
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(b_id));
+
+        // Tab → next
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(c_id));
+
+        // Tab wraps to first
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+    }
+
+    #[test]
+    fn keyboard_shift_tab_traverses_backward_and_wraps() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let a = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let a_id = a.id();
+        let b = RecordingWidget::new(Rect::new(0.0, 40.0, 100.0, 30.0), Rc::clone(&log));
+        let b_id = b.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([(a_id, Box::new(a) as Box<dyn Widget>), (b_id, Box::new(b))]),
+            parents: HashMap::from([(b_id, root)]),
+            children: HashMap::from([(root, vec![b_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        // Focus first via click
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Shift+Tab wraps backward to last
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(b_id));
+
+        // Shift+Tab back to first
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::shift() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+    }
+
+    #[test]
+    fn keyboard_tab_skips_non_focusable_widgets() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let focusable = Rc::new(Cell::new(true));
+        let skip = Rc::new(Cell::new(false)); // non-focusable
+        let a = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 0.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let a_id = a.id();
+        let b = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 40.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&skip),
+        );
+        let b_id = b.id();
+        let c = RecordingWidget::with_focusable_flag(
+            Rect::new(0.0, 80.0, 100.0, 30.0),
+            Rc::clone(&log),
+            Rc::clone(&focusable),
+        );
+        let c_id = c.id();
+        let root = a_id;
+        let mut tree = TestTree {
+            root,
+            nodes: HashMap::from([
+                (a_id, Box::new(a) as Box<dyn Widget>),
+                (b_id, Box::new(b) as Box<dyn Widget>),
+                (c_id, Box::new(c)),
+            ]),
+            parents: HashMap::from([(b_id, root), (c_id, root)]),
+            children: HashMap::from([(root, vec![b_id, c_id])]),
+        };
+        let mut router = EventRouter::new(root);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(a_id));
+        log.borrow_mut().clear();
+
+        // Tab should skip non-focusable b and go to c
+        router.route(
+            UiEvent::KeyDown { key: KeyCode::Tab, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(c_id));
+    }
+
+    #[test]
+    fn keyboard_enter_on_focused_widget_is_routed_to_it() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        // Focus via click
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.focused(), Some(id));
+        log.borrow_mut().clear();
+
+        // Enter routed to focused widget (RecordingWidget ignores keys → Ignored)
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut tree,
+            &|_| {},
+        );
+        // Ignored is correct — the key reaches the focused widget but it doesn't handle it
+        let _ = result;
+    }
+
+    #[test]
+    fn keyboard_modified_enter_is_not_trapped() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        // Ctrl+Enter is held for global shortcuts
+        let result = router.route(
+            UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::ctrl() },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(result, EventResult::Ignored);
+    }
+
+    // ── IME / clipboard / drag smoke ─────────────────────────────────────────
+
+    #[test]
+    fn ime_commit_routes_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::ImeCommit("hello".into()), &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["commit:hello"]);
+    }
+
+    #[test]
+    fn ime_cancel_routes_to_focused_widget() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::ImeCancel, &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["ime-cancel"]);
+    }
+
+    #[test]
+    fn drag_events_route_to_hit_target() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(tree.root);
+
+        router.route(
+            UiEvent::DragEnter {
+                payload: DragPayload::File(vec![]),
+                position: Point::new(10.0, 10.0),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-enter"]);
+        log.borrow_mut().clear();
+
+        router.route(
+            UiEvent::DragOver { position: Point::new(10.0, 10.0) },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(log.borrow().as_slice(), ["drag-over"]);
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::DragLeave, &mut tree, &|_| {});
+        assert_eq!(log.borrow().as_slice(), ["drag-leave"]);
+    }
+
+    #[test]
+    fn focus_loss_releases_pointer_capture() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        // Capture via mouse down
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        assert_eq!(router.captured(), Some(id));
+        log.borrow_mut().clear();
+
+        // Blur releases capture
+        router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+        assert_eq!(router.captured(), None);
+        assert!(router.take_repaint_request());
+    }
+
+    #[test]
+    fn focus_loss_disables_ime() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let widget = RecordingWidget::new(Rect::new(0.0, 0.0, 100.0, 30.0), Rc::clone(&log));
+        let id = widget.id();
+        let mut tree = TestTree::single(widget);
+        let mut router = EventRouter::new(id);
+
+        router.route(
+            UiEvent::MouseDown {
+                position: Point::new(10.0, 10.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut tree,
+            &|_| {},
+        );
+        // Take the IME enable request from mouse down
+        assert!(router.take_ime_request().is_some_and(|r| r.enabled));
+        log.borrow_mut().clear();
+
+        router.route(UiEvent::FocusLost, &mut tree, &|_| {});
+        let ime = router.take_ime_request().expect("focus loss must disable IME");
+        assert!(!ime.enabled);
+        assert_eq!(ime.cursor_area, None);
+    }
+}

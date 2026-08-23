@@ -1,0 +1,68 @@
+{
+  "schema_version": 4,
+  "id": "windows-playback-m0-v4",
+  "machine_profile": "windows-alpha-reference-v2",
+  "build_profile": "release",
+  "requires_clean_tree_for_baseline": true,
+  "baseline_machine_requirements": {
+    "memory_class": "standard-playback"
+  },
+  "diagnostic_execution": {
+    "explicit_unqualified_machine_opt_in_required": true,
+    "waivable_machine_issue_codes": [
+      "machine.memory-class"
+    ]
+  },
+  "gates": [
+    {
+      "id": "video",
+      "fixture_id": "generated-playback-4k25-hevc-main10-rec709-v1",
+      "required_purposes": [
+        "professional-video-playback",
+        "long-gop-seek",
+        "10-bit-decode",
+        "cancellation",
+        "whole-process-memory"
+      ],
+      "cargo_test": "preview_media_professional_4k_hevc_main10_hardware_playback_gate",
+      "media_environment": "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH",
+      "build_timeout_seconds": 2700,
+      "process_timeout_seconds": 2700,
+      "decode_progress_environment": "MONDRIAN_PREVIEW_DECODE_EXECUTION_OUTPUT",
+      "decode_progress_required": true,
+      "packaged_demux_worker_required": true,
+      "expected_report_profile": "uhd_hevc_main10_hardware_1x_v7",
+      "expected_report_path": "professional_media_gates"
+    },
+    {
+      "id": "audio",
+      "fixture_id": "generated-playback-aac-48k-stereo-v1",
+      "required_purposes": [
+        "professional-audio-playback",
+        "device-clock",
+        "controlled-device-recovery",
+        "proven-av-phase",
+        "decoded-window-cache",
+        "whole-process-memory"
+      ],
+      "cargo_test": "playback_professional_cpal_av_gate",
+      "media_environment": "MONDRIAN_PLAYBACK_PROFESSIONAL_AUDIO_MEDIA_PATH",
+      "build_timeout_seconds": 2700,
+      "process_timeout_seconds": 2700,
+      "expected_report_profile": "cpal_av_48khz_30min_recovery_v2",
+      "expected_report_path": "$"
+    }
+  ],
+  "baseline_acceptance": {
+    "required_gate_ids": ["video", "audio"],
+    "machine_id_required": true,
+    "fixture_artifact_hash_required": true,
+    "recipe_hash_required_for_generated_fixture": true,
+    "machine_report_required": true,
+    "gate_report_required": true,
+    "bounded_gate_build_required": true,
+    "external_process_timeout_required": true,
+    "video_decode_progress_journal_required": true,
+    "audio_controlled_recovery_required": true
+  }
+}

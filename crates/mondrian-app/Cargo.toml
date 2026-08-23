@@ -4,46 +4,115 @@ version.workspace    = true
 edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
+rust-version.workspace = true
+default-run = "mondrian"
 
+[features]
+validation = [
+    "mondrian-export/validation",
+    "mondrian-media/validation",
+    "mondrian-renderer/validation",
+]
+
+# Product app UI editor shell.
 [[bin]]
 name = "mondrian"
 path = "src/main.rs"
 
+[[bin]]
+name = "mondrian-golden"
+path = "src/bin/mondrian_golden.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
+# Developer gallery for reusable app UI widgets.
+[[bin]]
+name = "ui_demo"
+path = "src/bin/ui_demo.rs"
+
+[[bin]]
+name = "ui_color_test"
+path = "src/bin/ui_color_test.rs"
+
+[[bin]]
+name = "ui_widget_test"
+path = "src/bin/ui_widget_test.rs"
+
+[[bin]]
+name = "ui_pipeline_test"
+path = "src/bin/ui_pipeline_test.rs"
+
+[[bin]]
+name = "viewer_gpu_output_budget"
+path = "src/bin/viewer_gpu_output_budget.rs"
+
 [dependencies]
+mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
+mondrian-playback = { workspace = true }
+mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }
 mondrian-assets   = { workspace = true }
 mondrian-effects  = { workspace = true }
 mondrian-export   = { workspace = true }
+mondrian-project  = { workspace = true }
 
-# UI（Phase 1: egui）
-egui      = "0.33"
-eframe    = { version = "0.33", features = ["wgpu", "glow"] }
-egui-wgpu = "0.33"
-egui_extras = { version = "0.33", features = ["all_loaders"] }
-rfd       = "0.14"
+# 新 UI 架构
+mondrian-editor-state = { workspace = true }
+mondrian-ui-core      = { workspace = true }
+mondrian-ui-theme     = { workspace = true }
+mondrian-platform     = { workspace = true }
+mondrian-ui-renderer  = { workspace = true }
+mondrian-ui-layout    = { workspace = true }
+mondrian-ui-events    = { workspace = true }
+mondrian-ui-widgets   = { workspace = true }
+mondrian-ui-tooltip   = { workspace = true }
+mondrian-ui-text      = { workspace = true }
+
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+
+rfd       = "0.15"
 image     = { workspace = true }
-usvg = "0.45"
-resvg = "0.45"
+usvg      = { workspace = true }
+resvg     = { workspace = true }
 tiny-skia = "0.11"
 
 # 异步
 tokio     = { workspace = true }
 # 日志
 tracing           = { workspace = true }
-tracing-subscriber = { workspace = true }
 # 错误
 anyhow    = { workspace = true }
+thiserror = { workspace = true }
 # 序列化
 serde     = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
 # 并发
 parking_lot = { workspace = true }
-rayon = { workspace = true }
-zip = "0.6"
+glam  = { workspace = true }
+bytemuck = { workspace = true }
+wgpu = { workspace = true }
+winit = "0.30"
+pollster = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { workspace = true, features = ["Win32_Security"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1"
-image = { workspace = true, features = ["ico"] }
+
+[dev-dependencies]
+mondrian-editor-state = { workspace = true, features = ["test-support"] }
+mondrian-export = { workspace = true, features = ["validation"] }
+mondrian-renderer = { workspace = true, features = ["validation"] }

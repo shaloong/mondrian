@@ -1,6 +1,7 @@
 [workspace]
-resolver = "2"
+resolver = "3"
 members = [
+    "crates/mondrian-storage",
     "crates/mondrian-core",
     "crates/mondrian-media",
     "crates/mondrian-timeline",
@@ -9,20 +10,35 @@ members = [
     "crates/mondrian-ai",
     "crates/mondrian-effects",
     "crates/mondrian-export",
+    "crates/mondrian-project",
+    "crates/mondrian-playback",
+    "crates/mondrian-audio",
     "crates/mondrian-app",
+    "crates/mondrian-editor-state",
+    "crates/mondrian-ui-core",
+    "crates/mondrian-ui-theme",
+    "crates/mondrian-platform-core",
+    "crates/mondrian-platform",
+    "crates/mondrian-ui-renderer",
+    "crates/mondrian-ui-layout",
+    "crates/mondrian-ui-events",
+    "crates/mondrian-ui-text",
+    "crates/mondrian-ui-widgets",
+    "crates/mondrian-ui-tooltip",
 ]
 
 [workspace.package]
-version       = "0.1.0"
-edition       = "2021"
-authors       = ["Mondrian Team <team@mondrian.dev>"]
-license       = "MIT OR Apache-2.0"
+version       = "0.2.0"
+edition       = "2024"
+authors       = ["Shaloong <contact@shaloong.com>"]
+license       = "AGPL-3.0-or-later"
 repository    = "https://github.com/mondrian-studio/mondrian"
-rust-version  = "1.92"
+rust-version  = "1.97.1"
 
 # ── 全局共享依赖（各 crate 通过 workspace = true 引用）──────────────────────────
 [workspace.dependencies]
 # ---- 内部 crate ----
+mondrian-storage  = { path = "crates/mondrian-storage" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
@@ -31,6 +47,22 @@ mondrian-assets   = { path = "crates/mondrian-assets" }
 mondrian-ai       = { path = "crates/mondrian-ai" }
 mondrian-effects  = { path = "crates/mondrian-effects" }
 mondrian-export   = { path = "crates/mondrian-export" }
+mondrian-project  = { path = "crates/mondrian-project" }
+mondrian-playback = { path = "crates/mondrian-playback" }
+mondrian-audio    = { path = "crates/mondrian-audio" }
+
+# ---- 新 UI 架构 ----
+mondrian-editor-state = { path = "crates/mondrian-editor-state" }
+mondrian-ui-core      = { path = "crates/mondrian-ui-core" }
+mondrian-ui-theme     = { path = "crates/mondrian-ui-theme" }
+mondrian-platform-core = { path = "crates/mondrian-platform-core" }
+mondrian-platform     = { path = "crates/mondrian-platform" }
+mondrian-ui-renderer  = { path = "crates/mondrian-ui-renderer" }
+mondrian-ui-layout    = { path = "crates/mondrian-ui-layout" }
+mondrian-ui-events    = { path = "crates/mondrian-ui-events" }
+mondrian-ui-text      = { path = "crates/mondrian-ui-text" }
+mondrian-ui-widgets   = { path = "crates/mondrian-ui-widgets" }
+mondrian-ui-tooltip   = { path = "crates/mondrian-ui-tooltip" }
 
 # ---- 异步运行时 ----
 tokio            = { version = "1",    features = ["full"] }
@@ -45,25 +77,67 @@ thiserror        = "1"
 serde            = { version = "1",    features = ["derive"] }
 serde_json       = "1"
 toml             = "0.8"
+sha2             = "0.10"
 
 # ---- 日志 / 追踪 ----
 tracing          = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender  = "0.2.5"
 
 # ---- GPU 渲染 ----
-wgpu             = "22.1"
+wgpu             = { version = "30.0", features = ["naga-ir"] }
+naga             = { version = "30.0", features = ["glsl-in", "wgsl-out", "wgsl-in"] }
 bytemuck         = { version = "1",    features = ["derive"] }
-glam             = { version = "0.27", features = ["serde"] }
+glam             = { version = "0.29", features = ["serde"] }
+lyon             = "1"
+resvg            = { version = "0.45", default-features = false }
+tiny-skia        = "0.11"
+tiny-skia-path   = "0.11"
+usvg             = { version = "0.45", default-features = false }
 
 # ---- 并发 / 消息 ----
 crossbeam-channel = "0.5"
+crossbeam-queue = "0.3"
 parking_lot       = "0.12"
-rayon             = "1"
 dashmap           = "6"
+pulp              = "0.22"
 
 # ---- ID / 时间 ----
 uuid             = { version = "1",    features = ["v4", "serde"] }
 chrono           = { version = "0.4",  features = ["serde"] }
+
+# ---- Unicode ----
+unicode-segmentation = "1"
+arboard              = "3"
+xcap                 = "0.3"
+cosmic-text          = "0.19"
+fontdb               = { version = "0.23", default-features = false, features = ["fontconfig"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_ColorSystem",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D12",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+] }
 
 # ---- 网络 / AI API ----
 reqwest          = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
@@ -73,11 +147,21 @@ url              = "2"
 walkdir          = "2"
 tempfile         = "3"
 
+# ---- 颜色管理 ----
+ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933c65dc4e8e4e22767174f0e22b07fe7af42e07", features = ["bundled"] }
+
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+zip              = "0.6"
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验
+
+# The App lib-test links the complete product and validation harness. Avoiding a
+# full App PDB keeps that monolithic MSVC link practical on 16 GiB machines;
+# domain crates retain normal test debuginfo and App incremental builds stay on.
+[profile.test.package.mondrian-app]
+debug = 0
 
 [profile.release]
 opt-level     = 3

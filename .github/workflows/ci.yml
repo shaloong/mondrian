@@ -9,16 +9,36 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # Use a modern registry/toolchain while vcpkg.json locks ffmpeg-next 8.1 to
-  # the compatible FFmpeg 6 ABI. The tag is verified against this commit.
+  # Keep native dependency resolution reproducible and identical to Release.
   VCPKG_REF: "2026.07.29"
-  VCPKG_COMMIT: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 缓存策略：每个 Job 独立缓存，避免交叉污染并提升命中率
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
+  reference-contracts:
+    name: Reference Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: 校验 Reference Corpus 与项目契约
+        shell: pwsh
+        run: ./scripts/validation/validate-reference-assets.ps1 -Tier Pr
+
+      - name: 校验 GitHub Actions 不可变身份
+        shell: pwsh
+        run: ./scripts/validation/validate-github-actions-pins.ps1
+
+      - name: 校验 Windows 参考机资格契约
+        shell: pwsh
+        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-qualified-v3.json -RequiredMemoryClass standard-playback -RequireBaselineEligibility -OutputPath target/validation/reference-machine-contract.json
+
+      - name: 校验 8 GiB 最低支持内存契约
+        shell: pwsh
+        run: ./scripts/validation/validate-windows-reference.ps1 -MachineReportPath tests/validation/fixtures/windows-machine-minimum-memory-v3.json -RequiredMemoryClass minimum-supported -OutputPath target/validation/minimum-memory-contract.json
+
   # ───────────────────────────────────────────────────────────────────────────
   # 代码格式 & 风格检查（最快，优先失败）
   # ───────────────────────────────────────────────────────────────────────────
@@ -26,15 +46,15 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
           components: rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
 
@@ -48,15 +68,15 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
 
@@ -66,10 +86,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 运行 clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   # ───────────────────────────────────────────────────────────────────────────
   # MSRV（最低支持 Rust 版本）验证
@@ -78,13 +98,15 @@ jobs:
     name: MSRV
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # workspace.rust-version = 1.92
-      - name: 安装 Rust 1.92
-        uses: dtolnay/rust-toolchain@1.92.0
+      # workspace.rust-version = 1.97
+      - name: 安装 Rust 1.97
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
 
@@ -94,7 +116,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 编译 workspace（验证 MSRV 兼容性）
         run: cargo build --workspace --exclude mondrian-app
@@ -106,23 +128,23 @@ jobs:
     name: Deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
 
       - name: 安装 cargo-deny
-        uses: taiki-e/install-action@cargo-deny
+        uses: taiki-e/install-action@b5f481f16e786705c7dde1397a33ca4a65131d62 # cargo-deny
 
       - name: 运行 cargo-deny
         run: cargo deny check bans licenses advisories
 
   # ───────────────────────────────────────────────────────────────────────────
-  # 测试（Linux + Windows；macOS 逻辑与 Linux 同构，仅在 Release 验证）
+  # 测试（Windows + Linux + macOS；实机硬件资格仍由专用 Windows 门禁负责）
   # ───────────────────────────────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }})
@@ -130,22 +152,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
+          components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
-          # ffmpeg-sys-next generates bindings from native headers. Keep its
-          # target cache isolated whenever the pinned native manifest changes.
-          key: native-${{ hashFiles('vcpkg.json') }}
 
       # ── Linux ──────────────────────────────────────────────────────────────
       - name: 安装 FFmpeg (Linux)
@@ -155,22 +175,27 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
+
+      # ── macOS ─────────────────────────────────────────────────────────────
+      - name: 安装 FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
 
       # ── Windows ───────────────────────────────────────────────────────────
       - name: 缓存 vcpkg (Windows)
         if: runner.os == 'Windows'
         id: vcpkg-cache
-        uses: actions/cache@v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             C:\vcpkg\downloads
             C:\vcpkg\installed
             C:\vcpkg\packages
             C:\vcpkg\triplets\community
-          key: ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-${{ hashFiles('Cargo.lock', 'vcpkg.json') }}
+          key: ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-${{ hashFiles('Cargo.lock', 'vcpkg-overlay/**') }}
           restore-keys: |
-            ${{ runner.os }}-vcpkg-ffmpeg6-v1-${{ env.VCPKG_COMMIT }}-
+            ${{ runner.os }}-vcpkg-ffmpeg-runtime-v3-${{ env.VCPKG_REF }}-
 
       - name: 初始化 vcpkg (Windows)
         if: runner.os == 'Windows'
@@ -182,10 +207,6 @@ jobs:
             git -C C:\vcpkg fetch --depth 1 origin "refs/tags/$env:VCPKG_REF"
             git -C C:\vcpkg checkout --detach FETCH_HEAD
           }
-          $resolvedCommit = git -C C:\vcpkg rev-parse HEAD
-          if ($resolvedCommit -ne $env:VCPKG_COMMIT) {
-            throw "vcpkg ref resolved to $resolvedCommit, expected $env:VCPKG_COMMIT"
-          }
           & C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
 
       - name: 安装 FFmpeg (Windows, vcpkg)
@@ -195,17 +216,22 @@ jobs:
           $cacheHit = '${{ steps.vcpkg-cache.outputs.cache-hit }}' -eq 'true'
           Write-Host "Cache hit: $cacheHit"
           
-          $ffmpegInstall = 'C:\vcpkg\installed\x64-windows\lib\pkgconfig\libavcodec.pc'
-          if (Test-Path $ffmpegInstall) {
-            Write-Host '✓ FFmpeg already cached and installed, skipping vcpkg install'
-          } else {
-            Write-Host 'Installing manifest-locked FFmpeg via vcpkg...'
-            & C:\vcpkg\vcpkg.exe install `
-              --triplet x64-windows `
-              --x-manifest-root=$PWD `
-              --x-install-root=C:\vcpkg\installed
-            if ($LASTEXITCODE -ne 0) { throw 'vcpkg FFmpeg installation failed' }
+          # Reconcile the complete product runtime: linked decoders plus the
+          # ffmpeg/ffprobe tools and every software encoder exposed by Export.
+          # Upstream asset hosts (code.videolan.org) time out occasionally;
+          # retry the install because vcpkg resumes from its downloads cache.
+          $install = {
+            & C:\vcpkg\vcpkg.exe install 'ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows' --recurse --overlay-ports=vcpkg-overlay
           }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & $install
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -lt 3) {
+              Write-Host "vcpkg install attempt $attempt failed; retrying after $($attempt * 20)s"
+              Start-Sleep -Seconds ($attempt * 20)
+            }
+          }
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg ffmpeg install failed after 3 attempts" }
           
           $pkgConf = 'C:\vcpkg\installed\x64-windows\tools\pkgconf\pkgconf.exe'
           "VCPKG_ROOT=C:\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -220,6 +246,7 @@ jobs:
           "PKG_CONFIG=$pkgConf" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Split-Path $pkgConf | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           "C:\vcpkg\installed\x64-windows\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\vcpkg\installed\x64-windows\tools\ffmpeg" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: 诊断 FFmpeg 环境 (Windows)
         if: runner.os == 'Windows'
@@ -230,42 +257,49 @@ jobs:
           Write-Host "FFMPEG_DIR=$env:FFMPEG_DIR"
           Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
           pkg-config --version
-          $avcodecVersion = (pkg-config --modversion libavcodec).Trim()
-          if ($LASTEXITCODE -ne 0 -or $avcodecVersion -notmatch '^60\.') {
-            throw "Expected FFmpeg 6 libavcodec ABI 60, found '$avcodecVersion'"
-          }
-          Write-Host "libavcodec $avcodecVersion"
+          pkg-config --modversion libavcodec
           pkg-config --modversion libavformat
           pkg-config --modversion libavfilter
           pkg-config --modversion libavdevice
           pkg-config --modversion libswscale
           pkg-config --modversion libswresample
 
-      - name: 重建 FFmpeg Rust 绑定 (Windows)
-        if: runner.os == 'Windows'
-        run: cargo clean -p ffmpeg-sys-next -p ffmpeg-next
-
       - name: 编译
         run: cargo build --workspace --exclude mondrian-app
+
+      - name: 检查平台 Adapter
+        run: cargo clippy -p mondrian-platform-core -p mondrian-platform --all-targets -- -D warnings
 
       - name: 测试
         run: cargo test --workspace --exclude mondrian-app
 
+      - name: 测试完整 App 产品路径
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo test -p mondrian-app --all-targets -j1
+
+      - name: 编译 Golden 验证入口 (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: cargo build -p mondrian-app --features validation --bin mondrian-golden -j1
+
   # ───────────────────────────────────────────────────────────────────────────
-  # 文档构建（检测 doc comment 错误）
+  # 自研 UI 产品门禁（Linux；覆盖 app UI shell、基础图形和组件极端场景）
   # ───────────────────────────────────────────────────────────────────────────
-  docs:
-    name: Docs
+  app-ui:
+    name: App UI Gate
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: 安装 Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
-          toolchain: 1.92.0
+          toolchain: 1.97.1
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           cache-on-failure: true
 
@@ -275,7 +309,42 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
             libavdevice-dev libswscale-dev libswresample-dev \
-            libasound2-dev pkg-config
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
+
+      - name: 运行完整 app 产品测试
+        run: cargo test -p mondrian-app --all-targets
+
+      - name: 运行 app UI primitive/draw-command renderer 测试
+        run: cargo test -p mondrian-ui-renderer
+
+      - name: 运行 app UI widget 极端场景测试
+        run: cargo test -p mondrian-ui-widgets component_extreme_tests
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 文档构建（检测 doc comment 错误）
+  # ───────────────────────────────────────────────────────────────────────────
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
+        with:
+          toolchain: 1.97.1
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+
+      - name: 安装 FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libavcodec-dev libavformat-dev libavfilter-dev \
+            libavdevice-dev libswscale-dev libswresample-dev \
+            libasound2-dev libdbus-1-dev libxcb1-dev pkg-config
 
       - name: 构建文档
         run: cargo doc --workspace --no-deps --exclude mondrian-app

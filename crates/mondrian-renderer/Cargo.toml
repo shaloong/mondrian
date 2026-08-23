@@ -5,12 +5,16 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+validation = []
+
 [dependencies]
 mondrian-core     = { workspace = true }
+mondrian-effects  = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
-
 wgpu       = { workspace = true }
+naga       = { workspace = true }
 bytemuck   = { workspace = true }
 glam       = { workspace = true }
 
@@ -20,5 +24,32 @@ tracing    = { workspace = true }
 thiserror  = { workspace = true }
 anyhow     = { workspace = true }
 serde      = { workspace = true }
+serde_json = { workspace = true }
+sha2       = { workspace = true }
 lru        = "0.18"
 parking_lot = { workspace = true }
+cosmic-text = { workspace = true }
+fontdb = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std"] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVMetalTexture", "CVMetalTextureCache", "CVPixelBuffer", "CVReturn", "objc2", "objc2-metal"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLTexture"] }
+
+[dev-dependencies]
+mondrian-effects = { workspace = true }
+image = { workspace = true, features = ["exr"] }
+pollster = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+half = "2.7"
+
+[[bench]]
+name = "compositor"
+harness = false
+
+[[bench]]
+name = "visual_program"
+harness = false

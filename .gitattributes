@@ -2,3 +2,7 @@
 
 *.bat text eol=crlf
 *.cmd text eol=crlf
+
+# Integrity-pinned embedded OCIO assets: bytes are part of the product identity
+*.cube -text
+*.ocio -text

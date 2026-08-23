@@ -1,0 +1,6 @@
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="24.000000" height="24.000000" fill="none">
+	<rect id="Icon/warning" width="24.000000" height="24.000000" x="0.000000" y="0.000000" />
+	<path id="warning-outline" d="M10.2717 4.32853C11.0407 2.99427 12.9593 2.99427 13.7283 4.32853L22.0145 18.6999C22.7835 20.0341 21.8242 21.702 20.2862 21.702L3.71377 21.702C2.17576 21.702 1.21645 20.0341 1.98545 18.6999L10.2717 4.32853Z" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
+	<path id="warning-stem" d="M12 9L12 13" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
+	<path id="warning-dot" d="M12 17L12.01 17" stroke="rgb(0,0,0)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.000000" />
+</svg>

@@ -1,6 +1,7 @@
 [licenses]
 version = 2
 allow = [
+    "AGPL-3.0-or-later",
     "MIT",
     "Apache-2.0",
     "BSD-3-Clause",
@@ -9,12 +10,9 @@ allow = [
     "CC0-1.0",
     "WTFPL",
     "Zlib",
-    "MPL-2.0",
-    "OFL-1.1",
-    "Ubuntu-font-1.0",
-    "CDLA-Permissive-2.0",
     "ISC",
     "Unicode-3.0",
+    "Apache-2.0 WITH LLVM-exception",
 ]
 confidence-threshold = 0.8
 
@@ -23,18 +21,28 @@ multiple-versions = "allow"
 wildcards = "allow"
 highlight = "all"
 
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-git = ["https://github.com/shaloong/ocio-rs.git"]
+
 [advisories]
 version = 2
 ignore = [
-    "RUSTSEC-2024-0436",
-    # These quick-xml advisories are reachable only through build-time Linux
-    # XML parsers in wayland-scanner. Mondrian does not pass project or media
-    # input to them. Remove both when the upstream stack accepts quick-xml 0.41.
+    # Both quick-xml advisories are currently reachable only through build-time
+    # XML parsers in xcb and wayland-scanner. Mondrian does not pass project or
+    # media input to these parsers. Remove these exceptions as soon as those
+    # upstream crates accept quick-xml >= 0.41.
     "RUSTSEC-2026-0194",
     "RUSTSEC-2026-0195",
-    # The current egui/resvg font stack has no maintained replacement release.
-    # These are unmaintained notices, not known vulnerabilities. Keep them
-    # isolated here until the default branch adopts the maintained UI stack.
+    # ttf-parser 0.25 is unmaintained rather than known vulnerable. It remains
+    # the newest version selected by the current fontdb/cosmic-text/resvg and
+    # winit stacks. Remove this exception when those upstream stacks migrate.
     "RUSTSEC-2026-0192",
-    "RUSTSEC-2026-0206",
+    # paste is a build-time proc macro selected by the current latest pulp
+    # 0.22.3 and exr 1.74.2. The advisory is unmaintained-only, declares no
+    # safe upgrade, and does not describe a vulnerability. Replacing it would
+    # require Mondrian to own forks of two otherwise maintained numeric/image
+    # crates. Remove this exception as soon as either upstream adopts pastey.
+    "RUSTSEC-2024-0436",
 ]

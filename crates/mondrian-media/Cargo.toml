@@ -5,14 +5,20 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+default = []
+validation = []
+
 [dependencies]
+mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }
 
-# FFmpeg 绑定（需要系统安装 FFmpeg 8.x+）
+# FFmpeg bindings link dynamically for source builds. Product packages carry
+# their own verified private runtime closure; end users do not install FFmpeg.
 ffmpeg-next = "8"
 
 # 音频
-cpal    = "0.15"    # 跨平台音频输出
+cpal    = "0.18.1"  # 跨平台音频输出与稳定设备身份
 rubato  = "0.15"    # 高质量重采样
 
 # 异步
@@ -21,9 +27,9 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 
 # 并发
-rayon          = { workspace = true }
 parking_lot    = { workspace = true }
 crossbeam-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
 dashmap        = { workspace = true }
 
 # 错误处理
@@ -43,6 +49,9 @@ tempfile   = { workspace = true }
 
 # LRU 缓存
 lru = "0.18"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

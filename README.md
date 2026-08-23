@@ -1,18 +1,18 @@
 # Mondrian
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.92%2B-orange)](https://rustup.rs)
+[![License](https://img.shields.io/badge/license-AGPL--3.0--or--later-blue)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.97.1%2B-orange)](https://rustup.rs)
 [![Build](https://github.com/shaloong/mondrian/actions/workflows/ci.yml/badge.svg)](https://github.com/shaloong/mondrian/actions)
 
-> [!WARNING]  
-> 当前处于早期开发阶段，后续可能随时发生破坏性重构，不建议在生产环境中使用。
+> [!NOTE]
+> Mondrian is in active development. The core editing, preview, and export pipeline is functional. Expect continued iteration on effects, audio, and plugin APIs.
 
 ## 🏗️ 系统架构概览
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                   mondrian-app  (UI 层)                     │
-│                         egui                                │
+│                self-hosted winit / wgpu UI                  │
 └──────────────────────────┬──────────────────────────────────┘
                            │ 事件总线 / 命令模式
      ┌─────────────────────┼────────────────────────┐
@@ -41,21 +41,22 @@
 | Crate               | 职责                                  | 关键依赖               |
 | ------------------- | ------------------------------------- | ---------------------- |
 | `mondrian-core`     | 公共类型、错误、事件总线、项目模型    | serde, uuid, thiserror |
-| `mondrian-media`    | FFmpeg 解码、音频处理、Proxy 代理缓存 | ffmpeg-next, cpal      |
+| `mondrian-media`    | FFmpeg 解码、音频源缓存、物理输出、Proxy 缓存 | ffmpeg-next, cpal      |
+| `mondrian-audio`    | 音频作者模型编译、路由/DSP、嵌套输出与执行 Session | mondrian-core, mondrian-timeline |
 | `mondrian-timeline` | 多轨时间线、关键帧、贝塞尔曲线、变速  | mondrian-core          |
 | `mondrian-renderer` | wgpu GPU 渲染管线、实时帧合成         | wgpu, bytemuck, glam   |
 | `mondrian-assets`   | 素材库、角色/场景/模板、跨项目复用    | serde, sqlite          |
 | `mondrian-ai`       | AI Agent 编排、视频生成 API、自动剪辑 | reqwest, tokio         |
-| `mondrian-effects`  | LUT 调色、滤镜、转场、文字动画        | mondrian-renderer      |
+| `mondrian-effects`  | DAG 效果图、GPU compute 加速效果、LUT 调色、滤镜、转场 | mondrian-core          |
 | `mondrian-export`   | 导出编码、渲染队列、硬件加速          | ffmpeg-next            |
-| `mondrian-app`      | 主程序入口、UI 状态机、面板布局       | egui                   |
+| `mondrian-app`      | 主程序入口、自研 UI 壳、UI 状态机、面板布局 | winit, wgpu, legacy egui reference |
 
 ## 🚀 快速开始
 
 ### 环境要求
 
-- Rust 1.75+
-- FFmpeg 8.x（动态链接）
+- Rust 1.97.1+
+- FFmpeg 开发库与 `ffmpeg`/`ffprobe` CLI（仅源码构建需要；发行包自带私有动态运行时）
 - Vulkan / Metal / DirectX 12 驱动
 - Windows 11 / macOS 13+ / Ubuntu 22.04+
 
@@ -66,8 +67,10 @@
 git clone https://github.com/mondrian-studio/mondrian
 cd mondrian
 
-# 安装 FFmpeg（Windows）
-winget install ffmpeg
+# 安装与 CI 同构的 Windows 媒体运行时
+git clone https://github.com/microsoft/vcpkg C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+C:\vcpkg\vcpkg.exe install "ffmpeg[zlib,ffmpeg,ffprobe,gpl,x264,x265,aom]:x64-windows" --recurse
 
 # Debug 构建
 cargo build
@@ -81,27 +84,36 @@ cargo run -p mondrian-app
 
 ### 测试
 
-```bash
+```powershell
 # 运行全部测试
 cargo test --workspace
 
 # 运行特定模块
 cargo test -p mondrian-timeline
 
+$perfRun = "target/perf/manual-$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())"
+New-Item -ItemType Directory -Path $perfRun | Out-Null
+
 # 性能烟雾测试（项目创建/打开/保存，输出 AI 可解析 JSON）
-$env:MONDRIAN_PERF_OUTPUT='target/perf/project-lifecycle.jsonl'; cargo test -p mondrian-app perf_project_lifecycle_smoke -- --ignored --nocapture
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'project-lifecycle.jsonl'; cargo test -p mondrian-app --release -j 2 --lib perf_project_lifecycle_smoke -- --ignored --nocapture --test-threads=1
 
-# 1080p29.97 预览模拟性能测试（广播常见帧率）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-1080p2997.jsonl'; cargo test -p mondrian-app preview_1080p2997_simulated_perf -- --ignored --nocapture
+# 生产媒体解码/缓存 smoke（FFmpeg 生成短 testsrc2，不是 1080p 产品门禁）
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-media.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_decode_cache_smoke -- --ignored --nocapture --test-threads=1
 
-# 4K60 预览模拟性能测试（用于更高负载优化）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-4k60.jsonl'; cargo test -p mondrian-app preview_4k60_simulated_perf -- --ignored --nocapture
+# 生产连续播放 smoke（同样使用本地生成的短测试素材）
+$env:MONDRIAN_PERF_OUTPUT=Join-Path $perfRun 'preview-playback.jsonl'; cargo test -p mondrian-app --release -j 2 --lib preview_media_continuous_playback_smoke -- --ignored --nocapture --test-threads=1
 
-# 8K60 预览模拟性能测试（极限负载优化）
-$env:MONDRIAN_PREVIEW_SIM_OUTPUT='target/perf/preview-8k60.jsonl'; cargo test -p mondrian-app preview_8k60_simulated_perf -- --ignored --nocapture
+# 稠密音频 Schedule 的 scalar/SIMD 多轨负载矩阵
+$env:MONDRIAN_AUDIO_LOAD_MATRIX_OUTPUT=Join-Path $perfRun 'audio-load-matrix.jsonl'; cargo test -p mondrian-audio --release -j 2 --test load_matrix dense_schedule_multitrack_load_matrix -- --ignored --nocapture --test-threads=1
 
 # Benchmark
 cargo bench -p mondrian-renderer
+
+# GPU 渲染性能剖析（输出 JSON 报告）
+$env:MONDRIAN_RENDER_PROFILE=1; cargo run -p mondrian-app
+
+# 金标准图像回归测试
+cargo test -p mondrian-renderer golden
 ```
 
 性能烟雾测试支持通过环境变量调整阈值：
@@ -111,38 +123,14 @@ cargo bench -p mondrian-renderer
 - `MONDRIAN_PERF_SAVE_MS`：保存项目最大耗时（毫秒，默认 `6000`）
 - `MONDRIAN_PERF_OPEN_ITERS`：打开项目采样次数（默认 `3`）
 - `MONDRIAN_PERF_SAVE_ITERS`：保存项目采样次数（默认 `5`）
-- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）
+- `MONDRIAN_PERF_OUTPUT`：可选，写入 JSONL 报告路径（每行一条 JSON）。每项 smoke 必须使用独立的新文件。
 
-1080p29.97 预览模拟测试关键环境变量：
+短 Preview smoke 说明：
 
-- `MONDRIAN_PREVIEW_SIM_TTFF_MS`：首帧显示上限（毫秒，默认 `2000`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MIN`：稳定播放最低 FPS（默认 `27`）
-- `MONDRIAN_PREVIEW_SIM_FPS_MAX`：稳定播放最高 FPS（默认 `30`）
-- `MONDRIAN_PREVIEW_SIM_FRAMES`：模拟帧数（默认 `96`）
-- `MONDRIAN_PREVIEW_SIM_LAYERS`：模拟合成图层数（默认 `2`）
-- `MONDRIAN_PREVIEW_SIM_OUTPUT`：可选，写入 JSONL 报告路径
-
-4K60 预览模拟测试关键环境变量：
-
-- `MONDRIAN_PREVIEW_SIM_4K_WIDTH`：模拟宽度（默认 `3840`）
-- `MONDRIAN_PREVIEW_SIM_4K_HEIGHT`：模拟高度（默认 `2160`）
-- `MONDRIAN_PREVIEW_SIM_4K_TARGET_FPS`：目标 FPS（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_4K_TTFF_MS`：首帧显示上限（默认 `3000`）
-- `MONDRIAN_PREVIEW_SIM_4K_FPS_MIN`：最低 FPS 门槛（默认 `30`）
-- `MONDRIAN_PREVIEW_SIM_4K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_4K_FRAMES`：模拟帧数（默认 `120`）
-- `MONDRIAN_PREVIEW_SIM_4K_LAYERS`：模拟图层数（默认 `2`）
-
-8K60 预览模拟测试关键环境变量：
-
-- `MONDRIAN_PREVIEW_SIM_8K_WIDTH`：模拟宽度（默认 `7680`）
-- `MONDRIAN_PREVIEW_SIM_8K_HEIGHT`：模拟高度（默认 `4320`）
-- `MONDRIAN_PREVIEW_SIM_8K_TARGET_FPS`：目标 FPS（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_8K_TTFF_MS`：首帧显示上限（默认 `4000`）
-- `MONDRIAN_PREVIEW_SIM_8K_FPS_MIN`：最低 FPS 门槛（默认 `20`）
-- `MONDRIAN_PREVIEW_SIM_8K_FPS_MAX`：最高 FPS 门槛（默认 `60`）
-- `MONDRIAN_PREVIEW_SIM_8K_FRAMES`：模拟帧数（默认 `120`）
-- `MONDRIAN_PREVIEW_SIM_8K_LAYERS`：模拟图层数（默认 `2`）
+- Preview 报告使用与其他 app smoke 相同的 `MONDRIAN_PERF_OUTPUT`。
+两个 Preview smoke 都通过生产媒体路径生成短时、无版权依赖的本地测试素材。
+真实 4K HEVC Main10、长期 A/V 同步与设备时钟验证由
+`scripts/validation/invoke-playback-reference-gates.ps1` 负责，不能用内存模拟帧替代。
 
 ## 📋 功能路线图
 
@@ -159,6 +147,7 @@ cargo bench -p mondrian-renderer
 | [AI 工作流](docs/architecture/ai-workflow.md)       | Agent 系统设计    |
 | [素材资产系统](docs/architecture/asset-system.md)   | 跨项目复用架构    |
 | [效果系统](docs/architecture/effects-system.md)     | LUT / 滤镜 / 转场 |
+| [插件开发手册](docs/plugins/README.md) | 插件开发者完整手册 |
 | [导出系统](docs/architecture/export-system.md)      | 渲染队列设计      |
 | [设计准则](docs/DESIGN_GUIDELINES.md)               | UI/UX 设计基线    |
 | [技术栈选型](docs/TECH_STACK.md)                    | 选型理由与对比    |
@@ -171,4 +160,4 @@ cargo bench -p mondrian-renderer
 
 ## 📄 许可证
 
-本项目采用 **Apache-2.0** 协议。
+本项目采用 **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** 协议。

@@ -1,37 +1,13 @@
-//! 蒙版系统
+//! 蒙版系统 — 对标 Premiere Pro 的不透明度蒙版
+//!
+//! 每个 Clip 支持多个蒙版，每个蒙版支持关键帧动画。
+//!
+//! All type definitions are re-exported from `mondrian_core::mask_data`.
 
-use glam::Vec2;
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BezierPoint {
-    pub position: Vec2,
-    pub control_in: Vec2,
-    pub control_out: Vec2,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum MaskShape {
-    Rectangle {
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-        corner_radius: f32,
-    },
-    Ellipse {
-        center: Vec2,
-        radii: Vec2,
-    },
-    Path {
-        points: Vec<BezierPoint>,
-        closed: bool,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Mask {
-    pub shape: MaskShape,
-    pub feather: f32,
-    pub invert: bool,
-}
+// Re-export mask types from mondrian-core.
+pub use mondrian_core::mask_data::{
+    interpolate_shape, shape_label, BezierPoint, MaskComponent, MaskEvaluation, MaskOp, MaskShape,
+    MaskShapeInterpolation, MaskShapeKeyframe, MASK_PROP_EXPANSION, MASK_PROP_FEATHER,
+    MASK_PROP_INVERT, MASK_PROP_MASK_OP, MASK_PROP_OPACITY, MASK_PROP_SHAPE, MAX_MASK_PATH_POINTS,
+};
+pub use mondrian_core::types::MaskId;

@@ -1,0 +1,330 @@
+{
+  "schema_version": 4,
+  "id": "windows-alpha-golden-v14",
+  "kind": "golden",
+  "hero_sequence": {
+    "role": "hero",
+    "duration_frames": 7500,
+    "requires_all_obligations": true
+  },
+  "timeline": {
+    "duration_frames": 7500,
+    "frame_rate": "25/1",
+    "width": 3840,
+    "height": 2160,
+    "pixel_aspect_ratio": "1/1",
+    "field_order": "progressive",
+    "working_color_space": "linear_rec2020",
+    "output_color_space": "rec709",
+    "video_range": "legal",
+    "delivery_bit_depth": 10,
+    "audio_sample_rate": 48000,
+    "audio_channel_layout": "stereo"
+  },
+  "required_fixture_roles": [
+    {
+      "role": "hlg-main10-picture",
+      "fixture_id": "generated-golden-hlg-main10-25fps-v1",
+      "required": true,
+      "required_purpose": "golden-hlg-main10-picture"
+    },
+    {
+      "role": "rec709-h264-picture",
+      "fixture_id": "generated-golden-rec709-h264-25fps-v1",
+      "required": true,
+      "required_purpose": "golden-rec709-h264-picture"
+    },
+    {
+      "role": "rec709-h264-vfr-picture",
+      "fixture_id": "generated-golden-rec709-h264-vfr-v1",
+      "required": true,
+      "required_purpose": "golden-rec709-h264-vfr-picture"
+    },
+    {
+      "role": "srgb-alpha-still",
+      "fixture_id": "generated-golden-srgb-alpha-still-v1",
+      "required": true,
+      "required_purpose": "golden-srgb-alpha-still"
+    },
+    {
+      "role": "pcm-audio",
+      "fixture_id": "generated-golden-pcm-s16-48k-stereo-305s-v1",
+      "required": true,
+      "required_purpose": "golden-pcm-audio"
+    },
+    {
+      "role": "aac-audio",
+      "fixture_id": "generated-playback-aac-48k-stereo-v1",
+      "required": true,
+      "required_purpose": "golden-aac-audio"
+    }
+  ],
+  "required_operations": [
+    "open",
+    "play",
+    "accurate-seek",
+    "scrub",
+    "insert",
+    "overwrite",
+    "trim",
+    "ripple",
+    "split",
+    "lift",
+    "extract",
+    "undo-redo",
+    "proxy-original-switch",
+    "offline-relink",
+    "constant-retime",
+    "autosave-recovery",
+    "save-reopen",
+    "export",
+    "reimport"
+  ],
+  "required_content": [
+    "transform",
+    "opacity",
+    "primary-color",
+    "lut",
+    "gaussian-blur",
+    "sharpen",
+    "basic-mask",
+    "cross-dissolve",
+    "basic-title",
+    "clip-audio-gain-pan-fades",
+    "hold-keyframe",
+    "linear-keyframe",
+    "bezier-keyframe",
+    "nested-sequence"
+  ],
+  "execution_slices": [
+    {
+      "id": "foundation-audio-authoring-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [
+        "pcm-audio"
+      ],
+      "required_operations": [
+        "open",
+        "undo-redo",
+        "save-reopen"
+      ],
+      "required_content": [
+        "clip-audio-gain-pan-fades"
+      ],
+      "required_exports": [],
+      "timeline_window": null
+    },
+    {
+      "id": "editorial-transport-v2",
+      "sequence_role": "hero",
+      "required_fixture_roles": [
+        "aac-audio"
+      ],
+      "required_operations": [
+        "play",
+        "accurate-seek",
+        "scrub",
+        "insert",
+        "overwrite",
+        "ripple",
+        "split",
+        "lift",
+        "extract"
+      ],
+      "required_content": [],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 150
+      }
+    },
+    {
+      "id": "proxy-relink-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [
+        "rec709-h264-picture",
+        "rec709-h264-vfr-picture"
+      ],
+      "required_operations": [
+        "proxy-original-switch",
+        "offline-relink",
+        "constant-retime"
+      ],
+      "required_content": [],
+      "required_exports": [
+        "h264-aac-sdr"
+      ],
+      "timeline_window": {
+        "start_frame": 200,
+        "end_frame_exclusive": 500
+      }
+    },
+    {
+      "id": "generated-delivery-roundtrip-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [
+        "pcm-audio"
+      ],
+      "required_operations": [
+        "trim",
+        "export",
+        "reimport"
+      ],
+      "required_content": [
+        "transform",
+        "opacity"
+      ],
+      "required_exports": [
+        "h264-aac-sdr",
+        "hevc-main10"
+      ],
+      "timeline_window": {
+        "start_frame": 150,
+        "end_frame_exclusive": 175
+      }
+    },
+    {
+      "id": "visual-authoring-roundtrip-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [],
+      "required_operations": [
+        "undo-redo",
+        "save-reopen"
+      ],
+      "required_content": [
+        "primary-color",
+        "lut",
+        "gaussian-blur",
+        "sharpen",
+        "basic-mask",
+        "cross-dissolve",
+        "basic-title",
+        "hold-keyframe",
+        "linear-keyframe",
+        "bezier-keyframe"
+      ],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 0,
+        "end_frame_exclusive": 100
+      }
+    },
+    {
+      "id": "recovery-nesting-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [],
+      "required_operations": [
+        "autosave-recovery",
+        "save-reopen"
+      ],
+      "required_content": [
+        "nested-sequence"
+      ],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 175,
+        "end_frame_exclusive": 200
+      }
+    },
+    {
+      "id": "color-media-roundtrip-v1",
+      "sequence_role": "hero",
+      "required_fixture_roles": [
+        "hlg-main10-picture",
+        "srgb-alpha-still"
+      ],
+      "required_operations": [],
+      "required_content": [],
+      "required_exports": [],
+      "timeline_window": {
+        "start_frame": 500,
+        "end_frame_exclusive": 525
+      }
+    }
+  ],
+  "exports": [
+    {
+      "id": "h264-aac-sdr",
+      "builtin_preset_id": "h264-aac-sdr",
+      "expected_delivery": {
+        "container": "mp4",
+        "video_codec": "h264",
+        "video_profile": "high",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "chroma_sampling": "yuv420",
+        "pixel_format": "yuv420p",
+        "range": "legal",
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_matrix": "bt709",
+        "static_hdr_metadata": "absent",
+        "alpha": "flatten_black",
+        "audio_codec": "aac",
+        "audio_bitrate_kbps": 192
+      },
+      "required_probe_fields": [
+        "duration",
+        "frame_rate",
+        "width",
+        "height",
+        "profile",
+        "pixel_format",
+        "bit_depth",
+        "primaries",
+        "transfer",
+        "matrix",
+        "range",
+        "hdr_static_metadata",
+        "audio_sample_rate",
+        "audio_channels"
+      ]
+    },
+    {
+      "id": "hevc-main10",
+      "builtin_preset_id": "hevc-main10",
+      "expected_delivery": {
+        "container": "mp4",
+        "video_codec": "hevc",
+        "video_profile": "main10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "chroma_sampling": "yuv420",
+        "pixel_format": "yuv420p10le",
+        "range": "legal",
+        "color_primaries": "bt709",
+        "color_transfer": "bt709",
+        "color_matrix": "bt709",
+        "static_hdr_metadata": "absent",
+        "alpha": "flatten_black",
+        "audio_codec": "aac",
+        "audio_bitrate_kbps": 192
+      },
+      "required_probe_fields": [
+        "duration",
+        "frame_rate",
+        "width",
+        "height",
+        "profile",
+        "pixel_format",
+        "bit_depth",
+        "primaries",
+        "transfer",
+        "matrix",
+        "range",
+        "hdr_static_metadata",
+        "audio_sample_rate",
+        "audio_channels"
+      ]
+    }
+  ],
+  "acceptance": {
+    "consecutive_passes": 3,
+    "duration_error_max_frames": 1,
+    "av_boundary_error_max_ms": 20,
+    "silent_fallback_allowed": false,
+    "unexecuted_requirement_may_pass": false
+  }
+}

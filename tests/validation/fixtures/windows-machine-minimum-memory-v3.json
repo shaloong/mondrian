@@ -1,0 +1,64 @@
+{
+  "schema_version": 3,
+  "captured_at_utc": "2026-07-20T00:00:00Z",
+  "profile": "windows-alpha-reference-v2",
+  "machine_id": "minimum-memory-contract-fixture",
+  "privacy": {
+    "hardware_serials_collected": false,
+    "machine_id_is_operator_assigned": true
+  },
+  "git": {
+    "revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dirty": false
+  },
+  "os": {
+    "caption": "Microsoft Windows 11",
+    "version": "10.0.22631",
+    "build_number": 22631,
+    "architecture": "64-bit"
+  },
+  "cpu": {
+    "names": ["Minimum memory contract fixture CPU"],
+    "physical_cores": 8,
+    "logical_processors": 16
+  },
+  "installed_memory_bytes": 8589934592,
+  "visible_memory_bytes": 8455716864,
+  "gpus": [
+    {
+      "name": "Minimum memory contract fixture GPU",
+      "driver_version": "1.2.3.4",
+      "adapter_ram_bytes": 4294967296,
+      "video_processor": "Minimum memory contract fixture GPU"
+    }
+  ],
+  "storage": [
+    {
+      "model": "Minimum memory contract fixture NVMe",
+      "firmware_revision": "1.0",
+      "interface_type": "SCSI",
+      "media_type": "Fixed hard disk media",
+      "size_bytes": 549755813888
+    }
+  ],
+  "volumes": [
+    {
+      "drive": "C:",
+      "file_system": "NTFS",
+      "size_bytes": 549755813888,
+      "free_bytes": 274877906944
+    }
+  ],
+  "displays": [],
+  "execution_scoped_capabilities": [
+    "d3d12",
+    "native-video-import",
+    "hdr-output-state"
+  ],
+  "tools": {
+    "rustc": "rustc 1.97.1 (contract fixture)",
+    "cargo": "cargo 1.97.1 (contract fixture)",
+    "ffmpeg": "ffmpeg version contract-fixture",
+    "ffprobe": "ffprobe version contract-fixture"
+  }
+}

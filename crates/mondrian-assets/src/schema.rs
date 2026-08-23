@@ -1,21 +1,40 @@
 //! SQLite 数据库 Schema 初始化
 
 pub const INIT_SQL: &str = r#"
+-- 文件夹 / Bin 层级
+CREATE TABLE IF NOT EXISTS folders (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    parent_id   TEXT,
+    sort_order  INTEGER DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
+
 -- 全局资产索引
 CREATE TABLE IF NOT EXISTS assets (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
     asset_type  TEXT NOT NULL,
     path        TEXT NOT NULL UNIQUE,
+    folder_id   TEXT,
     thumbnail   TEXT,
     tags        TEXT DEFAULT '[]',
     metadata    TEXT DEFAULT '{}',
+    source_fingerprint TEXT,
+    interpretation TEXT DEFAULT '{"color":{"mode":"auto"}}',
+    audio_components TEXT NOT NULL DEFAULT '{"components":[]}',
+    retired_at  TEXT,
     usage_count INTEGER DEFAULT 0,
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (folder_id) REFERENCES folders(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_assets_type ON assets(asset_type);
 CREATE INDEX IF NOT EXISTS idx_assets_name ON assets(name);
+CREATE INDEX IF NOT EXISTS idx_assets_folder ON assets(folder_id);
 
 -- 跨项目引用
 CREATE TABLE IF NOT EXISTS asset_project_links (
@@ -34,4 +53,18 @@ CREATE TABLE IF NOT EXISTS ai_generation_log (
     params       TEXT DEFAULT '{}',
     created_at   TEXT NOT NULL
 );
+"#;
+
+/// Folder schema created before legacy asset columns are added.
+pub const CREATE_FOLDERS_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS folders (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    parent_id   TEXT,
+    sort_order  INTEGER DEFAULT 0,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
 "#;

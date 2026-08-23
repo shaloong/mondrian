@@ -1,165 +1,135 @@
-//! 全局事件总线（发布/订阅模式）
+//! Observation-only application event broadcast.
 //!
-//! 基于 `crossbeam-channel` 实现的同步广播总线。
-//! 所有跨模块通信通过此总线传递，保证模块解耦。
+//! This synchronous bus carries low-frequency facts after their owning
+//! transaction or execution boundary has committed. It is not a request
+//! transport, state authority, realtime queue, or Undo/Redo implementation.
 
 use crate::types::*;
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{bounded, Receiver, Sender, TrySendError};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 // ─── 应用事件枚举 ─────────────────────────────────────────────────────────────
 
-/// 全应用事件类型
+const SUBSCRIBER_CAPACITY: usize = 256;
+
+/// Low-frequency facts that independent application observers may consume.
 ///
-/// 新增事件时，在此枚举中添加变体。
+/// A variant must describe something that already happened. Commands belong in
+/// typed request interfaces such as the editor `Action` adapter, never in this
+/// enum.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
-    // ── 播放控制 ──────────────────────────────────────────────────────────────
-    Play,
-    Pause,
-    Stop,
-    SeekTo {
-        timecode: TimeCode,
-    },
-    PlayheadMoved {
-        timecode: TimeCode,
-    },
-
     // ── 时间线编辑 ────────────────────────────────────────────────────────────
+    /// One committed edit changed a Sequence.
     TimelineModified {
+        /// Sequence whose committed author state changed.
         sequence_id: SequenceId,
     },
+    /// One Clip was committed into a Sequence.
     ClipAdded {
+        /// Sequence that now owns the Clip.
         sequence_id: SequenceId,
+        /// Newly committed Clip.
         clip_id: ClipId,
     },
+    /// One Clip was removed by a committed Sequence edit.
     ClipRemoved {
+        /// Sequence from which the Clip was removed.
         sequence_id: SequenceId,
+        /// Removed Clip identity.
         clip_id: ClipId,
-    },
-    ClipMoved {
-        clip_id: ClipId,
-        new_position: TimeCode,
-    },
-    ClipTrimmed {
-        clip_id: ClipId,
-    },
-    TrackAdded {
-        sequence_id: SequenceId,
-        track_id: TrackId,
-    },
-    TrackRemoved {
-        sequence_id: SequenceId,
-        track_id: TrackId,
-    },
-    KeyframeChanged {
-        clip_id: ClipId,
-        property: String,
     },
 
     // ── 素材库 ────────────────────────────────────────────────────────────────
+    /// One Asset became an ordinary member of the Project Asset Library.
     AssetImported {
+        /// Imported Asset identity.
         asset_id: AssetId,
     },
-    AssetDeleted {
+    /// Ordinary Asset Library membership was retired while the strong Project
+    /// record and every author reference remain valid.
+    AssetRetired {
+        /// Retired Asset identity.
         asset_id: AssetId,
     },
+    /// The owning Asset Library published a new committed view.
     AssetLibraryReloaded,
 
     // ── AI 工作流 ─────────────────────────────────────────────────────────────
+    /// An admitted AI workflow started executing.
     WorkflowStarted {
+        /// Stable user-facing workflow name.
         workflow_name: String,
     },
+    /// One admitted workflow step started executing.
     WorkflowStepStarted {
+        /// Workflow-local step identity.
         step_id: String,
+        /// Stable user-facing step name.
         step_name: String,
     },
+    /// One workflow step completed successfully.
     WorkflowStepCompleted {
+        /// Workflow-local step identity.
         step_id: String,
     },
+    /// One workflow step terminated with an explicit failure.
     WorkflowStepFailed {
+        /// Workflow-local step identity.
         step_id: String,
+        /// Diagnostic failure text; this is observation, not control flow.
         error: String,
     },
+    /// Every admitted step in an AI workflow completed successfully.
     WorkflowCompleted {
+        /// Stable user-facing workflow name.
         workflow_name: String,
     },
-    AiGenerationProgress {
-        step_id: String,
-        progress: f32,
-        message: String,
-    },
-
-    // ── 渲染 / 导出 ───────────────────────────────────────────────────────────
-    RenderJobStarted {
-        job_id: JobId,
-    },
-    RenderJobProgress {
-        job_id: JobId,
-        progress: f32,
-    },
-    RenderJobCompleted {
-        job_id: JobId,
-        output_path: String,
-    },
-    RenderJobFailed {
-        job_id: JobId,
-        error: String,
-    },
-
-    // ── 项目管理 ──────────────────────────────────────────────────────────────
-    ProjectOpened {
-        project_id: ProjectId,
-    },
-    ProjectSaved {
-        project_id: ProjectId,
-    },
-    ProjectClosed,
-
-    // ── UI ────────────────────────────────────────────────────────────────────
-    PanelResized {
-        panel: String,
-        size: f32,
-    },
-    ThemeChanged {
-        theme: String,
-    },
-    UndoPerformed,
-    RedoPerformed,
 }
 
 // ─── 事件总线 ─────────────────────────────────────────────────────────────────
 
 type Subscriber = Sender<AppEvent>;
 
-/// 轻量广播事件总线
+/// Lightweight observation-only broadcast bus.
 ///
-/// 通过 `subscribe()` 获取接收端，通过 `publish()` 向所有订阅者广播事件。
+/// Subscribers receive facts independently through bounded queues. Delivery is
+/// intentionally best-effort: a disconnected observer is removed, a saturated
+/// observer drops the new notification, and no producer may depend on a
+/// subscriber to execute work or acknowledge success. Observers must reconcile
+/// from the owning typed state when they need an exact current view.
 #[derive(Default)]
 pub struct EventBus {
     subscribers: RwLock<Vec<Subscriber>>,
 }
 
 impl EventBus {
+    /// Create an empty application-fact bus.
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// 订阅事件，返回接收端 `Receiver`
+    /// Subscribe to subsequently published facts.
     pub fn subscribe(&self) -> Receiver<AppEvent> {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(SUBSCRIBER_CAPACITY);
         self.subscribers.write().push(tx);
         rx
     }
 
-    /// 向所有活跃订阅者广播事件（失败的订阅者自动清理）
+    /// Non-blockingly broadcast one committed fact.
+    ///
+    /// Saturated observers remain subscribed but must reconcile from authority;
+    /// disconnected observers are retired.
     pub fn publish(&self, event: AppEvent) {
         let mut subs = self.subscribers.write();
-        subs.retain(|s| s.send(event.clone()).is_ok());
+        subs.retain(|subscriber| match subscriber.try_send(event.clone()) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
     }
 
-    /// 当前活跃订阅者数量
+    /// Return the number of currently connected observers.
     pub fn subscriber_count(&self) -> usize {
         self.subscribers.read().len()
     }
@@ -175,10 +145,16 @@ mod tests {
         let rx1 = bus.subscribe();
         let rx2 = bus.subscribe();
 
-        bus.publish(AppEvent::Play);
+        bus.publish(AppEvent::AssetLibraryReloaded);
 
-        assert!(matches!(rx1.try_recv().unwrap(), AppEvent::Play));
-        assert!(matches!(rx2.try_recv().unwrap(), AppEvent::Play));
+        assert!(matches!(
+            rx1.try_recv().unwrap(),
+            AppEvent::AssetLibraryReloaded
+        ));
+        assert!(matches!(
+            rx2.try_recv().unwrap(),
+            AppEvent::AssetLibraryReloaded
+        ));
     }
 
     #[test]
@@ -187,8 +163,21 @@ mod tests {
         {
             let _rx = bus.subscribe(); // 离开作用域后 rx 被 drop
         }
-        // 广播时自动清理已断开的订阅者
-        bus.publish(AppEvent::Stop);
+        // Broadcasting retires disconnected observers.
+        bus.publish(AppEvent::AssetLibraryReloaded);
         assert_eq!(bus.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn saturated_observer_never_blocks_or_allocates_an_unbounded_backlog() {
+        let bus = EventBus::new();
+        let rx = bus.subscribe();
+
+        for _ in 0..(SUBSCRIBER_CAPACITY * 2) {
+            bus.publish(AppEvent::AssetLibraryReloaded);
+        }
+
+        assert_eq!(rx.len(), SUBSCRIBER_CAPACITY);
+        assert_eq!(bus.subscriber_count(), 1);
     }
 }

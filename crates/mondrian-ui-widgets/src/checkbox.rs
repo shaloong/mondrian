@@ -1,0 +1,977 @@
+//! Checkbox 控件
+//!
+//! 布尔值勾选框，点击切换状态，派发 Action。
+
+use mondrian_editor_state::Action;
+use mondrian_ui_core::types::*;
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, EventContext, PaintContext,
+};
+use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{Theme, ThemePreset};
+use std::cell::Cell;
+
+use crate::paint::{centered_text_origin_y, paint_focus_ring};
+use crate::text_metrics::measure_single_line;
+
+/// Adapter that maps the current checkbox state to an editor [`Action`].
+pub type CheckboxChangeAction = dyn Fn(bool) -> Option<Action>;
+
+/// Checkbox Widget —— 可切换的勾选框
+pub struct Checkbox {
+    id: WidgetId,
+    label: String,
+    checked: bool,
+    bounds: Rect,
+    enabled: bool,
+    focused: bool,
+    focus_visible: bool,
+    hovered: bool,
+    pressed: bool,
+    pub on_toggle: Option<Action>,
+    on_change: Option<Box<CheckboxChangeAction>>,
+    visual: Cell<CheckboxVisualTokens>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CheckboxVisualTokens {
+    box_size: f32,
+    box_left_inset: f32,
+    label_gap: f32,
+    control_height: f32,
+    label_font_size: f32,
+    border_width: f32,
+}
+
+impl CheckboxVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        Self {
+            box_size: spacing.icon_size + spacing.border_emphasis,
+            box_left_inset: spacing.border_emphasis,
+            label_gap: spacing.border_emphasis,
+            control_height: theme.typography.body.line_height + spacing.border_emphasis,
+            label_font_size: theme.typography.body.font_size,
+            border_width: spacing.border_standard,
+        }
+    }
+
+    fn label_x(self) -> f32 {
+        self.box_left_inset + self.box_size + self.label_gap
+    }
+}
+
+impl Default for CheckboxVisualTokens {
+    fn default() -> Self {
+        Self::from_theme(&ThemePreset::Dark.build())
+    }
+}
+
+impl Checkbox {
+    /// Create a checkbox with an initial checked state.
+    pub fn new(label: impl Into<String>, checked: bool) -> Self {
+        Self {
+            id: WidgetId::new(),
+            label: label.into(),
+            checked,
+            bounds: Rect::ZERO,
+            enabled: true,
+            focused: false,
+            focus_visible: false,
+            hovered: false,
+            pressed: false,
+            on_toggle: None,
+            on_change: None,
+            visual: Cell::new(CheckboxVisualTokens::default()),
+        }
+    }
+
+    /// Dispatch a static action whenever the checkbox toggles.
+    pub fn on_toggle(mut self, action: Action) -> Self {
+        self.on_toggle = Some(action);
+        self
+    }
+
+    /// Dispatch a value-aware action whenever the checkbox toggles.
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(bool) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |checked| action(checked).into()));
+        self
+    }
+
+    /// Set whether the checkbox accepts user input and participates in focus.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
+            self.hovered = false;
+            self.pressed = false;
+        }
+        self
+    }
+
+    /// Disable the checkbox.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the checkbox is enabled.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Return whether the checkbox is checked.
+    pub fn is_checked(&self) -> bool {
+        self.checked
+    }
+
+    /// Set the checked state without dispatching actions.
+    pub fn set_checked(&mut self, checked: bool) {
+        self.checked = checked;
+    }
+
+    fn toggle(&mut self, ctx: &mut EventContext) {
+        self.checked = !self.checked;
+        if let Some(action) = &self.on_toggle {
+            (ctx.dispatch)(action.clone());
+        }
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(self.checked)
+        {
+            (ctx.dispatch)(action);
+        }
+        ctx.request_repaint();
+    }
+}
+
+impl Widget for Checkbox {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        let visual = self.visual.get();
+        let (label_width, _) = measure_single_line(&self.label, visual.label_font_size);
+        let preferred = Size::new(visual.label_x() + label_width, visual.control_height);
+        constraint.constrain(preferred)
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            self.focused = false;
+            self.focus_visible = false;
+            self.hovered = false;
+            self.pressed = false;
+            return EventResult::Ignored;
+        }
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
+                self.pressed = true;
+                self.focus_visible = false;
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                if self.pressed && self.bounds.contains(*position) {
+                    self.toggle(ctx);
+                }
+                self.pressed = false;
+                EventResult::Handled
+            }
+            UiEvent::MouseMove { position, .. } => {
+                self.hovered = self.bounds.contains(*position);
+                EventResult::Ignored
+            }
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
+                EventResult::Handled
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                self.hovered = false;
+                self.pressed = false;
+                EventResult::Handled
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if *modifiers == Modifiers::none() =>
+            {
+                self.pressed = true;
+                self.toggle(ctx);
+                EventResult::Handled
+            }
+            UiEvent::KeyUp { key: KeyCode::Enter | KeyCode::Space, .. } => {
+                if self.pressed {
+                    self.pressed = false;
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        self.visual.set(CheckboxVisualTokens::from_theme(ctx.theme));
+        let visual = self.visual.get();
+        let tokens = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
+
+        let box_rect = Rect::new(
+            (self.bounds.x + visual.box_left_inset).round(),
+            (self.bounds.y + (self.bounds.height - visual.box_size) * 0.5).round(),
+            visual.box_size,
+            visual.box_size,
+        );
+
+        // Fill color
+        let fill = if !self.enabled {
+            tokens.muted
+        } else if self.checked {
+            tokens.foreground
+        } else if self.hovered {
+            tokens.accent
+        } else {
+            tokens.card
+        };
+
+        // Border color
+        let border_color = if !self.enabled {
+            tokens.border
+        } else if self.checked || self.hovered {
+            tokens.foreground
+        } else {
+            tokens.border
+        };
+
+        // Rounded border: draw slightly larger rounded rect behind fill
+        let border_inset = visual.border_width;
+        let border_rect = box_rect.inset(-border_inset, -border_inset);
+        ctx.encoder
+            .draw_rect(border_rect, border_color, spacing.radius_sm + border_inset);
+        // Fill on top
+        ctx.encoder.draw_rect(box_rect, fill, spacing.radius_sm);
+
+        // Check mark — one filled shape, not two independent stroked lines.
+        if self.checked {
+            let vertices = checkmark_triangles(box_rect);
+            let check_color = if self.enabled {
+                tokens.background
+            } else {
+                tokens.muted_foreground
+            };
+            ctx.encoder.draw_triangles(&vertices, check_color);
+        }
+        if self.focus_visible {
+            paint_focus_ring(ctx, border_rect, spacing.radius_sm + border_inset);
+        }
+
+        // Label text
+        if !self.label.is_empty() {
+            let text_clip = Rect::new(
+                self.bounds.x + visual.label_x(),
+                self.bounds.y,
+                (self.bounds.width - visual.label_x()).max(0.0),
+                self.bounds.height,
+            );
+            let tx = text_clip.x;
+            let ty = centered_text_origin_y(text_clip, ctx.theme.typography.body.line_height);
+            ctx.push_clip(text_clip);
+            ctx.encoder.draw_text(
+                &self.label,
+                visual.label_font_size,
+                Point::new(tx, ty),
+                if self.enabled {
+                    tokens.foreground
+                } else {
+                    tokens.muted_foreground
+                },
+            );
+            ctx.pop_clip();
+        }
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Checkbox)
+                .with_name(self.label.clone())
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    checked: Some(self.checked),
+                    ..AccessibilityState::default()
+                }),
+        )
+    }
+}
+
+fn checkmark_triangles(box_rect: Rect) -> [Point; 12] {
+    let point = |x: f32, y: f32| {
+        Point::new(
+            (box_rect.x + box_rect.width * x).round(),
+            (box_rect.y + box_rect.height * y).round(),
+        )
+    };
+    let p0 = point(0.1875, 0.5625);
+    let p1 = point(0.3125, 0.4375);
+    let p2 = point(0.4375, 0.5625);
+    let p3 = point(0.75, 0.25);
+    let p4 = point(0.875, 0.375);
+    let p5 = point(0.4375, 0.8125);
+
+    [p5, p0, p1, p5, p1, p2, p5, p2, p3, p3, p4, p5]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rects: Vec<Rect>,
+        rect_radii: Vec<f32>,
+        lines: Vec<(Point, Point, f32)>,
+        triangles: Vec<Point>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        texts: Vec<String>,
+        text_font_sizes: Vec<f32>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, bounds: Rect, _color: mondrian_core::Color, corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_radii.push(corner_radius);
+        }
+
+        fn draw_line(
+            &mut self,
+            start: Point,
+            end: Point,
+            width: f32,
+            _color: mondrian_core::Color,
+        ) {
+            self.lines.push((start, end, width));
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: mondrian_core::Color) {
+            self.triangles.extend_from_slice(vertices);
+        }
+
+        fn draw_text(
+            &mut self,
+            text: &str,
+            font_size: f32,
+            _position: Point,
+            _color: mondrian_core::Color,
+        ) {
+            self.texts.push(text.into());
+            self.text_font_sizes.push(font_size);
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    fn checked_action(checked: bool) -> Action {
+        Action::Custom {
+            namespace: "test.checkbox".into(),
+            name: format!("checked:{checked}"),
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn checkbox_new_unchecked() {
+        let cb = Checkbox::new("Option", false);
+        assert!(!cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_new_checked() {
+        let cb = Checkbox::new("Option", true);
+        assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_click_toggles() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(!cb.is_checked()); // not yet toggled on MouseDown
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(cb.is_checked()); // toggled on MouseUp
+    }
+
+    #[test]
+    fn checkbox_click_twice() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let pos = Point::new(50.0, 11.0);
+        let md = UiEvent::MouseDown {
+            position: pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        let mu = UiEvent::MouseUp {
+            position: pos,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+        };
+        cb.event(&md, &mut ctx);
+        cb.event(&mu, &mut ctx);
+        assert!(cb.is_checked());
+        cb.event(&md, &mut ctx);
+        cb.event(&mu, &mut ctx);
+        assert!(!cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_release_outside_no_toggle() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: Point::new(200.0, 200.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(!cb.is_checked());
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn checkbox_set_checked() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.set_checked(true);
+        assert!(cb.is_checked());
+    }
+
+    #[test]
+    fn checkbox_accessibility_exposes_checked_state() {
+        let cb = Checkbox::new("Enable effects", true);
+
+        let node = cb.accessibility().expect("checkbox should expose accessibility");
+
+        assert_eq!(node.role, AccessibilityRole::Checkbox);
+        assert_eq!(node.name.as_deref(), Some("Enable effects"));
+        assert!(node.state.focusable);
+        assert_eq!(node.state.checked, Some(true));
+        assert!(!node.state.disabled);
+    }
+
+    #[test]
+    fn disabled_checkbox_ignores_mouse_and_focus() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay).disabled();
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::MouseDown {
+                position: Point::new(50.0, 11.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!cb.is_checked());
+        assert!(!cb.can_focus());
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn checkbox_pointer_focus_is_accessible_without_focus_ring() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            cb.event(&UiEvent::focus_gained_pointer(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(cb.focused);
+        assert!(!cb.focus_visible);
+        assert!(cb.accessibility().unwrap().state.focused);
+    }
+
+    #[test]
+    fn checkbox_keyboard_focus_shows_focus_ring() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            cb.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+
+        assert!(cb.focused);
+        assert!(cb.focus_visible);
+        assert!(cb.accessibility().unwrap().state.focused);
+    }
+
+    #[test]
+    fn checkbox_checked_paints_one_filled_checkmark_shape() {
+        let mut cb = Checkbox::new("Opt", true);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 100.0, 22.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert!(encoder.lines.is_empty());
+        assert_eq!(encoder.triangles.len(), 12);
+        for point in &encoder.triangles {
+            assert_eq!(point.x.fract(), 0.0);
+            assert_eq!(point.y.fract(), 0.0);
+            assert!((2.0..=18.0).contains(&point.x));
+            assert!((3.0..=19.0).contains(&point.y));
+        }
+    }
+
+    #[test]
+    fn checkbox_paint_clips_long_label_to_remaining_bounds() {
+        let mut cb = Checkbox::new("A very long checkbox label", false);
+        cb.layout(Rect::new(10.0, 20.0, 80.0, 22.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert_eq!(encoder.texts, vec!["A very long checkbox label"]);
+        assert_eq!(encoder.clips, vec![Rect::new(30.0, 20.0, 60.0, 22.0)]);
+        assert_eq!(encoder.clip_pops, 1);
+    }
+
+    #[test]
+    fn checkbox_visual_metrics_follow_theme_tokens() {
+        let cb = Checkbox::new("Tokenized", false);
+        let mut theme = ThemePreset::Dark.build();
+        theme.spacing.icon_size = 18.0;
+        theme.spacing.border_emphasis = 3.0;
+        theme.spacing.border_standard = 2.0;
+        theme.typography.body.font_size = 15.0;
+        theme.typography.body.line_height = 24.0;
+
+        let visual = CheckboxVisualTokens::from_theme(&theme);
+        assert_eq!(visual.box_size, 21.0);
+        assert_eq!(visual.label_x(), 27.0);
+
+        let mut cb = cb;
+        cb.layout(Rect::new(10.0, 20.0, 120.0, 30.0));
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 100.0),
+        };
+
+        cb.paint(&mut ctx);
+
+        assert_eq!(
+            cb.measure(LayoutConstraint::LOOSE).height,
+            visual.control_height
+        );
+        assert_eq!(encoder.rects[1], Rect::new(13.0, 25.0, 21.0, 21.0));
+        assert_eq!(encoder.rects[0], Rect::new(11.0, 23.0, 25.0, 25.0));
+        assert_eq!(
+            encoder.rect_radii[0],
+            theme.spacing.radius_sm + visual.border_width
+        );
+        assert_eq!(encoder.clips, vec![Rect::new(37.0, 20.0, 93.0, 30.0)]);
+        assert_eq!(encoder.text_font_sizes, vec![15.0]);
+    }
+
+    #[test]
+    fn checkbox_on_toggle_dispatches() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(cell.into_inner(), vec![Action::TogglePlay]);
+    }
+
+    #[test]
+    fn checkbox_on_change_dispatches_new_state_and_requests_repaint() {
+        let mut cb = Checkbox::new("Opt", false).on_change(checked_action);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(cell.borrow().as_slice(), &[checked_action(true)]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn checkbox_static_and_value_actions_can_dispatch_together() {
+        let mut cb = Checkbox::new("Opt", false)
+            .on_toggle(Action::TogglePlay)
+            .on_change(checked_action);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let pos = Point::new(50.0, 11.0);
+        cb.event(
+            &UiEvent::MouseDown {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        cb.event(
+            &UiEvent::MouseUp {
+                position: pos,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            cell.borrow().as_slice(),
+            &[Action::TogglePlay, checked_action(true)]
+        );
+    }
+
+    #[test]
+    fn checkbox_space_toggles_and_dispatches() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(cb.is_checked());
+        assert!(cb.pressed);
+        assert_eq!(cell.borrow().as_slice(), &[Action::TogglePlay]);
+        assert!(ctx.requests.repaint);
+
+        let result = cb.event(
+            &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(!cb.pressed);
+    }
+
+    #[test]
+    fn checkbox_keyboard_activation_ignores_modified_key_down() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        for (key, modifiers) in [
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                cb.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(!cb.is_checked());
+            assert!(!cb.pressed);
+        }
+        assert!(cell.borrow().is_empty());
+    }
+
+    #[test]
+    fn checkbox_key_up_releases_press_even_when_modifiers_changed() {
+        let mut cb = Checkbox::new("Opt", false).on_toggle(Action::TogglePlay);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        assert_eq!(
+            cb.event(
+                &UiEvent::KeyDown { key: KeyCode::Space, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            cb.event(
+                &UiEvent::KeyUp { key: KeyCode::Space, modifiers: Modifiers::shift() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(!cb.pressed);
+        assert!(cb.is_checked());
+        assert_eq!(cell.borrow().as_slice(), &[Action::TogglePlay]);
+    }
+
+    #[test]
+    fn checkbox_enter_without_action_toggles_without_dispatch() {
+        let mut cb = Checkbox::new("Opt", false);
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let cell = RefCell::new(Vec::new());
+        let dispatch_fn = |a: Action| {
+            cell.borrow_mut().push(a);
+        };
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &dispatch_fn);
+
+        let result = cb.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(cb.is_checked());
+        assert!(cell.into_inner().is_empty());
+    }
+
+    #[test]
+    fn checkbox_mouse_move_in_sets_hovered() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert!(cb.hovered);
+    }
+
+    #[test]
+    fn checkbox_mouse_move_out_clears_hovered() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        cb.hovered = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(200.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert!(!cb.hovered);
+    }
+
+    #[test]
+    fn checkbox_mouse_move_same_state_no_rehandle() {
+        let mut cb = Checkbox::new("Opt", false);
+        cb.layout(Rect::new(0.0, 0.0, 100.0, 22.0));
+        cb.hovered = true;
+        let mut f = DummyFocus;
+        let mut s = DummyShortcut;
+        let mut t = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut s, &mut t, &|_| {});
+
+        let r = cb.event(
+            &UiEvent::MouseMove {
+                position: Point::new(50.0, 11.0),
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(r, EventResult::Ignored);
+        assert!(cb.hovered);
+    }
+}

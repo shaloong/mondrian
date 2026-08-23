@@ -1,0 +1,4149 @@
+//! Card-grid browser surface for media assets and similar project resources.
+//!
+//! `AssetGrid` is deliberately domain-light: it owns local browser interaction
+//! such as filtering, selection, activation, drag initiation, and file drops,
+//! while app crates map real domain records into item view models.
+
+mod model;
+mod paint;
+
+use mondrian_core::Color;
+use mondrian_editor_state::Action;
+use mondrian_ui_core::types::*;
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, EventContext,
+    PaintContext,
+};
+use mondrian_ui_core::{EventResult, UiEvent, Widget};
+use mondrian_ui_theme::{current_theme, Theme};
+use std::collections::BTreeSet;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::paint::{centered_text_origin_y, color_with_alpha, paint_focus_ring, soft_border};
+use crate::panel_header::PanelHeader;
+use crate::text_metrics::measure_single_line;
+use crate::vector_icon::VectorIcon;
+use crate::ContextMenu;
+use crate::MenuItem;
+use crate::RasterImage;
+use crate::TextInput;
+
+use self::model as grid_model;
+
+const DOUBLE_CLICK_MAX_AGE: Duration = Duration::from_millis(500);
+const DOUBLE_CLICK_MAX_DISTANCE: f32 = 5.0;
+const DRAG_START_DISTANCE: f32 = 6.0;
+const RENAME_MENU_COMMAND: &str = "asset_grid.rename";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct AssetGridVisualTokens {
+    footer_title_font_size: f32,
+    footer_subtitle_font_size: f32,
+    badge_font_size: f32,
+    badge_edge_inset: f32,
+    badge_gap: f32,
+    badge_padding_x: f32,
+    badge_min_width: f32,
+    badge_height: f32,
+    badge_radius: f32,
+    preview_background: Color,
+    neutral_badge_fill: Color,
+    neutral_badge_text: Color,
+    failed_thumbnail_mark: Color,
+}
+
+impl AssetGridVisualTokens {
+    fn from_theme(theme: &Theme) -> Self {
+        let spacing = &theme.spacing;
+        let typography = &theme.typography;
+        let colors = &theme.colors;
+        Self {
+            footer_title_font_size: typography.small.font_size,
+            footer_subtitle_font_size: typography.metadata.font_size,
+            badge_font_size: typography.metadata.font_size,
+            badge_edge_inset: spacing.sm,
+            badge_gap: spacing.xs,
+            badge_padding_x: spacing.sm,
+            badge_min_width: (spacing.interact_height - spacing.xs).max(spacing.md),
+            badge_height: (spacing.interact_height - spacing.md).max(1.0),
+            badge_radius: spacing.radius_sm,
+            preview_background: colors.viewer_stage,
+            neutral_badge_fill: color_with_alpha(colors.popover, 0.78),
+            neutral_badge_text: colors.popover_foreground,
+            failed_thumbnail_mark: color_with_alpha(colors.background, 0.78),
+        }
+    }
+}
+
+/// Dynamic action factory for [`AssetGrid`] item selection or activation.
+pub type AssetGridAction = dyn Fn(usize, &AssetGridItem) -> Option<Action>;
+/// Dynamic action factory for committing an item title edit.
+pub type AssetGridRenameAction = dyn Fn(usize, &AssetGridItem, &str) -> Option<Action>;
+/// Dynamic action factory for payloads dropped on an [`AssetGrid`].
+pub type AssetGridDropAction = dyn Fn(&DragPayload, Point) -> AssetGridDropOutcome;
+/// Dynamic action factory for payloads dropped on one [`AssetGridItem`].
+pub type AssetGridItemDropAction =
+    dyn Fn(&DragPayload, usize, &AssetGridItem) -> AssetGridDropOutcome;
+/// Dynamic menu factory for the current asset-grid selection.
+pub type AssetGridSelectionMenu = dyn Fn(&[usize], &[&AssetGridItem]) -> Vec<MenuItem>;
+
+/// Widget-local result of evaluating an asset-grid drop target.
+///
+/// This result deliberately remains outside the editor [`Action`] language:
+/// consuming a pointer gesture without forming an authoring command is an
+/// interaction outcome, not a serializable product command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssetGridDropOutcome {
+    /// This target declined the payload, so the caller may try a broader target.
+    Unhandled,
+    /// This target accepted the gesture but intentionally formed no command.
+    Consumed,
+    /// This target formed an editor command that must be dispatched once.
+    Dispatch(Action),
+}
+
+impl From<Option<Action>> for AssetGridDropOutcome {
+    fn from(action: Option<Action>) -> Self {
+        action.map_or(Self::Unhandled, Self::Dispatch)
+    }
+}
+
+impl From<Action> for AssetGridDropOutcome {
+    fn from(action: Action) -> Self {
+        Self::Dispatch(action)
+    }
+}
+
+/// Local browser state for preserving an [`AssetGrid`] across model refreshes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssetGridState {
+    /// Text currently committed in the optional filter input.
+    pub filter_query: String,
+    /// Selected item by stable id when available.
+    pub selected_item_id: Option<String>,
+    /// Selected item by model index as a fallback.
+    pub selected_index: Option<usize>,
+    /// Multi-selected item ids, preserved across model refreshes when possible.
+    pub selected_item_ids: Vec<String>,
+    /// Multi-selected item indices as a fallback when ids are unavailable.
+    pub selected_indices: Vec<usize>,
+    /// Hovered item by stable id when available.
+    pub hovered_item_id: Option<String>,
+    /// Hovered item by model index as a fallback.
+    pub hovered_index: Option<usize>,
+}
+
+/// Non-image state for an [`AssetGridItem`] preview region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetGridThumbnailStatus {
+    /// No thumbnail is expected; paint the normal icon placeholder.
+    None,
+    /// A thumbnail request is in flight.
+    Loading,
+    /// A thumbnail was expected but could not be produced.
+    Failed,
+}
+
+/// Single card rendered by [`AssetGrid`].
+#[derive(Debug, Clone)]
+pub struct AssetGridItem {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub badges: Vec<AssetGridBadge>,
+    pub accent: Color,
+    pub icon: Option<VectorIcon>,
+    pub thumbnail: Option<RasterImage>,
+    pub thumbnail_status: AssetGridThumbnailStatus,
+    pub disabled: bool,
+    pub select_action: Option<Action>,
+    pub activate_action: Option<Action>,
+    pub drag_payload: Option<DragPayload>,
+    pub context_menu_items: Vec<MenuItem>,
+    pub renamable: bool,
+}
+
+/// Semantic visual tone for an [`AssetGridBadge`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetGridBadgeTone {
+    /// Neutral metadata, such as media kind.
+    Neutral,
+    /// Accent metadata tied to the active theme primary/accent color.
+    Accent,
+    /// Positive/ready status.
+    Success,
+    /// Attention-needed status.
+    Warning,
+    /// Error or unavailable status.
+    Error,
+}
+
+/// Compact label painted over an [`AssetGridItem`] preview.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetGridBadge {
+    pub label: String,
+    pub tone: AssetGridBadgeTone,
+}
+
+impl AssetGridBadge {
+    /// Create a neutral badge.
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            tone: AssetGridBadgeTone::Neutral,
+        }
+    }
+
+    /// Create a badge with a semantic tone.
+    pub fn with_tone(label: impl Into<String>, tone: AssetGridBadgeTone) -> Self {
+        Self { label: label.into(), tone }
+    }
+}
+
+impl AssetGridItem {
+    /// Create an enabled asset-grid card.
+    pub fn new(id: impl Into<String>, title: impl Into<String>, accent: Color) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            subtitle: String::new(),
+            badges: Vec::new(),
+            accent,
+            icon: None,
+            thumbnail: None,
+            thumbnail_status: AssetGridThumbnailStatus::None,
+            disabled: false,
+            select_action: None,
+            activate_action: None,
+            drag_payload: None,
+            context_menu_items: Vec::new(),
+            renamable: false,
+        }
+    }
+
+    /// Set secondary card text.
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.subtitle = subtitle.into();
+        self
+    }
+
+    /// Append a compact kind/status badge.
+    pub fn with_badge(mut self, badge: impl Into<String>) -> Self {
+        self.badges.push(AssetGridBadge::new(badge));
+        self
+    }
+
+    /// Append a compact kind/status badge with a semantic tone.
+    pub fn with_badge_tone(mut self, badge: impl Into<String>, tone: AssetGridBadgeTone) -> Self {
+        self.badges.push(AssetGridBadge::with_tone(badge, tone));
+        self
+    }
+
+    /// Set all compact kind/status badges.
+    pub fn with_badges(mut self, badges: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.badges = badges.into_iter().map(AssetGridBadge::new).collect();
+        self
+    }
+
+    /// Set a vector icon painted in the preview region.
+    pub fn with_icon(mut self, icon: VectorIcon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Set a raster thumbnail painted in the preview region.
+    pub fn with_thumbnail(mut self, thumbnail: RasterImage) -> Self {
+        self.thumbnail = Some(thumbnail);
+        self.thumbnail_status = AssetGridThumbnailStatus::None;
+        self
+    }
+
+    /// Mark the preview region as waiting for an async thumbnail.
+    pub fn with_thumbnail_loading(mut self) -> Self {
+        self.thumbnail = None;
+        self.thumbnail_status = AssetGridThumbnailStatus::Loading;
+        self
+    }
+
+    /// Mark the preview region as failed to load a thumbnail.
+    pub fn with_thumbnail_failed(mut self) -> Self {
+        self.thumbnail = None;
+        self.thumbnail_status = AssetGridThumbnailStatus::Failed;
+        self
+    }
+
+    /// Mark the card as disabled.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    /// Dispatch a static action when this card becomes selected.
+    pub fn with_select_action(mut self, action: Action) -> Self {
+        self.select_action = Some(action);
+        self
+    }
+
+    /// Dispatch a static action when this card is activated.
+    pub fn with_activate_action(mut self, action: Action) -> Self {
+        self.activate_action = Some(action);
+        self
+    }
+
+    /// Start an internal UI drag with this payload after pointer movement.
+    pub fn with_drag_payload(mut self, payload: DragPayload) -> Self {
+        self.drag_payload = Some(payload);
+        self
+    }
+
+    /// Attach a card-specific right-click context menu.
+    pub fn with_context_menu(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
+        self
+    }
+
+    /// Allow this card title to enter inline editing from keyboard/mouse input.
+    pub fn renamable(mut self, renamable: bool) -> Self {
+        self.renamable = renamable;
+        self
+    }
+}
+
+/// Searchable, selectable card grid for asset-library style panels.
+pub struct AssetGrid {
+    id: WidgetId,
+    header: PanelHeader,
+    items: Vec<AssetGridItem>,
+    filter_input: Option<Box<TextInput>>,
+    filter_query: String,
+    visible_indices: Vec<usize>,
+    bounds: Rect,
+    viewport: Rect,
+    selected: Option<usize>,
+    selected_indices: BTreeSet<usize>,
+    selection_anchor: Option<usize>,
+    hovered: Option<usize>,
+    focused: bool,
+    focus_visible: bool,
+    drop_hovered: bool,
+    last_click: Option<AssetGridClick>,
+    drag_candidate: Option<AssetGridDragCandidate>,
+    columns: usize,
+    card_width: f32,
+    context_menu_items: Vec<MenuItem>,
+    selection_context_menu: Option<Box<AssetGridSelectionMenu>>,
+    context_menu: Option<ContextMenu>,
+    context_menu_target: Option<usize>,
+    rename_editor: Option<AssetGridRenameEditor>,
+    on_select: Option<Box<AssetGridAction>>,
+    on_activate: Option<Box<AssetGridAction>>,
+    on_rename: Option<Box<AssetGridRenameAction>>,
+    on_drop: Option<Box<AssetGridDropAction>>,
+    on_item_drop: Option<Box<AssetGridItemDropAction>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AssetGridClick {
+    index: usize,
+    position: Point,
+    time: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct AssetGridDragCandidate {
+    index: usize,
+    start: Point,
+    payload: DragPayload,
+}
+
+struct AssetGridRenameEditor {
+    index: usize,
+    input: Box<TextInput>,
+}
+
+impl AssetGrid {
+    /// Create a card grid with a title and cards.
+    pub fn new(title: impl Into<String>, items: Vec<AssetGridItem>) -> Self {
+        let visible_indices = (0..items.len()).collect();
+        Self {
+            id: WidgetId::new(),
+            header: PanelHeader::new(title),
+            items,
+            filter_input: None,
+            filter_query: String::new(),
+            visible_indices,
+            bounds: Rect::ZERO,
+            viewport: Rect::ZERO,
+            selected: None,
+            selected_indices: BTreeSet::new(),
+            selection_anchor: None,
+            hovered: None,
+            focused: false,
+            focus_visible: false,
+            drop_hovered: false,
+            last_click: None,
+            drag_candidate: None,
+            columns: 1,
+            card_width: grid_model::AssetGridMetrics::default().card_width,
+            context_menu_items: Vec::new(),
+            selection_context_menu: None,
+            context_menu: None,
+            context_menu_target: None,
+            rename_editor: None,
+            on_select: None,
+            on_activate: None,
+            on_rename: None,
+            on_drop: None,
+            on_item_drop: None,
+        }
+    }
+
+    /// Attach a right-click context menu to the grid surface.
+    ///
+    /// The menu stays domain-light: items carry already-mapped app actions,
+    /// while `AssetGrid` only owns popup placement, overlay painting, keyboard
+    /// navigation, and dismissal.
+    pub fn with_context_menu(mut self, items: Vec<MenuItem>) -> Self {
+        self.context_menu_items = items;
+        self
+    }
+
+    /// Attach a dynamic context menu for the current selection.
+    pub fn with_selection_context_menu(
+        mut self,
+        menu: impl Fn(&[usize], &[&AssetGridItem]) -> Vec<MenuItem> + 'static,
+    ) -> Self {
+        self.selection_context_menu = Some(Box::new(menu));
+        self
+    }
+
+    /// Set a small explanatory subtitle below the title.
+    pub fn with_subtitle(mut self, subtitle: impl Into<String>) -> Self {
+        self.header.subtitle = subtitle.into();
+        self
+    }
+
+    /// Use compact embedded chrome when the host panel already supplies title text.
+    pub fn with_embedded_panel_chrome(mut self) -> Self {
+        self.header.set_embedded();
+        self
+    }
+
+    /// Add a real filter input above the card grid.
+    pub fn with_filter(mut self, placeholder: impl Into<String>) -> Self {
+        let mut input = TextInput::new(placeholder);
+        if !self.filter_query.is_empty() {
+            input.set_text(self.filter_query.clone());
+        }
+        self.filter_input = Some(Box::new(input));
+        self.header.has_filter = true;
+        self
+    }
+
+    /// Grid title used by host shells as a stable state key.
+    pub fn title(&self) -> &str {
+        self.header.title_text()
+    }
+
+    /// Current committed filter query.
+    pub fn filter_query(&self) -> &str {
+        &self.filter_query
+    }
+
+    /// Set the filter text programmatically without dispatching item actions.
+    pub fn set_filter_query(&mut self, query: impl Into<String>) {
+        self.filter_query = query.into();
+        if let Some(input) = &mut self.filter_input {
+            input.set_text(self.filter_query.clone());
+        }
+        self.normalize_after_filter_change();
+    }
+
+    /// Snapshot local browser interaction state.
+    pub fn state(&self) -> AssetGridState {
+        AssetGridState {
+            filter_query: self.filter_query.clone(),
+            selected_item_id: self
+                .selected
+                .and_then(|index| self.items.get(index))
+                .map(|item| item.id.clone()),
+            selected_index: self.selected,
+            selected_item_ids: self
+                .selected_indices
+                .iter()
+                .filter_map(|index| self.items.get(*index).map(|item| item.id.clone()))
+                .collect(),
+            selected_indices: self.selected_indices.iter().copied().collect(),
+            hovered_item_id: self
+                .hovered
+                .and_then(|index| self.items.get(index))
+                .map(|item| item.id.clone()),
+            hovered_index: self.hovered,
+        }
+    }
+
+    /// Restore local browser state after replacing the backing model.
+    pub fn restore_state(&mut self, state: &AssetGridState) {
+        self.set_filter_query(state.filter_query.clone());
+        let primary = state
+            .selected_item_id
+            .as_ref()
+            .and_then(|id| {
+                self.items
+                    .iter()
+                    .position(|item| item.id == *id && self.item_matches_filter(item))
+            })
+            .or(state.selected_index);
+        let mut selected_indices = BTreeSet::new();
+        for id in &state.selected_item_ids {
+            if let Some(index) = self
+                .items
+                .iter()
+                .position(|item| item.id == *id && self.item_matches_filter(item))
+                .filter(|index| self.is_enabled_index(*index))
+            {
+                selected_indices.insert(index);
+            }
+        }
+        if selected_indices.is_empty() {
+            selected_indices.extend(
+                state
+                    .selected_indices
+                    .iter()
+                    .copied()
+                    .filter(|index| self.is_enabled_index(*index))
+                    .filter(|index| self.visible_indices.contains(index)),
+            );
+        }
+        if let Some(primary) = primary
+            .filter(|index| self.is_enabled_index(*index))
+            .filter(|index| self.visible_indices.contains(index))
+        {
+            selected_indices.insert(primary);
+            self.selected = Some(primary);
+        } else {
+            self.selected = selected_indices.iter().next().copied();
+        }
+        self.selected_indices = selected_indices;
+        self.selection_anchor = self.selected;
+        self.hovered = state
+            .hovered_item_id
+            .as_ref()
+            .and_then(|id| {
+                self.items
+                    .iter()
+                    .position(|item| item.id == *id && self.item_matches_filter(item))
+            })
+            .or(state.hovered_index)
+            .filter(|index| self.visible_indices.contains(index));
+    }
+
+    /// Dispatch a dynamic action when selection changes.
+    pub fn on_select<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_select = Some(Box::new(move |index, item| action(index, item).into()));
+        self
+    }
+
+    /// Dispatch a dynamic action when the current card is activated.
+    pub fn on_activate<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_activate = Some(Box::new(move |index, item| action(index, item).into()));
+        self
+    }
+
+    /// Dispatch a dynamic action when a card title inline edit is committed.
+    pub fn on_rename<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(usize, &AssetGridItem, &str) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_rename = Some(Box::new(move |index, item, title| {
+            action(index, item, title).into()
+        }));
+        self
+    }
+
+    /// Dispatch a dynamic action when a drag payload is dropped on the grid.
+    pub fn on_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&DragPayload, Point) -> R + 'static,
+        R: Into<AssetGridDropOutcome>,
+    {
+        self.on_drop = Some(Box::new(move |payload, point| {
+            action(payload, point).into()
+        }));
+        self
+    }
+
+    /// Dispatch a dynamic action when a drag payload is dropped on a card.
+    pub fn on_item_drop<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(&DragPayload, usize, &AssetGridItem) -> R + 'static,
+        R: Into<AssetGridDropOutcome>,
+    {
+        self.on_item_drop = Some(Box::new(move |payload, index, item| {
+            action(payload, index, item).into()
+        }));
+        self
+    }
+
+    /// Set selected item without dispatching actions.
+    pub fn set_selected(&mut self, index: Option<usize>) {
+        self.selected_indices.clear();
+        self.selected =
+            index.filter(|idx| self.is_enabled_index(*idx) && self.visible_indices.contains(idx));
+        if let Some(selected) = self.selected {
+            self.selected_indices.insert(selected);
+        }
+        self.selection_anchor = self.selected;
+    }
+
+    /// Currently selected item index.
+    pub fn selected_index(&self) -> Option<usize> {
+        self.selected
+    }
+
+    /// Currently selected item indices.
+    pub fn selected_indices(&self) -> Vec<usize> {
+        self.selected_indices.iter().copied().collect()
+    }
+
+    /// Number of columns computed during the last layout pass.
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// Bounds of a visible card by model index after the last layout pass.
+    pub fn card_rect_for_index(&self, index: usize) -> Option<Rect> {
+        let visible_position = self.visible_position_for_index(index)?;
+        Some(self.card_rect_at_visible_position(visible_position))
+    }
+
+    fn header_height(&self) -> f32 {
+        self.header.height()
+    }
+
+    fn content_height_for_width(width: f32, item_count: usize) -> f32 {
+        let theme = current_theme();
+        grid_model::content_height_for_width(
+            width,
+            item_count,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
+    }
+
+    fn preview_rect_for_card(&self, card: Rect) -> Rect {
+        let theme = current_theme();
+        grid_model::preview_rect_for_card(
+            card,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
+    }
+
+    fn footer_rect_for_card(&self, card: Rect) -> Rect {
+        let theme = current_theme();
+        grid_model::footer_rect_for_card(
+            card,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
+    }
+
+    fn is_enabled_index(&self, index: usize) -> bool {
+        self.items.get(index).is_some_and(|item| !item.disabled)
+    }
+
+    fn item_matches_query(item: &AssetGridItem, query: &str) -> bool {
+        grid_model::item_matches_query(item, query)
+    }
+
+    fn item_matches_filter(&self, item: &AssetGridItem) -> bool {
+        Self::item_matches_query(item, &self.filter_query.trim().to_lowercase())
+    }
+
+    fn rebuild_visible_indices(&mut self) {
+        self.visible_indices = grid_model::rebuild_visible_indices(&self.items, &self.filter_query);
+    }
+
+    fn normalize_after_filter_change(&mut self) {
+        self.rebuild_visible_indices();
+        self.selected = self
+            .selected
+            .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
+        let visible_indices = self.visible_indices.clone();
+        let enabled_indices: BTreeSet<usize> = visible_indices
+            .iter()
+            .copied()
+            .filter(|index| self.is_enabled_index(*index))
+            .collect();
+        self.selected_indices.retain(|index| enabled_indices.contains(index));
+        if let Some(selected) = self.selected {
+            self.selected_indices.insert(selected);
+        } else {
+            self.selected = self.selected_indices.iter().next().copied();
+        }
+        self.selection_anchor = self
+            .selection_anchor
+            .filter(|index| self.is_enabled_index(*index) && self.visible_indices.contains(index));
+        if self
+            .rename_editor
+            .as_ref()
+            .is_some_and(|editor| !self.can_rename_index(editor.index))
+        {
+            self.rename_editor = None;
+        }
+        self.hovered = None;
+        self.drag_candidate = None;
+        self.last_click = None;
+    }
+
+    fn filter_input_rect(&self) -> Option<Rect> {
+        self.header.filter_input_rect(self.bounds)
+    }
+
+    fn sync_filter_query_from_input(&mut self) -> bool {
+        let Some(input) = &self.filter_input else {
+            return false;
+        };
+        let query = input.text().to_owned();
+        if query == self.filter_query {
+            return false;
+        }
+        self.filter_query = query;
+        self.normalize_after_filter_change();
+        true
+    }
+
+    fn route_filter_input_event(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> Option<EventResult> {
+        let input = self.filter_input.as_mut()?;
+        let result = input.event(event, ctx);
+        if self.sync_filter_query_from_input() {
+            ctx.request_repaint();
+        }
+        Some(result)
+    }
+
+    fn visible_position_for_index(&self, index: usize) -> Option<usize> {
+        grid_model::visible_position_for_index(&self.visible_indices, index)
+    }
+
+    fn visible_enabled_indices(&self) -> Vec<usize> {
+        grid_model::visible_enabled_indices(&self.visible_indices, &self.items)
+    }
+
+    fn first_enabled(&self) -> Option<usize> {
+        self.visible_enabled_indices().first().copied()
+    }
+
+    fn last_enabled(&self) -> Option<usize> {
+        self.visible_enabled_indices().last().copied()
+    }
+
+    fn move_selection(&mut self, direction: i32) -> Option<usize> {
+        grid_model::move_selection(&self.visible_indices, &self.items, self.selected, direction)
+    }
+
+    fn selected_range(&self, start: usize, end: usize) -> BTreeSet<usize> {
+        grid_model::selected_range(&self.visible_indices, &self.items, start, end)
+    }
+
+    fn set_selection_set(&mut self, selected: BTreeSet<usize>, primary: usize) {
+        self.selected_indices = selected;
+        if self.is_enabled_index(primary) && self.visible_indices.contains(&primary) {
+            self.selected = Some(primary);
+            self.selected_indices.insert(primary);
+        } else {
+            self.selected = self.selected_indices.iter().next().copied();
+        }
+    }
+
+    fn select_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        if !self.is_enabled_index(index) {
+            return EventResult::Handled;
+        }
+        if self.selected != Some(index)
+            || self.selected_indices.len() != 1
+            || !self.selected_indices.contains(&index)
+        {
+            self.set_selected(Some(index));
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn extend_selection_from_input(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        if !self.is_enabled_index(index) {
+            return EventResult::Handled;
+        }
+        let anchor = self.selection_anchor.or(self.selected).unwrap_or(index);
+        let selected = self.selected_range(anchor, index);
+        if selected != self.selected_indices || self.selected != Some(index) {
+            self.set_selection_set(selected, index);
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+        }
+        EventResult::Handled
+    }
+
+    fn click_is_activation(&self, index: usize, position: Point, now: Instant) -> bool {
+        let Some(last) = self.last_click else {
+            return false;
+        };
+        if last.index != index || now.duration_since(last.time) > DOUBLE_CLICK_MAX_AGE {
+            return false;
+        }
+        let dx = position.x - last.position.x;
+        let dy = position.y - last.position.y;
+        dx * dx + dy * dy <= DOUBLE_CLICK_MAX_DISTANCE * DOUBLE_CLICK_MAX_DISTANCE
+    }
+
+    fn select_or_activate_from_input(
+        &mut self,
+        index: usize,
+        position: Point,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        if !self.is_enabled_index(index) {
+            self.last_click = None;
+            return EventResult::Handled;
+        }
+        let now = Instant::now();
+        let activate =
+            !modifiers.ctrl && !modifiers.shift && self.click_is_activation(index, position, now);
+        self.last_click = Some(AssetGridClick { index, position, time: now });
+        if modifiers.shift {
+            return self.extend_selection_from_input(index, ctx);
+        }
+        if modifiers.ctrl {
+            if self.selected_indices.contains(&index) {
+                self.selected_indices.remove(&index);
+                self.selected = self.selected_indices.iter().next().copied();
+                if self.selection_anchor == Some(index) {
+                    self.selection_anchor = self.selected;
+                }
+            } else {
+                self.selected_indices.insert(index);
+                self.selected = Some(index);
+                self.selection_anchor.get_or_insert(index);
+            }
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+            return EventResult::Handled;
+        }
+        if self.selected != Some(index)
+            || self.selected_indices.len() != 1
+            || !self.selected_indices.contains(&index)
+        {
+            self.set_selected(Some(index));
+            self.dispatch_select(index, ctx);
+            ctx.request_repaint();
+        }
+        if activate {
+            if self.title_editor_rect(index).is_some_and(|rect| rect.contains(position))
+                && self.can_rename_index(index)
+            {
+                return self.start_rename(index, ctx);
+            }
+            self.dispatch_activate(index, ctx);
+        }
+        EventResult::Handled
+    }
+
+    fn begin_drag_candidate_if_needed(
+        &mut self,
+        position: Point,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let Some(candidate) = self.drag_candidate.clone() else {
+            return EventResult::Ignored;
+        };
+        if !self.is_enabled_index(candidate.index) {
+            self.drag_candidate = None;
+            ctx.release_pointer_capture(self.id);
+            return EventResult::Handled;
+        }
+        let dx = position.x - candidate.start.x;
+        let dy = position.y - candidate.start.y;
+        if dx * dx + dy * dy < DRAG_START_DISTANCE * DRAG_START_DISTANCE {
+            return EventResult::Ignored;
+        }
+        self.drag_candidate = None;
+        ctx.begin_drag(self.drag_payload_for_index(candidate.index, candidate.payload));
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn drag_payload_for_index(&self, index: usize, fallback: DragPayload) -> DragPayload {
+        if !self.selected_indices.contains(&index) || self.selected_indices.len() <= 1 {
+            return fallback;
+        }
+        let mut assets = Vec::new();
+        let mut folders = Vec::new();
+        for selected in &self.selected_indices {
+            match self.items.get(*selected).and_then(|item| item.drag_payload.as_ref()) {
+                Some(DragPayload::Asset(asset_id)) => assets.push(*asset_id),
+                Some(DragPayload::AssetFolder(folder_id)) => folders.push(folder_id.clone()),
+                Some(_) | None => return fallback,
+            }
+        }
+        if assets.len() + folders.len() <= 1 {
+            fallback
+        } else {
+            DragPayload::AssetSelection { assets, folders }
+        }
+    }
+
+    fn activate_selected(&self, ctx: &mut EventContext) -> EventResult {
+        let Some(index) = self.selected.filter(|idx| self.is_enabled_index(*idx)) else {
+            return EventResult::Ignored;
+        };
+        self.dispatch_activate(index, ctx);
+        EventResult::Handled
+    }
+
+    fn dispatch_selection_menu_action(&self, ctx: &mut EventContext) -> EventResult {
+        for item in self.selection_context_menu_items() {
+            if !item.enabled {
+                continue;
+            }
+            if let Some(action) = item.action().cloned() {
+                (ctx.dispatch)(action);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+        }
+        EventResult::Ignored
+    }
+
+    fn clear_selection_from_input(&mut self, ctx: &mut EventContext) -> EventResult {
+        if self.selected.is_none() && self.selected_indices.is_empty() {
+            return EventResult::Ignored;
+        }
+        self.selected = None;
+        self.selected_indices.clear();
+        self.selection_anchor = None;
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn dispatch_select(&self, index: usize, ctx: &mut EventContext) {
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        if let Some(action) = item.select_action.clone() {
+            (ctx.dispatch)(action);
+        }
+        if let Some(factory) = &self.on_select
+            && let Some(action) = factory(index, item)
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    fn dispatch_activate(&self, index: usize, ctx: &mut EventContext) {
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        if let Some(action) = item.activate_action.clone() {
+            (ctx.dispatch)(action);
+        }
+        if let Some(factory) = &self.on_activate
+            && let Some(action) = factory(index, item)
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    fn drop_payload(&self, payload: &DragPayload, position: Point, ctx: &mut EventContext) {
+        if let Some(index) = self.index_at(position)
+            && let (Some(factory), Some(item)) = (&self.on_item_drop, self.items.get(index))
+        {
+            match factory(payload, index, item) {
+                AssetGridDropOutcome::Unhandled => {}
+                AssetGridDropOutcome::Consumed => return,
+                AssetGridDropOutcome::Dispatch(action) => {
+                    (ctx.dispatch)(action);
+                    return;
+                }
+            }
+        }
+        if let Some(factory) = &self.on_drop {
+            match factory(payload, position) {
+                AssetGridDropOutcome::Unhandled | AssetGridDropOutcome::Consumed => {}
+                AssetGridDropOutcome::Dispatch(action) => (ctx.dispatch)(action),
+            }
+        }
+    }
+
+    fn open_context_menu(
+        &mut self,
+        position: Point,
+        items: Vec<MenuItem>,
+        target: Option<usize>,
+        ctx: &mut EventContext,
+    ) -> bool {
+        if items.iter().all(|item| !item.is_activatable()) {
+            return false;
+        }
+        let mut menu = ContextMenu::new(position, items);
+        menu.layout(self.bounds);
+        self.context_menu = Some(menu);
+        self.context_menu_target = target;
+        ctx.request_repaint();
+        true
+    }
+
+    fn card_context_menu_items(&self, index: usize) -> Vec<MenuItem> {
+        let mut items = self
+            .items
+            .get(index)
+            .map(|item| item.context_menu_items.clone())
+            .unwrap_or_default();
+        if self.can_rename_index(index) {
+            let mut with_rename = Vec::with_capacity(items.len() + 2);
+            with_rename.push(MenuItem::local("Rename", RENAME_MENU_COMMAND));
+            if !items.is_empty() {
+                with_rename.push(MenuItem::separator());
+                with_rename.append(&mut items);
+            }
+            with_rename
+        } else {
+            items
+        }
+    }
+
+    fn selection_context_menu_items(&self) -> Vec<MenuItem> {
+        let Some(factory) = &self.selection_context_menu else {
+            return Vec::new();
+        };
+        let indices: Vec<usize> = self.selected_indices.iter().copied().collect();
+        let items: Vec<&AssetGridItem> =
+            indices.iter().filter_map(|index| self.items.get(*index)).collect();
+        if items.is_empty() {
+            return Vec::new();
+        }
+        factory(&indices, &items)
+    }
+
+    fn card_rect_at_visible_position(&self, visible_position: usize) -> Rect {
+        let theme = current_theme();
+        grid_model::card_rect_at_visible_position_with_metrics(
+            self.viewport,
+            self.columns,
+            self.card_width,
+            visible_position,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
+    }
+
+    fn index_at(&self, point: Point) -> Option<usize> {
+        let theme = current_theme();
+        grid_model::index_at(
+            &self.visible_indices,
+            self.viewport,
+            self.columns,
+            self.card_width,
+            point,
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing),
+        )
+    }
+
+    fn title_editor_rect(&self, index: usize) -> Option<Rect> {
+        let visible_position = self.visible_position_for_index(index)?;
+        let card = self.card_rect_at_visible_position(visible_position);
+        let footer = self.footer_rect_for_card(card);
+        Some(Rect::new(footer.x, footer.y - 3.0, footer.width, 24.0))
+    }
+
+    fn footer_text_metrics(
+        &self,
+        item: &AssetGridItem,
+        footer: Rect,
+        title_font_size: f32,
+        duration_font_size: f32,
+    ) -> (f32, f32, f32) {
+        let duration_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size)
+                .0
+                .min((footer.width * 0.38).max(28.0))
+        };
+        let title_width = if duration_width > 0.0 {
+            (footer.width - duration_width - 8.0).max(0.0)
+        } else {
+            footer.width
+        };
+        let title_text_width = measure_single_line(&item.title, title_font_size).0;
+        let duration_text_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size).0
+        };
+        (title_width, title_text_width, duration_text_width)
+    }
+
+    fn item_footer_tooltip(&self, index: usize) -> Option<String> {
+        let item = self.items.get(index)?;
+        let visible_position = self.visible_position_for_index(index)?;
+        let card = self.card_rect_at_visible_position(visible_position);
+        let footer = self.footer_rect_for_card(card);
+        let theme = current_theme();
+        let visual = AssetGridVisualTokens::from_theme(&theme);
+        let title_font_size = visual.footer_title_font_size;
+        let duration_font_size = visual.footer_subtitle_font_size;
+        let (title_width, title_text_width, duration_text_width) =
+            self.footer_text_metrics(item, footer, title_font_size, duration_font_size);
+        let duration_width = if item.subtitle.is_empty() {
+            0.0
+        } else {
+            measure_single_line(&item.subtitle, duration_font_size)
+                .0
+                .min((footer.width * 0.38).max(28.0))
+        };
+        let truncated = title_text_width > title_width
+            || (!item.subtitle.is_empty() && duration_text_width > duration_width);
+        truncated.then(|| {
+            if item.subtitle.is_empty() {
+                item.title.clone()
+            } else {
+                format!("{}  {}", item.title, item.subtitle)
+            }
+        })
+    }
+
+    fn start_rename(&mut self, index: usize, ctx: &mut EventContext) -> EventResult {
+        if !self.can_rename_index(index) {
+            return EventResult::Ignored;
+        }
+        let Some(item) = self.items.get(index) else {
+            return EventResult::Ignored;
+        };
+        let mut input = TextInput::new("Name").with_text(item.title.clone());
+        input.select_all();
+        if let Some(rect) = self.title_editor_rect(index) {
+            input.layout(rect);
+        }
+        let input_id = input.id();
+        self.rename_editor = Some(AssetGridRenameEditor { index, input: Box::new(input) });
+        self.drag_candidate = None;
+        self.context_menu = None;
+        self.context_menu_target = None;
+        ctx.focus.request_focus(input_id);
+        if let Some(editor) = &mut self.rename_editor {
+            let _ = editor.input.event(&UiEvent::focus_gained_programmatic(), ctx);
+        }
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn can_rename_index(&self, index: usize) -> bool {
+        self.on_rename.is_some()
+            && self.items.get(index).is_some_and(|item| !item.disabled && item.renamable)
+            && self.visible_indices.contains(&index)
+    }
+
+    fn commit_rename(&mut self, ctx: &mut EventContext) -> EventResult {
+        let Some(mut editor) = self.rename_editor.take() else {
+            return EventResult::Ignored;
+        };
+        let _ = editor.input.event(&UiEvent::FocusLost, ctx);
+        let text = editor.input.text().trim().to_owned();
+        if !text.is_empty()
+            && let (Some(item), Some(factory)) =
+                (self.items.get(editor.index), self.on_rename.as_ref())
+            && text != item.title
+            && let Some(action) = factory(editor.index, item, &text)
+        {
+            (ctx.dispatch)(action);
+        }
+        self.focused = true;
+        self.focus_visible = false;
+        ctx.focus.request_focus(self.id);
+        ctx.request_repaint();
+        EventResult::Handled
+    }
+
+    fn cancel_rename(&mut self, ctx: &mut EventContext) -> EventResult {
+        if let Some(mut editor) = self.rename_editor.take() {
+            let _ = editor.input.event(&UiEvent::FocusLost, ctx);
+            self.context_menu_target = None;
+            self.focused = true;
+            self.focus_visible = false;
+            ctx.focus.request_focus(self.id);
+            ctx.request_repaint();
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    fn route_rename_editor_event(
+        &mut self,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> Option<EventResult> {
+        let editor = self.rename_editor.as_mut()?;
+        match event {
+            UiEvent::KeyDown { key: KeyCode::Enter, .. } => Some(self.commit_rename(ctx)),
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } => Some(self.cancel_rename(ctx)),
+            UiEvent::MouseDown { position, .. } if !editor.input.hit_test(*position) => {
+                Some(self.commit_rename(ctx))
+            }
+            UiEvent::FocusLost => Some(self.commit_rename(ctx)),
+            _ => {
+                let result = editor.input.event(event, ctx);
+                Some(result)
+            }
+        }
+    }
+
+    fn paint_badges(&self, ctx: &mut PaintContext, item: &AssetGridItem, preview: Rect) {
+        if item.badges.is_empty() {
+            return;
+        }
+        let visual = AssetGridVisualTokens::from_theme(ctx.theme);
+        let font_size = visual.badge_font_size;
+        let min_x = preview.x + visual.badge_edge_inset;
+        let mut x = preview.x + preview.width - visual.badge_edge_inset;
+        let max_badge_width =
+            (preview.width - visual.badge_edge_inset * 2.0).max(visual.badge_min_width);
+        for badge in item.badges.iter().rev() {
+            let text_width = measure_single_line(&badge.label, font_size).0;
+            let desired_width = (text_width + visual.badge_padding_x * 2.0)
+                .clamp(visual.badge_min_width, max_badge_width);
+            let available_width = x - min_x;
+            if available_width < visual.badge_min_width - 2.0 {
+                break;
+            }
+            let badge_width = desired_width.min(available_width);
+            let badge_rect = Rect::new(
+                x - badge_width,
+                preview.y + visual.badge_edge_inset,
+                badge_width,
+                visual.badge_height,
+            );
+            let (fill, text) = badge_colors(ctx, badge);
+            ctx.encoder.draw_rect(badge_rect, fill, visual.badge_radius);
+            ctx.push_clip(badge_rect.inset(visual.badge_padding_x - 1.0, 1.0));
+            ctx.encoder.draw_text(
+                &badge.label,
+                font_size,
+                snap_point(Point::new(
+                    badge_rect.x + visual.badge_padding_x,
+                    centered_text_origin_y(badge_rect, ctx.theme.typography.metadata.line_height),
+                )),
+                text,
+            );
+            ctx.pop_clip();
+            x = badge_rect.x - visual.badge_gap;
+        }
+    }
+
+    fn paint_empty_state(&self, ctx: &mut PaintContext) {
+        let colors = &ctx.theme.colors;
+        let (title, description) = if self.items.is_empty() {
+            ("拖入媒体开始编辑", "支持视频、音频、图片与序列")
+        } else {
+            ("没有匹配的素材", "换个关键词或清空搜索条件")
+        };
+        let top = self.viewport.y + (self.viewport.height * 0.30).max(24.0);
+        let title_size = ctx.theme.typography.small.font_size;
+        let body_size = ctx.theme.typography.metadata.font_size;
+        ctx.encoder.draw_text_box(
+            title,
+            title_size,
+            snap_point(Point::new(self.viewport.x + 16.0, top)),
+            (self.viewport.width - 32.0).max(0.0),
+            colors.text_secondary,
+        );
+        ctx.encoder.draw_text_box(
+            description,
+            body_size,
+            snap_point(Point::new(self.viewport.x + 16.0, top + 20.0)),
+            (self.viewport.width - 32.0).max(0.0),
+            colors.text_tertiary,
+        );
+    }
+
+    fn paint_card(&self, ctx: &mut PaintContext, index: usize, rect: Rect) {
+        let item = &self.items[index];
+        let colors = &ctx.theme.colors;
+        let spacing = &ctx.theme.spacing;
+        let metrics = grid_model::AssetGridMetrics::from_spacing(spacing);
+        let visual = AssetGridVisualTokens::from_theme(ctx.theme);
+        let primary_selected = self.selected == Some(index);
+        let selected = self.selected_indices.contains(&index);
+        let hovered = self.hovered == Some(index) && !item.disabled;
+        let base_fill = if selected {
+            color_with_alpha(colors.primary, 0.12)
+        } else if hovered {
+            color_with_alpha(colors.foreground, 0.04)
+        } else {
+            Color::TRANSPARENT
+        };
+        if primary_selected && (self.focus_visible || self.focused) {
+            paint_focus_ring(ctx, rect, metrics.card_radius);
+        }
+        let card_border = if selected {
+            color_with_alpha(colors.primary, 0.45)
+        } else if hovered {
+            color_with_alpha(colors.foreground, 0.10)
+        } else {
+            Color::TRANSPARENT
+        };
+        ctx.encoder.draw_rect(rect, card_border, metrics.card_radius);
+        ctx.encoder.draw_rect(
+            rect.inset(1.0, 1.0),
+            base_fill,
+            (metrics.card_radius - 1.0).max(0.0),
+        );
+
+        let preview = self.preview_rect_for_card(rect);
+        ctx.encoder.draw_rect(
+            preview.inset(-1.0, -1.0),
+            soft_border(colors.border),
+            spacing.radius_sm + 1.0,
+        );
+        ctx.encoder.draw_rect(preview, visual.preview_background, spacing.radius_sm);
+
+        let text_color = if item.disabled {
+            colors.muted_foreground
+        } else {
+            color_with_alpha(colors.foreground, 0.92)
+        };
+        if let Some(thumbnail) = &item.thumbnail {
+            let image_rect =
+                fit_rect_into(thumbnail.width as f32, thumbnail.height as f32, preview);
+            ctx.push_clip(preview);
+            ctx.encoder.draw_raster_image(
+                &thumbnail.key,
+                image_rect,
+                thumbnail.width,
+                thumbnail.height,
+                thumbnail.color_space,
+                Arc::clone(&thumbnail.rgba),
+                if item.disabled {
+                    colors.muted_foreground
+                } else {
+                    Color::WHITE
+                },
+            );
+            ctx.pop_clip();
+        } else {
+            // No accent line — plain rounded card as requested
+        }
+        if item.thumbnail.is_none() {
+            if let Some(icon) = &item.icon {
+                let icon_rect = Rect::new(
+                    preview.x + (preview.width - metrics.icon_size) * 0.5,
+                    preview.y + (preview.height - metrics.icon_size) * 0.5,
+                    metrics.icon_size,
+                    metrics.icon_size,
+                );
+                icon.paint(ctx, icon_rect, text_color);
+            }
+            match item.thumbnail_status {
+                AssetGridThumbnailStatus::None => {}
+                AssetGridThumbnailStatus::Loading => {
+                    paint_thumbnail_loading(ctx, preview, text_color);
+                }
+                AssetGridThumbnailStatus::Failed => {
+                    paint_thumbnail_failed(ctx, preview, colors.muted_foreground, visual);
+                }
+            }
+        }
+        self.paint_badges(ctx, item, preview);
+
+        let footer = self.footer_rect_for_card(rect);
+        ctx.push_clip(footer);
+        let editing_title = self.rename_editor.as_ref().is_some_and(|editor| editor.index == index);
+        if !editing_title {
+            let font_size = visual.footer_title_font_size;
+            let duration_font_size = visual.footer_subtitle_font_size;
+            let (title_width, _, _) =
+                self.footer_text_metrics(item, footer, font_size, duration_font_size);
+            let duration_width = if item.subtitle.is_empty() {
+                0.0
+            } else {
+                measure_single_line(&item.subtitle, duration_font_size)
+                    .0
+                    .min((footer.width * 0.38).max(28.0))
+            };
+            let title = elide_text_to_width(&item.title, font_size, title_width);
+            let title_y = centered_text_origin_y(footer, ctx.theme.typography.small.line_height);
+            ctx.encoder.draw_text(
+                &title,
+                font_size,
+                snap_point(Point::new(footer.x, title_y)),
+                text_color,
+            );
+            if !item.subtitle.is_empty() && duration_width > 0.0 {
+                let duration =
+                    elide_text_to_width(&item.subtitle, duration_font_size, duration_width);
+                let duration_text_width = measure_single_line(&duration, duration_font_size).0;
+                let duration_y =
+                    centered_text_origin_y(footer, ctx.theme.typography.metadata.line_height);
+                ctx.encoder.draw_text(
+                    &duration,
+                    duration_font_size,
+                    snap_point(Point::new(
+                        footer.x + footer.width - duration_text_width,
+                        duration_y,
+                    )),
+                    colors.text_tertiary,
+                );
+            }
+        }
+        ctx.pop_clip();
+    }
+}
+
+impl Widget for AssetGrid {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        let width = if constraint.max.width.is_finite() {
+            constraint.max.width.max(constraint.min.width)
+        } else {
+            let metrics = {
+                let theme = current_theme();
+                grid_model::AssetGridMetrics::from_spacing(&theme.spacing)
+            };
+            metrics.card_width * 2.0 + metrics.content_padding * 2.0
+        };
+        constraint.constrain(Size::new(
+            width,
+            self.header_height()
+                + Self::content_height_for_width(width, self.visible_indices.len()),
+        ))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        if let Some(rect) = self.filter_input_rect()
+            && let Some(input) = &mut self.filter_input
+        {
+            input.layout(rect);
+        }
+        if let Some(menu) = &mut self.context_menu {
+            menu.layout(bounds);
+        }
+        let header = self.header_height();
+        let metrics = {
+            let theme = current_theme();
+            grid_model::AssetGridMetrics::from_spacing(&theme.spacing)
+        };
+        let layout =
+            grid_model::layout_for_bounds(bounds, header, self.visible_indices.len(), metrics);
+        self.columns = layout.columns;
+        self.card_width = layout.card_width;
+        self.viewport = layout.viewport;
+        if let Some(index) = self.rename_editor.as_ref().map(|editor| editor.index)
+            && let Some(rect) = self.title_editor_rect(index)
+            && let Some(editor) = &mut self.rename_editor
+        {
+            editor.input.layout(rect);
+        }
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if let Some(result) = self.route_rename_editor_event(event, ctx) {
+            return result;
+        }
+
+        let replace_with_new_menu = matches!(
+            event,
+            UiEvent::MouseDown {
+                position,
+                button: MouseButton::Right,
+                ..
+            } if self.bounds.contains(*position)
+        );
+        if replace_with_new_menu {
+            self.context_menu = None;
+            self.context_menu_target = None;
+        } else if let Some(menu) = &mut self.context_menu {
+            if menu.is_visible() {
+                let result = menu.event(event, ctx);
+                let local_command = menu.take_local_command();
+                if !menu.is_visible() {
+                    self.context_menu = None;
+                }
+                if local_command.as_deref() == Some(RENAME_MENU_COMMAND) {
+                    if let Some(index) = self.context_menu_target.take() {
+                        return self.start_rename(index, ctx);
+                    }
+                    return EventResult::Handled;
+                }
+                if self.context_menu.is_none() {
+                    self.context_menu_target = None;
+                }
+                if result == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            } else {
+                self.context_menu = None;
+                self.context_menu_target = None;
+            }
+        }
+
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Right, .. }
+                if self.bounds.contains(*position) =>
+            {
+                self.focus_visible = false;
+                if let Some(index) = self.index_at(*position)
+                    && self.is_enabled_index(index)
+                {
+                    if self.selected_indices.contains(&index) && self.selected_indices.len() > 1 {
+                        let items = self.selection_context_menu_items();
+                        if self.open_context_menu(*position, items, None, ctx) {
+                            return EventResult::Handled;
+                        }
+                    }
+                    let items = self.card_context_menu_items(index);
+                    if items.iter().any(MenuItem::is_activatable) {
+                        if !self.selected_indices.contains(&index) {
+                            self.set_selected(Some(index));
+                        }
+                        if self.open_context_menu(*position, items, Some(index), ctx) {
+                            return EventResult::Handled;
+                        }
+                    }
+                }
+                if self.open_context_menu(*position, self.context_menu_items.clone(), None, ctx) {
+                    return EventResult::Handled;
+                }
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Left, modifiers } => {
+                if self.filter_input.as_ref().is_some_and(|input| input.hit_test(*position)) {
+                    return self
+                        .route_filter_input_event(event, ctx)
+                        .unwrap_or(EventResult::Ignored);
+                }
+                if self.bounds.contains(*position) {
+                    self.focus_visible = false;
+                    if let Some(index) = self.index_at(*position) {
+                        let result =
+                            self.select_or_activate_from_input(index, *position, *modifiers, ctx);
+                        if let Some(payload) =
+                            self.items.get(index).and_then(|item| item.drag_payload.clone())
+                        {
+                            self.drag_candidate =
+                                Some(AssetGridDragCandidate { index, start: *position, payload });
+                            ctx.request_pointer_capture(self.id);
+                        }
+                        return result;
+                    }
+                    return EventResult::Handled;
+                }
+            }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.drag_candidate.is_some() => {
+                self.drag_candidate = None;
+                ctx.release_pointer_capture(self.id);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::MouseMove { position, .. } => {
+                if self.begin_drag_candidate_if_needed(*position, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+                let hover = self.index_at(*position);
+                if hover != self.hovered {
+                    self.hovered = hover;
+                    if let Some(index) = hover {
+                        if let Some(text) = self.item_footer_tooltip(index) {
+                            ctx.tooltip.show(text, Point::new(position.x, position.y + 18.0));
+                        } else {
+                            ctx.tooltip.hide();
+                        }
+                    } else {
+                        ctx.tooltip.hide();
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if let Some(index) = hover {
+                    if let Some(text) = self.item_footer_tooltip(index) {
+                        ctx.tooltip.show(text, Point::new(position.x, position.y + 18.0));
+                    } else {
+                        ctx.tooltip.hide();
+                    }
+                }
+            }
+            UiEvent::DragEnter { payload, position }
+                if (self.on_drop.is_some() || self.on_item_drop.is_some())
+                    && self.bounds.contains(*position) =>
+            {
+                // Only handle file/asset drags, not PanelTab drags
+                if matches!(payload, DragPayload::PanelTab(_)) {
+                    return EventResult::Ignored;
+                }
+                if !self.drop_hovered {
+                    self.drop_hovered = true;
+                    ctx.request_repaint();
+                }
+                return EventResult::Handled;
+            }
+            UiEvent::DragOver { position, .. }
+                if self.drop_hovered && self.bounds.contains(*position) =>
+            {
+                return EventResult::Handled;
+            }
+            UiEvent::Drop { payload, position }
+                if (self.on_drop.is_some() || self.on_item_drop.is_some())
+                    && self.bounds.contains(*position) =>
+            {
+                self.drop_hovered = false;
+                self.drop_payload(payload, *position, ctx);
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::DragLeave if self.on_drop.is_some() || self.on_item_drop.is_some() => {
+                if self.drop_hovered {
+                    self.drop_hovered = false;
+                    ctx.request_repaint();
+                }
+                return EventResult::Handled;
+            }
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
+                return EventResult::Handled;
+            }
+            UiEvent::FocusLost => {
+                let had_pointer_capture = self.drag_candidate.is_some();
+                self.focused = false;
+                self.focus_visible = false;
+                self.drag_candidate = None;
+                self.drop_hovered = false;
+                self.last_click = None;
+                self.context_menu = None;
+                self.context_menu_target = None;
+                if let Some(input) = &mut self.filter_input {
+                    let _ = input.event(event, ctx);
+                }
+                if had_pointer_capture {
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                }
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::A, modifiers } if self.focused && modifiers.ctrl => {
+                self.selected_indices = self.visible_enabled_indices().into_iter().collect();
+                self.selected = self.selected_indices.iter().next().copied();
+                self.selection_anchor = self.selected;
+                ctx.request_repaint();
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Right, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.move_selection(1) {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Left, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.move_selection(-1) {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.move_selection(self.columns as i32) {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.move_selection(-(self.columns as i32)) {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Home, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.first_enabled() {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::End, modifiers }
+                if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if let Some(index) = self.last_enabled() {
+                    return if modifiers.shift {
+                        self.extend_selection_from_input(index, ctx)
+                    } else {
+                        self.select_from_input(index, ctx)
+                    };
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::F2, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
+                if let Some(index) = self.selected {
+                    return self.start_rename(index, ctx);
+                }
+                return EventResult::Ignored;
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
+                return self.clear_selection_from_input(ctx);
+            }
+            UiEvent::KeyDown {
+                key: KeyCode::Delete | KeyCode::Backspace,
+                modifiers,
+            } if self.focused && !modifiers.ctrl && !modifiers.alt && !modifiers.meta => {
+                return self.dispatch_selection_menu_action(ctx);
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.focused && *modifiers == Modifiers::none() =>
+            {
+                return self.activate_selected(ctx);
+            }
+            _ => {}
+        }
+        EventResult::Ignored
+    }
+
+    fn after_child_event(&mut self, _event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.rename_editor.is_some() {
+            match _event {
+                UiEvent::KeyDown { key: KeyCode::Enter, .. } | UiEvent::FocusLost => {
+                    return self.commit_rename(ctx);
+                }
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    return self.cancel_rename(ctx);
+                }
+                _ => {}
+            }
+        }
+        if self.sync_filter_query_from_input() {
+            ctx.request_repaint();
+            EventResult::Handled
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        self.header.paint_background(ctx, self.bounds);
+        self.header.paint(ctx, self.bounds);
+        if let Some(input) = &self.filter_input {
+            input.paint(ctx);
+        }
+
+        ctx.push_clip(self.viewport);
+        if self.visible_indices.is_empty() {
+            self.paint_empty_state(ctx);
+        } else {
+            for (visible_position, index) in self.visible_indices.iter().copied().enumerate() {
+                self.paint_card(
+                    ctx,
+                    index,
+                    self.card_rect_at_visible_position(visible_position),
+                );
+            }
+            if let Some(editor) = &self.rename_editor {
+                editor.input.paint(ctx);
+            }
+        }
+        ctx.pop_clip();
+
+        let colors = &ctx.theme.colors;
+        if self.drop_hovered {
+            ctx.encoder.draw_rect(
+                self.bounds.inset(3.0, 3.0),
+                color_with_alpha(colors.ring, 0.22),
+                ctx.theme.spacing.radius_md,
+            );
+        }
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if let Some(menu) = &self.context_menu {
+            menu.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, point: Point) -> bool {
+        self.context_menu.as_ref().is_some_and(|menu| menu.overlay_hit_test(point))
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+
+    fn child_count(&self) -> usize {
+        usize::from(self.filter_input.is_some()) + usize::from(self.rename_editor.is_some())
+    }
+
+    fn child(&self, index: usize) -> Option<&dyn Widget> {
+        let filter_count = usize::from(self.filter_input.is_some());
+        if index == 0
+            && let Some(input) = &self.filter_input
+        {
+            return Some(input.as_ref() as &dyn Widget);
+        }
+        if index == filter_count {
+            return self.rename_editor.as_ref().map(|editor| editor.input.as_ref() as &dyn Widget);
+        }
+        None
+    }
+
+    fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        let filter_count = usize::from(self.filter_input.is_some());
+        if index == 0
+            && let Some(input) = &mut self.filter_input
+        {
+            return Some(input.as_mut() as &mut dyn Widget);
+        }
+        if index == filter_count {
+            return self
+                .rename_editor
+                .as_mut()
+                .map(|editor| editor.input.as_mut() as &mut dyn Widget);
+        }
+        None
+    }
+
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn can_focus(&self) -> bool {
+        true
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        self.filter_input.as_ref().is_some_and(|input| input.accepts_text_input())
+            || self
+                .rename_editor
+                .as_ref()
+                .is_some_and(|editor| editor.input.accepts_text_input())
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::Grid)
+                .with_name(self.header.title.clone())
+                .with_state(AccessibilityState {
+                    focusable: true,
+                    focused: self.focused,
+                    selected: Some(!self.selected_indices.is_empty()),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Collection {
+                    total_count: self.items.len(),
+                    visible_count: self.visible_indices.len(),
+                    selected_count: self.selected_indices.len(),
+                }),
+        )
+    }
+}
+
+fn fit_rect_into(source_width: f32, source_height: f32, bounds: Rect) -> Rect {
+    grid_model::fit_rect_into(source_width, source_height, bounds)
+}
+
+fn elide_text_to_width(text: &str, font_size: f32, max_width: f32) -> String {
+    if text.is_empty() || max_width <= 0.0 {
+        return String::new();
+    }
+    if measure_single_line(text, font_size).0 <= max_width {
+        return text.to_owned();
+    }
+
+    let suffix = "...";
+    if measure_single_line(suffix, font_size).0 > max_width {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    for ch in text.chars() {
+        out.push(ch);
+        let candidate = format!("{out}{suffix}");
+        if measure_single_line(&candidate, font_size).0 > max_width {
+            out.pop();
+            break;
+        }
+    }
+    format!("{out}{suffix}")
+}
+
+fn paint_thumbnail_loading(ctx: &mut PaintContext, preview: Rect, color: Color) {
+    paint::paint_thumbnail_loading(ctx, preview, color);
+}
+
+fn paint_thumbnail_failed(
+    ctx: &mut PaintContext,
+    preview: Rect,
+    color: Color,
+    visual: AssetGridVisualTokens,
+) {
+    paint::paint_thumbnail_failed(ctx, preview, color, &visual);
+}
+
+fn badge_colors(ctx: &PaintContext, badge: &AssetGridBadge) -> (Color, Color) {
+    let colors = &ctx.theme.colors;
+    let visual = AssetGridVisualTokens::from_theme(ctx.theme);
+    match badge.tone {
+        AssetGridBadgeTone::Neutral => (visual.neutral_badge_fill, visual.neutral_badge_text),
+        AssetGridBadgeTone::Accent => (color_with_alpha(colors.primary, 0.22), colors.primary),
+        AssetGridBadgeTone::Success => (color_with_alpha(colors.success, 0.22), colors.success),
+        AssetGridBadgeTone::Warning => (color_with_alpha(colors.warning, 0.22), colors.warning),
+        AssetGridBadgeTone::Error => (color_with_alpha(colors.error, 0.22), colors.error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paint::mix_color;
+    use crate::test_utils::{DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::types::AssetId;
+    use mondrian_platform_core::NoopPlatformService;
+    use mondrian_ui_core::focus::FocusManager;
+    use mondrian_ui_core::widget::{
+        DrawCommandEncoder, EventContext, EventRequests, PointerCaptureRequest,
+    };
+    use mondrian_ui_theme::ThemePreset;
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
+        clips: Vec<Rect>,
+        clip_pops: usize,
+        raster_images: Vec<(String, Rect, u32, u32)>,
+        texts: Vec<String>,
+        triangles: usize,
+        lines: usize,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, bounds: Rect) {
+            self.clips.push(bounds);
+        }
+
+        fn pop_clip(&mut self) {
+            self.clip_pops += 1;
+        }
+
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_colors.push(color);
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
+            self.lines += 1;
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangles += vertices.len() / 3;
+        }
+
+        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+            self.texts.push(text.to_owned());
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            key: &str,
+            bounds: Rect,
+            width: u32,
+            height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
+            _rgba: Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images.push((key.to_owned(), bounds, width, height));
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    fn item(id: &str, title: &str) -> AssetGridItem {
+        AssetGridItem::new(id, title, Color::from_hex(0x6688CC))
+    }
+
+    #[test]
+    fn asset_grid_accessibility_exposes_collection_counts_and_focus() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("camera", "Camera"),
+                item("music", "Music"),
+                item("camera-b", "Camera B"),
+            ],
+        )
+        .with_filter("Search");
+        grid.set_filter_query("camera");
+        grid.set_selected(Some(0));
+        grid.focused = true;
+
+        let node = grid.accessibility().expect("asset grid should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::Grid);
+        assert_eq!(node.name.as_deref(), Some("Assets"));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert_eq!(node.state.selected, Some(true));
+        assert_eq!(
+            node.value,
+            Some(AccessibilityValue::Collection {
+                total_count: 3,
+                visible_count: 2,
+                selected_count: 1,
+            })
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingFocus {
+        focused: Option<WidgetId>,
+    }
+
+    impl FocusManager for RecordingFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            self.focused
+        }
+
+        fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+            None
+        }
+
+        fn request_focus(&mut self, widget: WidgetId) {
+            self.focused = Some(widget);
+        }
+
+        fn release_focus(&mut self, widget: WidgetId) {
+            if self.focused == Some(widget) {
+                self.focused = None;
+            }
+        }
+
+        fn clear_focus(&mut self) {
+            self.focused = None;
+        }
+    }
+
+    fn event_ctx<'a>(
+        focus: &'a mut dyn FocusManager,
+        shortcut: &'a mut DummyShortcut,
+        tooltip: &'a mut DummyTooltip,
+        requests: &'a mut EventRequests,
+        dispatch: &'a dyn Fn(Action),
+    ) -> EventContext<'a> {
+        EventContext {
+            focus,
+            shortcut,
+            tooltip,
+            dispatch,
+            platform: &NoopPlatformService,
+            requests,
+        }
+    }
+
+    #[test]
+    fn grid_layout_wraps_cards_without_using_scrollbar_gutter() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        let measured =
+            grid.measure(LayoutConstraint { min: Size::ZERO, max: Size::new(380.0, f32::MAX) });
+
+        grid.layout(Rect::new(0.0, 0.0, 380.0, 220.0));
+
+        assert_eq!(measured.width, 380.0);
+        assert_eq!(grid.columns(), 2);
+        let first = grid.card_rect_for_index(0).expect("first card");
+        let second = grid.card_rect_for_index(1).expect("second card");
+        assert!(second.x > first.x + first.width);
+        assert!(second.x + second.width <= 380.0);
+    }
+
+    #[test]
+    fn thumbnail_model_rejects_invalid_rgba_payloads() {
+        assert!(RasterImage::new(
+            "asset:bad",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 15],
+        )
+        .is_none());
+        assert!(RasterImage::new(
+            "asset:empty",
+            0,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            Vec::<u8>::new(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn thumbnail_status_builders_clear_ready_thumbnail_payloads() {
+        let thumbnail = RasterImage::new(
+            "asset-thumb:clip-a",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid thumbnail");
+
+        let loading = item("clip-a", "Clip A")
+            .with_thumbnail(thumbnail.clone())
+            .with_thumbnail_loading();
+        let failed = item("clip-b", "Clip B").with_thumbnail(thumbnail).with_thumbnail_failed();
+
+        assert!(loading.thumbnail.is_none());
+        assert_eq!(loading.thumbnail_status, AssetGridThumbnailStatus::Loading);
+        assert!(failed.thumbnail.is_none());
+        assert_eq!(failed.thumbnail_status, AssetGridThumbnailStatus::Failed);
+    }
+
+    #[test]
+    fn inline_rename_commits_f2_edit_with_enter() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.child_count(), 1);
+        assert_eq!(
+            grid.event(&UiEvent::TextInput("New".into()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::OpenProject(path) = &actions[0] else {
+            panic!("expected rename custom action");
+        };
+        assert_eq!(path, &PathBuf::from("New"));
+        assert_eq!(grid.child_count(), 0);
+    }
+
+    #[test]
+    fn inline_rename_escape_cancels_without_dispatch() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert_eq!(grid.child_count(), 0);
+    }
+
+    #[test]
+    fn inline_rename_filter_change_cancels_hidden_editor_without_dispatch() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("clip-a", "Camera A").renamable(true),
+                item("music", "Music Bed"),
+            ],
+        )
+        .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(&UiEvent::TextInput("Hidden rename".into()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(grid.child_count(), 1);
+
+        grid.set_filter_query("music");
+
+        assert_eq!(grid.filter_query(), "music");
+        assert_eq!(grid.child_count(), 0);
+        assert!(grid.rename_editor.is_none());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn inline_rename_commit_returns_focus_to_grid_and_disables_ime() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = RecordingFocus::default();
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        let grid_id = grid.id();
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.child_count(), 1);
+        assert_ne!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.child_count(), 0);
+        assert_eq!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert_eq!(actions.borrow().len(), 1);
+    }
+
+    #[test]
+    fn inline_rename_cancel_returns_focus_to_grid_and_disables_ime() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = RecordingFocus::default();
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Old").renamable(true)])
+            .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        let grid_id = grid.id();
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        grid.event(
+            &UiEvent::MouseDown {
+                position: grid.card_rect_for_index(0).expect("card").center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        grid.event(
+            &UiEvent::KeyDown { key: KeyCode::F2, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.child_count(), 1);
+        assert_ne!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        grid.event(&UiEvent::TextInput("New".into()), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.child_count(), 0);
+        assert_eq!(ctx.focus.focused_widget(), Some(grid_id));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn context_menu_rename_starts_inline_editor_and_commits() {
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Old")
+                .renamable(true)
+                .with_context_menu(vec![MenuItem::new("Delete asset", Action::DeleteSelection)])],
+        )
+        .on_rename(|_, _, name| Action::OpenProject(PathBuf::from(name)));
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.selected_index(), Some(0));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.child_count(), 1);
+
+        assert_eq!(
+            grid.event(&UiEvent::TextInput("New".into()), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        let actions = actions.borrow();
+        assert_eq!(actions.len(), 1);
+        let Action::OpenProject(path) = &actions[0] else {
+            panic!("expected rename action");
+        };
+        assert_eq!(path, &PathBuf::from("New"));
+    }
+
+    #[test]
+    fn paint_card_draws_thumbnail_inside_preview_clip() {
+        let thumbnail = RasterImage::new(
+            "asset-thumb:clip-a",
+            2,
+            2,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![255; 16],
+        )
+        .expect("valid thumbnail");
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail(thumbnail)],
+        );
+        let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+        let card = Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height);
+        let preview = grid.preview_rect_for_card(card);
+        let image_rect = fit_rect_into(2.0, 2.0, preview);
+
+        grid.paint_card(&mut ctx, 0, card);
+
+        assert_eq!(
+            encoder.raster_images,
+            vec![("asset-thumb:clip-a".to_owned(), image_rect, 2, 2)]
+        );
+        assert!(
+            encoder.clips.contains(&preview),
+            "asset thumbnails must be clipped to the card preview region"
+        );
+        assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn paint_card_without_thumbnail_keeps_vector_placeholder_path() {
+        let grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")]);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert!(encoder.rects.len() >= 3);
+    }
+
+    #[test]
+    fn paint_uses_layered_panel_card_and_preview_surfaces() {
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")]);
+        grid.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        grid.paint(&mut ctx);
+
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == mix_color(theme.colors.background, theme.colors.card, 0.24)),
+            "asset grid background should sit below card surfaces"
+        );
+        assert!(
+            encoder.rect_colors.contains(&Color::TRANSPARENT),
+            "normal asset cards should rest transparent until hover or selection"
+        );
+        assert!(
+            encoder.rect_colors.contains(&theme.colors.viewer_stage),
+            "asset previews should use the theme viewer-stage media well"
+        );
+        assert_ne!(theme.colors.viewer_stage, Color::from_hex(0x000000));
+    }
+
+    #[test]
+    fn asset_grid_visual_tokens_follow_theme_typography_and_surfaces() {
+        let dark = ThemePreset::Dark.build();
+        let light = ThemePreset::Light.build();
+        let dark_tokens = AssetGridVisualTokens::from_theme(&dark);
+        let light_tokens = AssetGridVisualTokens::from_theme(&light);
+
+        assert_eq!(
+            dark_tokens.footer_title_font_size,
+            dark.typography.small.font_size
+        );
+        assert_eq!(
+            dark_tokens.footer_subtitle_font_size,
+            dark.typography.metadata.font_size
+        );
+        assert_eq!(
+            dark_tokens.badge_font_size,
+            dark.typography.metadata.font_size
+        );
+        assert_eq!(dark_tokens.badge_radius, dark.spacing.radius_sm);
+        assert_eq!(dark_tokens.preview_background, dark.colors.viewer_stage);
+        assert_eq!(light_tokens.preview_background, light.colors.viewer_stage);
+        assert_ne!(
+            dark_tokens.preview_background,
+            light_tokens.preview_background
+        );
+        assert_eq!(
+            dark_tokens.neutral_badge_text,
+            dark.colors.popover_foreground
+        );
+        assert_eq!(
+            light_tokens.neutral_badge_text,
+            light.colors.popover_foreground
+        );
+    }
+
+    #[test]
+    fn embedded_panel_chrome_omits_duplicate_header_and_divider() {
+        let mut grid = AssetGrid::new("Assets", vec![item("clip-a", "Clip A")])
+            .with_subtitle("Project library")
+            .with_filter("Search assets")
+            .with_embedded_panel_chrome();
+        grid.layout(Rect::new(0.0, 0.0, 260.0, 180.0));
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 260.0, 180.0),
+        };
+        grid.paint(&mut ctx);
+
+        assert!(!encoder.texts.iter().any(|text| text == "Assets"));
+        assert!(!encoder.texts.iter().any(|text| text == "Project library"));
+        assert_eq!(encoder.lines, 0);
+        assert!(
+            grid.viewport.y < 56.0,
+            "embedded grid should not reserve the full title/subtitle header"
+        );
+    }
+
+    #[test]
+    fn multiple_badges_are_searchable_and_paint_inside_preview() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A")
+                .with_badge("VID")
+                .with_badge_tone("OFFLINE", AssetGridBadgeTone::Warning)],
+        );
+        assert!(AssetGrid::item_matches_query(&grid.items[0], "offline"));
+
+        let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+        let card = Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height);
+        let preview = grid.preview_rect_for_card(card);
+
+        grid.paint_card(&mut ctx, 0, card);
+
+        assert!(encoder.texts.iter().any(|text| text == "VID"));
+        assert!(encoder.texts.iter().any(|text| text == "OFFLINE"));
+        assert!(
+            encoder
+                .rect_colors
+                .iter()
+                .any(|color| *color == color_with_alpha(theme.colors.warning, 0.22)),
+            "warning badges should use the theme warning token"
+        );
+        let visual = AssetGridVisualTokens::from_theme(&theme);
+        assert!(
+            encoder.rect_colors.contains(&visual.neutral_badge_fill),
+            "neutral badges should use derived theme tokens instead of fixed colors"
+        );
+        let badge_clips: Vec<Rect> = encoder
+            .clips
+            .iter()
+            .copied()
+            .filter(|rect| rect.y >= preview.y && rect.y < preview.y + 28.0)
+            .collect();
+        assert_eq!(badge_clips.len(), 2);
+        for clip in badge_clips {
+            assert!(preview.contains(Point::new(clip.x, clip.y)));
+            assert!(preview.contains(Point::new(clip.x + clip.width, clip.y + clip.height)));
+        }
+    }
+
+    #[test]
+    fn paint_card_uses_badges_for_type_metadata_not_subtitle_text() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_subtitle("0:12").with_badge("VID")],
+        );
+        let theme = ThemePreset::Dark.build();
+        let metrics = grid_model::AssetGridMetrics::from_spacing(&theme.spacing);
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(
+            &mut ctx,
+            0,
+            Rect::new(20.0, 30.0, metrics.card_width, metrics.card_height),
+        );
+
+        assert!(encoder.texts.iter().any(|text| text == "Clip A"));
+        assert!(encoder.texts.iter().any(|text| text == "VID"));
+        assert!(encoder.texts.iter().any(|text| text == "0:12"));
+    }
+
+    #[test]
+    fn paint_card_loading_thumbnail_uses_shape_marker_without_raster_image() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail_loading()],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert_eq!(encoder.triangles, 0);
+        assert!(encoder.rects.len() >= 6);
+    }
+
+    #[test]
+    fn paint_card_failed_thumbnail_uses_vector_warning_marker() {
+        let grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A").with_thumbnail_failed()],
+        );
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 240.0),
+        };
+
+        grid.paint_card(&mut ctx, 0, Rect::new(20.0, 30.0, 158.0, 118.0));
+
+        assert!(encoder.raster_images.is_empty());
+        assert_eq!(encoder.triangles, 1);
+    }
+
+    #[test]
+    fn filter_state_restores_selection_by_stable_id() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("clip-a", "Camera A"),
+                item("music", "Music Bed"),
+                item("clip-b", "Camera B"),
+            ],
+        )
+        .with_filter("Search assets");
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.set_filter_query("camera");
+        grid.set_selected(Some(2));
+        let state = grid.state();
+
+        let mut rebuilt = AssetGrid::new(
+            "Assets",
+            vec![
+                item("clip-b", "Camera B"),
+                item("music", "Music Bed"),
+                item("clip-a", "Camera A"),
+            ],
+        )
+        .with_filter("Search assets");
+        rebuilt.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        rebuilt.restore_state(&state);
+
+        assert_eq!(rebuilt.filter_query(), "camera");
+        assert_eq!(rebuilt.selected_index(), Some(0));
+    }
+
+    #[test]
+    fn restore_state_rejects_hidden_fallback_selection_index() {
+        let state = AssetGridState {
+            filter_query: "camera".to_owned(),
+            selected_item_id: Some("missing".to_owned()),
+            selected_index: Some(1),
+            selected_item_ids: Vec::new(),
+            selected_indices: vec![1],
+            hovered_item_id: None,
+            hovered_index: None,
+        };
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Camera A"), item("music", "Music Bed")],
+        )
+        .with_filter("Search assets");
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+
+        grid.restore_state(&state);
+
+        assert_eq!(grid.filter_query(), "camera");
+        assert_eq!(grid.selected_index(), None);
+        assert!(grid.selected_indices().is_empty());
+    }
+
+    #[test]
+    fn restore_state_preserves_hover_by_stable_id_across_rebuilds() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("clip-a", "Clip A"), item("clip-b", "Clip B")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 220.0));
+        let hover_point = grid.card_rect_for_index(1).expect("second card").center();
+        let dispatch = |_| {};
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseMove {
+                    position: hover_point,
+                    modifiers: Modifiers::none()
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let state = grid.state();
+
+        let mut rebuilt = AssetGrid::new(
+            "Assets",
+            vec![item("clip-b", "Clip B"), item("clip-a", "Clip A")],
+        );
+        rebuilt.layout(Rect::new(0.0, 0.0, 520.0, 220.0));
+        rebuilt.restore_state(&state);
+
+        assert_eq!(rebuilt.hovered, Some(0));
+    }
+
+    #[test]
+    fn ctrl_click_toggles_multi_selection_without_losing_primary_focus() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::ctrl(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![0, 1]);
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::ctrl(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![1]);
+    }
+
+    #[test]
+    fn shift_click_selects_visible_range_from_anchor() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A"),
+                item("b", "B"),
+                item("c", "C"),
+                item("d", "D"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 320.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let fourth = grid.card_rect_for_index(3).expect("fourth").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: fourth,
+                button: MouseButton::Left,
+                modifiers: Modifiers::shift(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(grid.selected_index(), Some(3));
+        assert_eq!(grid.selected_indices(), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn multi_selection_state_restores_by_stable_ids() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let third = grid.card_rect_for_index(2).expect("third").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: third,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        let state = grid.state();
+
+        let mut rebuilt = AssetGrid::new(
+            "Assets",
+            vec![item("c", "C"), item("b", "B"), item("a", "A")],
+        );
+        rebuilt.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        rebuilt.restore_state(&state);
+
+        assert_eq!(rebuilt.selected_index(), Some(0));
+        assert_eq!(rebuilt.selected_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn keyboard_navigation_clamps_at_last_visible_item() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A"), item("b", "B")]);
+        grid.layout(Rect::new(0.0, 0.0, 360.0, 220.0));
+        grid.set_selected(Some(1));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![1]);
+    }
+
+    #[test]
+    fn keyboard_shift_navigation_extends_asset_selection() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("a", "A"), item("b", "B"), item("c", "C")],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::shift() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(grid.selected_indices(), vec![0, 1]);
+    }
+
+    #[test]
+    fn keyboard_navigation_rename_and_activation_ignore_unowned_modified_keys() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A").renamable(true).with_activate_action(Action::Play),
+                item("b", "B").with_activate_action(Action::TogglePlay),
+            ],
+        )
+        .on_rename(|_, _, _| Action::SaveProject);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Home,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (KeyCode::F2, Modifiers::shift()),
+            (KeyCode::Enter, Modifiers::ctrl()),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                grid.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert_eq!(grid.selected_index(), Some(0));
+            assert_eq!(grid.selected_indices(), vec![0]);
+        }
+
+        assert!(grid.rename_editor.is_none());
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_visible_enabled_cards() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("a", "A"),
+                item("b", "B").disabled(true),
+                item("c", "C"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 520.0, 260.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_indices(), vec![0, 2]);
+    }
+
+    #[test]
+    fn escape_clears_local_selection_when_focused() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A"), item("b", "B")]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(1));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), None);
+        assert!(grid.selected_indices().is_empty());
+        assert!(actions.borrow().is_empty());
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn escape_without_local_selection_is_ignored() {
+        let mut grid = AssetGrid::new("Assets", vec![item("a", "A")]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn file_drop_dispatches_import_action() {
+        let mut grid = AssetGrid::new("Assets", vec![item("drop", "Drop")]).on_drop(
+            |payload, _| match payload {
+                DragPayload::File(paths) if !paths.is_empty() => {
+                    Some(Action::ImportMedia(paths.clone()))
+                }
+                _ => None,
+            },
+        );
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+        let path = PathBuf::from("E:/media/clip.mov");
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::File(vec![path.clone()]),
+                position: Point::new(24.0, 76.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::ImportMedia(vec![path])]
+        );
+    }
+
+    #[test]
+    fn item_drop_dispatches_item_action_before_grid_action() {
+        let asset_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("folder:a", "Folder A"), item("folder:b", "Folder B")],
+        )
+        .on_drop(|_, _| Some(Action::DeselectAll))
+        .on_item_drop(|payload, _index, item| {
+            if item.id == "folder:a" && matches!(payload, DragPayload::Asset(_)) {
+                Some(Action::SelectAll)
+            } else {
+                None
+            }
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first card");
+        let second = grid.card_rect_for_index(1).expect("second card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::Asset(asset_id),
+                    position: first.center(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::Drop {
+                    payload: DragPayload::Asset(asset_id),
+                    position: second.center(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[Action::SelectAll, Action::DeselectAll]
+        );
+    }
+
+    #[test]
+    fn consumed_grid_drop_is_not_dispatched() {
+        let mut grid = AssetGrid::new("Assets", vec![item("drop", "Drop")])
+            .on_drop(|_, _| AssetGridDropOutcome::Consumed);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(AssetId::new()),
+                position: Point::new(24.0, 76.0),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn consumed_item_drop_blocks_grid_fallback_without_dispatch() {
+        let mut grid = AssetGrid::new("Assets", vec![item("folder:a", "Folder A")])
+            .on_drop(|_, _| Some(Action::DeselectAll))
+            .on_item_drop(|_, _index, _item| AssetGridDropOutcome::Consumed);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 180.0));
+        let card = grid.card_rect_for_index(0).expect("folder card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::Drop {
+                payload: DragPayload::Asset(AssetId::new()),
+                position: card.center(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Handled);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn right_click_context_menu_dispatches_actions_as_overlay() {
+        let import_action = Action::ImportMedia(Vec::new());
+        let mut grid =
+            AssetGrid::new("Assets", vec![item("asset", "Asset")]).with_context_menu(vec![
+                MenuItem::new("Import media", import_action.clone()),
+                MenuItem::separator(),
+                MenuItem::new("New folder", Action::DeselectAll),
+            ]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(32.0, 72.0),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(grid.overlay_hit_test(Point::new(900.0, 900.0)));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[import_action]);
+        assert!(!grid.overlay_hit_test(Point::new(900.0, 900.0)));
+    }
+
+    #[test]
+    fn right_click_disabled_grid_context_menu_is_ignored() {
+        let mut grid =
+            AssetGrid::new("Assets", vec![item("asset", "Asset")]).with_context_menu(vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::ImportMedia(Vec::new())).disabled(),
+            ]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let result = grid.event(
+            &UiEvent::MouseDown {
+                position: Point::new(32.0, 72.0),
+                button: MouseButton::Right,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(result, EventResult::Ignored);
+        assert!(!grid.overlay_hit_test(Point::new(900.0, 900.0)));
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn right_click_disabled_card_context_menu_preserves_selection_and_falls_back_to_grid() {
+        let grid_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A").with_context_menu(vec![
+                    MenuItem::separator(),
+                    MenuItem::new("Unavailable", Action::DeleteSelection).disabled(),
+                ]),
+                item("asset-b", "Asset B"),
+            ],
+        )
+        .with_context_menu(vec![MenuItem::new("New folder", grid_action.clone())]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        grid.set_selected(Some(1));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[grid_action]);
+    }
+
+    #[test]
+    fn right_click_card_context_menu_overrides_grid_menu_and_selects_card() {
+        let card_action = Action::ImportMedia(vec![PathBuf::from("E:/media/card.mov")]);
+        let grid_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", card_action.clone())]),
+                item("asset-b", "Asset B"),
+            ],
+        )
+        .with_context_menu(vec![MenuItem::new("New folder", grid_action)]);
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.selected_index(), Some(0));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_replaces_open_context_menu_with_new_card_target() {
+        let first_action = Action::ImportMedia(vec![PathBuf::from("E:/media/first.mov")]);
+        let second_action = Action::ImportMedia(vec![PathBuf::from("E:/media/second.mov")]);
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete first", first_action)]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete second", second_action.clone())]),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first card");
+        let second = grid.card_rect_for_index(1).expect("second card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: first.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(grid.selected_index(), Some(1));
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[second_action]);
+    }
+
+    #[test]
+    fn right_click_card_context_menu_does_not_dispatch_select_before_popup_action() {
+        let select_action = Action::SaveProject;
+        let card_action = Action::ImportMedia(vec![PathBuf::from("E:/media/delete.mov")]);
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_select_action(select_action)
+                    .with_context_menu(vec![MenuItem::new("Delete asset", card_action.clone())]),
+                item("asset-b", "Asset B"),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: card.center(),
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(grid.selected_index(), Some(0));
+        assert!(actions.borrow().is_empty());
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[card_action]);
+    }
+
+    #[test]
+    fn right_click_disabled_selection_context_menu_uses_card_menu() {
+        let single_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+            ],
+        )
+        .with_selection_context_menu(|_, _| {
+            vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::DeleteSelection).disabled(),
+            ]
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(actions.borrow().as_slice(), &[single_action]);
+    }
+
+    #[test]
+    fn right_click_multi_selection_uses_selection_context_menu() {
+        let selection_action = Action::DeleteSelection;
+        let single_action = Action::DeselectAll;
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("asset-a", "Asset A")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action.clone())]),
+                item("asset-b", "Asset B")
+                    .with_context_menu(vec![MenuItem::new("Delete asset", single_action)]),
+            ],
+        )
+        .with_selection_context_menu(move |indices, _items| {
+            if indices.len() > 1 {
+                vec![MenuItem::new("Delete selected", selection_action.clone())]
+            } else {
+                Vec::new()
+            }
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: second,
+                    button: MouseButton::Right,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn delete_key_dispatches_selection_context_action() {
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("asset-a", "Asset A"), item("asset-b", "Asset B")],
+        )
+        .with_selection_context_menu(|indices, _items| {
+            assert_eq!(indices, &[0, 1]);
+            vec![
+                MenuItem::separator(),
+                MenuItem::new("Unavailable", Action::DeselectAll).disabled(),
+                MenuItem::new("Delete selected", Action::DeleteSelection),
+            ]
+        });
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown { key: KeyCode::Delete, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeleteSelection]);
+    }
+
+    #[test]
+    fn backspace_key_without_selection_action_is_ignored() {
+        let mut grid = AssetGrid::new("Assets", vec![item("asset-a", "Asset A")])
+            .with_selection_context_menu(|_, _| vec![MenuItem::separator()]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        grid.set_selected(Some(0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(&UiEvent::focus_gained_keyboard(), &mut ctx);
+        assert_eq!(
+            grid.event(
+                &UiEvent::KeyDown {
+                    key: KeyCode::Backspace,
+                    modifiers: Modifiers::none()
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn pointer_motion_after_press_starts_asset_drag() {
+        let asset_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("asset", "Asset").with_drag_payload(DragPayload::Asset(asset_id))],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let start = card.center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            grid.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(start.x + 12.0, start.y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(
+            requests.drag,
+            Some(mondrian_ui_core::widget::DragRequest::Begin(
+                DragPayload::Asset(asset_id)
+            ))
+        );
+    }
+
+    #[test]
+    fn focus_lost_releases_drag_candidate_capture() {
+        let asset_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![item("asset", "Asset").with_drag_payload(DragPayload::Asset(asset_id))],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let card = grid.card_rect_for_index(0).expect("card");
+        let start = card.center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        {
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                grid.event(
+                    &UiEvent::MouseDown {
+                        position: start,
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::none(),
+                    },
+                    &mut ctx,
+                ),
+                EventResult::Handled
+            );
+        }
+        assert!(grid.drag_candidate.is_some());
+        requests.pointer_capture = None;
+        requests.repaint = false;
+
+        {
+            let mut ctx = event_ctx(
+                &mut focus,
+                &mut shortcut,
+                &mut tooltip,
+                &mut requests,
+                &dispatch,
+            );
+            assert_eq!(
+                grid.event(&UiEvent::FocusLost, &mut ctx),
+                EventResult::Handled
+            );
+        }
+
+        assert!(grid.drag_candidate.is_none());
+        assert_eq!(
+            requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(grid.id()))
+        );
+        assert!(requests.repaint);
+    }
+
+    #[test]
+    fn idle_focus_lost_does_not_release_pointer_capture() {
+        let mut grid = AssetGrid::new("Assets", vec![item("asset", "Asset")]);
+        grid.layout(Rect::new(0.0, 0.0, 320.0, 220.0));
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        assert_eq!(
+            grid.event(&UiEvent::FocusLost, &mut ctx),
+            EventResult::Handled
+        );
+
+        assert_eq!(ctx.requests.pointer_capture, None);
+        assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dragging_selected_asset_cards_starts_asset_selection_drag() {
+        let first_id = AssetId::new();
+        let second_id = AssetId::new();
+        let mut grid = AssetGrid::new(
+            "Assets",
+            vec![
+                item("first", "First").with_drag_payload(DragPayload::Asset(first_id)),
+                item("second", "Second").with_drag_payload(DragPayload::Asset(second_id)),
+            ],
+        );
+        grid.layout(Rect::new(0.0, 0.0, 420.0, 260.0));
+        let first = grid.card_rect_for_index(0).expect("first").center();
+        let second = grid.card_rect_for_index(1).expect("second").center();
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut requests = EventRequests::default();
+        let mut ctx = event_ctx(
+            &mut focus,
+            &mut shortcut,
+            &mut tooltip,
+            &mut requests,
+            &dispatch,
+        );
+
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: first,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseDown {
+                position: second,
+                button: MouseButton::Left,
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+        let _ = grid.event(
+            &UiEvent::MouseMove {
+                position: Point::new(second.x + 12.0, second.y),
+                modifiers: Modifiers::ctrl(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            requests.drag,
+            Some(mondrian_ui_core::widget::DragRequest::Begin(
+                DragPayload::AssetSelection {
+                    assets: vec![first_id, second_id],
+                    folders: Vec::new()
+                }
+            ))
+        );
+    }
+}

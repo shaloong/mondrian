@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "id": "windows-commercial-engine-v1",
+  "release_artifact": "windows-x86_64-msvc",
+  "source": {
+    "clean_tree_required": true,
+    "trusted_branches": [
+      "main",
+      "develop"
+    ]
+  },
+  "complete_golden": {
+    "contract_id": "windows-alpha-golden-v14",
+    "report_schema_version": 3,
+    "required_status": "passed",
+    "baseline_eligible_required": true,
+    "required_consecutive_passes": 3,
+    "build_timeout_seconds": 3600,
+    "process_timeout_seconds": 1800
+  },
+  "playback_reference": {
+    "plan_id": "windows-playback-m0-v4",
+    "report_schema_version": 4,
+    "required_status": "passed-baseline",
+    "baseline_eligible_required": true,
+    "required_gate_ids": [
+      "video",
+      "audio"
+    ]
+  }
+}

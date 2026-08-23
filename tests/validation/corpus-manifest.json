@@ -1,0 +1,317 @@
+{
+  "schema_version": 2,
+  "corpus_revision": "2026-08-05",
+  "entries": [
+    {
+      "id": "mondrian-standard-quality-v1",
+      "path": "color/metadata/mondrian-standard-quality-corpus-v1.json",
+      "availability": "committed",
+      "sha256": "3e78a4a0a2cb72540f8bcaea8d1219f29641489a27634dcf90ddcdcb1bd8a4b8",
+      "size_bytes": 6951,
+      "provenance": {
+        "source": "Mondrian v1 stimulus recipes plus Colour Science ColorChecker 2005 xyY data under BSD-3-Clause",
+        "rights_basis": "project-authored-and-bsd-3-clause",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "numeric-color-reference",
+        "container": "json",
+        "codec": "utf-8",
+        "width": null,
+        "height": null,
+        "frame_rate": "not-applicable",
+        "frame_rate_mode": "not-applicable",
+        "bit_depth": "float32-recipes",
+        "primaries": "rec2020-and-cie-xyy",
+        "transfer": "scene-linear-and-reference",
+        "matrix": "not-applicable",
+        "range": "extended-float"
+      },
+      "purposes": [
+        "mondrian-standard-quality",
+        "colorchecker-reference",
+        "sdr-hdr-view-invariants",
+        "gamut-boundary-continuity"
+      ]
+    },
+    {
+      "id": "generated-playback-4k25-hevc-main10-rec709-v1",
+      "path": "large/playback-4k25-hevc-main10-rec709-1812s-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
+        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "profile": "Video",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 code-pattern recipe; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "hevc-main10",
+        "width": 3840,
+        "height": 2160,
+        "frame_rate": "25/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 10,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 1811.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "professional-video-playback",
+        "long-gop-seek",
+        "10-bit-decode",
+        "cancellation",
+        "whole-process-memory"
+      ]
+    },
+    {
+      "id": "generated-playback-aac-48k-stereo-v1",
+      "path": "large/playback-aac-48k-stereo-1835s-v1.m4a",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-reference-playback-media.ps1",
+        "recipe_sha256": "b31068ad5eaa984028104491cf21454d156efbe895b4adb88099c578d553bc48",
+        "profile": "Audio",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored two-channel analytic tone recipe encoded by FFmpeg AAC",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "audio",
+        "container": "m4a",
+        "codec": "aac",
+        "sample_rate": 48000,
+        "channels": 2,
+        "channel_layout": "stereo",
+        "minimum_stream_duration_seconds": 1834.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "professional-audio-playback",
+        "device-clock",
+        "controlled-device-recovery",
+        "proven-av-phase",
+        "av-drift",
+        "decoded-window-cache",
+        "whole-process-memory",
+        "golden-aac-audio"
+      ]
+    },
+    {
+      "id": "generated-golden-rec709-h264-25fps-v1",
+      "path": "large/golden-rec709-h264-25fps-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-editorial-video.ps1",
+        "recipe_sha256": "a93976780cee5ed6285edfc63ce4e5a0e0a97837f43a9dd6d734317afefa7cf4",
+        "profile": "ProxyRelinkEditorial",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 code-pattern recipe; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "h264-high",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "25/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 8,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 7.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "golden-rec709-h264-picture",
+        "proxy-original-switch",
+        "offline-relink",
+        "constant-retime"
+      ]
+    },
+    {
+      "id": "generated-golden-rec709-h264-vfr-v1",
+      "path": "large/golden-rec709-h264-vfr-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-vfr-retime-video.ps1",
+        "recipe_sha256": "d09f6faae4aced87338d9a814329c5d9f26e4cd19040f0c2ae905d6a8e1dd773",
+        "profile": "SignedRetimeVfr",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic FFmpeg lavfi testsrc2 code-pattern recipe with alternating 20/60 ms presentation intervals; not a color reference",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "h264-high",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "5000/199",
+        "frame_rate_mode": "variable",
+        "bit_depth": 8,
+        "primaries": "bt709",
+        "transfer": "bt709",
+        "matrix": "bt709",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 7.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "golden-rec709-h264-vfr-picture",
+        "constant-retime",
+        "vfr-presentation-interval"
+      ]
+    },
+    {
+      "id": "generated-golden-hlg-main10-25fps-v1",
+      "path": "large/golden-hlg-main10-25fps-v1.mp4",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-color-reference-media.ps1",
+        "recipe_sha256": "2a6334dfd92ec91c30d178046d6b2faa8c6e93ffd8fdbc60dd2cfad62a6ea205",
+        "profile": "HlgMain10",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored HLG encoded RGB patch recipe converted to BT.2020 non-constant-luminance HEVC Main10",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "video",
+        "container": "mp4",
+        "codec": "hevc-main10",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "25/1",
+        "frame_rate_mode": "constant",
+        "bit_depth": 10,
+        "primaries": "bt2020",
+        "transfer": "arib-std-b67",
+        "matrix": "bt2020nc",
+        "range": "limited",
+        "minimum_stream_duration_seconds": 0.99,
+        "color_reference_eligible": true
+      },
+      "purposes": [
+        "golden-hlg-main10-picture",
+        "hlg-metadata-interpretation",
+        "source-to-working-color",
+        "preview-export-roundtrip"
+      ]
+    },
+    {
+      "id": "generated-golden-srgb-alpha-still-v1",
+      "path": "large/golden-srgb-alpha-still-v1.png",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-color-reference-media.ps1",
+        "recipe_sha256": "2a6334dfd92ec91c30d178046d6b2faa8c6e93ffd8fdbc60dd2cfad62a6ea205",
+        "profile": "SrgbAlpha",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored RGBA patch recipe with an explicit PNG sRGB chunk",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "still-image",
+        "container": "png",
+        "codec": "png-rgba",
+        "width": 1920,
+        "height": 1080,
+        "frame_rate": "not-applicable",
+        "frame_rate_mode": "not-applicable",
+        "bit_depth": 8,
+        "primaries": "bt709",
+        "transfer": "iec61966-2-1",
+        "matrix": "gbr",
+        "range": "full",
+        "alpha": "straight",
+        "color_reference_eligible": true
+      },
+      "purposes": [
+        "golden-srgb-alpha-still",
+        "srgb-metadata-interpretation",
+        "straight-alpha-compositing",
+        "preview-export-roundtrip"
+      ]
+    },
+    {
+      "id": "generated-golden-pcm-s16-48k-stereo-305s-v1",
+      "path": "large/golden-pcm-s16-48k-stereo-305s-v1.mov",
+      "availability": "generated",
+      "sha256": null,
+      "size_bytes": null,
+      "generation": {
+        "recipe_path": "scripts/validation/generate-golden-project-media.ps1",
+        "recipe_sha256": "0aebc637ba11e4eae740d17300ba58f85ffd4e034e3420f675e57c7b7d6630ce",
+        "profile": "FoundationAudioAuthoring",
+        "attestation_suffix": ".attestation.json",
+        "artifact_hash_scope": "reference-run"
+      },
+      "provenance": {
+        "source": "Deterministic project-authored unequal-channel analytic tone recipe encoded as PCM S16LE",
+        "rights_basis": "project-generated-synthetic-stimulus",
+        "redistribution": "permitted"
+      },
+      "media": {
+        "kind": "audio",
+        "container": "mov",
+        "codec": "pcm_s16le",
+        "sample_format": "s16",
+        "sample_rate": 48000,
+        "channels": 2,
+        "channel_layout": "stereo",
+        "minimum_stream_duration_seconds": 304.9,
+        "color_reference_eligible": false
+      },
+      "purposes": [
+        "golden-pcm-audio",
+        "clip-audio-authoring",
+        "project-save-reopen"
+      ]
+    }
+  ]
+}

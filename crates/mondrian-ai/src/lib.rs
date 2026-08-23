@@ -1,11 +1,11 @@
 //! # mondrian-ai
 //!
-//! AI 工作流引擎。
+//! AI capability contracts and fail-closed workflow schema.
 //!
-//! 提供：
-//! - AI Provider 抽象层（图像/视频/语音/音乐/LLM）
-//! - 内置 Provider 实现（OpenAI / Runway / Kling / Suno / Whisper）
-//! - Agent 工作流引擎（YAML DSL 驱动）
+//! This experimental crate currently provides typed Provider traits and a
+//! YAML workflow model. It does not contain a production Provider or editor
+//! mutation Adapter. [`AgentOrchestrator`] therefore rejects every unbound or
+//! unknown step and never reports an unexecuted workflow as complete.
 
 pub mod orchestrator;
 pub mod provider;

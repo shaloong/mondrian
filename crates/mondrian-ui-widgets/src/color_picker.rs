@@ -1,0 +1,3232 @@
+//! Color picker widget.
+//!
+//! Provides a compact model-based color editor for the custom UI stack.
+
+mod geometry;
+mod interaction;
+mod model;
+mod paint;
+
+use std::cell::Cell;
+
+use geometry::ColorPickerGeometry;
+use interaction::{
+    apply_drag, nudge_keyboard_target, ColorDragGeometry, ColorDragTarget, ColorInteractionState,
+    ColorInteractionUpdate,
+};
+use model::{apply_field_texts, field_text, hue_for_color, ColorField};
+use mondrian_core::Color;
+use mondrian_editor_state::Action;
+use mondrian_ui_core::types::*;
+use mondrian_ui_core::widget::{
+    AccessibilityNode, AccessibilityRole, AccessibilityState, AccessibilityValue, CursorRequest,
+    EventContext, EventRequests, PaintContext, PointerCaptureRequest,
+};
+use mondrian_ui_core::{EventResult, UiEvent, Widget};
+
+use crate::menu::{
+    paint_menu_popup_chrome, paint_menu_row, paint_menu_trigger, rect_has_paintable_area,
+    DropdownTriggerStyle, MenuRowPaint,
+};
+use crate::paint::paint_focus_ring;
+use crate::text_input::TextInput;
+use crate::vector_icon::VectorIcon;
+
+const MODES: [ColorPickerMode; 5] = [
+    ColorPickerMode::Hex,
+    ColorPickerMode::Rgb,
+    ColorPickerMode::Hsl,
+    ColorPickerMode::Hsv,
+    ColorPickerMode::Cmyk,
+];
+const FIELD_COUNT: usize = 5;
+const PICKER_TOP: f32 = 56.0;
+const COLOR_AREA_HEIGHT: f32 = 112.0;
+const BAR_HEIGHT: f32 = 14.0;
+const BAR_GAP: f32 = 8.0;
+const FIELD_TOP_GAP: f32 = 12.0;
+const PICKER_WIDTH: f32 = 280.0;
+const PICKER_HEIGHT: f32 = 292.0;
+const MODE_HEIGHT: f32 = 28.0;
+const MODE_TRIGGER_WIDTH: f32 = 74.0;
+const ROW_HEIGHT: f32 = 28.0;
+const ROW_GAP: f32 = 6.0;
+const SWATCH_SIZE: f32 = 36.0;
+
+/// Editable color model shown by [`ColorPicker`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorPickerMode {
+    /// Hexadecimal `#RRGGBB` / `#RRGGBBAA` input.
+    Hex,
+    /// Red, green, blue, alpha channels.
+    Rgb,
+    /// Hue, saturation, lightness, alpha channels.
+    Hsl,
+    /// Hue, saturation, value, alpha channels.
+    Hsv,
+    /// Cyan, magenta, yellow, key, alpha channels.
+    Cmyk,
+}
+
+impl ColorPickerMode {
+    /// Short label used by segmented controls.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Hex => "HEX",
+            Self::Rgb => "RGB",
+            Self::Hsl => "HSL",
+            Self::Hsv => "HSV",
+            Self::Cmyk => "CMYK",
+        }
+    }
+
+    fn fields(self) -> &'static [ColorField] {
+        match self {
+            Self::Hex => &[ColorField::Hex],
+            Self::Rgb => &[ColorField::R, ColorField::G, ColorField::B, ColorField::A],
+            Self::Hsl => &[ColorField::H, ColorField::S, ColorField::L, ColorField::A],
+            Self::Hsv => &[ColorField::H, ColorField::S, ColorField::V, ColorField::A],
+            Self::Cmyk => &[
+                ColorField::C,
+                ColorField::M,
+                ColorField::Y,
+                ColorField::K,
+                ColorField::A,
+            ],
+        }
+    }
+}
+
+/// Shape used by the interactive color area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorPickerAreaMode {
+    /// Rectangular saturation/value area with a separate hue bar.
+    Square,
+    /// Circular hue/saturation wheel. Value remains editable through fields.
+    Wheel,
+}
+
+/// Adapter that maps the current picker color to an editor [`Action`].
+pub type ColorChangeAction = dyn Fn(Color) -> Option<Action>;
+
+/// Color picker widget with model tabs and text inputs.
+pub struct ColorPicker {
+    id: WidgetId,
+    bounds: Rect,
+    color: Color,
+    hue: f32,
+    mode: ColorPickerMode,
+    fields: [TextInput; FIELD_COUNT],
+    mode_hovered: Option<ColorPickerMode>,
+    mode_pressed: Option<ColorPickerMode>,
+    mode_menu_open: bool,
+    overlay_viewport: Cell<Option<Rect>>,
+    eyedropper_hovered: bool,
+    eyedropper_pressed: bool,
+    drag_target: Option<ColorDragTarget>,
+    keyboard_target: ColorDragTarget,
+    focused_field: Option<usize>,
+    field_pointer_captured: Option<usize>,
+    eyedropper_active: bool,
+    area_mode: ColorPickerAreaMode,
+    show_swatch: bool,
+    eyedropper_icon: Option<VectorIcon>,
+    focused: bool,
+    focus_visible: bool,
+    pending_capture_release: bool,
+    pending_eyedropper_cleanup: bool,
+    enabled: bool,
+    on_change: Option<Box<ColorChangeAction>>,
+}
+
+impl ColorPicker {
+    /// Create a color picker with the given initial color.
+    pub fn new(color: Color) -> Self {
+        let hue = color.to_hsv().h;
+        let mut picker = Self {
+            id: WidgetId::new(),
+            bounds: Rect::ZERO,
+            color,
+            hue,
+            mode: ColorPickerMode::Hex,
+            fields: [
+                TextInput::new(""),
+                TextInput::new(""),
+                TextInput::new(""),
+                TextInput::new(""),
+                TextInput::new(""),
+            ],
+            mode_hovered: None,
+            mode_pressed: None,
+            mode_menu_open: false,
+            overlay_viewport: Cell::new(None),
+            eyedropper_hovered: false,
+            eyedropper_pressed: false,
+            drag_target: None,
+            keyboard_target: ColorDragTarget::ColorArea,
+            focused_field: None,
+            field_pointer_captured: None,
+            eyedropper_active: false,
+            area_mode: ColorPickerAreaMode::Square,
+            show_swatch: true,
+            eyedropper_icon: None,
+            focused: false,
+            focus_visible: false,
+            pending_capture_release: false,
+            pending_eyedropper_cleanup: false,
+            enabled: true,
+            on_change: None,
+        };
+        picker.sync_fields_from_color();
+        picker
+    }
+
+    /// Return the current color.
+    pub fn color(&self) -> Color {
+        self.color
+    }
+
+    /// Replace the current color and refresh visible input fields.
+    pub fn set_color(&mut self, color: Color) {
+        self.color = color;
+        self.update_hue_from_color();
+        self.sync_fields_from_color();
+    }
+
+    /// Dispatch a value-aware action whenever user input changes the color.
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(Color) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.on_change = Some(Box::new(move |color| action(color).into()));
+        self
+    }
+
+    /// Set whether the picker accepts pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the picker accepts user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the picker accepts pointer, keyboard, IME, eyedropper, and focus input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        let had_capture_interaction = self.drag_target.is_some()
+            || self.eyedropper_pressed
+            || self.eyedropper_active
+            || self.field_pointer_captured.is_some();
+        let had_eyedropper = self.eyedropper_active;
+        self.enabled = enabled;
+        for field in &mut self.fields {
+            field.set_enabled(enabled);
+        }
+        if !enabled {
+            self.focused = false;
+            self.focus_visible = false;
+            self.mode_menu_open = false;
+            self.mode_pressed = None;
+            self.mode_hovered = None;
+            self.eyedropper_hovered = false;
+            self.cancel_interaction();
+            self.pending_capture_release |= had_capture_interaction;
+            self.pending_eyedropper_cleanup |= had_eyedropper;
+        }
+    }
+
+    /// Return the active editing mode.
+    pub fn mode(&self) -> ColorPickerMode {
+        self.mode
+    }
+
+    /// Switch the active editing mode.
+    pub fn set_mode(&mut self, mode: ColorPickerMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            self.mode_hovered = None;
+            self.mode_pressed = None;
+            self.mode_menu_open = false;
+            self.focused_field = None;
+            self.field_pointer_captured = None;
+            self.sync_fields_from_color();
+            self.layout_fields();
+        }
+    }
+
+    /// Return the interactive color area shape.
+    pub fn area_mode(&self) -> ColorPickerAreaMode {
+        self.area_mode
+    }
+
+    /// Select the interactive color area shape.
+    pub fn set_area_mode(&mut self, area_mode: ColorPickerAreaMode) {
+        self.area_mode = area_mode;
+    }
+
+    /// Whether the picker paints its own current-color swatch.
+    pub fn show_swatch(&self) -> bool {
+        self.show_swatch
+    }
+
+    /// Show or hide the current-color swatch in the picker chrome.
+    pub fn set_show_swatch(&mut self, show_swatch: bool) {
+        self.show_swatch = show_swatch;
+    }
+
+    /// Paint this vector icon inside the eyedropper button.
+    pub fn with_eyedropper_icon(mut self, icon: VectorIcon) -> Self {
+        self.set_eyedropper_icon(icon);
+        self
+    }
+
+    /// Replace the eyedropper button icon.
+    pub fn set_eyedropper_icon(&mut self, icon: VectorIcon) {
+        self.eyedropper_icon = Some(icon);
+    }
+
+    /// Mark the picker as waiting for an externally sampled color.
+    pub fn begin_eyedropper(&mut self) {
+        if !self.enabled {
+            return;
+        }
+        self.eyedropper_active = true;
+        self.mode_menu_open = false;
+        self.mode_pressed = None;
+        self.mode_hovered = None;
+        self.drag_target = None;
+    }
+
+    /// Cancel an active eyedropper request.
+    pub fn cancel_eyedropper(&mut self) {
+        self.eyedropper_active = false;
+        self.eyedropper_pressed = false;
+    }
+
+    /// Whether the picker is waiting for a sampled color.
+    pub fn is_eyedropper_active(&self) -> bool {
+        self.eyedropper_active
+    }
+
+    /// Apply a color sampled by an external viewer/platform integration.
+    pub fn apply_sampled_color(&mut self, color: Color) {
+        self.eyedropper_active = false;
+        self.set_color(color);
+    }
+
+    fn active_fields(&self) -> &'static [ColorField] {
+        self.mode.fields()
+    }
+
+    fn update_hue_from_color(&mut self) {
+        self.hue = hue_for_color(self.hue, self.color);
+    }
+
+    fn cancel_interaction(&mut self) {
+        self.drag_target = None;
+        self.mode_pressed = None;
+        self.mode_hovered = None;
+        self.eyedropper_pressed = false;
+        self.eyedropper_active = false;
+        self.focused_field = None;
+        self.field_pointer_captured = None;
+    }
+
+    fn pointer_position(event: &UiEvent) -> Option<Point> {
+        match event {
+            UiEvent::MouseDown { position, .. }
+            | UiEvent::MouseUp { position, .. }
+            | UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseWheel { position, .. }
+            | UiEvent::DragEnter { position, .. }
+            | UiEvent::DragOver { position }
+            | UiEvent::Drop { position, .. } => Some(*position),
+            _ => None,
+        }
+    }
+
+    fn field_at_position(&self, position: Point) -> Option<usize> {
+        (0..self.active_fields().len()).find(|index| self.fields[*index].hit_test(position))
+    }
+
+    fn translate_field_capture_request(
+        &mut self,
+        field_index: usize,
+        requests: &mut EventRequests,
+    ) {
+        match requests.pointer_capture {
+            Some(PointerCaptureRequest::Capture(id)) if id == self.fields[field_index].id() => {
+                self.field_pointer_captured = Some(field_index);
+                requests.request_pointer_capture(self.id);
+            }
+            Some(PointerCaptureRequest::Release(id)) if id == self.fields[field_index].id() => {
+                if self.field_pointer_captured == Some(field_index) {
+                    self.field_pointer_captured = None;
+                }
+                requests.release_pointer_capture(self.id);
+            }
+            _ => {}
+        }
+    }
+
+    fn blur_fields(&mut self, ctx: &mut EventContext) {
+        for index in 0..self.active_fields().len() {
+            let _ = self.fields[index].event(&UiEvent::FocusLost, ctx);
+            self.translate_field_capture_request(index, ctx.requests);
+        }
+        self.focused_field = None;
+    }
+
+    fn send_field_event(
+        &mut self,
+        index: usize,
+        event: &UiEvent,
+        ctx: &mut EventContext,
+    ) -> EventResult {
+        let before = self.fields[index].text().to_string();
+        let result = self.fields[index].event(event, ctx);
+        self.translate_field_capture_request(index, ctx.requests);
+        if result == EventResult::Handled && !matches!(event, UiEvent::FocusLost) {
+            ctx.focus.request_focus(self.id);
+        }
+        if result == EventResult::Handled
+            && self.fields[index].text() != before
+            && self.apply_visible_fields()
+        {
+            self.dispatch_change(ctx);
+            ctx.request_repaint();
+        }
+        result
+    }
+
+    fn layout_fields(&mut self) {
+        for index in 0..FIELD_COUNT {
+            self.fields[index].layout(self.field_rect(index));
+        }
+    }
+
+    fn geometry(&self) -> ColorPickerGeometry {
+        ColorPickerGeometry::new(
+            self.bounds,
+            self.mode,
+            self.area_mode,
+            self.show_swatch,
+            self.mode_menu_open,
+            self.overlay_viewport.get(),
+        )
+    }
+
+    fn swatch_rect(&self) -> Rect {
+        self.geometry().swatch_rect()
+    }
+
+    fn mode_trigger_rect(&self) -> Rect {
+        self.geometry().mode_trigger_rect()
+    }
+
+    fn mode_menu_rect(&self) -> Rect {
+        self.geometry().mode_menu_rect()
+    }
+
+    fn eyedropper_rect(&self) -> Rect {
+        self.geometry().eyedropper_rect()
+    }
+
+    fn mode_item_rect(&self, mode: ColorPickerMode) -> Rect {
+        self.geometry().mode_item_rect(mode)
+    }
+
+    fn color_area_rect(&self) -> Rect {
+        self.geometry().color_area_rect()
+    }
+
+    fn hue_bar_rect(&self) -> Rect {
+        self.geometry().hue_bar_rect()
+    }
+
+    fn alpha_bar_rect(&self) -> Rect {
+        self.geometry().alpha_bar_rect()
+    }
+
+    #[cfg(test)]
+    fn fields_top(&self) -> f32 {
+        self.geometry().fields_top()
+    }
+
+    fn field_rect(&self, index: usize) -> Rect {
+        self.geometry().field_rect(index)
+    }
+
+    fn field_label_pos(&self, index: usize) -> Point {
+        self.geometry().field_label_pos(index)
+    }
+
+    fn field_text(&self, field: ColorField) -> String {
+        field_text(self.color, self.mode, field)
+    }
+
+    fn sync_fields_from_color(&mut self) {
+        let fields = self.active_fields();
+        for index in 0..FIELD_COUNT {
+            let text = fields.get(index).map(|field| self.field_text(*field)).unwrap_or_default();
+            self.fields[index].set_text(text);
+        }
+    }
+
+    fn apply_visible_fields(&mut self) -> bool {
+        let old = self.color;
+        let fields = self.active_fields();
+        let text = |index: usize| self.fields[index].text();
+        let Some(update) = apply_field_texts(old, self.hue, self.mode, fields, text) else {
+            return false;
+        };
+        self.color = update.color;
+        self.hue = update.hue;
+        update.color_changed
+    }
+
+    fn hovered_mode_at(&self, point: Point) -> Option<ColorPickerMode> {
+        if !self.mode_menu_open {
+            return None;
+        }
+        MODES.iter().copied().find(|mode| self.mode_item_rect(*mode).contains(point))
+    }
+
+    fn next_mode_selection(&self, direction: i32) -> ColorPickerMode {
+        let current_mode = self.mode_hovered.unwrap_or(self.mode);
+        let current = MODES.iter().position(|candidate| *candidate == current_mode).unwrap_or(0);
+        let next = if direction < 0 {
+            (current + MODES.len() - 1) % MODES.len()
+        } else {
+            (current + 1) % MODES.len()
+        };
+        MODES[next]
+    }
+
+    fn close_mode_menu(&mut self) {
+        self.mode_menu_open = false;
+        self.mode_pressed = None;
+        self.mode_hovered = None;
+    }
+
+    fn mode_chrome_contains(&self, point: Point) -> bool {
+        self.geometry().mode_chrome_contains(point)
+    }
+
+    fn drag_target_at(&self, point: Point) -> Option<ColorDragTarget> {
+        if self.color_area_hit_test(point) {
+            Some(ColorDragTarget::ColorArea)
+        } else if self.hue_bar_rect().contains(point) {
+            Some(ColorDragTarget::Hue)
+        } else if self.alpha_bar_rect().contains(point) {
+            Some(ColorDragTarget::Alpha)
+        } else {
+            None
+        }
+    }
+
+    fn color_area_hit_test(&self, point: Point) -> bool {
+        self.geometry().color_area_hit_test(point)
+    }
+
+    fn color_wheel_rect(&self) -> Rect {
+        self.geometry().color_wheel_rect()
+    }
+
+    fn dispatch_change(&self, ctx: &mut EventContext) {
+        if let Some(action) = &self.on_change
+            && let Some(action) = action(self.color)
+        {
+            (ctx.dispatch)(action);
+        }
+    }
+
+    fn color_changed_from_input(&self, old: Color, ctx: &mut EventContext) -> bool {
+        if self.color == old {
+            return false;
+        }
+        self.dispatch_change(ctx);
+        ctx.request_repaint();
+        true
+    }
+
+    fn interaction_state(&self) -> ColorInteractionState {
+        ColorInteractionState { color: self.color, hue: self.hue }
+    }
+
+    fn drag_geometry(&self) -> ColorDragGeometry {
+        ColorDragGeometry {
+            color_area: self.color_area_rect(),
+            hue_bar: self.hue_bar_rect(),
+            alpha_bar: self.alpha_bar_rect(),
+            color_wheel: self.color_wheel_rect(),
+        }
+    }
+
+    fn apply_interaction_update(
+        &mut self,
+        update: ColorInteractionUpdate,
+        ctx: &mut EventContext,
+    ) -> bool {
+        self.color = update.color;
+        self.hue = update.hue;
+        self.sync_fields_from_color();
+        if update.color_changed {
+            self.dispatch_change(ctx);
+            ctx.request_repaint();
+        } else if update.hue_changed {
+            ctx.request_repaint();
+        }
+        update.changed()
+    }
+
+    fn update_from_drag(
+        &mut self,
+        target: ColorDragTarget,
+        point: Point,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let update = apply_drag(
+            self.interaction_state(),
+            self.area_mode,
+            target,
+            point,
+            self.drag_geometry(),
+        );
+        self.apply_interaction_update(update, ctx)
+    }
+
+    fn nudge_keyboard_target(
+        &mut self,
+        key: KeyCode,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let Some(update) = nudge_keyboard_target(
+            self.interaction_state(),
+            self.keyboard_target,
+            key,
+            modifiers,
+        ) else {
+            return false;
+        };
+        self.apply_interaction_update(update, ctx)
+    }
+
+    fn paint_panel_chrome(&self, ctx: &mut PaintContext) {
+        paint::paint_panel_chrome(ctx, self.bounds, self.eyedropper_active);
+    }
+
+    fn paint_swatch(&self, ctx: &mut PaintContext) {
+        paint::paint_swatch(ctx, self.color, self.swatch_rect());
+    }
+
+    fn paint_eyedropper_button(&self, ctx: &mut PaintContext) {
+        paint::paint_eyedropper_button(
+            ctx,
+            self.eyedropper_rect(),
+            self.enabled,
+            self.eyedropper_active,
+            self.eyedropper_pressed,
+            self.eyedropper_hovered,
+            self.eyedropper_icon.as_ref(),
+        );
+    }
+
+    fn paint_color_area(&self, ctx: &mut PaintContext) {
+        match self.area_mode {
+            ColorPickerAreaMode::Square => paint::paint_square_color_area(
+                ctx,
+                self.color_area_rect(),
+                self.hue,
+                self.color.to_hsv(),
+            ),
+            ColorPickerAreaMode::Wheel => paint::paint_wheel_color_area(
+                ctx,
+                self.color_area_rect(),
+                self.color_wheel_rect(),
+                self.hue,
+                self.color.to_hsv(),
+            ),
+        }
+    }
+
+    fn paint_hue_bar(&self, ctx: &mut PaintContext) {
+        paint::paint_hue_bar(ctx, self.hue_bar_rect(), self.hue);
+    }
+
+    fn paint_alpha_bar(&self, ctx: &mut PaintContext) {
+        paint::paint_alpha_bar(ctx, self.alpha_bar_rect(), self.color);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paint_crosshair(&self, ctx: &mut PaintContext, point: Point) {
+        paint::paint_crosshair(ctx, point);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn paint_bar_handle(&self, ctx: &mut PaintContext, bar: Rect, x: f32) {
+        paint::paint_bar_handle(ctx, bar, x);
+    }
+}
+
+impl Widget for ColorPicker {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(PICKER_WIDTH, PICKER_HEIGHT))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        self.layout_fields();
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if self.pending_capture_release {
+            ctx.release_pointer_capture(self.id);
+            self.pending_capture_release = false;
+        }
+        if self.pending_eyedropper_cleanup {
+            ctx.set_cursor(CursorRequest::Default);
+            ctx.set_eyedropper(false, None);
+            self.pending_eyedropper_cleanup = false;
+        }
+        if !self.enabled {
+            if self.eyedropper_active
+                || self.eyedropper_pressed
+                || self.drag_target.is_some()
+                || self.field_pointer_captured.is_some()
+            {
+                ctx.set_cursor(CursorRequest::Default);
+                ctx.set_eyedropper(false, None);
+                ctx.release_pointer_capture(self.id);
+            }
+            self.focused = false;
+            self.focus_visible = false;
+            self.mode_menu_open = false;
+            self.cancel_interaction();
+            return EventResult::Ignored;
+        }
+
+        // ── Eyedropper mode: maintain capture and feed events ──────────────
+        if self.eyedropper_active {
+            match event {
+                UiEvent::KeyDown { key: KeyCode::Escape, .. } => {
+                    self.cancel_eyedropper();
+                    ctx.set_cursor(CursorRequest::Default);
+                    ctx.set_eyedropper(false, None);
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                UiEvent::FocusLost => {
+                    self.focused = false;
+                    self.focus_visible = false;
+                    self.blur_fields(ctx);
+                    return EventResult::Handled;
+                }
+                UiEvent::MouseMove { position, .. } => {
+                    self.mode_hovered = self.hovered_mode_at(*position);
+                    self.eyedropper_hovered = self.eyedropper_rect().contains(*position);
+                    return EventResult::Handled;
+                }
+                UiEvent::EyedropperSample { color } => {
+                    self.eyedropper_active = false;
+                    self.eyedropper_pressed = false;
+                    let old = self.color;
+                    self.set_color(*color);
+                    self.color_changed_from_input(old, ctx);
+                    ctx.set_cursor(CursorRequest::Default);
+                    ctx.set_eyedropper(false, None);
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                UiEvent::EyedropperCancel => {
+                    self.cancel_eyedropper();
+                    ctx.set_cursor(CursorRequest::Default);
+                    ctx.set_eyedropper(false, None);
+                    ctx.release_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                _ => return EventResult::Handled,
+            }
+        }
+
+        if let Some(index) = self.field_pointer_captured
+            && index < self.active_fields().len()
+            && self.send_field_event(index, event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
+        }
+
+        match event {
+            UiEvent::MouseMove { position, .. } if self.drag_target.is_some() => {
+                if let Some(target) = self.drag_target {
+                    self.update_from_drag(target, *position, ctx);
+                }
+                return EventResult::Handled;
+            }
+            UiEvent::MouseUp { button: MouseButton::Left, .. } if self.drag_target.is_some() => {
+                self.drag_target = None;
+                ctx.release_pointer_capture(self.id);
+                return EventResult::Handled;
+            }
+            UiEvent::MouseMove { position, .. } => {
+                self.mode_hovered = self.hovered_mode_at(*position);
+                self.eyedropper_hovered = self.eyedropper_rect().contains(*position);
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } => {
+                self.focus_visible = false;
+                if self.eyedropper_rect().contains(*position) {
+                    self.eyedropper_pressed = true;
+                    self.mode_menu_open = false;
+                    self.mode_pressed = None;
+                    self.mode_hovered = None;
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                if self.mode_trigger_rect().contains(*position) {
+                    self.mode_menu_open = !self.mode_menu_open;
+                    self.mode_pressed = None;
+                    self.mode_hovered = self.mode_menu_open.then_some(self.mode);
+                    return EventResult::Handled;
+                }
+                if self.mode_menu_open {
+                    if let Some(mode) = self.hovered_mode_at(*position) {
+                        self.mode_pressed = Some(mode);
+                        return EventResult::Handled;
+                    }
+                    if !self.mode_chrome_contains(*position) {
+                        self.close_mode_menu();
+                        return EventResult::Handled;
+                    }
+                }
+                if let Some(target) = self.drag_target_at(*position) {
+                    self.drag_target = Some(target);
+                    self.keyboard_target = target;
+                    ctx.request_pointer_capture(self.id);
+                    self.update_from_drag(target, *position, ctx);
+                    return EventResult::Handled;
+                }
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                if self.eyedropper_pressed {
+                    self.eyedropper_pressed = false;
+                    ctx.release_pointer_capture(self.id);
+                    if self.eyedropper_rect().contains(*position) {
+                        self.begin_eyedropper();
+                        // Re-request pointer capture so we stay captured
+                        // during the entire eyedropper session.
+                        ctx.request_pointer_capture(self.id);
+                        // Request crosshair cursor for the platform.
+                        ctx.set_cursor(CursorRequest::Crosshair);
+                        ctx.set_eyedropper(true, Some(self.eyedropper_rect().center()));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
+                let released = self.hovered_mode_at(*position);
+                if let (Some(pressed), Some(released)) = (self.mode_pressed, released) {
+                    self.mode_pressed = None;
+                    if pressed == released {
+                        self.set_mode(released);
+                    }
+                    self.close_mode_menu();
+                    return EventResult::Handled;
+                }
+                self.mode_pressed = None;
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.mode_menu_open => {
+                self.close_mode_menu();
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Down, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
+            {
+                self.mode_hovered = Some(self.next_mode_selection(1));
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Up, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
+            {
+                self.mode_hovered = Some(self.next_mode_selection(-1));
+                return EventResult::Handled;
+            }
+            UiEvent::KeyDown { key: KeyCode::Enter | KeyCode::Space, modifiers }
+                if self.mode_menu_open && *modifiers == Modifiers::none() =>
+            {
+                let selected = self.mode_hovered.unwrap_or(self.mode);
+                self.set_mode(selected);
+                self.close_mode_menu();
+                return EventResult::Handled;
+            }
+            UiEvent::FocusGained { source } => {
+                self.focused = true;
+                self.focus_visible = source.is_focus_visible();
+                return EventResult::Handled;
+            }
+            UiEvent::FocusLost => {
+                self.focused = false;
+                self.focus_visible = false;
+                self.cancel_interaction();
+                self.blur_fields(ctx);
+                return EventResult::Handled;
+            }
+            _ => {}
+        }
+
+        if let Some(position) = Self::pointer_position(event) {
+            if matches!(event, UiEvent::MouseDown { button: MouseButton::Left, .. }) {
+                if let Some(index) = self.field_at_position(position) {
+                    self.blur_fields(ctx);
+                    self.focused_field = Some(index);
+                    if self.send_field_event(index, event, ctx) == EventResult::Handled {
+                        return EventResult::Handled;
+                    }
+                } else if self.bounds.contains(position) {
+                    self.blur_fields(ctx);
+                    return EventResult::Handled;
+                }
+            }
+        } else if let Some(index) = self.focused_field
+            && index < self.active_fields().len()
+            && self.send_field_event(index, event, ctx) == EventResult::Handled
+        {
+            return EventResult::Handled;
+        }
+
+        if let UiEvent::KeyDown { key, modifiers } = event
+            && self.nudge_keyboard_target(*key, *modifiers, ctx)
+        {
+            return EventResult::Handled;
+        }
+        EventResult::Ignored
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        let tokens = &ctx.theme.colors;
+        let font_size = ctx.theme.typography.body.font_size;
+
+        self.paint_panel_chrome(ctx);
+        if self.focus_visible {
+            paint_focus_ring(ctx, self.bounds, ctx.theme.spacing.radius_md);
+        }
+        if self.show_swatch {
+            self.paint_swatch(ctx);
+        }
+        self.paint_eyedropper_button(ctx);
+        self.paint_color_area(ctx);
+        self.paint_hue_bar(ctx);
+        self.paint_alpha_bar(ctx);
+
+        paint_menu_trigger(
+            ctx,
+            self.mode_trigger_rect(),
+            self.mode.label(),
+            self.mode_menu_open,
+            false,
+            DropdownTriggerStyle::Filled,
+        );
+
+        for (index, field) in self.active_fields().iter().enumerate() {
+            ctx.encoder.draw_text(
+                field.label(),
+                font_size,
+                self.field_label_pos(index),
+                tokens.muted_foreground,
+            );
+            self.fields[index].paint(ctx);
+        }
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if !self.mode_menu_open {
+            return;
+        }
+
+        if !rect_has_paintable_area(ctx.clip_rect) {
+            self.overlay_viewport.set(None);
+            return;
+        }
+        self.overlay_viewport.set(Some(ctx.clip_rect));
+        let menu = self.mode_menu_rect();
+        paint_menu_popup_chrome(ctx, menu);
+
+        for mode in MODES {
+            let rect = self.mode_item_rect(mode);
+            paint_menu_row(
+                ctx,
+                rect,
+                mode.label(),
+                None,
+                None,
+                false,
+                MenuRowPaint {
+                    enabled: true,
+                    active: self.mode == mode,
+                    hovered: self.mode_hovered == Some(mode),
+                },
+            );
+        }
+    }
+
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && self.mode_menu_open
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        self.enabled && self.focused_field.is_some()
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let rgba = self.color.to_rgba();
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::ColorPicker)
+                .with_name("Color picker")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused || self.focused_field.is_some(),
+                    disabled: !self.enabled,
+                    expanded: Some(self.mode_menu_open),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Color {
+                    r: rgba.r,
+                    g: rgba.g,
+                    b: rgba.b,
+                    a: rgba.a,
+                }),
+        )
+    }
+}
+
+/// Configuration for [`ColorPickerTrigger`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ColorPickerTriggerOptions {
+    /// Closed trigger width.
+    pub trigger_width: f32,
+    /// Closed trigger height.
+    pub trigger_height: f32,
+    /// Popup picker width.
+    pub popup_width: f32,
+    /// Popup picker height.
+    pub popup_height: f32,
+}
+
+impl Default for ColorPickerTriggerOptions {
+    fn default() -> Self {
+        Self {
+            trigger_width: 32.0,
+            trigger_height: 32.0,
+            popup_width: PICKER_WIDTH,
+            popup_height: PICKER_HEIGHT,
+        }
+    }
+}
+
+/// Compact color trigger that opens a full [`ColorPicker`] in the overlay pass.
+pub struct ColorPickerTrigger {
+    id: WidgetId,
+    bounds: Rect,
+    picker: ColorPicker,
+    options: ColorPickerTriggerOptions,
+    open: bool,
+    pressed: bool,
+    focused: bool,
+    enabled: bool,
+    picker_pointer_captured: bool,
+}
+
+impl ColorPickerTrigger {
+    /// Create a trigger with the given initial color.
+    pub fn new(color: Color) -> Self {
+        Self::with_options(color, ColorPickerTriggerOptions::default())
+    }
+
+    /// Create a trigger with explicit sizing options.
+    pub fn with_options(color: Color, options: ColorPickerTriggerOptions) -> Self {
+        Self {
+            id: WidgetId::new(),
+            bounds: Rect::ZERO,
+            picker: ColorPicker::new(color),
+            options,
+            open: false,
+            pressed: false,
+            focused: false,
+            enabled: true,
+            picker_pointer_captured: false,
+        }
+    }
+
+    /// Current color.
+    pub fn color(&self) -> Color {
+        self.picker.color()
+    }
+
+    /// Replace the current color.
+    pub fn set_color(&mut self, color: Color) {
+        self.picker.set_color(color);
+    }
+
+    /// Dispatch a value-aware action whenever the embedded picker changes color.
+    pub fn on_change<F, R>(mut self, action: F) -> Self
+    where
+        F: Fn(Color) -> R + 'static,
+        R: Into<Option<Action>>,
+    {
+        self.picker = self.picker.on_change(action);
+        self
+    }
+
+    /// Set whether the trigger and embedded picker accept user input.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.set_enabled(enabled);
+        self
+    }
+
+    /// Disable the trigger and embedded picker.
+    pub fn disabled(self) -> Self {
+        self.enabled(false)
+    }
+
+    /// Whether the trigger and embedded picker accept user input.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set whether the trigger and embedded picker accept user input.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        self.picker.set_enabled(enabled);
+        if !enabled {
+            self.open = false;
+            self.pressed = false;
+            self.focused = false;
+        }
+    }
+
+    /// Access the embedded picker for inspector-specific configuration.
+    pub fn picker_mut(&mut self) -> &mut ColorPicker {
+        &mut self.picker
+    }
+
+    /// Whether the popup picker is open.
+    pub fn is_open(&self) -> bool {
+        self.open
+    }
+
+    fn popup_rect(&self) -> Rect {
+        Rect::new(
+            self.bounds.x,
+            self.bounds.y + self.bounds.height + 4.0,
+            self.options.popup_width.max(1.0),
+            self.options.popup_height.max(1.0),
+        )
+    }
+
+    fn color_rect(&self) -> Rect {
+        self.bounds.inset(4.0, 4.0)
+    }
+
+    fn translate_picker_event_requests(
+        &mut self,
+        event: &UiEvent,
+        result: EventResult,
+        ctx: &mut EventContext,
+    ) {
+        match ctx.requests.pointer_capture {
+            Some(PointerCaptureRequest::Capture(id)) if id == self.picker.id() => {
+                self.picker_pointer_captured = true;
+                ctx.request_pointer_capture(self.id);
+            }
+            Some(PointerCaptureRequest::Release(id)) if id == self.picker.id() => {
+                self.picker_pointer_captured = false;
+                ctx.release_pointer_capture(self.id);
+            }
+            _ => {}
+        }
+        if result == EventResult::Handled && !matches!(event, UiEvent::FocusLost) {
+            ctx.focus.request_focus(self.id);
+        }
+    }
+
+    fn popup_should_receive_event(&self, event: &UiEvent) -> bool {
+        if self.picker_pointer_captured {
+            return true;
+        }
+        match event {
+            UiEvent::MouseDown { position, .. }
+            | UiEvent::MouseUp { position, .. }
+            | UiEvent::MouseMove { position, .. }
+            | UiEvent::MouseWheel { position, .. }
+            | UiEvent::DragEnter { position, .. }
+            | UiEvent::DragOver { position }
+            | UiEvent::Drop { position, .. } => self.popup_rect().contains(*position),
+            _ => true,
+        }
+    }
+
+    fn close_popup(&mut self, ctx: &mut EventContext, release_focus: bool) {
+        self.open = false;
+        self.pressed = false;
+        let focus_lost = UiEvent::FocusLost;
+        let result = self.picker.event(&focus_lost, ctx);
+        self.translate_picker_event_requests(&focus_lost, result, ctx);
+        self.picker.cancel_interaction();
+        if self.picker_pointer_captured {
+            self.picker_pointer_captured = false;
+            ctx.release_pointer_capture(self.id);
+        }
+        if release_focus {
+            ctx.focus.release_focus(self.id);
+        }
+    }
+}
+
+impl Widget for ColorPickerTrigger {
+    fn id(&self) -> WidgetId {
+        self.id
+    }
+
+    fn measure(&self, constraint: LayoutConstraint) -> Size {
+        constraint.constrain(Size::new(
+            self.options.trigger_width,
+            self.options.trigger_height,
+        ))
+    }
+
+    fn layout(&mut self, bounds: Rect) {
+        self.bounds = bounds;
+        self.picker.layout(self.popup_rect());
+    }
+
+    fn event(&mut self, event: &UiEvent, ctx: &mut EventContext) -> EventResult {
+        if !self.enabled {
+            if self.open
+                || self.pressed
+                || self.picker_pointer_captured
+                || self.picker.is_eyedropper_active()
+            {
+                self.close_popup(ctx, true);
+                self.picker.cancel_eyedropper();
+                ctx.set_cursor(CursorRequest::Default);
+                ctx.set_eyedropper(false, None);
+                ctx.release_pointer_capture(self.id);
+            }
+            self.open = false;
+            self.pressed = false;
+            return EventResult::Ignored;
+        }
+
+        let eyedropper_active = self.picker.is_eyedropper_active();
+
+        if self.open {
+            // During eyedropper mode, don't close the popup on outside clicks.
+            // The picker holds pointer capture and the user is sampling a color.
+            if !eyedropper_active
+                && let UiEvent::MouseDown { position, button: MouseButton::Left, .. } = event
+                && !self.bounds.contains(*position)
+                && !self.popup_rect().contains(*position)
+            {
+                self.close_popup(ctx, true);
+                return EventResult::Handled;
+            }
+
+            // During eyedropper, always route events to the picker (it holds
+            // pointer capture). When not eyedropping, use normal hit-test routing.
+            let should_route = if eyedropper_active {
+                true
+            } else {
+                self.popup_should_receive_event(event)
+            };
+
+            if should_route {
+                let result = self.picker.event(event, ctx);
+                self.translate_picker_event_requests(event, result, ctx);
+                if result == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
+        }
+
+        match event {
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. }
+                if self.bounds.contains(*position) =>
+            {
+                self.pressed = true;
+                EventResult::Handled
+            }
+            UiEvent::MouseUp { position, button: MouseButton::Left, .. } if self.pressed => {
+                self.pressed = false;
+                if self.bounds.contains(*position) {
+                    self.open = !self.open;
+                }
+                EventResult::Handled
+            }
+            UiEvent::MouseDown { position, button: MouseButton::Left, .. } if self.open => {
+                if !eyedropper_active
+                    && !self.bounds.contains(*position)
+                    && !self.popup_rect().contains(*position)
+                {
+                    self.close_popup(ctx, true);
+                    return EventResult::Handled;
+                }
+                EventResult::Ignored
+            }
+            UiEvent::KeyDown { key: KeyCode::Escape, .. } if self.open => {
+                self.close_popup(ctx, false);
+                EventResult::Handled
+            }
+            UiEvent::FocusGained { .. } => {
+                self.focused = true;
+                EventResult::Handled
+            }
+            UiEvent::FocusLost => {
+                if self.open
+                    || self.pressed
+                    || self.picker_pointer_captured
+                    || self.picker.is_eyedropper_active()
+                {
+                    self.close_popup(ctx, false);
+                    self.picker.cancel_eyedropper();
+                    ctx.set_cursor(CursorRequest::Default);
+                    ctx.set_eyedropper(false, None);
+                }
+                self.pressed = false;
+                self.focused = false;
+                EventResult::Handled
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn paint(&self, ctx: &mut PaintContext) {
+        paint::paint_trigger(
+            ctx,
+            self.bounds,
+            self.color(),
+            self.color_rect(),
+            self.enabled,
+            self.open,
+            self.pressed,
+        );
+    }
+
+    fn paint_overlay(&self, ctx: &mut PaintContext) {
+        if self.open {
+            self.picker.paint(ctx);
+            self.picker.paint_overlay(ctx);
+        }
+    }
+
+    fn overlay_hit_test(&self, _point: Point) -> bool {
+        self.enabled && (self.open || self.picker.is_eyedropper_active())
+    }
+
+    fn hit_test(&self, point: Point) -> bool {
+        self.bounds.contains(point)
+    }
+
+    fn can_focus(&self) -> bool {
+        self.enabled
+    }
+
+    fn accepts_text_input(&self) -> bool {
+        self.enabled && self.open && self.picker.accepts_text_input()
+    }
+
+    fn accessibility(&self) -> Option<AccessibilityNode> {
+        let rgba = self.color().to_rgba();
+        Some(
+            AccessibilityNode::new(self.id, AccessibilityRole::ColorPicker)
+                .with_name("Color")
+                .with_state(AccessibilityState {
+                    focusable: self.enabled,
+                    focused: self.focused,
+                    disabled: !self.enabled,
+                    pressed: Some(self.pressed),
+                    expanded: Some(self.open),
+                    ..AccessibilityState::default()
+                })
+                .with_value(AccessibilityValue::Color {
+                    r: rgba.r,
+                    g: rgba.g,
+                    b: rgba.b,
+                    a: rgba.a,
+                }),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paint::shadow_color;
+    use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
+    use mondrian_core::{Color, HsvColor};
+    use mondrian_ui_core::focus::FocusManager;
+    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_theme::ThemePreset;
+    use paint::WHEEL_SEGMENTS;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct RecordingEncoder {
+        rects: Vec<Rect>,
+        rect_colors: Vec<Color>,
+        soft_shadows: Vec<(Rect, Color, f32, f32, f32, glam::Vec2)>,
+        gradient_rects: Vec<Rect>,
+        line_segments: usize,
+        triangle_vertices: usize,
+        raster_images: usize,
+        colored_triangle_vertices: usize,
+        colored_triangle_mask: Option<(Rect, f32)>,
+        colored_triangle_max_radius: f32,
+        texts: Vec<String>,
+    }
+
+    impl DrawCommandEncoder for RecordingEncoder {
+        fn push_clip(&mut self, _bounds: Rect) {}
+
+        fn pop_clip(&mut self) {}
+
+        fn draw_rect(&mut self, bounds: Rect, color: Color, _corner_radius: f32) {
+            self.rects.push(bounds);
+            self.rect_colors.push(color);
+        }
+
+        fn draw_soft_shadow(
+            &mut self,
+            bounds: Rect,
+            color: Color,
+            corner_radius: f32,
+            blur_radius: f32,
+            spread: f32,
+            offset: glam::Vec2,
+        ) {
+            self.soft_shadows
+                .push((bounds, color, corner_radius, blur_radius, spread, offset));
+        }
+
+        fn draw_gradient_rect(&mut self, bounds: Rect, _colors: [Color; 4], _corner_radius: f32) {
+            self.gradient_rects.push(bounds);
+        }
+
+        fn draw_line(&mut self, _start: Point, _end: Point, _width: f32, _color: Color) {
+            self.line_segments += 1;
+        }
+
+        fn draw_triangles(&mut self, vertices: &[Point], _color: Color) {
+            self.triangle_vertices += vertices.len();
+        }
+
+        fn draw_colored_triangles(&mut self, vertices: &[(Point, Color)]) {
+            self.colored_triangle_vertices += vertices.len();
+        }
+
+        fn draw_colored_triangles_in_rect(
+            &mut self,
+            vertices: &[(Point, Color)],
+            mask_bounds: Rect,
+            corner_radius: f32,
+        ) {
+            self.colored_triangle_vertices += vertices.len();
+            self.colored_triangle_mask = Some((mask_bounds, corner_radius));
+            let center = mask_bounds.center();
+            self.colored_triangle_max_radius = self.colored_triangle_max_radius.max(
+                vertices
+                    .iter()
+                    .map(|(point, _)| {
+                        let dx = point.x - center.x;
+                        let dy = point.y - center.y;
+                        (dx * dx + dy * dy).sqrt()
+                    })
+                    .fold(0.0, f32::max),
+            );
+        }
+
+        fn draw_text(&mut self, text: &str, _font_size: f32, _position: Point, _color: Color) {
+            self.texts.push(text.into());
+        }
+
+        fn draw_raster_image(
+            &mut self,
+            _key: &str,
+            _bounds: Rect,
+            _width: u32,
+            _height: u32,
+            _color_space: mondrian_ui_core::RasterImageColorSpace,
+            _rgba: std::sync::Arc<[u8]>,
+            _tint: Color,
+        ) {
+            self.raster_images += 1;
+        }
+
+        fn push_translate(&mut self, _offset: glam::Vec2) {}
+
+        fn pop_transform(&mut self) {}
+    }
+
+    fn event_ctx() -> EventContext<'static> {
+        let f: &'static mut DummyFocus = Box::leak(Box::new(DummyFocus));
+        let s: &'static mut DummyShortcut = Box::leak(Box::new(DummyShortcut));
+        let t: &'static mut DummyTooltip = Box::leak(Box::new(DummyTooltip));
+        make_event_ctx(f, s, t, &|_| {})
+    }
+
+    struct RecordingFocus {
+        focused: Rc<RefCell<Option<WidgetId>>>,
+    }
+
+    impl FocusManager for RecordingFocus {
+        fn focused_widget(&self) -> Option<WidgetId> {
+            *self.focused.borrow()
+        }
+
+        fn focused_panel(&self) -> Option<mondrian_editor_state::state::PanelKind> {
+            None
+        }
+
+        fn request_focus(&mut self, widget: WidgetId) {
+            *self.focused.borrow_mut() = Some(widget);
+        }
+
+        fn release_focus(&mut self, widget: WidgetId) {
+            if *self.focused.borrow() == Some(widget) {
+                *self.focused.borrow_mut() = None;
+            }
+        }
+
+        fn clear_focus(&mut self) {
+            *self.focused.borrow_mut() = None;
+        }
+    }
+
+    fn accessibility_color_value(color: Color) -> AccessibilityValue {
+        let rgba = color.to_rgba();
+        AccessibilityValue::Color { r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a }
+    }
+
+    fn color_action(color: Color) -> Action {
+        let [r, g, b, a] = color.to_rgba8();
+        Action::Custom {
+            namespace: "test.color".into(),
+            name: format!("rgba:{r},{g},{b},{a}"),
+            payload: Default::default(),
+        }
+    }
+
+    #[test]
+    fn disabled_picker_ignores_eyedropper_and_focus() {
+        let mut picker = ColorPicker::new(Color::BLACK).disabled();
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let eyedropper = picker.eyedropper_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.begin_eyedropper();
+        assert!(!picker.is_enabled());
+        assert!(!picker.is_eyedropper_active());
+        assert!(!picker.can_focus());
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: eyedropper,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!picker.is_eyedropper_active());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn disabling_active_eyedropper_cleans_platform_request_on_next_event() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        picker.begin_eyedropper();
+        picker.set_enabled(false);
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove {
+                    position: picker.eyedropper_rect().center(),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!picker.is_eyedropper_active());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert_eq!(
+            ctx.requests.eyedropper,
+            Some(mondrian_ui_core::widget::EyedropperRequest { active: false, hotspot: None })
+        );
+    }
+
+    #[test]
+    fn disabling_and_reenabling_cancels_active_eyedropper() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker = ColorPicker::new(Color::BLACK).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        picker.begin_eyedropper();
+        assert!(picker.is_eyedropper_active());
+
+        picker.set_enabled(false);
+        assert!(!picker.is_eyedropper_active());
+        picker.set_enabled(true);
+
+        assert_eq!(
+            picker.event(&UiEvent::EyedropperSample { color: Color::WHITE }, &mut ctx,),
+            EventResult::Ignored
+        );
+
+        assert_eq!(picker.color(), Color::BLACK);
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert_eq!(
+            ctx.requests.eyedropper,
+            Some(mondrian_ui_core::widget::EyedropperRequest { active: false, hotspot: None })
+        );
+    }
+
+    #[test]
+    fn disabling_pressed_eyedropper_button_releases_capture_on_next_event() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let eyedropper = picker.eyedropper_rect().center();
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: eyedropper,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(picker.id()))
+        );
+
+        picker.set_enabled(false);
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove { position: eyedropper, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+        assert!(!picker.eyedropper_pressed);
+        assert!(!picker.is_eyedropper_active());
+    }
+
+    #[test]
+    fn disabling_and_reenabling_cancels_pending_color_drag() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let original = Color::from_rgba8(51, 102, 153, 255);
+        let mut picker = ColorPicker::new(original).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let alpha = picker.alpha_bar_rect();
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: Point::new(alpha.x + alpha.width, alpha.center().y),
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(picker.drag_target, Some(ColorDragTarget::Alpha));
+        assert_eq!(picker.color(), original);
+        assert!(actions.borrow().is_empty());
+        ctx.requests.pointer_capture = None;
+
+        picker.set_enabled(false);
+        assert_eq!(picker.drag_target, None);
+        picker.set_enabled(true);
+
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseMove {
+                    position: Point::new(alpha.x, alpha.center().y),
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert_eq!(picker.color(), original);
+        assert!(actions.borrow().is_empty());
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+    }
+
+    #[test]
+    fn disabled_trigger_does_not_open_popup() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK).disabled();
+        trigger.layout(Rect::new(8.0, 8.0, 32.0, 32.0));
+        let center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert!(!trigger.is_enabled());
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseUp {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Ignored
+        );
+
+        assert!(!trigger.is_open());
+        assert!(ctx.requests.pointer_capture.is_none());
+    }
+
+    #[test]
+    fn picker_accessibility_exposes_color_state_and_mode_menu() {
+        let color = Color::from_rgba8(51, 102, 153, 128);
+        let mut picker = ColorPicker::new(color);
+        picker.mode_menu_open = true;
+        picker.focused = true;
+
+        let node = picker.accessibility().expect("picker should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert_eq!(node.name.as_deref(), Some("Color picker"));
+        assert_eq!(node.value, Some(accessibility_color_value(color)));
+        assert!(node.state.focusable);
+        assert!(node.state.focused);
+        assert!(!node.state.disabled);
+        assert_eq!(node.state.expanded, Some(true));
+    }
+
+    #[test]
+    fn disabled_picker_accessibility_exposes_disabled_state() {
+        let picker = ColorPicker::new(Color::BLACK).disabled();
+        let node = picker.accessibility().expect("picker should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
+        assert_eq!(node.state.expanded, Some(false));
+    }
+
+    #[test]
+    fn trigger_accessibility_tracks_color_focus_pressed_and_popup_state() {
+        let color = Color::from_rgba8(10, 20, 30, 255);
+        let mut trigger = ColorPickerTrigger::new(color);
+        trigger.layout(Rect::new(8.0, 8.0, 32.0, 32.0));
+        let center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert_eq!(
+            trigger.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let pressed =
+            trigger.accessibility().expect("trigger should expose accessibility metadata");
+        assert_eq!(pressed.role, AccessibilityRole::ColorPicker);
+        assert_eq!(pressed.name.as_deref(), Some("Color"));
+        assert_eq!(pressed.value, Some(accessibility_color_value(color)));
+        assert!(pressed.state.focusable);
+        assert!(pressed.state.focused);
+        assert_eq!(pressed.state.pressed, Some(true));
+        assert_eq!(pressed.state.expanded, Some(false));
+
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseUp {
+                    position: center,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        let opened = trigger.accessibility().expect("trigger should expose accessibility metadata");
+        assert_eq!(opened.state.pressed, Some(false));
+        assert_eq!(opened.state.expanded, Some(true));
+    }
+
+    #[test]
+    fn disabled_trigger_accessibility_exposes_disabled_closed_state() {
+        let trigger = ColorPickerTrigger::new(Color::BLACK).disabled();
+        let node = trigger.accessibility().expect("trigger should expose accessibility metadata");
+
+        assert_eq!(node.role, AccessibilityRole::ColorPicker);
+        assert!(!node.state.focusable);
+        assert!(!node.state.focused);
+        assert!(node.state.disabled);
+        assert_eq!(node.state.pressed, Some(false));
+        assert_eq!(node.state.expanded, Some(false));
+    }
+
+    #[test]
+    fn hex_fields_sync_from_color() {
+        let picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 128));
+
+        assert_eq!(picker.fields[0].text(), "#33669980");
+    }
+
+    #[test]
+    fn rgb_fields_apply_to_color() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Rgb);
+        picker.fields[0].set_text("255".into());
+        picker.fields[1].set_text("128".into());
+        picker.fields[2].set_text("0".into());
+        picker.fields[3].set_text("50".into());
+
+        assert!(picker.apply_visible_fields());
+        assert_eq!(picker.color().to_rgba8(), [255, 128, 0, 128]);
+    }
+
+    #[test]
+    fn hsl_fields_apply_to_color() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Hsl);
+        picker.fields[0].set_text("240".into());
+        picker.fields[1].set_text("100".into());
+        picker.fields[2].set_text("50".into());
+        picker.fields[3].set_text("100".into());
+
+        assert!(picker.apply_visible_fields());
+        assert_eq!(picker.color().to_rgba8(), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn cmyk_fields_apply_to_color() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Cmyk);
+        picker.fields[0].set_text("100".into());
+        picker.fields[1].set_text("0".into());
+        picker.fields[2].set_text("0".into());
+        picker.fields[3].set_text("0".into());
+        picker.fields[4].set_text("100".into());
+
+        assert!(picker.apply_visible_fields());
+        assert_eq!(picker.color().to_rgba8(), [0, 255, 255, 255]);
+    }
+
+    #[test]
+    fn invalid_field_does_not_change_color() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(10, 20, 30, 255));
+        picker.set_mode(ColorPickerMode::Rgb);
+        picker.fields[0].set_text("nope".into());
+
+        assert!(!picker.apply_visible_fields());
+        assert_eq!(picker.color().to_rgba8(), [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn cmyk_fields_fit_on_one_row() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Cmyk);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        let first = picker.field_rect(0);
+        let last = picker.field_rect(4);
+
+        assert_eq!(first.y, last.y);
+        assert!(last.x + last.width <= picker.bounds.x + picker.bounds.width - 10.0);
+        assert!(last.width >= 30.0);
+    }
+
+    #[test]
+    fn hex_label_has_room_before_field() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Hex);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        let label = picker.field_label_pos(0);
+        let field = picker.field_rect(0);
+
+        assert!(field.x - label.x >= 24.0);
+        assert!(field.width > 200.0);
+    }
+
+    #[test]
+    fn mode_change_relayouts_text_inputs_immediately() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        picker.set_mode(ColorPickerMode::Cmyk);
+        let expected = picker.field_rect(4);
+
+        assert!(picker.fields[4].hit_test(expected.center()));
+    }
+
+    #[test]
+    fn hidden_swatch_does_not_paint_over_compact_mode_dropdown() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_show_swatch(false);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let swatch = picker.swatch_rect();
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT),
+        };
+
+        picker.paint(&mut ctx);
+
+        assert!(!encoder.rects.contains(&swatch));
+    }
+
+    #[test]
+    fn trigger_defaults_to_square_and_can_hide_popup_swatch() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+
+        assert_eq!(
+            trigger.measure(LayoutConstraint::loose(0.0, 0.0)).width,
+            32.0
+        );
+        assert_eq!(
+            trigger.measure(LayoutConstraint::loose(0.0, 0.0)).height,
+            32.0
+        );
+        assert!(trigger.picker.show_swatch());
+
+        trigger.picker_mut().set_show_swatch(false);
+        assert!(!trigger.picker.show_swatch());
+    }
+
+    #[test]
+    fn clicking_mode_dropdown_switches_mode() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let trigger = picker.mode_trigger_rect();
+        let trigger_position = Point::new(
+            trigger.x + trigger.width * 0.5,
+            trigger.y + trigger.height * 0.5,
+        );
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: trigger_position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(picker.mode_menu_open);
+
+        let hsv = picker.mode_item_rect(ColorPickerMode::Hsv);
+        let position = Point::new(hsv.x + hsv.width * 0.5, hsv.y + hsv.height * 0.5);
+        picker.event(
+            &UiEvent::MouseMove { position, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.mode(), ColorPickerMode::Hsv);
+        assert!(!picker.mode_menu_open);
+        assert_eq!(picker.fields[0].text(), "0");
+    }
+
+    #[test]
+    fn mode_dropdown_keyboard_navigation_selects_mode() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let trigger = picker.mode_trigger_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: trigger,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(picker.mode_hovered, Some(ColorPickerMode::Hex));
+
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::Down, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert_eq!(picker.mode_hovered, Some(ColorPickerMode::Rgb));
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::Enter, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.mode(), ColorPickerMode::Rgb);
+        assert!(!picker.mode_menu_open);
+    }
+
+    #[test]
+    fn mode_dropdown_keyboard_navigation_wraps_up() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let trigger = picker.mode_trigger_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: trigger,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::Up, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.mode_hovered, Some(ColorPickerMode::Cmyk));
+    }
+
+    #[test]
+    fn mode_dropdown_keyboard_navigation_ignores_modified_keys() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let trigger = picker.mode_trigger_rect().center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: trigger,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.mode_hovered = Some(ColorPickerMode::Rgb);
+
+        for (key, modifiers) in [
+            (KeyCode::Down, Modifiers::ctrl()),
+            (KeyCode::Up, Modifiers { alt: true, ..Default::default() }),
+            (
+                KeyCode::Enter,
+                Modifiers { meta: true, ..Default::default() },
+            ),
+            (KeyCode::Space, Modifiers::shift()),
+        ] {
+            assert_eq!(
+                picker.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            assert!(picker.mode_menu_open);
+            assert_eq!(picker.mode(), ColorPickerMode::Hex);
+            assert_eq!(picker.mode_hovered, Some(ColorPickerMode::Rgb));
+        }
+    }
+
+    #[test]
+    fn field_click_routes_to_target_field_without_being_swallowed_by_previous_field() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Rgb);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let green = picker.field_rect(1).center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: green,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::A, modifiers: Modifiers::ctrl() },
+            &mut ctx,
+        );
+        picker.event(&UiEvent::TextInput("200".into()), &mut ctx);
+
+        assert_eq!(picker.color().to_rgba8(), [0, 200, 0, 255]);
+    }
+
+    #[test]
+    fn field_click_keeps_router_focus_on_color_picker() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let picker_id = picker.id();
+        let field = picker.field_rect(0).center();
+        let focused = Rc::new(RefCell::new(None));
+        let mut focus = RecordingFocus { focused: Rc::clone(&focused) };
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_action: Action| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            picker.event(&UiEvent::focus_gained_keyboard(), &mut ctx),
+            EventResult::Handled
+        );
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: field,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(*focused.borrow(), Some(picker_id));
+        assert!(picker.accepts_text_input());
+    }
+
+    #[test]
+    fn blank_click_inside_picker_blurs_field_without_starting_capture() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.set_mode(ColorPickerMode::Rgb);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let red = picker.field_rect(0).center();
+        let blank = Point::new(
+            picker.bounds.x + picker.bounds.width - 8.0,
+            picker.fields_top(),
+        );
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: red,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        picker.event(
+            &UiEvent::MouseDown {
+                position: blank,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.focused_field, None);
+        assert_eq!(picker.field_pointer_captured, None);
+    }
+
+    #[test]
+    fn dragging_color_area_updates_saturation_and_value() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.0,
+            v: 0.0,
+            a: 1.0,
+        }));
+        picker.hue = 120.0;
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let area = picker.color_area_rect();
+        let position = Point::new(area.x + area.width, area.y);
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        let hsv = picker.color().to_hsv();
+        assert!((hsv.h - 120.0).abs() <= 0.1);
+        assert!((hsv.s - 1.0).abs() <= 0.01);
+        assert!((hsv.v - 1.0).abs() <= 0.01);
+    }
+
+    #[test]
+    fn dragging_hue_bar_preserves_saturation_and_value() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 0.0,
+            s: 0.5,
+            v: 0.75,
+            a: 1.0,
+        }));
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let bar = picker.hue_bar_rect();
+        let position = Point::new(bar.x + bar.width * 0.5, bar.y + bar.height * 0.5);
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        let hsv = picker.color().to_hsv();
+        assert!((hsv.h - 180.0).abs() <= 0.1);
+        assert!((hsv.s - 0.5).abs() <= 0.01);
+        assert!((hsv.v - 0.75).abs() <= 0.01);
+    }
+
+    #[test]
+    fn wheel_area_drag_updates_hue_and_saturation() {
+        let mut picker =
+            ColorPicker::new(Color::from_hsv(HsvColor { h: 0.0, s: 0.0, v: 1.0, a: 1.0 }));
+        picker.set_area_mode(ColorPickerAreaMode::Wheel);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let wheel = picker.color_wheel_rect();
+        let center = wheel.center();
+        let position = Point::new(center.x, center.y + wheel.height * 0.5);
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        let hsv = picker.color().to_hsv();
+        assert!(hsv.h > 89.0 && hsv.h < 91.0);
+        assert!(hsv.s > 0.99);
+        assert!(hsv.v > 0.99);
+    }
+
+    #[test]
+    fn dragging_alpha_bar_updates_alpha_and_fields() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let bar = picker.alpha_bar_rect();
+        let position = Point::new(bar.x + bar.width * 0.5, bar.y + bar.height * 0.5);
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.color().to_rgba8(), [51, 102, 153, 128]);
+        assert_eq!(picker.fields[0].text(), "#33669980");
+    }
+
+    #[test]
+    fn dragging_alpha_bar_dispatches_color_change_and_requests_repaint() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker =
+            ColorPicker::new(Color::from_rgba8(51, 102, 153, 255)).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let bar = picker.alpha_bar_rect();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: Point::new(bar.x + bar.width * 0.5, bar.center().y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.color().to_rgba8(), [51, 102, 153, 128]);
+        assert_eq!(actions.borrow().as_slice(), &[color_action(picker.color())]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn dragging_alpha_bar_at_same_value_does_not_dispatch_duplicate_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker =
+            ColorPicker::new(Color::from_rgba8(51, 102, 153, 255)).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let bar = picker.alpha_bar_rect();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: Point::new(bar.x + bar.width, bar.center().y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(actions.borrow().is_empty());
+        assert!(!ctx.requests.repaint);
+    }
+
+    #[test]
+    fn eyedropper_sample_dispatches_color_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker = ColorPicker::new(Color::BLACK).on_change(color_action);
+
+        picker.begin_eyedropper();
+        picker.event(
+            &UiEvent::EyedropperSample { color: Color::from_rgba8(1, 2, 3, 4) },
+            &mut ctx,
+        );
+
+        assert_eq!(actions.borrow().as_slice(), &[color_action(picker.color())]);
+        assert!(ctx.requests.repaint);
+    }
+
+    #[test]
+    fn opening_mode_dropdown_does_not_dispatch_color_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut picker = ColorPicker::new(Color::BLACK).on_change(color_action);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position: picker.mode_trigger_rect().center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(picker.mode_menu_open);
+        assert!(actions.borrow().is_empty());
+    }
+
+    #[test]
+    fn keyboard_nudge_updates_last_color_target() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        picker.hue = 120.0;
+        picker.keyboard_target = ColorDragTarget::ColorArea;
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+
+        assert!(picker.color().to_hsv().s > 0.5);
+    }
+
+    #[test]
+    fn keyboard_shift_nudge_uses_larger_step() {
+        let mut normal = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        let mut shifted = ColorPicker::new(normal.color());
+        normal.keyboard_target = ColorDragTarget::ColorArea;
+        shifted.keyboard_target = ColorDragTarget::ColorArea;
+        let mut normal_ctx = event_ctx();
+        let mut shifted_ctx = event_ctx();
+
+        normal.event(
+            &UiEvent::KeyDown { key: KeyCode::Right, modifiers: Modifiers::none() },
+            &mut normal_ctx,
+        );
+        shifted.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut shifted_ctx,
+        );
+
+        assert!(shifted.color().to_hsv().s - normal.color().to_hsv().s > 0.03);
+    }
+
+    #[test]
+    fn keyboard_nudge_ignores_ctrl_alt_and_meta_chords() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 120.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        picker.hue = 120.0;
+        picker.keyboard_target = ColorDragTarget::ColorArea;
+        let mut ctx = event_ctx();
+
+        for (key, modifiers) in [
+            (KeyCode::Right, Modifiers::ctrl()),
+            (KeyCode::Left, Modifiers { alt: true, ..Default::default() }),
+            (KeyCode::Up, Modifiers { meta: true, ..Default::default() }),
+            (
+                KeyCode::Down,
+                Modifiers { ctrl: true, shift: true, ..Default::default() },
+            ),
+        ] {
+            assert_eq!(
+                picker.event(&UiEvent::KeyDown { key, modifiers }, &mut ctx),
+                EventResult::Ignored
+            );
+            let hsv = picker.color().to_hsv();
+            assert!((hsv.s - 0.5).abs() < f32::EPSILON);
+            assert!((hsv.v - 0.5).abs() < f32::EPSILON);
+            assert!((picker.hue - 120.0).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn keyboard_nudge_clamps_alpha() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(10, 20, 30, 252));
+        picker.keyboard_target = ColorDragTarget::Alpha;
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(picker.color().to_rgba8()[3], 255);
+        assert_eq!(picker.fields[0].text(), "#0A141EFF");
+    }
+
+    #[test]
+    fn keyboard_nudge_wraps_hue() {
+        let mut picker = ColorPicker::new(Color::from_hsv(HsvColor {
+            h: 358.0,
+            s: 0.5,
+            v: 0.5,
+            a: 1.0,
+        }));
+        picker.hue = 358.0;
+        picker.keyboard_target = ColorDragTarget::Hue;
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::KeyDown {
+                key: KeyCode::Right,
+                modifiers: Modifiers { shift: true, ..Modifiers::none() },
+            },
+            &mut ctx,
+        );
+
+        assert!(picker.hue < 20.0);
+    }
+
+    #[test]
+    fn eyedropper_sample_updates_color_and_clears_active_state() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+
+        picker.begin_eyedropper();
+        assert!(picker.is_eyedropper_active());
+        picker.apply_sampled_color(Color::from_rgba8(1, 2, 3, 4));
+
+        assert!(!picker.is_eyedropper_active());
+        assert_eq!(picker.color().to_rgba8(), [1, 2, 3, 4]);
+        assert_eq!(picker.fields[0].text(), "#01020304");
+    }
+
+    #[test]
+    fn eyedropper_button_enters_sampling_and_escape_cancels() {
+        let mut picker = ColorPicker::new(Color::BLACK);
+        picker.layout(Rect::new(0.0, 0.0, PICKER_WIDTH, PICKER_HEIGHT));
+        let button = picker.eyedropper_rect();
+        let position = button.center();
+        let mut ctx = event_ctx();
+
+        picker.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(picker.id()))
+        );
+        picker.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        // After MouseUp on eyedropper button we re-request capture for
+        // the eyedropper session.
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(picker.id()))
+        );
+        assert!(picker.is_eyedropper_active());
+
+        picker.event(
+            &UiEvent::KeyDown { key: KeyCode::Escape, modifiers: Modifiers::none() },
+            &mut ctx,
+        );
+        assert!(!picker.is_eyedropper_active());
+        // Escape releases capture.
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(picker.id()))
+        );
+    }
+
+    #[test]
+    fn trigger_outside_click_cancels_active_eyedropper() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let eyedropper = trigger.picker.eyedropper_rect().center();
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: eyedropper,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(trigger.id()))
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: eyedropper,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.picker.is_eyedropper_active());
+
+        // During eyedropper mode, outside clicks do NOT close the popup.
+        // The picker holds pointer capture. Instead, the app shell sends
+        // EyedropperSample/EyedropperCancel to end eyedropper mode.
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        // Popup stays open during eyedropper.
+        assert!(trigger.is_open());
+        assert!(trigger.picker.is_eyedropper_active());
+
+        // Platform cancellation closes eyedropper.
+        trigger.event(&UiEvent::EyedropperCancel, &mut ctx);
+        assert!(!trigger.picker.is_eyedropper_active());
+    }
+
+    #[test]
+    fn trigger_open_hit_test_catches_outside_clicks_for_dismissal() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+        let outside = Point::new(500.0, 500.0);
+        let mut ctx = event_ctx();
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(trigger.is_open());
+        assert!(!trigger.hit_test(outside));
+        assert!(trigger.overlay_hit_test(outside));
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: outside,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(!trigger.is_open());
+    }
+
+    #[test]
+    fn trigger_translates_inner_text_field_capture_to_trigger_id() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.picker_mut().set_mode(ColorPickerMode::Rgb);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let red = trigger.picker.field_rect(0).center();
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: red,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(trigger.id()))
+        );
+    }
+
+    #[test]
+    fn trigger_translates_inner_text_focus_to_trigger_id() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.picker_mut().set_mode(ColorPickerMode::Rgb);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_id = trigger.id();
+        let trigger_center = trigger.bounds.center();
+        let focused = Rc::new(RefCell::new(None));
+        let mut focus = RecordingFocus { focused: Rc::clone(&focused) };
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let dispatch = |_action: Action| {};
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let red = trigger.picker.field_rect(0).center();
+        assert_eq!(
+            trigger.event(
+                &UiEvent::MouseDown {
+                    position: red,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(*focused.borrow(), Some(trigger_id));
+        assert!(trigger.accepts_text_input());
+    }
+
+    #[test]
+    fn trigger_is_focusable_and_closing_popup_blurs_inner_field() {
+        let mut trigger = ColorPickerTrigger::new(Color::BLACK);
+        trigger.picker_mut().set_mode(ColorPickerMode::Rgb);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        assert!(trigger.can_focus());
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let red = trigger.picker.field_rect(0).center();
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: red,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(trigger.picker.focused_field, Some(0));
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| ime.enabled));
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: Point::new(500.0, 500.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(!trigger.is_open());
+        assert_eq!(trigger.picker.focused_field, None);
+        assert!(ctx.requests.ime.as_ref().is_some_and(|ime| !ime.enabled));
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(trigger.id()))
+        );
+    }
+
+    #[test]
+    fn paint_draws_swatch_modes_and_active_fields() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.set_mode(ColorPickerMode::Rgb);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 280.0, 302.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        assert!(encoder.rects.len() > 10);
+        assert_eq!(encoder.gradient_rects.len(), 9);
+        assert!(encoder.texts.iter().any(|text| text == "RGB"));
+        assert!(encoder.texts.iter().any(|text| text == "R"));
+        assert!(encoder.texts.iter().any(|text| text == "A"));
+    }
+
+    #[test]
+    fn paint_uses_theme_shadow_token_for_picker_chrome() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let bounds = Rect::new(12.0, 18.0, 280.0, 302.0);
+        picker.layout(bounds);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 400.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        let shadow = &theme.spacing.shadow_md;
+        assert_eq!(encoder.soft_shadows.len(), 1);
+        assert_eq!(encoder.soft_shadows[0].0, bounds);
+        assert_eq!(encoder.soft_shadows[0].1, shadow_color(shadow));
+        assert_eq!(encoder.soft_shadows[0].3, shadow.blur);
+        assert_eq!(encoder.soft_shadows[0].4, shadow.spread);
+        assert_eq!(
+            encoder.soft_shadows[0].5,
+            glam::Vec2::new(shadow.offset_x, shadow.offset_y)
+        );
+    }
+
+    #[test]
+    fn paint_eyedropper_uses_injected_vector_icon() {
+        let icon = VectorIcon::from_svg_str(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 20l2-5 8-8 2 2-8 8-4 3z"/></svg>"#,
+        )
+        .expect("test vector icon should parse");
+        let mut picker =
+            ColorPicker::new(Color::from_rgba8(51, 102, 153, 255)).with_eyedropper_icon(icon);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 280.0, 302.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        assert_eq!(encoder.line_segments, 0);
+        assert!(encoder.raster_images > 0 || encoder.triangle_vertices > 0);
+    }
+
+    #[test]
+    fn paint_crosshair_uses_color_handle_tokens() {
+        let picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
+        };
+
+        picker.paint_crosshair(&mut ctx, Point::new(80.0, 90.0));
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![
+                theme.colors.color_handle_shadow,
+                theme.colors.color_handle_outer,
+                theme.colors.color_handle_inner,
+            ]
+        );
+    }
+
+    #[test]
+    fn paint_bar_handle_uses_color_handle_tokens() {
+        let picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 200.0, 200.0),
+        };
+
+        picker.paint_bar_handle(&mut ctx, Rect::new(20.0, 30.0, 100.0, 12.0), 60.0);
+
+        assert_eq!(
+            encoder.rect_colors,
+            vec![
+                theme.colors.color_handle_strong_shadow,
+                theme.colors.color_handle_outer
+            ]
+        );
+    }
+
+    #[test]
+    fn paint_wheel_area_draws_colored_triangles() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.set_area_mode(ColorPickerAreaMode::Wheel);
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 280.0, 302.0),
+        };
+
+        picker.paint(&mut ctx);
+
+        assert!(encoder.colored_triangle_vertices >= WHEEL_SEGMENTS * 3);
+        let (mask, corner_radius) = encoder
+            .colored_triangle_mask
+            .expect("wheel should paint through a circular SDF mask");
+        let mask_radius = mask.width.min(mask.height) * 0.5;
+        assert!((corner_radius - mask_radius).abs() < f32::EPSILON);
+        assert!(
+            encoder.colored_triangle_max_radius > mask_radius,
+            "wheel geometry must overdraw the circular mask so the SDF, not polygon chords, defines the edge"
+        );
+    }
+
+    #[test]
+    fn paint_overlay_draws_open_mode_dropdown() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+        picker.mode_menu_open = true;
+        picker.mode_hovered = Some(ColorPickerMode::Hsv);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 280.0, 400.0),
+        };
+
+        picker.paint_overlay(&mut ctx);
+
+        assert!(encoder.texts.iter().any(|text| text == "HEX"));
+        assert!(encoder.texts.iter().any(|text| text == "HSV"));
+        assert!(encoder.rects.len() >= MODES.len() + 2);
+    }
+
+    #[test]
+    fn mode_dropdown_overlay_skips_paint_when_clip_is_invalid_or_empty() {
+        for clip_rect in [
+            Rect::new(0.0, 0.0, 0.0, 302.0),
+            Rect::new(0.0, 0.0, f32::INFINITY, 302.0),
+        ] {
+            let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+            picker.layout(Rect::new(0.0, 0.0, 280.0, 302.0));
+            picker.mode_menu_open = true;
+            let theme = ThemePreset::Dark.build();
+            let mut encoder = RecordingEncoder::default();
+            let mut ctx = PaintContext { encoder: &mut encoder, theme: &theme, clip_rect };
+
+            picker.paint_overlay(&mut ctx);
+
+            assert!(encoder.rects.is_empty());
+            assert!(encoder.texts.is_empty());
+            assert_eq!(picker.overlay_viewport.get(), None);
+        }
+    }
+
+    #[test]
+    fn mode_dropdown_flips_above_bottom_viewport_and_remains_clickable() {
+        let mut picker = ColorPicker::new(Color::from_rgba8(51, 102, 153, 255));
+        picker.layout(Rect::new(0.0, 246.0, 280.0, 302.0));
+        picker.mode_menu_open = true;
+        picker.mode_hovered = Some(ColorPickerMode::Hex);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 320.0, 340.0),
+        };
+
+        picker.paint_overlay(&mut paint_ctx);
+
+        let menu = picker.mode_menu_rect();
+        assert!(menu.y < picker.mode_trigger_rect().y);
+        assert!(menu.y + menu.height <= 336.0);
+
+        let mut ctx = event_ctx();
+        let hsv = picker.mode_item_rect(ColorPickerMode::Hsv).center();
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseDown {
+                    position: hsv,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            picker.event(
+                &UiEvent::MouseUp {
+                    position: hsv,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+
+        assert_eq!(picker.mode(), ColorPickerMode::Hsv);
+        assert!(!picker.mode_menu_open);
+    }
+
+    #[test]
+    fn trigger_opens_picker_in_overlay_and_exposes_color() {
+        let mut trigger = ColorPickerTrigger::new(Color::from_rgba8(51, 102, 153, 255));
+        trigger.layout(Rect::new(0.0, 0.0, 84.0, 30.0));
+        let mut ctx = event_ctx();
+        let position = Point::new(12.0, 12.0);
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert!(trigger.is_open());
+        assert_eq!(trigger.color().to_rgba8(), [51, 102, 153, 255]);
+
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        let mut paint_ctx = PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: Rect::new(0.0, 0.0, 400.0, 400.0),
+        };
+        trigger.paint_overlay(&mut paint_ctx);
+        assert!(encoder.gradient_rects.len() >= 9);
+    }
+
+    #[test]
+    fn trigger_embedded_picker_dispatches_color_change() {
+        let actions = RefCell::new(Vec::new());
+        let dispatch = |action: Action| actions.borrow_mut().push(action);
+        let mut f = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut f, &mut shortcut, &mut tooltip, &dispatch);
+        let mut trigger =
+            ColorPickerTrigger::new(Color::from_rgba8(51, 102, 153, 255)).on_change(color_action);
+        trigger.layout(Rect::new(20.0, 30.0, 32.0, 32.0));
+        let trigger_center = trigger.bounds.center();
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        let bar = trigger.picker.alpha_bar_rect();
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: Point::new(bar.x + bar.width * 0.5, bar.center().y),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+
+        assert_eq!(trigger.color().to_rgba8(), [51, 102, 153, 128]);
+        assert_eq!(
+            actions.borrow().as_slice(),
+            &[color_action(trigger.color())]
+        );
+    }
+
+    #[test]
+    fn trigger_translates_inner_picker_pointer_capture_to_trigger_id() {
+        let mut trigger =
+            ColorPickerTrigger::new(Color::from_hsv(HsvColor { h: 0.0, s: 0.0, v: 1.0, a: 1.0 }));
+        trigger.picker_mut().set_area_mode(ColorPickerAreaMode::Wheel);
+        trigger.layout(Rect::new(20.0, 30.0, 84.0, 30.0));
+        let trigger_center = trigger.bounds.center();
+        let mut ctx = event_ctx();
+
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: trigger_center,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert!(trigger.is_open());
+
+        let wheel = trigger.picker.color_wheel_rect();
+        let wheel_point = Point::new(wheel.center().x, wheel.y + wheel.height);
+        trigger.event(
+            &UiEvent::MouseDown {
+                position: wheel_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(trigger.id()))
+        );
+
+        trigger.event(
+            &UiEvent::MouseUp {
+                position: wheel_point,
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(trigger.id()))
+        );
+    }
+}

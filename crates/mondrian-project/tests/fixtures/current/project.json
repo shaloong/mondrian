@@ -1,0 +1,601 @@
+{
+  "schema_version": 25,
+  "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
+  "document_revision": 1,
+  "meta": {
+    "name": "Main",
+    "description": "",
+    "author": "",
+    "created_at": "2026-07-12T10:43:40.105840Z",
+    "updated_at": "2026-07-12T10:43:40.105840Z"
+  },
+  "settings": {
+    "proxy_enabled": true,
+    "proxy_resolution": {
+      "width": 1280,
+      "height": 720
+    },
+    "cache_dir": null,
+    "auto_save_interval": 300
+  },
+  "color_environment": {
+    "engine": {
+      "mode": "mondrian_standard",
+      "package": {
+        "package_id": "mondrian_standard",
+        "package_version": "v3",
+        "config_id": "mondrian_default_ocio_v2",
+        "config_sha256": "99416ff04d756a3d490778d4a6e3df32a24b5adbea1c7fa890c5c7caa31a78f6",
+        "package_sha256": "807882e1ae3f7c30cfb53c06ef3e3833cff1da5e216f4b755e3928a59f095f47",
+        "working_space_id": "linear_rec2020_v1",
+        "working_space_version": "v1",
+        "sdr_view_transform_id": "mondrian_standard_sdr_v2",
+        "sdr_view_transform_version": "v2",
+        "hdr_view_transform_id": "mondrian_standard_hdr_1000_nits_v1",
+        "hdr_view_transform_version": "v1"
+      }
+    }
+  },
+  "new_sequence_defaults": {
+    "editing_mode": "Custom",
+    "resolution": {
+      "width": 1920,
+      "height": 1080
+    },
+    "frame_rate": {
+      "num": 25,
+      "den": 1
+    },
+    "pixel_aspect_ratio": "Square",
+    "field_order": "Progressive",
+    "timeline_display": {
+      "format": {
+        "kind": "frames"
+      },
+      "timecode_start_frame": 0
+    },
+    "audio_sample_rate": 48000,
+    "audio_display_format": "AudioSamples",
+    "audio_channel_layout": {
+      "Speakers": [
+        "FrontLeft",
+        "FrontRight"
+      ]
+    },
+    "preview": {
+      "format": "IFrameOnly",
+      "resolution_scale": 0.5,
+      "cache_enabled": true
+    },
+    "color": {
+      "working_color_space": "linear_rec2020",
+      "input": {
+        "missing_metadata_policy": "AssumeRec709",
+        "auto_tone_map_media": true
+      },
+      "program_output": {
+        "workflow": "SceneReferred",
+        "tone_map_policy": "Automatic",
+        "color_space": "Rec709"
+      }
+    },
+    "delivery": {
+      "video_range": "Full",
+      "bit_depth": "Ten",
+      "static_hdr_metadata_policy": "Omit"
+    },
+    "action_safe_margin": 0.1,
+    "title_safe_margin": 0.2
+  },
+  "sequences": {
+    "sequences": [
+      {
+        "id": "f4d7b743-4075-4043-a624-e2df3bd9f8f6",
+        "revision": 1,
+        "name": "Main",
+        "role": "Editorial",
+        "settings": {
+          "editing_mode": "Custom",
+          "resolution": {
+            "width": 1920,
+            "height": 1080
+          },
+          "frame_rate": {
+            "num": 25,
+            "den": 1
+          },
+          "pixel_aspect_ratio": "Square",
+          "field_order": "Progressive",
+          "timeline_display": {
+            "format": {
+              "kind": "frames"
+            },
+            "timecode_start_frame": 0
+          },
+          "audio_sample_rate": 48000,
+          "audio_display_format": "AudioSamples",
+          "audio_channel_layout": {
+            "Speakers": [
+              "FrontLeft",
+              "FrontRight"
+            ]
+          },
+          "preview": {
+            "format": "IFrameOnly",
+            "resolution_scale": 0.5,
+            "cache_enabled": true
+          },
+          "color": {
+            "working_color_space": "linear_rec2020",
+            "input": {
+              "missing_metadata_policy": "AssumeRec709",
+              "auto_tone_map_media": true
+            },
+            "program_output": {
+              "workflow": "SceneReferred",
+              "tone_map_policy": "Automatic",
+              "color_space": "Rec709"
+            }
+          },
+          "delivery": {
+            "video_range": "Full",
+            "bit_depth": "Ten",
+            "static_hdr_metadata_policy": "Omit"
+          },
+          "action_safe_margin": 0.1,
+          "title_safe_margin": 0.2
+        },
+        "video_tracks": [
+          {
+            "id": "5f99013c-81f7-4b94-a43f-26e2321f7ce3",
+            "name": "V1",
+            "track_type": "Video",
+            "height": 80.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "b33a9d77-ace8-402e-b06e-3fb380250d24",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          },
+          {
+            "id": "326e9b76-b5e6-4f2a-91ae-34b16595445b",
+            "name": "V2",
+            "track_type": "Video",
+            "height": 80.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "6563db28-ab8c-4315-8591-189e5fd77198",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          },
+          {
+            "id": "a4b4abdf-67fb-47b9-b2af-01105ea92bf8",
+            "name": "V3",
+            "track_type": "Video",
+            "height": 80.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "7ecd7d94-257d-4499-9af8-1a0ec6dc6e4d",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          }
+        ],
+        "audio_tracks": [
+          {
+            "id": "ef4ed27f-1a1f-4337-b08a-0ec3844168ec",
+            "name": "A1",
+            "track_type": "Audio",
+            "height": 50.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "5cb43824-c334-4c89-9782-f7fda1b0f4fb",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          },
+          {
+            "id": "40ef8ee3-66cb-4512-b5e0-3f4e9779923a",
+            "name": "A2",
+            "track_type": "Audio",
+            "height": 50.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "e2fc86e5-69fa-41b9-b526-eba5f5f5bd63",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          },
+          {
+            "id": "f3b03bce-75a4-4218-ac54-607002a245fc",
+            "name": "A3",
+            "track_type": "Audio",
+            "height": 50.0,
+            "is_muted": false,
+            "is_locked": false,
+            "is_visible": true,
+            "blend_mode": "Normal",
+            "opacity": {
+              "track_id": "01c715bf-7bb1-4676-b242-7ba5868c9c4b",
+              "descriptor": {
+                "schema": {
+                  "parameter_id": "mondrian.track.opacity",
+                  "schema_version": 1,
+                  "message_id": "mondrian.track.opacity.label",
+                  "value_type": "Float",
+                  "default_value": {
+                    "Float": 1.0
+                  },
+                  "is_animatable": true,
+                  "unit": "normalized",
+                  "numeric": {
+                    "hard_range": { "min": 0.0, "max": 1.0 },
+                    "soft_range": { "min": 0.0, "max": 1.0 },
+                    "step": 0.01,
+                    "invalid_value_policy": "reject"
+                  },
+                  "allowed_interpolations": [
+                    "Hold", "Linear", "Bezier"
+                  ],
+                  "enum_options": [],
+                  "cache_impact": "value"
+                },
+                "path": "track.opacity",
+                "display_name": "轨道不透明度",
+                "ui_metadata": {
+                  "group_name": null,
+                  "supports_spatial": false
+                }
+              },
+              "static_value": {
+                "Float": 1.0
+              },
+              "animation_enabled": false,
+              "channels": [
+                {
+                  "index": 0,
+                  "keyframes": []
+                }
+              ]
+            },
+            "clips": []
+          }
+        ],
+        "video_transitions": [],
+        "audio_roles": [],
+        "audio_program": {
+          "processing_scopes": [],
+          "transitions": [],
+          "track_channels": {
+            "40ef8ee3-66cb-4512-b5e0-3f4e9779923a": {
+              "strip": {
+                "input_trim_db": 0.0,
+                "pre_fader": {
+                  "processors": []
+                },
+                "fader_db": 0.0,
+                "fader_automation": null,
+                "post_fader": {
+                  "processors": []
+                }
+              }
+            },
+            "ef4ed27f-1a1f-4337-b08a-0ec3844168ec": {
+              "strip": {
+                "input_trim_db": 0.0,
+                "pre_fader": {
+                  "processors": []
+                },
+                "fader_db": 0.0,
+                "fader_automation": null,
+                "post_fader": {
+                  "processors": []
+                }
+              }
+            },
+            "f3b03bce-75a4-4218-ac54-607002a245fc": {
+              "strip": {
+                "input_trim_db": 0.0,
+                "pre_fader": {
+                  "processors": []
+                },
+                "fader_db": 0.0,
+                "fader_automation": null,
+                "post_fader": {
+                  "processors": []
+                }
+              }
+            }
+          },
+          "buses": [],
+          "outputs": [
+            {
+              "id": "afdda4ee-152b-4fab-9527-b91121d56393",
+              "name": "Main",
+              "main_source": "RoutedInputs",
+              "strip": {
+                "input_trim_db": 0.0,
+                "pre_fader": {
+                  "processors": []
+                },
+                "fader_db": 0.0,
+                "fader_automation": null,
+                "post_fader": {
+                  "processors": []
+                }
+              }
+            }
+          ],
+          "routes": [
+            {
+              "id": "52e43eb5-96d7-4705-9cea-6b6e42996762",
+              "source": {
+                "Track": {
+                  "track_id": "ef4ed27f-1a1f-4337-b08a-0ec3844168ec",
+                  "port": "PostMute"
+                }
+              },
+              "destination": {
+                "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
+            },
+            {
+              "id": "a8e58d56-6eca-4339-9a14-bf9748e4ffa5",
+              "source": {
+                "Track": {
+                  "track_id": "40ef8ee3-66cb-4512-b5e0-3f4e9779923a",
+                  "port": "PostMute"
+                }
+              },
+              "destination": {
+                "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
+            },
+            {
+              "id": "4b4efa4b-3c0c-47c5-a7f1-166fa8a2b608",
+              "source": {
+                "Track": {
+                  "track_id": "f3b03bce-75a4-4218-ac54-607002a245fc",
+                  "port": "PostMute"
+                }
+              },
+              "destination": {
+                "Output": "afdda4ee-152b-4fab-9527-b91121d56393"
+              },
+              "enabled": true,
+              "gain_db": 0.0,
+              "gain_automation": null
+            }
+          ]
+        },
+        "playhead": {
+          "numerator": 0,
+          "denominator": 1
+        },
+        "in_point": null,
+        "out_point": null
+      }
+    ],
+    "default_sequence_id": "f4d7b743-4075-4043-a624-e2df3bd9f8f6",
+    "active_sequence_id": "f4d7b743-4075-4043-a624-e2df3bd9f8f6"
+  },
+  "proxy_mode_assets": []
+}

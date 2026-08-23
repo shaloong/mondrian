@@ -1,4 +1,4 @@
-/// mondrian-app — 主应用程序入口与 egui UI 框架
+/// mondrian-app — product state and the app UI editor shell.
 pub mod app;
-pub mod shortcuts;
-pub mod ui;
+pub mod app_ui;
+pub(crate) mod product_assets;

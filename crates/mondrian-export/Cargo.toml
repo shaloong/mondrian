@@ -5,11 +5,18 @@ edition.workspace    = true
 authors.workspace    = true
 license.workspace    = true
 
+[features]
+validation = ["mondrian-renderer/validation"]
+
 [dependencies]
+mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
+mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
 mondrian-renderer = { workspace = true }
+mondrian-effects  = { workspace = true }
+wgpu             = { workspace = true }
 
 tokio       = { workspace = true }
 async-trait = { workspace = true }
@@ -20,3 +27,7 @@ tracing     = { workspace = true }
 uuid        = { workspace = true }
 chrono      = { workspace = true }
 parking_lot = { workspace = true }
+sha2       = { workspace = true }
+tempfile   = { workspace = true }
+
+[dev-dependencies]

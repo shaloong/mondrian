@@ -1,0 +1,18 @@
+[package]
+name        = "mondrian-project"
+version.workspace    = true
+edition.workspace    = true
+authors.workspace    = true
+license.workspace    = true
+rust-version.workspace = true
+
+[dependencies]
+mondrian-storage  = { workspace = true }
+mondrian-core     = { workspace = true }
+mondrian-timeline = { workspace = true }
+
+anyhow     = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+sha2       = { workspace = true }
+zip        = { workspace = true }

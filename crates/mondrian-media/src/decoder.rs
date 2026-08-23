@@ -1,741 +1,1906 @@
-//! 解码器池
+//! Decode residency and hardware-frame import diagnostics.
 //!
-//! 管理多个并发 FFmpeg 解码上下文，支持帧精确随机访问。
+//! Preview frame scheduling and access-mode FFmpeg session ownership live in
+//! `preview.rs` plus the app preview worker. This module intentionally does not
+//! expose a second preview decode pool.
 
-use crate::cache::{FrameCache, RawVideoFrame};
-use crate::preview::{
-    decode_video_frame_at_time_rgba, decode_video_frame_at_time_rgba_scaled, RgbaFrame,
-};
-use dashmap::DashMap;
-use lru::LruCache;
-use mondrian_core::{types::*, Result};
-use parking_lot::Mutex;
-use std::num::NonZeroUsize;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::Instant;
-use tokio::runtime::Runtime;
-use tokio::sync::{Notify, Semaphore};
+use std::collections::HashMap;
+use std::ffi::CString;
+use std::ptr::{self, NonNull};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-/// GPU 硬件加速后端
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use ffmpeg_next as ffmpeg;
+pub use mondrian_core::DecodedVideoRange;
+
+/// GPU hardware acceleration backend family.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
 pub enum HwAccelBackend {
-    /// 纯 CPU 软解码
+    /// CPU software decode.
+    #[default]
     None,
-    /// NVIDIA NVDEC
+    /// NVIDIA NVDEC.
     Cuda,
-    /// Windows DirectX 11 Video Acceleration
+    /// Windows Direct3D 12 Video Acceleration.
+    D3D12VA,
+    /// Windows DirectX 11 Video Acceleration.
     D3D11VA,
-    /// macOS/iOS VideoToolbox
+    /// Legacy Windows DirectX Video Acceleration 2.
+    Dxva2,
+    /// macOS/iOS VideoToolbox.
     VideoToolbox,
-    /// Linux VA-API
+    /// Linux VA-API.
     Vaapi,
+    /// Legacy Linux VDPAU.
+    Vdpau,
+}
+
+/// Backend-specific device selection supplied by the renderer admission path.
+///
+/// The selector is an explicit cross-layer contract, not a claim that the
+/// selected decoder can be imported. Renderer admission still validates the
+/// resulting native frame's physical adapter identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum HwAccelDeviceSelector {
+    /// DXGI adapter index passed only to FFmpeg's D3D12VA device creator.
+    D3D12VaAdapterIndex(u32),
+    /// DXGI adapter index passed only to FFmpeg's D3D11VA device creator.
+    D3D11VaAdapterIndex(u32),
+}
+
+impl HwAccelDeviceSelector {
+    fn device_name_for(self, backend: HwAccelBackend) -> Option<CString> {
+        match (self, backend) {
+            (Self::D3D12VaAdapterIndex(index), HwAccelBackend::D3D12VA)
+            | (Self::D3D11VaAdapterIndex(index), HwAccelBackend::D3D11VA) => {
+                CString::new(index.to_string()).ok()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn selects_backend(self, backend: HwAccelBackend) -> bool {
+        matches!(
+            (self, backend),
+            (Self::D3D12VaAdapterIndex(_), HwAccelBackend::D3D12VA)
+                | (Self::D3D11VaAdapterIndex(_), HwAccelBackend::D3D11VA)
+        )
+    }
+}
+
+type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
+const HW_DEVICE_FAILURE_BACKOFF_BASE: Duration = Duration::from_millis(250);
+const HW_DEVICE_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Idle-residency policy for one explicit hardware-device context pool.
+///
+/// Active decoder Sessions are never revoked to satisfy this policy. A zero
+/// limit makes every context cold after the last Session releases it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HwDeviceContextPoolPolicy {
+    /// Maximum idle device contexts retained for future decoder Sessions.
+    pub max_idle_contexts: usize,
+}
+
+impl HwDeviceContextPoolPolicy {
+    /// Construct one explicit idle-residency policy.
+    pub const fn new(max_idle_contexts: usize) -> Self {
+        Self { max_idle_contexts }
+    }
+}
+
+impl Default for HwDeviceContextPoolPolicy {
+    fn default() -> Self {
+        Self { max_idle_contexts: 2 }
+    }
+}
+
+/// Point-in-time evidence for one hardware-device context pool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HwDeviceContextPoolDiagnostics {
+    /// Effective idle-residency policy.
+    pub policy: HwDeviceContextPoolPolicy,
+    /// Current policy revision.
+    pub policy_revision: u64,
+    /// Context generations currently addressable by new Sessions.
+    pub entries: usize,
+    /// Entries with at least one active Session lease.
+    pub active_contexts: usize,
+    /// Entries retained only as idle acceleration resources.
+    pub idle_contexts: usize,
+    /// Most recently allocated device generation.
+    pub latest_generation: u64,
+    /// Acquisitions that reused one current generation.
+    pub hits: u64,
+    /// Acquisitions that created a new generation.
+    pub misses: u64,
+    /// Current generations retired after setup or execution failure.
+    pub retirements: u64,
+    /// Idle generations released by policy or explicit pressure.
+    pub evictions: u64,
+    /// Driver/device creation failures.
+    pub creation_failures: u64,
+    /// Codec-attachment or decoder-open failures that retired a device generation.
+    pub setup_failures: u64,
+    /// Backend/adapter keys currently under a bounded retry delay.
+    pub failure_backoffs: usize,
+    /// Acquisitions deferred without driver work while a retry delay was active.
+    pub backoff_rejections: u64,
+}
+
+struct HwDeviceContextPoolEntry {
+    generation: u64,
+    last_used: u64,
+    owner: Arc<SharedHwAccelDeviceContext>,
+}
+
+struct HwDeviceContextFailureBackoff {
+    probe: HwAccelDeviceContextProbe,
+    consecutive_failures: u32,
+    retry_after: Instant,
+}
+
+struct HwDeviceContextPoolState {
+    policy: HwDeviceContextPoolPolicy,
+    policy_revision: u64,
+    next_generation: u64,
+    recency_clock: u64,
+    entries: HashMap<HwAccelDeviceProbeKey, HwDeviceContextPoolEntry>,
+    failures: HashMap<HwAccelDeviceProbeKey, HwDeviceContextFailureBackoff>,
+    hits: u64,
+    misses: u64,
+    retirements: u64,
+    evictions: u64,
+    creation_failures: u64,
+    setup_failures: u64,
+    backoff_rejections: u64,
+}
+
+impl HwDeviceContextPoolState {
+    fn new(policy: HwDeviceContextPoolPolicy) -> Self {
+        Self {
+            policy,
+            policy_revision: 1,
+            next_generation: 1,
+            recency_clock: 0,
+            entries: HashMap::new(),
+            failures: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            retirements: 0,
+            evictions: 0,
+            creation_failures: 0,
+            setup_failures: 0,
+            backoff_rejections: 0,
+        }
+    }
+
+    fn next_recency(&mut self) -> u64 {
+        self.recency_clock = self.recency_clock.saturating_add(1);
+        self.recency_clock
+    }
+
+    fn allocate_generation(&mut self) -> Option<u64> {
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.checked_add(1)?;
+        Some(generation)
+    }
+
+    fn idle_count(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| Arc::strong_count(&entry.owner) == 1)
+            .count()
+    }
+
+    fn trim_idle_to(&mut self, max_idle_contexts: usize) {
+        while self.idle_count() > max_idle_contexts {
+            let Some(key) = self
+                .entries
+                .iter()
+                .filter(|(_, entry)| Arc::strong_count(&entry.owner) == 1)
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| *key)
+            else {
+                break;
+            };
+            self.entries.remove(&key);
+            self.evictions = self.evictions.saturating_add(1);
+        }
+    }
+
+    fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
+        let idle_contexts = self.idle_count();
+        HwDeviceContextPoolDiagnostics {
+            policy: self.policy,
+            policy_revision: self.policy_revision,
+            entries: self.entries.len(),
+            active_contexts: self.entries.len().saturating_sub(idle_contexts),
+            idle_contexts,
+            latest_generation: self.next_generation.saturating_sub(1),
+            hits: self.hits,
+            misses: self.misses,
+            retirements: self.retirements,
+            evictions: self.evictions,
+            creation_failures: self.creation_failures,
+            setup_failures: self.setup_failures,
+            failure_backoffs: self.failures.len(),
+            backoff_rejections: self.backoff_rejections,
+        }
+    }
+
+    fn record_failure(
+        &mut self,
+        key: HwAccelDeviceProbeKey,
+        probe: HwAccelDeviceContextProbe,
+        setup_failure: bool,
+    ) -> HwAccelDeviceContextProbe {
+        let consecutive_failures = self
+            .failures
+            .get(&key)
+            .map_or(1, |failure| failure.consecutive_failures.saturating_add(1));
+        let shift = consecutive_failures.saturating_sub(1).min(7);
+        let multiplier = 1u32.checked_shl(shift).unwrap_or(u32::MAX);
+        let delay = HW_DEVICE_FAILURE_BACKOFF_BASE
+            .checked_mul(multiplier)
+            .unwrap_or(HW_DEVICE_FAILURE_BACKOFF_MAX)
+            .min(HW_DEVICE_FAILURE_BACKOFF_MAX);
+        self.failures.insert(
+            key,
+            HwDeviceContextFailureBackoff {
+                probe: probe.clone(),
+                consecutive_failures,
+                retry_after: Instant::now() + delay,
+            },
+        );
+        if setup_failure {
+            self.setup_failures = self.setup_failures.saturating_add(1);
+        } else {
+            self.creation_failures = self.creation_failures.saturating_add(1);
+        }
+        probe
+    }
+}
+
+struct HwDeviceContextPoolInner {
+    state: Mutex<HwDeviceContextPoolState>,
+}
+
+/// Explicit worker-family owner of shared FFmpeg hardware device contexts.
+///
+/// The pool shares only immutable device roots for an exact backend/adapter.
+/// Codec contexts, DPB state, frame pools, and decoded surfaces remain
+/// Session-owned. Retiring a generation removes it from future lookup while
+/// active leases safely keep its `AVBufferRef` alive.
+#[derive(Clone)]
+pub struct HwDeviceContextPool {
+    inner: Arc<HwDeviceContextPoolInner>,
+}
+
+impl std::fmt::Debug for HwDeviceContextPool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HwDeviceContextPool")
+            .field("diagnostics", &self.diagnostics())
+            .finish()
+    }
+}
+
+impl HwDeviceContextPool {
+    /// Create a pool with one explicit idle-residency policy.
+    pub fn new(policy: HwDeviceContextPoolPolicy) -> Self {
+        Self {
+            inner: Arc::new(HwDeviceContextPoolInner {
+                state: Mutex::new(HwDeviceContextPoolState::new(policy)),
+            }),
+        }
+    }
+
+    /// Apply an idle-residency policy online and immediately release excess idle contexts.
+    pub fn reconfigure(&self, policy: HwDeviceContextPoolPolicy) {
+        let mut state = self.lock_state();
+        if state.policy == policy {
+            return;
+        }
+        state.policy = policy;
+        state.policy_revision = state.policy_revision.saturating_add(1);
+        state.trim_idle_to(policy.max_idle_contexts);
+    }
+
+    /// Release every idle context while preserving all active Session leases.
+    pub fn release_idle(&self) {
+        self.lock_state().trim_idle_to(0);
+    }
+
+    /// Clear transient setup-failure delays, for example after an explicit
+    /// adapter/device-generation change notification.
+    pub fn invalidate_failure_backoff(&self) {
+        self.lock_state().failures.clear();
+    }
+
+    /// Return current generation and residency evidence.
+    pub fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
+        self.lock_state().diagnostics()
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, HwDeviceContextPoolState> {
+        match self.inner.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "hardware device context pool lock was poisoned; retaining explicit state"
+                );
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retire(&self, key: HwAccelDeviceProbeKey, generation: u64) {
+        let mut state = self.lock_state();
+        let current_generation = state.entries.get(&key).map(|entry| entry.generation);
+        if current_generation == Some(generation) {
+            state.entries.remove(&key);
+            state.retirements = state.retirements.saturating_add(1);
+        }
+    }
+
+    fn retire_after_setup_failure(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        generation: u64,
+        probe: HwAccelDeviceContextProbe,
+    ) {
+        let mut state = self.lock_state();
+        let current_generation = state.entries.get(&key).map(|entry| entry.generation);
+        if current_generation == Some(generation) {
+            state.entries.remove(&key);
+            state.retirements = state.retirements.saturating_add(1);
+        }
+        let _ = state.record_failure(key, probe, true);
+    }
+
+    fn release(
+        &self,
+        key: HwAccelDeviceProbeKey,
+        generation: u64,
+        owner: &Arc<SharedHwAccelDeviceContext>,
+    ) {
+        let mut state = self.lock_state();
+        let is_last_active_lease = state.entries.get(&key).is_some_and(|entry| {
+            entry.generation == generation
+                && Arc::ptr_eq(&entry.owner, owner)
+                && Arc::strong_count(owner) == 2
+        });
+        if !is_last_active_lease {
+            return;
+        }
+
+        let max_idle_contexts = state.policy.max_idle_contexts;
+        if state.idle_count() >= max_idle_contexts {
+            state.entries.remove(&key);
+            state.evictions = state.evictions.saturating_add(1);
+        }
+        state.trim_idle_to(max_idle_contexts);
+    }
+
+    pub(crate) fn acquire(
+        &self,
+        backend: HwAccelBackend,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> std::result::Result<HwAccelDeviceContext, HwAccelDeviceContextProbe> {
+        if let Some(selector) = selector.filter(|selector| !selector.selects_backend(backend)) {
+            return Err(HwAccelDeviceContextProbe::unavailable(
+                backend,
+                format!(
+                    "hardware device selector {selector:?} does not select {}",
+                    backend.as_str()
+                ),
+            ));
+        }
+        let Some(device_type) = backend.to_ffmpeg_device_type() else {
+            return Err(HwAccelDeviceContextProbe::unavailable(
+                backend,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    backend.as_str()
+                ),
+            ));
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        if !ffmpeg_device_type_available {
+            return Err(HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "linked FFmpeg build does not list {} hardware device type",
+                    backend.as_str()
+                ),
+            });
+        }
+
+        let key = (backend, selector);
+        let mut state = self.lock_state();
+        let now = Instant::now();
+        if let Some(failure) = state.failures.get(&key) {
+            if now < failure.retry_after {
+                let retry_after = failure.retry_after.saturating_duration_since(now);
+                let mut probe = failure.probe.clone();
+                probe.device_create_attempted = false;
+                probe.device_context_created = false;
+                probe.reason = format!(
+                    "{}; retry deferred for {} ms after {} consecutive failures",
+                    probe.reason,
+                    retry_after.as_millis(),
+                    failure.consecutive_failures
+                );
+                state.backoff_rejections = state.backoff_rejections.saturating_add(1);
+                return Err(probe);
+            }
+            state.failures.remove(&key);
+        }
+        let recency = state.next_recency();
+        if let Some(entry) = state.entries.get_mut(&key) {
+            entry.last_used = recency;
+            let generation = entry.generation;
+            let owner = Arc::clone(&entry.owner);
+            state.hits = state.hits.saturating_add(1);
+            state.failures.remove(&key);
+            return Ok(HwAccelDeviceContext {
+                owner,
+                pool: self.clone(),
+                key,
+                generation,
+                newly_created: false,
+            });
+        }
+
+        let Some(generation) = state.allocate_generation() else {
+            return Err(HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: "hardware device generation space is exhausted".to_owned(),
+            });
+        };
+        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let device_name = selector.and_then(|selector| selector.device_name_for(backend));
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                device_type,
+                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            if !device_context.is_null() {
+                // SAFETY: FFmpeg returned this partial AVBufferRef through the
+                // exclusive out pointer; no owner was published.
+                unsafe {
+                    ffmpeg::ffi::av_buffer_unref(&mut device_context);
+                }
+            }
+            let probe = HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: Some(result),
+                reason: format!(
+                    "FFmpeg could not create {} hardware device context: {}",
+                    backend.as_str(),
+                    ffmpeg::Error::from(result)
+                ),
+            };
+            return Err(state.record_failure(key, probe, false));
+        }
+        let Some(device_context) = NonNull::new(device_context) else {
+            let probe = HwAccelDeviceContextProbe {
+                backend,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "FFmpeg reported success but returned no {} hardware device context",
+                    backend.as_str()
+                ),
+            };
+            return Err(state.record_failure(key, probe, false));
+        };
+
+        let owner = Arc::new(SharedHwAccelDeviceContext { backend, ptr: device_context });
+        state.entries.insert(
+            key,
+            HwDeviceContextPoolEntry {
+                generation,
+                last_used: recency,
+                owner: Arc::clone(&owner),
+            },
+        );
+        state.failures.remove(&key);
+        state.misses = state.misses.saturating_add(1);
+        let max_idle_contexts = state.policy.max_idle_contexts;
+        state.trim_idle_to(max_idle_contexts);
+        Ok(HwAccelDeviceContext {
+            owner,
+            pool: self.clone(),
+            key,
+            generation,
+            newly_created: true,
+        })
+    }
+}
+
+impl Default for HwDeviceContextPool {
+    fn default() -> Self {
+        Self::new(HwDeviceContextPoolPolicy::default())
+    }
+}
+
+/// Residency of frames produced by the media decode boundary.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub enum DecodedFrameResidency {
+    /// Decoder output is CPU RGBA memory.
+    #[default]
+    CpuRgba,
+    /// Decoder output is CPU RGBA f32 memory.
+    CpuFloat,
+    /// Decoder output is a GPU texture or hardware frame.
+    GpuTexture,
+}
+
+/// Decoder output surface format before Mondrian's preview CPU RGBA boundary.
+///
+/// This is a media-layer fact. Renderer-native import formats are modeled by
+/// `mondrian-renderer` and must be mapped at the app/readiness boundary.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub enum DecodedVideoSurfaceFormat {
+    /// The decoder surface format is unknown or not yet reported.
+    #[default]
+    Unknown,
+    /// 8-bit NV12 two-plane YUV 4:2:0 surface.
+    Nv12,
+    /// 10-bit P010 two-plane YUV 4:2:0 surface.
+    P010,
+    /// Planar 8-bit YUV 4:2:0.
+    Yuv420p,
+    /// Planar 10-bit YUV 4:2:0.
+    Yuv420p10le,
+    /// Packed RGBA8.
+    Rgba8,
+    /// Packed BGRA8.
+    Bgra8,
+    /// A known but currently non-native preview surface format.
+    Other,
+}
+
+/// Authority-aware quantization-range contract carried into frame decode.
+///
+/// Automatic interpretation prefers an explicit frame-level decoder fact and
+/// uses the probe result only when that frame omits range metadata. A user
+/// override remains authoritative even when the frame repeats an incorrect tag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "authority", rename_all = "snake_case")]
+pub enum DecodedVideoRangeContract {
+    /// Follow frame metadata, falling back to the latest stream probe.
+    Automatic {
+        /// Stream-level range reported while probing the asset.
+        probed_range: DecodedVideoRange,
+    },
+    /// Force studio/legal range.
+    OverrideLimited,
+    /// Force full range.
+    OverrideFull,
+}
+
+impl DecodedVideoRangeContract {
+    /// Build the decode contract from persistent asset interpretation and probe facts.
+    pub const fn from_interpretation(
+        interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+        probed_range: DecodedVideoRange,
+    ) -> Self {
+        use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+        match interpretation {
+            MediaRangeInterpretation::Auto => Self::Automatic { probed_range },
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Limited } => {
+                Self::OverrideLimited
+            }
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
+                Self::OverrideFull
+            }
+        }
+    }
+
+    /// Resolve the range to apply to one decoded frame.
+    pub const fn resolve_for_frame(self, frame_range: DecodedVideoRange) -> DecodedVideoRange {
+        match self {
+            Self::Automatic { probed_range } => match frame_range {
+                DecodedVideoRange::Unknown => probed_range,
+                explicit => explicit,
+            },
+            Self::OverrideLimited => DecodedVideoRange::Limited,
+            Self::OverrideFull => DecodedVideoRange::Full,
+        }
+    }
+
+    /// Return the range available before a frame has been decoded.
+    pub const fn baseline(self) -> DecodedVideoRange {
+        self.resolve_for_frame(DecodedVideoRange::Unknown)
+    }
+}
+
+/// Resolve the decoder-facing range from persistent asset interpretation and
+/// the latest probe result.
+///
+/// A user override is authoritative so incorrectly tagged media can be
+/// corrected consistently by preview, thumbnails, proxies, and export.
+pub fn resolve_decoded_video_range(
+    interpretation: mondrian_core::timeline_data::MediaRangeInterpretation,
+    detected: DecodedVideoRange,
+) -> DecodedVideoRange {
+    DecodedVideoRangeContract::from_interpretation(interpretation, detected).baseline()
+}
+
+pub(crate) fn decoded_video_range_from_ffmpeg(
+    range: ffmpeg_next::util::color::Range,
+) -> DecodedVideoRange {
+    match range {
+        ffmpeg_next::util::color::Range::MPEG => DecodedVideoRange::Limited,
+        ffmpeg_next::util::color::Range::JPEG => DecodedVideoRange::Full,
+        ffmpeg_next::util::color::Range::Unspecified => DecodedVideoRange::Unknown,
+    }
+}
+
+/// Chroma sample location reported by the decoder for a video frame.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub enum DecodedVideoChromaLocation {
+    /// No reliable chroma-location metadata was reported.
+    #[default]
+    Unknown,
+    /// Left chroma siting.
+    Left,
+    /// Center chroma siting.
+    Center,
+    /// Top-left chroma siting.
+    TopLeft,
+    /// Top chroma siting.
+    Top,
+    /// Bottom-left chroma siting.
+    BottomLeft,
+    /// Bottom chroma siting.
+    Bottom,
+}
+
+/// Decoder-reported sampling facts for a decoded video frame.
+///
+/// These are media payload facts, not color-interpretation decisions. The app
+/// combines them with the resolved source color space before asking the renderer
+/// to import a native video surface.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub struct DecodedVideoSampling {
+    /// Decoder-reported YCbCr-to-RGB matrix.
+    pub matrix: DecodedVideoMatrix,
+    /// Encoded quantization range.
+    pub range: DecodedVideoRange,
+    /// Chroma sample location.
+    pub chroma_location: DecodedVideoChromaLocation,
+    /// Effective coded bit depth. Zero means unknown.
+    pub bit_depth: u8,
+}
+
+/// YUV matrix applied while converting a decoded CPU frame to source-encoded RGB.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
+)]
+pub enum DecodedVideoMatrix {
+    /// No reliable matrix was reported.
+    #[default]
+    Unknown,
+    /// The decoder reported a matrix that requires a conversion not implemented
+    /// by Mondrian. This is distinct from absent metadata so callers fail closed
+    /// instead of substituting the project color-space matrix.
+    Unsupported,
+    /// BT.709 non-constant luminance coefficients.
+    Bt709,
+    /// BT.2020 non-constant luminance coefficients.
+    Bt2020NonConstant,
+    /// FCC coefficients.
+    Fcc,
+    /// BT.470BG / BT.601 coefficients.
+    Bt470Bg,
+    /// SMPTE 170M / BT.601 coefficients.
+    Smpte170M,
+    /// SMPTE 240M coefficients.
+    Smpte240M,
+    /// Source pixels were already RGB, so no YUV matrix was applied.
+    Rgb,
+}
+
+/// Native hardware-frame handle family produced by a decoder.
+///
+/// This enum names the cross-crate contract only. It does not claim that
+/// Mondrian can import the handle into the renderer; that requires a separate
+/// support contract from the active Renderer Adapter/Device runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum DecodedGpuFrameHandleKind {
+    /// Windows D3D12 `ID3D12Resource` hardware decode surface.
+    D3D12Resource,
+    /// Windows D3D11 `ID3D11Texture2D` hardware decode surface.
+    D3D11Texture2D,
+    /// Legacy Windows DXVA2 `IDirect3DSurface9` hardware decode surface.
+    Dxva2Surface,
+    /// macOS/iOS `CVPixelBuffer` backed by an IOSurface.
+    CVPixelBuffer,
+    /// Linux VA-API `VASurfaceID`/DMABUF-exportable surface.
+    VaapiSurface,
+    /// Legacy Linux VDPAU `VdpVideoSurface`.
+    VdpauVideoSurface,
+    /// CUDA/NVDEC device allocation.
+    CudaDeviceMemory,
+}
+
+/// FFmpeg hardware pixel format reported by `avcodec_get_hw_config`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HwAccelPixelFormat {
+    /// FFmpeg D3D12 hardware surfaces (`AV_PIX_FMT_D3D12`).
+    D3D12,
+    /// FFmpeg D3D11 hardware surfaces (`AV_PIX_FMT_D3D11`).
+    D3D11,
+    /// Legacy FFmpeg D3D11VA VLD surfaces.
+    D3D11VA,
+    /// Legacy FFmpeg DXVA2 VLD surfaces.
+    Dxva2,
+    /// FFmpeg VideoToolbox hardware surfaces.
+    VideoToolbox,
+    /// FFmpeg VA-API hardware surfaces.
+    Vaapi,
+    /// FFmpeg VDPAU hardware surfaces.
+    Vdpau,
+    /// FFmpeg CUDA/NVDEC hardware surfaces.
+    Cuda,
+    /// A hardware config exists, but Mondrian does not classify this pixel format yet.
+    Other(i32),
+}
+
+impl HwAccelPixelFormat {
+    /// Stable hardware pixel-format name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::D3D12 => "D3D12",
+            Self::D3D11 => "D3D11",
+            Self::D3D11VA => "D3D11VA",
+            Self::Dxva2 => "DXVA2",
+            Self::VideoToolbox => "VideoToolbox",
+            Self::Vaapi => "Vaapi",
+            Self::Vdpau => "VDPAU",
+            Self::Cuda => "Cuda",
+            Self::Other(_) => "Other",
+        }
+    }
+
+    fn from_ffmpeg(format: ffmpeg::ffi::AVPixelFormat) -> Self {
+        #[cfg(mondrian_ffmpeg_7_1)]
+        if format == ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12 {
+            return Self::D3D12;
+        }
+        match format {
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11 => Self::D3D11,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD => Self::D3D11VA,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD => Self::Dxva2,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX => Self::VideoToolbox,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI => Self::Vaapi,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VDPAU => Self::Vdpau,
+            ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA => Self::Cuda,
+            other => Self::Other(other as i32),
+        }
+    }
+
+    pub(crate) fn to_ffmpeg(self) -> Option<ffmpeg::ffi::AVPixelFormat> {
+        match self {
+            #[cfg(mondrian_ffmpeg_7_1)]
+            Self::D3D12 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D12),
+            #[cfg(not(mondrian_ffmpeg_7_1))]
+            Self::D3D12 => None,
+            Self::D3D11 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11),
+            Self::D3D11VA => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_D3D11VA_VLD),
+            Self::Dxva2 => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_DXVA2_VLD),
+            Self::VideoToolbox => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VIDEOTOOLBOX),
+            Self::Vaapi => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VAAPI),
+            Self::Vdpau => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_VDPAU),
+            Self::Cuda => Some(ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_CUDA),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+/// Setup methods advertised by one FFmpeg hardware codec config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelCodecConfigMethods {
+    /// Config can be initialized from an `AVHWDeviceContext`.
+    pub hw_device_ctx: bool,
+    /// Config can be initialized from an `AVHWFramesContext`.
+    pub hw_frames_ctx: bool,
+    /// FFmpeg can initialize this internally.
+    pub internal: bool,
+    /// Config requires an ad-hoc legacy setup path.
+    pub ad_hoc: bool,
+}
+
+impl HwAccelCodecConfigMethods {
+    fn from_bits(bits: i32) -> Self {
+        Self {
+            hw_device_ctx: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32 != 0,
+            hw_frames_ctx: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_HW_FRAMES_CTX as i32 != 0,
+            internal: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_INTERNAL as i32 != 0,
+            ad_hoc: bits & ffmpeg::ffi::AV_CODEC_HW_CONFIG_METHOD_AD_HOC as i32 != 0,
+        }
+    }
+}
+
+/// Read-only FFmpeg codec/backend hardware decode capability probe.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelCodecConfigProbe {
+    /// Backend requested for this probe.
+    pub backend: HwAccelBackend,
+    /// Whether this backend maps to a known FFmpeg hardware device type.
+    pub backend_maps_to_ffmpeg_device: bool,
+    /// Whether the linked FFmpeg build lists this hardware device type.
+    pub ffmpeg_device_type_available: bool,
+    /// Whether FFmpeg has a decoder for the requested codec id.
+    pub ffmpeg_decoder_available: bool,
+    /// Whether that decoder advertises a hardware config for this backend.
+    pub ffmpeg_codec_config_available: bool,
+    /// Hardware pixel format advertised by FFmpeg for this config.
+    pub hw_pixel_format: Option<HwAccelPixelFormat>,
+    /// Setup methods advertised by FFmpeg for this config.
+    pub methods: HwAccelCodecConfigMethods,
+    /// Stable diagnostic reason for unavailable or partial support.
+    pub reason: String,
+}
+
+impl HwAccelCodecConfigProbe {
+    fn unavailable(backend: HwAccelBackend, reason: impl Into<String>) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available: false,
+            ffmpeg_decoder_available: false,
+            ffmpeg_codec_config_available: false,
+            hw_pixel_format: None,
+            methods: HwAccelCodecConfigMethods::default(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// FFmpeg hardware device context creation probe for a backend.
+///
+/// This is a runtime capability probe for the local machine and linked FFmpeg
+/// build. It creates and immediately releases an `AVHWDeviceContext`; it does
+/// not attach that context to a decoder or claim that decoded frames are
+/// GPU-resident.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HwAccelDeviceContextProbe {
+    /// Backend requested for this probe.
+    pub backend: HwAccelBackend,
+    /// Whether this backend maps to a known FFmpeg hardware device type.
+    pub backend_maps_to_ffmpeg_device: bool,
+    /// Whether the linked FFmpeg build lists this hardware device type.
+    pub ffmpeg_device_type_available: bool,
+    /// Whether Mondrian attempted `av_hwdevice_ctx_create`.
+    pub device_create_attempted: bool,
+    /// Whether FFmpeg created an `AVHWDeviceContext` for this backend.
+    pub device_context_created: bool,
+    /// Negative FFmpeg error code returned by device creation, when any.
+    pub device_create_error_code: Option<i32>,
+    /// Stable diagnostic reason for unavailable or partial support.
+    pub reason: String,
+}
+
+impl HwAccelDeviceContextProbe {
+    pub(crate) fn unavailable(backend: HwAccelBackend, reason: impl Into<String>) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available: false,
+            device_create_attempted: false,
+            device_context_created: false,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn deferred(
+        backend: HwAccelBackend,
+        ffmpeg_device_type_available: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: backend.to_ffmpeg_device_type().is_some(),
+            ffmpeg_device_type_available,
+            device_create_attempted: false,
+            device_context_created: false,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
+
+    pub(crate) fn acquired(
+        backend: HwAccelBackend,
+        newly_created: bool,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            backend,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available: true,
+            device_create_attempted: newly_created,
+            device_context_created: true,
+            device_create_error_code: None,
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Session lease on one worker-family-shared FFmpeg hardware device context.
+///
+/// The device is shared only for the same backend and renderer-selected
+/// adapter. Codec contexts, DPB state, hardware frame pools, and decoded
+/// surfaces remain session-owned.
+pub(crate) struct HwAccelDeviceContext {
+    owner: Arc<SharedHwAccelDeviceContext>,
+    pool: HwDeviceContextPool,
+    key: HwAccelDeviceProbeKey,
+    generation: u64,
+    newly_created: bool,
+}
+
+/// Immutable owner retained by an explicit hardware-device context pool.
+struct SharedHwAccelDeviceContext {
+    backend: HwAccelBackend,
+    ptr: NonNull<ffmpeg::ffi::AVBufferRef>,
+}
+
+impl HwAccelDeviceContext {
+    /// Backend used to create this device context.
+    pub(crate) fn backend(&self) -> HwAccelBackend {
+        self.owner.backend
+    }
+
+    /// Whether this acquisition created the current pool generation.
+    pub(crate) fn newly_created(&self) -> bool {
+        self.newly_created
+    }
+
+    /// Retire this exact generation from future pool acquisitions.
+    ///
+    /// Other active Sessions remain safe because they retain independent Arc
+    /// leases; a later acquisition creates a new generation.
+    #[cfg(test)]
+    pub(crate) fn retire(&self) {
+        self.pool.retire(self.key, self.generation);
+    }
+
+    /// Retire this generation and apply a bounded owner-local retry delay
+    /// after codec attachment or decoder-open failure.
+    pub(crate) fn retire_after_setup_failure(&self, reason: impl Into<String>) {
+        self.pool.retire_after_setup_failure(
+            self.key,
+            self.generation,
+            HwAccelDeviceContextProbe::acquired(self.owner.backend, self.newly_created, reason),
+        );
+    }
+
+    /// Retire this generation and apply a bounded owner-local retry delay
+    /// after a runtime decode failure.
+    ///
+    /// A driver that opens successfully but fails during decode (a "half-bad"
+    /// environment common with multi-adapter or hybrid laptops) must not be
+    /// recreated on every request: without backoff each failure paid the full
+    /// device-creation and decoder-open cost and surfaced a fresh error.
+    pub(crate) fn retire_after_runtime_failure(&self, reason: impl Into<String>) {
+        self.pool.retire_after_setup_failure(
+            self.key,
+            self.generation,
+            HwAccelDeviceContextProbe::acquired(self.owner.backend, self.newly_created, reason),
+        );
+    }
+
+    /// Attach a ref-counted hardware device context reference to an unopened
+    /// FFmpeg codec context.
+    pub(crate) fn attach_to_codec_context(
+        &self,
+        context: &mut ffmpeg::codec::context::Context,
+    ) -> std::result::Result<(), String> {
+        let device_ref = unsafe { ffmpeg::ffi::av_buffer_ref(self.owner.ptr.as_ptr()) };
+        if device_ref.is_null() {
+            return Err(format!(
+                "FFmpeg could not retain {} hardware device context",
+                self.owner.backend.as_str()
+            ));
+        }
+        unsafe {
+            (*context.as_mut_ptr()).hw_device_ctx = device_ref;
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn shares_device_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.owner, &other.owner)
+    }
+
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
+
+impl Drop for HwAccelDeviceContext {
+    fn drop(&mut self) {
+        self.pool.release(self.key, self.generation, &self.owner);
+    }
+}
+
+// SAFETY: FFmpeg documents AVBuffer reference/unreference as thread-safe. The
+// AVHWDeviceContext is immutable after initialization; Mondrian exposes no raw
+// access or mutation, and each codec receives its own AVBufferRef. Backend
+// synchronization remains FFmpeg's responsibility through the initialized
+// device context.
+unsafe impl Send for SharedHwAccelDeviceContext {}
+// SAFETY: See the `Send` justification above. Shared access only creates or
+// releases AVBuffer references and never mutates the initialized context.
+unsafe impl Sync for SharedHwAccelDeviceContext {}
+
+impl Drop for SharedHwAccelDeviceContext {
+    fn drop(&mut self) {
+        let mut ptr = self.ptr.as_ptr();
+        unsafe {
+            ffmpeg::ffi::av_buffer_unref(&mut ptr);
+        }
+    }
+}
+
+impl DecodedGpuFrameHandleKind {
+    /// Stable handle-kind name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::D3D12Resource => "D3D12Resource",
+            Self::D3D11Texture2D => "D3D11Texture2D",
+            Self::Dxva2Surface => "Dxva2Surface",
+            Self::CVPixelBuffer => "CVPixelBuffer",
+            Self::VaapiSurface => "VaapiSurface",
+            Self::VdpauVideoSurface => "VdpauVideoSurface",
+            Self::CudaDeviceMemory => "CudaDeviceMemory",
+        }
+    }
+}
+
+/// Hardware decode / zero-copy probe result for the current process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HwAccelProbe {
+    /// Hardware backend families that should be tried on this platform in
+    /// priority order before runtime codec/device validation.
+    pub candidate_backends: Vec<HwAccelBackend>,
+    /// Hardware backend family that would be preferred on this platform, if a
+    /// real decoder adapter is connected.
+    pub candidate_backend: Option<HwAccelBackend>,
+    /// Native handle family the platform-preferred backend is expected to
+    /// produce, if known.
+    pub candidate_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Native decoded surface formats the platform-preferred backend should
+    /// prioritize for GPU-native playback.
+    pub candidate_surface_formats: Vec<DecodedVideoSurfaceFormat>,
+    /// Whether Mondrian has an implemented decoder adapter for the candidate
+    /// backend in this build.
+    pub decoder_adapter_available: bool,
+    /// Backend that is actually active for the media decode boundary.
+    pub selected_backend: HwAccelBackend,
+    /// Whether the media decode boundary currently uses a hardware decoder.
+    pub hardware_decode_active: bool,
+    /// Whether decoded frames currently remain GPU-resident through the media boundary.
+    pub zero_copy_active: bool,
+    /// Residency produced by the active decode path.
+    pub frame_residency: DecodedFrameResidency,
+    /// Native handle family produced by the active decoder, if GPU-resident.
+    pub gpu_frame_handle_kind: Option<DecodedGpuFrameHandleKind>,
+    /// Stable diagnostic reason for the selected path.
+    pub reason: String,
 }
 
 impl HwAccelBackend {
-    /// 自动检测当前平台最优硬解后端
+    /// Return the backend that is actually active for the media decode boundary.
+    ///
+    /// This intentionally fails closed to `None` until Mondrian has a real
+    /// hardware-frame path that exports/imports decoder textures into the
+    /// renderer. Platform preference alone must not be reported as active
+    /// hardware decode.
     pub fn detect() -> Self {
+        Self::probe().selected_backend
+    }
+
+    /// Probe the active hardware decode / zero-copy residency state.
+    pub fn probe() -> HwAccelProbe {
+        let candidate_backends = Self::platform_candidates();
+        let candidate_backend = candidate_backends.first().copied();
+        HwAccelProbe {
+            candidate_backends,
+            candidate_backend,
+            candidate_handle_kind: candidate_backend.and_then(Self::native_handle_kind),
+            candidate_surface_formats: candidate_backend
+                .map(Self::preferred_surface_formats)
+                .unwrap_or_default(),
+            decoder_adapter_available: false,
+            selected_backend: Self::None,
+            hardware_decode_active: false,
+            zero_copy_active: false,
+            frame_residency: DecodedFrameResidency::CpuRgba,
+            gpu_frame_handle_kind: None,
+            reason: hardware_decode_unavailable_reason().to_owned(),
+        }
+    }
+
+    /// Probe whether the linked FFmpeg decoder advertises a hardware config for
+    /// this backend and codec. This is read-only; it does not create a hardware
+    /// device or modify the preview decode session.
+    pub fn probe_ffmpeg_codec_config(self, codec_id: ffmpeg::codec::Id) -> HwAccelCodecConfigProbe {
+        let Some(device_type) = self.to_ffmpeg_device_type() else {
+            return HwAccelCodecConfigProbe::unavailable(
+                self,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    self.as_str()
+                ),
+            );
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        let codec = unsafe { ffmpeg::ffi::avcodec_find_decoder(codec_id.into()) };
+        if codec.is_null() {
+            return HwAccelCodecConfigProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                ffmpeg_decoder_available: false,
+                ffmpeg_codec_config_available: false,
+                hw_pixel_format: None,
+                methods: HwAccelCodecConfigMethods::default(),
+                reason: format!("FFmpeg decoder for {codec_id:?} is unavailable"),
+            };
+        }
+
+        let mut index = 0;
+        loop {
+            let config = unsafe { ffmpeg::ffi::avcodec_get_hw_config(codec, index) };
+            if config.is_null() {
+                break;
+            }
+            let config = unsafe { &*config };
+            if config.device_type == device_type {
+                return HwAccelCodecConfigProbe {
+                    backend: self,
+                    backend_maps_to_ffmpeg_device: true,
+                    ffmpeg_device_type_available,
+                    ffmpeg_decoder_available: true,
+                    ffmpeg_codec_config_available: true,
+                    hw_pixel_format: Some(HwAccelPixelFormat::from_ffmpeg(config.pix_fmt)),
+                    methods: HwAccelCodecConfigMethods::from_bits(config.methods),
+                    reason: "FFmpeg decoder advertises a hardware config for this backend"
+                        .to_owned(),
+                };
+            }
+            index += 1;
+        }
+
+        HwAccelCodecConfigProbe {
+            backend: self,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available,
+            ffmpeg_decoder_available: true,
+            ffmpeg_codec_config_available: false,
+            hw_pixel_format: None,
+            methods: HwAccelCodecConfigMethods::default(),
+            reason: format!(
+                "FFmpeg decoder for {codec_id:?} does not advertise {} hardware config",
+                self.as_str()
+            ),
+        }
+    }
+
+    /// Probe whether FFmpeg can create a hardware device context for this
+    /// backend. This creates and immediately releases an `AVHWDeviceContext`;
+    /// it does not modify decoder negotiation or allocate hardware frames.
+    pub fn probe_ffmpeg_device_context(self) -> HwAccelDeviceContextProbe {
+        self.probe_ffmpeg_device_context_for(None)
+    }
+
+    fn probe_ffmpeg_device_context_for(
+        self,
+        selector: Option<HwAccelDeviceSelector>,
+    ) -> HwAccelDeviceContextProbe {
+        let Some(device_type) = self.to_ffmpeg_device_type() else {
+            return HwAccelDeviceContextProbe::unavailable(
+                self,
+                format!(
+                    "{} does not map to an FFmpeg hardware device",
+                    self.as_str()
+                ),
+            );
+        };
+        let _ = ffmpeg::init();
+        let ffmpeg_device_type_available = ffmpeg_hwdevice_type_available(device_type);
+        if !ffmpeg_device_type_available {
+            return HwAccelDeviceContextProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: false,
+                device_context_created: false,
+                device_create_error_code: None,
+                reason: format!(
+                    "linked FFmpeg build does not list {} hardware device type",
+                    self.as_str()
+                ),
+            };
+        }
+
+        let mut device_context: *mut ffmpeg::ffi::AVBufferRef = ptr::null_mut();
+        let device_name = selector.and_then(|selector| selector.device_name_for(self));
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device_context,
+                device_type,
+                device_name.as_ref().map_or(ptr::null(), |name| name.as_ptr()),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 {
+            return HwAccelDeviceContextProbe {
+                backend: self,
+                backend_maps_to_ffmpeg_device: true,
+                ffmpeg_device_type_available,
+                device_create_attempted: true,
+                device_context_created: false,
+                device_create_error_code: Some(result),
+                reason: format!(
+                    "FFmpeg could not create {} hardware device context: {}",
+                    self.as_str(),
+                    ffmpeg::Error::from(result)
+                ),
+            };
+        }
+
+        let device_context_created = !device_context.is_null();
+        unsafe {
+            ffmpeg::ffi::av_buffer_unref(&mut device_context);
+        }
+        HwAccelDeviceContextProbe {
+            backend: self,
+            backend_maps_to_ffmpeg_device: true,
+            ffmpeg_device_type_available,
+            device_create_attempted: true,
+            device_context_created,
+            device_create_error_code: None,
+            reason: if device_context_created {
+                format!(
+                    "FFmpeg created and released {} hardware device context",
+                    self.as_str()
+                )
+            } else {
+                format!(
+                    "FFmpeg reported success but returned no {} hardware device context",
+                    self.as_str()
+                )
+            },
+        }
+    }
+
+    /// Preferred hardware backend for the current platform before runtime
+    /// adapter/device validation.
+    pub fn platform_candidate() -> Option<Self> {
+        Self::platform_candidates().first().copied()
+    }
+
+    /// Preferred hardware backends for the current platform in industrial
+    /// decode admission order. Runtime codec/device probes may skip an earlier
+    /// candidate and fall through to a later one.
+    pub fn platform_candidates() -> Vec<Self> {
         #[cfg(target_os = "windows")]
         {
-            // TODO: 实际检测 CUDA / D3D11VA 可用性
-            return Self::D3D11VA;
+            vec![Self::D3D12VA, Self::D3D11VA, Self::Dxva2]
         }
         #[cfg(target_os = "macos")]
         {
-            return Self::VideoToolbox;
+            vec![Self::VideoToolbox]
         }
         #[cfg(target_os = "linux")]
         {
-            return Self::Vaapi;
+            vec![Self::Vaapi, Self::Vdpau]
         }
-        #[allow(unreachable_code)]
-        Self::None
-    }
-}
-
-/// 单个媒体文件的解码上下文（FFmpeg AVFormatContext 包装）
-#[allow(dead_code)]
-struct DecoderContext {
-    asset_id: AssetId,
-    media_path: PathBuf,
-    hw_accel: HwAccelBackend,
-    // TODO: ffmpeg_next::format::context::Input
-}
-
-#[derive(Clone)]
-struct PrefetchTask {
-    asset_id: AssetId,
-    cancelled: Arc<AtomicBool>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct RgbaFrameKey {
-    asset_id: AssetId,
-    frame_num: u64,
-    width: u32,
-    height: u32,
-}
-
-#[derive(Default)]
-struct DecoderMetrics {
-    yuv_requests: AtomicU64,
-    yuv_cache_hits: AtomicU64,
-    rgba_requests: AtomicU64,
-    rgba_cache_hits: AtomicU64,
-    decode_executions: AtomicU64,
-    decode_failures: AtomicU64,
-    prefetch_started: AtomicU64,
-    prefetch_cancelled: AtomicU64,
-    prefetch_completed: AtomicU64,
-    total_decode_ns: AtomicU64,
-}
-
-#[derive(Debug, Clone)]
-pub struct DecoderMetricsSnapshot {
-    pub yuv_requests: u64,
-    pub yuv_cache_hits: u64,
-    pub rgba_requests: u64,
-    pub rgba_cache_hits: u64,
-    pub decode_executions: u64,
-    pub decode_failures: u64,
-    pub prefetch_started: u64,
-    pub prefetch_cancelled: u64,
-    pub prefetch_completed: u64,
-    pub avg_decode_ms: f64,
-    pub avg_decode_exec_ms: f64,
-    pub decode_miss_rate_pct: f64,
-}
-
-impl DecoderMetrics {
-    fn snapshot(&self) -> DecoderMetricsSnapshot {
-        let yuv_requests = self.yuv_requests.load(Ordering::Relaxed);
-        let rgba_requests = self.rgba_requests.load(Ordering::Relaxed);
-        let decode_requests = yuv_requests + rgba_requests;
-        let decode_executions = self.decode_executions.load(Ordering::Relaxed);
-        let total_decode_ns = self.total_decode_ns.load(Ordering::Relaxed);
-        DecoderMetricsSnapshot {
-            yuv_requests,
-            yuv_cache_hits: self.yuv_cache_hits.load(Ordering::Relaxed),
-            rgba_requests,
-            rgba_cache_hits: self.rgba_cache_hits.load(Ordering::Relaxed),
-            decode_executions,
-            decode_failures: self.decode_failures.load(Ordering::Relaxed),
-            prefetch_started: self.prefetch_started.load(Ordering::Relaxed),
-            prefetch_cancelled: self.prefetch_cancelled.load(Ordering::Relaxed),
-            prefetch_completed: self.prefetch_completed.load(Ordering::Relaxed),
-            avg_decode_ms: if decode_requests > 0 {
-                (total_decode_ns as f64 / decode_requests as f64) / 1_000_000.0
-            } else {
-                0.0
-            },
-            avg_decode_exec_ms: if decode_executions > 0 {
-                (total_decode_ns as f64 / decode_executions as f64) / 1_000_000.0
-            } else {
-                0.0
-            },
-            decode_miss_rate_pct: if decode_requests > 0 {
-                decode_executions as f64 / decode_requests as f64 * 100.0
-            } else {
-                0.0
-            },
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            Vec::new()
         }
     }
-}
 
-impl DecoderContext {
-    fn open(asset_id: AssetId, path: PathBuf, hw_accel: HwAccelBackend) -> Result<Self> {
-        tracing::debug!("Opened decoder for asset {asset_id}");
-        Ok(Self { asset_id, media_path: path, hw_accel })
-    }
-}
-
-/// 解码器池
-///
-/// - 每个素材最多持有一个 `DecoderContext`
-/// - 通过 `Semaphore` 限制并发解码数 ≤ `max_concurrent`
-/// - 解码结果通过 `FrameCache` 缓存
-pub struct DecoderPool {
-    contexts: DashMap<AssetId, Arc<tokio::sync::Mutex<DecoderContext>>>,
-    frame_cache: Arc<FrameCache>,
-    semaphore: Arc<Semaphore>,
-    hw_accel: HwAccelBackend,
-    prefetch_tasks: DashMap<u64, PrefetchTask>,
-    next_prefetch_task_id: AtomicU64,
-    rgba_cache: Mutex<LruCache<RgbaFrameKey, Arc<RgbaFrame>>>,
-    rgba_inflight: DashMap<RgbaFrameKey, Arc<Notify>>,
-    preview_decode_runtime: Arc<Runtime>,
-    background_runtime: Arc<Runtime>,
-    metrics: DecoderMetrics,
-}
-
-impl DecoderPool {
-    pub fn new(frame_cache: Arc<FrameCache>) -> Arc<Self> {
-        let max_concurrent = (num_cpus() - 2).max(1);
-        Arc::new(Self {
-            contexts: DashMap::new(),
-            frame_cache,
-            semaphore: Arc::new(Semaphore::new(max_concurrent)),
-            hw_accel: HwAccelBackend::detect(),
-            prefetch_tasks: DashMap::new(),
-            next_prefetch_task_id: AtomicU64::new(1),
-            rgba_cache: Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())),
-            rgba_inflight: DashMap::new(),
-            preview_decode_runtime: Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(preview_decode_worker_threads())
-                    .enable_all()
-                    .build()
-                    .expect("failed to create DecoderPool preview decode runtime"),
-            ),
-            background_runtime: Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .worker_threads(2)
-                    .enable_all()
-                    .build()
-                    .expect("failed to create DecoderPool background runtime"),
-            ),
-            metrics: DecoderMetrics::default(),
-        })
-    }
-
-    pub async fn get_video_frame_rgba(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-        target_width: u32,
-        target_height: u32,
-    ) -> Result<Arc<RgbaFrame>> {
-        self.metrics.rgba_requests.fetch_add(1, Ordering::Relaxed);
-        let frame_num = timecode.frame.max(0) as u64;
-        let key = RgbaFrameKey {
-            asset_id,
-            frame_num,
-            width: target_width,
-            height: target_height,
-        };
-
-        if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
-            self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(hit);
+    /// Native handle family expected from this hardware backend.
+    pub fn native_handle_kind(self) -> Option<DecodedGpuFrameHandleKind> {
+        match self {
+            Self::None => None,
+            Self::Cuda => Some(DecodedGpuFrameHandleKind::CudaDeviceMemory),
+            Self::D3D12VA => Some(DecodedGpuFrameHandleKind::D3D12Resource),
+            Self::D3D11VA => Some(DecodedGpuFrameHandleKind::D3D11Texture2D),
+            Self::Dxva2 => Some(DecodedGpuFrameHandleKind::Dxva2Surface),
+            Self::VideoToolbox => Some(DecodedGpuFrameHandleKind::CVPixelBuffer),
+            Self::Vaapi => Some(DecodedGpuFrameHandleKind::VaapiSurface),
+            Self::Vdpau => Some(DecodedGpuFrameHandleKind::VdpauVideoSurface),
         }
+    }
 
-        if let Some(waiter) = self.rgba_inflight.get(&key).map(|entry| Arc::clone(entry.value())) {
-            waiter.notified().await;
-            if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
-                self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(hit);
+    fn to_ffmpeg_device_type(self) -> Option<ffmpeg::ffi::AVHWDeviceType> {
+        match self {
+            Self::None => None,
+            Self::Cuda => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA),
+            #[cfg(mondrian_ffmpeg_7_1)]
+            Self::D3D12VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA),
+            #[cfg(not(mondrian_ffmpeg_7_1))]
+            Self::D3D12VA => None,
+            Self::D3D11VA => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA),
+            Self::Dxva2 => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2),
+            Self::VideoToolbox => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX),
+            Self::Vaapi => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI),
+            Self::Vdpau => Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU),
+        }
+    }
+
+    /// Preferred decoded surface formats for GPU-native playback.
+    pub fn preferred_surface_formats(self) -> Vec<DecodedVideoSurfaceFormat> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Dxva2 | Self::Vdpau => Vec::new(),
+            Self::Cuda | Self::D3D12VA | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
+                vec![
+                    DecodedVideoSurfaceFormat::P010,
+                    DecodedVideoSurfaceFormat::Nv12,
+                ]
             }
         }
+    }
 
-        let notify = Arc::new(Notify::new());
-        if let Some(existing) = self.rgba_inflight.insert(key.clone(), Arc::clone(&notify)) {
-            existing.notified().await;
-            if let Some(hit) = self.rgba_cache.lock().get(&key).cloned() {
-                self.metrics.rgba_cache_hits.fetch_add(1, Ordering::Relaxed);
-                return Ok(hit);
-            }
+    /// Stable backend name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Cuda => "Cuda",
+            Self::D3D12VA => "D3D12VA",
+            Self::D3D11VA => "D3D11VA",
+            Self::Dxva2 => "DXVA2",
+            Self::VideoToolbox => "VideoToolbox",
+            Self::Vaapi => "Vaapi",
+            Self::Vdpau => "VDPAU",
         }
+    }
+}
 
-        self.metrics.decode_executions.fetch_add(1, Ordering::Relaxed);
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
+impl DecodedFrameResidency {
+    /// Stable residency name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CpuRgba => "CpuRgba",
+            Self::CpuFloat => "CpuFloat",
+            Self::GpuTexture => "GpuTexture",
+        }
+    }
+}
 
-        tracing::debug!(
-            "[decoder] rgba request start asset={} frame={} target={}x{}",
-            asset_id,
-            frame_num,
-            target_width,
-            target_height
+impl DecodedVideoSurfaceFormat {
+    /// Stable surface-format name for telemetry.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "Unknown",
+            Self::Nv12 => "Nv12",
+            Self::P010 => "P010",
+            Self::Yuv420p => "Yuv420p",
+            Self::Yuv420p10le => "Yuv420p10le",
+            Self::Rgba8 => "Rgba8",
+            Self::Bgra8 => "Bgra8",
+            Self::Other => "Other",
+        }
+    }
+
+    /// Whether this decoded surface format can be carried as a native GPU payload.
+    pub fn supports_native_gpu_payload(self) -> bool {
+        matches!(self, Self::Nv12 | Self::P010 | Self::Rgba8 | Self::Bgra8)
+    }
+
+    /// Effective bit depth for formats with a fixed Mondrian contract.
+    pub fn fixed_bit_depth(self) -> Option<u8> {
+        match self {
+            Self::Nv12 | Self::Yuv420p | Self::Rgba8 | Self::Bgra8 => Some(8),
+            Self::P010 | Self::Yuv420p10le => Some(10),
+            Self::Unknown | Self::Other => None,
+        }
+    }
+}
+
+fn hardware_decode_unavailable_reason() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "D3D12VA/D3D11VA hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "VideoToolbox hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "VA-API hardware decode adapter and texture residency are not connected; using CPU RGBA decode"
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        "hardware decode texture residency is not connected for this platform; using CPU RGBA decode"
+    }
+}
+
+fn ffmpeg_hwdevice_type_available(device_type: ffmpeg::ffi::AVHWDeviceType) -> bool {
+    let mut previous = ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE;
+    loop {
+        let next = unsafe { ffmpeg::ffi::av_hwdevice_iterate_types(previous) };
+        if next == ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_NONE {
+            return false;
+        }
+        if next == device_type {
+            return true;
+        }
+        previous = next;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoded_video_range_resolution_keeps_auto_and_honors_override() {
+        use mondrian_core::timeline_data::{MediaRangeInterpretation, MediaSignalRange};
+
+        let automatic = DecodedVideoRangeContract::from_interpretation(
+            MediaRangeInterpretation::Auto,
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            automatic.resolve_for_frame(DecodedVideoRange::Full),
+            DecodedVideoRange::Full
+        );
+        assert_eq!(
+            automatic.resolve_for_frame(DecodedVideoRange::Unknown),
+            DecodedVideoRange::Limited
+        );
+        let override_full = DecodedVideoRangeContract::from_interpretation(
+            MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            override_full.resolve_for_frame(DecodedVideoRange::Limited),
+            DecodedVideoRange::Full
         );
 
-        let _ctx = self.get_or_open_context(asset_id, path.clone()).await?;
-        tracing::debug!(
-            "[decoder] rgba context ready asset={} frame={}",
-            asset_id,
-            frame_num
+        assert_eq!(
+            resolve_decoded_video_range(MediaRangeInterpretation::Auto, DecodedVideoRange::Limited),
+            DecodedVideoRange::Limited
         );
+        assert_eq!(
+            resolve_decoded_video_range(
+                MediaRangeInterpretation::Override { range: MediaSignalRange::Full },
+                DecodedVideoRange::Unknown
+            ),
+            DecodedVideoRange::Full
+        );
+    }
 
-        let secs = timecode.to_secs().max(0.0);
+    #[test]
+    fn hw_accel_probe_fails_closed_until_texture_residency_exists() {
+        let probe = HwAccelBackend::probe();
 
-        let started = Instant::now();
-        let mut decode_task = self.preview_decode_runtime.spawn(async move {
-            decode_video_frame_at_time_rgba_scaled(
-                path.as_path(),
-                secs,
-                Some(target_width.max(1)),
-                Some(target_height.max(1)),
-            )
-            .map(Arc::new)
-        });
+        assert_eq!(
+            probe.candidate_backends,
+            HwAccelBackend::platform_candidates()
+        );
+        assert_eq!(
+            probe.candidate_backend,
+            HwAccelBackend::platform_candidate()
+        );
+        assert_eq!(
+            probe.candidate_handle_kind,
+            probe.candidate_backend.and_then(HwAccelBackend::native_handle_kind)
+        );
+        assert_eq!(
+            probe.candidate_surface_formats,
+            probe
+                .candidate_backend
+                .map(HwAccelBackend::preferred_surface_formats)
+                .unwrap_or_default()
+        );
+        assert!(!probe.decoder_adapter_available);
+        assert_eq!(probe.selected_backend, HwAccelBackend::None);
+        assert!(!probe.hardware_decode_active);
+        assert!(!probe.zero_copy_active);
+        assert_eq!(probe.frame_residency, DecodedFrameResidency::CpuRgba);
+        assert_eq!(probe.gpu_frame_handle_kind, None);
+        assert!(probe.reason.contains("CPU RGBA decode"));
+    }
 
-        let decode_timeout_ms = decode_timeout_budget_ms();
-        let decode_result: Result<Arc<RgbaFrame>> = if decode_timeout_ms == 0 {
-            decode_task.await.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-                asset_id: asset_id.to_string(),
-                reason: e.to_string(),
-            })?
-        } else {
-            let timeout = tokio::time::sleep(tokio::time::Duration::from_millis(decode_timeout_ms));
-            tokio::pin!(timeout);
+    #[test]
+    fn hardware_backend_candidates_map_to_native_handles_and_surface_formats() {
+        assert_eq!(
+            HwAccelBackend::D3D12VA.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::D3D12Resource)
+        );
+        assert_eq!(
+            HwAccelBackend::D3D11VA.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::D3D11Texture2D)
+        );
+        assert_eq!(
+            HwAccelBackend::Dxva2.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::Dxva2Surface)
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::CVPixelBuffer)
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::VaapiSurface)
+        );
+        assert_eq!(
+            HwAccelBackend::Vdpau.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::VdpauVideoSurface)
+        );
+        assert_eq!(
+            HwAccelBackend::Cuda.native_handle_kind(),
+            Some(DecodedGpuFrameHandleKind::CudaDeviceMemory)
+        );
+        assert_eq!(HwAccelBackend::None.native_handle_kind(), None);
+        assert_eq!(
+            HwAccelBackend::D3D12VA.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::D3D11VA.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::Dxva2.preferred_surface_formats(),
+            Vec::new()
+        );
+        assert_eq!(
+            HwAccelBackend::Vdpau.preferred_surface_formats(),
+            Vec::new()
+        );
+    }
 
-            tokio::select! {
-                joined = &mut decode_task => {
-                    joined.map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-                        asset_id: asset_id.to_string(),
-                        reason: e.to_string(),
-                    })?
-                }
-                _ = &mut timeout => {
-                    decode_task.abort();
-                    tracing::warn!(
-                        "MONDRIAN_DECODE_TIMEOUT_JSON={{\"asset_id\":\"{}\",\"frame\":{},\"secs\":{:.3},\"budget_ms\":{},\"target_width\":{},\"target_height\":{},\"reason\":\"decode timeout\"}}",
-                        asset_id,
-                        frame_num,
-                        secs,
-                        decode_timeout_ms,
-                        target_width,
-                        target_height
-                    );
-                    Err(mondrian_core::MondrianError::DecodeFailed {
-                        asset_id: asset_id.to_string(),
-                        reason: format!(
-                            "preview decode timeout after {}ms (frame={} secs={:.3})",
-                            decode_timeout_ms,
-                            frame_num,
-                            secs
-                        ),
-                    })
-                }
-            }
-        };
+    #[test]
+    fn hardware_backends_map_to_ffmpeg_device_types() {
+        assert_eq!(HwAccelBackend::None.to_ffmpeg_device_type(), None);
+        #[cfg(mondrian_ffmpeg_7_1)]
+        assert_eq!(
+            HwAccelBackend::D3D12VA.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA)
+        );
+        #[cfg(not(mondrian_ffmpeg_7_1))]
+        assert_eq!(HwAccelBackend::D3D12VA.to_ffmpeg_device_type(), None);
+        assert_eq!(
+            HwAccelBackend::D3D11VA.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA)
+        );
+        assert_eq!(
+            HwAccelBackend::Dxva2.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2)
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX)
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI)
+        );
+        assert_eq!(
+            HwAccelBackend::Vdpau.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VDPAU)
+        );
+        assert_eq!(
+            HwAccelBackend::Cuda.to_ffmpeg_device_type(),
+            Some(ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_CUDA)
+        );
+    }
 
-        let decode_result = decode_result.map_err(|e| {
-            self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
-            e
-        });
+    #[test]
+    fn dxgi_device_selector_maps_to_modern_ffmpeg_windows_backends() {
+        let d3d12 = HwAccelDeviceSelector::D3D12VaAdapterIndex(7);
+        let d3d11 = HwAccelDeviceSelector::D3D11VaAdapterIndex(7);
 
-        self.metrics
-            .total_decode_ns
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        assert_eq!(
+            d3d11.device_name_for(HwAccelBackend::D3D11VA).as_deref(),
+            Some(c"7")
+        );
+        assert_eq!(
+            d3d12.device_name_for(HwAccelBackend::D3D12VA).as_deref(),
+            Some(c"7")
+        );
+        assert_eq!(d3d12.device_name_for(HwAccelBackend::D3D11VA), None);
+        assert_eq!(d3d11.device_name_for(HwAccelBackend::D3D12VA), None);
+        assert!(d3d12.selects_backend(HwAccelBackend::D3D12VA));
+        assert!(d3d11.selects_backend(HwAccelBackend::D3D11VA));
+        assert!(!d3d12.selects_backend(HwAccelBackend::D3D11VA));
+        assert!(!d3d11.selects_backend(HwAccelBackend::D3D12VA));
+        assert_eq!(d3d12.device_name_for(HwAccelBackend::Cuda), None);
+        assert!(!d3d12.selects_backend(HwAccelBackend::Cuda));
+    }
 
-        let elapsed_ms = started.elapsed().as_millis() as u64;
-        if elapsed_ms >= 40 {
-            tracing::warn!(
-                "[decoder] rgba request slow asset={} frame={} elapsed={}ms",
-                asset_id,
-                frame_num,
-                elapsed_ms
+    #[test]
+    fn hw_accel_pixel_format_names_are_stable() {
+        assert_eq!(HwAccelPixelFormat::D3D12.as_str(), "D3D12");
+        assert_eq!(HwAccelPixelFormat::D3D11.as_str(), "D3D11");
+        assert_eq!(HwAccelPixelFormat::D3D11VA.as_str(), "D3D11VA");
+        assert_eq!(HwAccelPixelFormat::Dxva2.as_str(), "DXVA2");
+        assert_eq!(HwAccelPixelFormat::VideoToolbox.as_str(), "VideoToolbox");
+        assert_eq!(HwAccelPixelFormat::Vaapi.as_str(), "Vaapi");
+        assert_eq!(HwAccelPixelFormat::Vdpau.as_str(), "VDPAU");
+        assert_eq!(HwAccelPixelFormat::Cuda.as_str(), "Cuda");
+        assert_eq!(HwAccelPixelFormat::Other(123).as_str(), "Other");
+    }
+
+    #[test]
+    fn ffmpeg_hw_codec_config_probe_reports_structured_support_for_common_codecs() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let h264 = backend.probe_ffmpeg_codec_config(ffmpeg::codec::Id::H264);
+        let h265 = backend.probe_ffmpeg_codec_config(ffmpeg::codec::Id::HEVC);
+
+        assert_eq!(h264.backend, backend);
+        assert!(h264.backend_maps_to_ffmpeg_device);
+        assert!(h264.ffmpeg_decoder_available);
+        assert!(!h264.reason.is_empty());
+        assert_eq!(h265.backend, backend);
+        assert!(h265.ffmpeg_decoder_available);
+        assert!(!h265.reason.is_empty());
+        if h264.ffmpeg_codec_config_available {
+            assert!(h264.hw_pixel_format.is_some());
+            assert!(
+                h264.methods.hw_device_ctx
+                    || h264.methods.hw_frames_ctx
+                    || h264.methods.internal
+                    || h264.methods.ad_hoc
             );
         }
+    }
 
-        match decode_result {
-            Ok(frame) => {
-                self.rgba_cache.lock().put(key.clone(), frame.clone());
-                self.rgba_inflight.remove(&key);
-                notify.notify_waiters();
-                Ok(frame)
-            }
-            Err(err) => {
-                self.rgba_inflight.remove(&key);
-                notify.notify_waiters();
-                Err(err)
-            }
+    #[test]
+    fn ffmpeg_hw_device_context_probe_reports_structured_runtime_status() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+
+        assert_eq!(probe.backend, backend);
+        assert!(probe.backend_maps_to_ffmpeg_device);
+        assert!(!probe.reason.is_empty());
+        if probe.ffmpeg_device_type_available {
+            assert!(probe.device_create_attempted);
+        } else {
+            assert!(!probe.device_create_attempted);
+        }
+        if probe.device_context_created {
+            assert_eq!(probe.device_create_error_code, None);
+        } else if probe.device_create_attempted {
+            assert!(probe.device_create_error_code.is_some());
         }
     }
 
-    /// 获取或创建指定素材的解码上下文
-    async fn get_or_open_context(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-    ) -> Result<Arc<tokio::sync::Mutex<DecoderContext>>> {
-        if let Some(ctx) = self.contexts.get(&asset_id) {
-            return Ok(ctx.clone());
-        }
-        let ctx = tokio::task::spawn_blocking({
-            let hw = self.hw_accel;
-            let path = path.clone();
-            move || DecoderContext::open(asset_id, path, hw)
-        })
-        .await
-        .map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-            asset_id: asset_id.to_string(),
-            reason: e.to_string(),
-        })??;
-
-        let ctx = Arc::new(tokio::sync::Mutex::new(ctx));
-        self.contexts.insert(asset_id, ctx.clone());
-        Ok(ctx)
-    }
-
-    /// 获取指定时间码处的视频帧（优先从缓存读取）
-    pub async fn get_video_frame(
-        &self,
-        asset_id: AssetId,
-        path: PathBuf,
-        timecode: TimeCode,
-    ) -> Result<Arc<RawVideoFrame>> {
-        self.metrics.yuv_requests.fetch_add(1, Ordering::Relaxed);
-        let frame_num = timecode.frame.max(0) as u64;
-
-        // 1. 检查缓存
-        if let Some(frame) = self.frame_cache.get(asset_id, frame_num) {
-            self.metrics.yuv_cache_hits.fetch_add(1, Ordering::Relaxed);
-            tracing::trace!("Cache hit: asset={asset_id} frame={frame_num}");
-            return Ok(frame);
+    #[test]
+    fn hardware_device_context_pool_reuses_and_safely_retires_generations() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+        if !probe.device_context_created {
+            return;
         }
 
-        self.metrics.decode_executions.fetch_add(1, Ordering::Relaxed);
-        // 2. 限流（最多 N 个并发解码）
-        let _permit = self
-            .semaphore
-            .acquire()
-            .await
-            .map_err(|_| mondrian_core::MondrianError::Cancelled)?;
+        let pool = HwDeviceContextPool::default();
+        let first = pool.acquire(backend, None).expect("first device lease");
+        let second = pool.acquire(backend, None).expect("second device lease");
 
-        // 3. 获取 context
-        let ctx = self.get_or_open_context(asset_id, path.clone()).await?;
+        assert!(first.shares_device_with(&second));
+        assert_eq!(first.generation(), second.generation());
+        first.retire();
 
-        // 4. 解码（在阻塞线程池执行）
-        let started = Instant::now();
-        let frame = tokio::task::spawn_blocking(move || {
-            let _ctx_lock = ctx.blocking_lock();
-            tracing::debug!("Decoding frame {frame_num} for asset {asset_id}");
+        let replacement = pool.acquire(backend, None).expect("replacement device lease");
+        assert!(replacement.generation() > first.generation());
+        assert!(!first.shares_device_with(&replacement));
+        assert!(first.shares_device_with(&second));
+        assert_eq!(pool.diagnostics().retirements, 1);
 
-            let timestamp_secs = timecode.to_secs().max(0.0);
-            let rgba = decode_video_frame_at_time_rgba(path.as_path(), timestamp_secs)?;
-            let (planes, strides) = rgba_to_yuv420p(&rgba)?;
-
-            Ok::<Arc<RawVideoFrame>, mondrian_core::MondrianError>(Arc::new(RawVideoFrame {
-                asset_id,
-                pts: timecode,
-                width: rgba.width,
-                height: rgba.height,
-                planes,
-                strides,
-                frame_num,
-            }))
-        })
-        .await
-        .map_err(|e| mondrian_core::MondrianError::DecodeFailed {
-            asset_id: asset_id.to_string(),
-            reason: e.to_string(),
-        })
-        .and_then(|r| r)
-        .map_err(|e| {
-            self.metrics.decode_failures.fetch_add(1, Ordering::Relaxed);
-            e
-        })?;
-
-        self.metrics
-            .total_decode_ns
-            .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-
-        // 5. 写入缓存
-        self.frame_cache.insert(frame.clone());
-
-        Ok(frame)
+        pool.reconfigure(HwDeviceContextPoolPolicy::new(0));
+        drop(first);
+        drop(second);
+        drop(replacement);
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.entries, 0);
+        assert_eq!(diagnostics.idle_contexts, 0);
+        assert_eq!(diagnostics.policy.max_idle_contexts, 0);
+        assert_eq!(diagnostics.evictions, 1);
     }
 
-    /// 关闭并移除指定素材的解码上下文（素材被删除时）
-    pub fn close_context(&self, asset_id: AssetId) {
-        self.contexts.remove(&asset_id);
-        self.cancel_prefetch_for_asset(asset_id);
-        self.frame_cache.evict_asset(asset_id);
-        self.evict_rgba_asset(asset_id);
+    #[test]
+    fn hardware_device_context_pool_backs_off_failed_setup_and_can_be_invalidated() {
+        let backend = HwAccelBackend::platform_candidate().unwrap_or(HwAccelBackend::D3D11VA);
+        let probe = backend.probe_ffmpeg_device_context();
+        if !probe.device_context_created {
+            return;
+        }
+
+        let pool = HwDeviceContextPool::default();
+        let lease = pool.acquire(backend, None).expect("device lease");
+        lease.retire_after_setup_failure("test decoder-open failure");
+        drop(lease);
+
+        let deferred = match pool.acquire(backend, None) {
+            Ok(_) => panic!("retry must be delayed"),
+            Err(probe) => probe,
+        };
+        assert!(!deferred.device_create_attempted);
+        assert!(deferred.reason.contains("retry deferred"));
+        let diagnostics = pool.diagnostics();
+        assert_eq!(diagnostics.setup_failures, 1);
+        assert_eq!(diagnostics.failure_backoffs, 1);
+        assert_eq!(diagnostics.backoff_rejections, 1);
+
+        pool.invalidate_failure_backoff();
+        let replacement = pool.acquire(backend, None).expect("explicit invalidation permits retry");
+        assert!(replacement.generation() > 0);
     }
 
-    /// 启动可取消的预取任务，返回任务 ID。
-    ///
-    /// 预取会顺序请求 `lookahead_frames` 帧，并尽量填充 `FrameCache`。
-    pub fn spawn_prefetch(
-        self: &Arc<Self>,
-        asset_id: AssetId,
-        path: PathBuf,
-        start_timecode: TimeCode,
-        lookahead_frames: u32,
-    ) -> u64 {
-        let task_id = self.next_prefetch_task_id.fetch_add(1, Ordering::Relaxed);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.prefetch_tasks.insert(
-            task_id,
-            PrefetchTask { asset_id, cancelled: cancelled.clone() },
+    #[test]
+    fn mismatched_hardware_device_selector_is_rejected_before_driver_creation() {
+        let error = HwDeviceContextPool::default()
+            .acquire(
+                HwAccelBackend::D3D12VA,
+                Some(HwAccelDeviceSelector::D3D11VaAdapterIndex(0)),
+            )
+            .err()
+            .expect("mismatched selector must fail");
+
+        assert!(!error.device_create_attempted);
+        assert!(error.reason.contains("does not select D3D12VA"));
+    }
+
+    #[test]
+    fn decoded_gpu_frame_handle_kind_has_stable_names() {
+        assert_eq!(
+            DecodedGpuFrameHandleKind::D3D12Resource.as_str(),
+            "D3D12Resource"
         );
-        self.metrics.prefetch_started.fetch_add(1, Ordering::Relaxed);
-
-        let pool = Arc::clone(self);
-        self.background_runtime.spawn(async move {
-            let fps = start_timecode.time_base;
-            let mut was_cancelled = false;
-            for offset in 0..lookahead_frames {
-                if cancelled.load(Ordering::Relaxed) {
-                    was_cancelled = true;
-                    break;
-                }
-
-                let tc = TimeCode::new(start_timecode.frame + offset as i64, fps);
-                if let Err(err) = pool.get_video_frame(asset_id, path.clone(), tc).await {
-                    if matches!(err, mondrian_core::MondrianError::Cancelled) {
-                        was_cancelled = true;
-                        break;
-                    }
-                    tracing::debug!(
-                        "prefetch frame failed: task_id={} asset={} frame={} err={}",
-                        task_id,
-                        asset_id,
-                        tc.frame,
-                        err
-                    );
-                    break;
-                }
-            }
-
-            pool.prefetch_tasks.remove(&task_id);
-            if was_cancelled {
-                pool.metrics.prefetch_cancelled.fetch_add(1, Ordering::Relaxed);
-            } else {
-                pool.metrics.prefetch_completed.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        task_id
-    }
-
-    /// 启动 RGBA 预取任务（按目标预览分辨率缓存）。
-    pub fn spawn_prefetch_rgba(
-        self: &Arc<Self>,
-        asset_id: AssetId,
-        path: PathBuf,
-        start_timecode: TimeCode,
-        lookahead_frames: u32,
-        target_width: u32,
-        target_height: u32,
-    ) -> u64 {
-        let task_id = self.next_prefetch_task_id.fetch_add(1, Ordering::Relaxed);
-        let cancelled = Arc::new(AtomicBool::new(false));
-        self.prefetch_tasks.insert(
-            task_id,
-            PrefetchTask { asset_id, cancelled: cancelled.clone() },
+        assert_eq!(
+            DecodedGpuFrameHandleKind::D3D11Texture2D.as_str(),
+            "D3D11Texture2D"
         );
-        self.metrics.prefetch_started.fetch_add(1, Ordering::Relaxed);
-
-        let pool = Arc::clone(self);
-        self.background_runtime.spawn(async move {
-            let tb = start_timecode.time_base;
-            let mut was_cancelled = false;
-            for offset in 0..lookahead_frames {
-                if cancelled.load(Ordering::Relaxed) {
-                    was_cancelled = true;
-                    break;
-                }
-
-                let tc = TimeCode::new(start_timecode.frame + offset as i64, tb);
-                if let Err(err) = pool
-                    .get_video_frame_rgba(
-                        asset_id,
-                        path.clone(),
-                        tc,
-                        target_width.max(1),
-                        target_height.max(1),
-                    )
-                    .await
-                {
-                    if matches!(err, mondrian_core::MondrianError::Cancelled) {
-                        was_cancelled = true;
-                        break;
-                    }
-                    tracing::debug!(
-                        "rgba prefetch failed: task_id={} asset={} frame={} err={}",
-                        task_id,
-                        asset_id,
-                        tc.frame,
-                        err
-                    );
-                    break;
-                }
-            }
-
-            pool.prefetch_tasks.remove(&task_id);
-            if was_cancelled {
-                pool.metrics.prefetch_cancelled.fetch_add(1, Ordering::Relaxed);
-            } else {
-                pool.metrics.prefetch_completed.fetch_add(1, Ordering::Relaxed);
-            }
-        });
-
-        task_id
+        assert_eq!(
+            DecodedGpuFrameHandleKind::Dxva2Surface.as_str(),
+            "Dxva2Surface"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::CVPixelBuffer.as_str(),
+            "CVPixelBuffer"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::VaapiSurface.as_str(),
+            "VaapiSurface"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::VdpauVideoSurface.as_str(),
+            "VdpauVideoSurface"
+        );
+        assert_eq!(
+            DecodedGpuFrameHandleKind::CudaDeviceMemory.as_str(),
+            "CudaDeviceMemory"
+        );
     }
 
-    /// 取消指定预取任务。
-    pub fn cancel_prefetch_task(&self, task_id: u64) {
-        if let Some(task) = self.prefetch_tasks.get(&task_id) {
-            task.cancelled.store(true, Ordering::Relaxed);
-        }
+    #[test]
+    fn decoded_frame_residency_has_stable_names() {
+        assert_eq!(DecodedFrameResidency::CpuRgba.as_str(), "CpuRgba");
+        assert_eq!(DecodedFrameResidency::CpuFloat.as_str(), "CpuFloat");
+        assert_eq!(DecodedFrameResidency::GpuTexture.as_str(), "GpuTexture");
     }
 
-    /// 取消某个素材的所有预取任务。
-    pub fn cancel_prefetch_for_asset(&self, asset_id: AssetId) {
-        for entry in self.prefetch_tasks.iter() {
-            if entry.value().asset_id == asset_id {
-                entry.value().cancelled.store(true, Ordering::Relaxed);
-            }
-        }
+    #[test]
+    fn decoded_video_surface_format_has_stable_names() {
+        assert_eq!(DecodedVideoSurfaceFormat::Unknown.as_str(), "Unknown");
+        assert_eq!(DecodedVideoSurfaceFormat::Nv12.as_str(), "Nv12");
+        assert_eq!(DecodedVideoSurfaceFormat::P010.as_str(), "P010");
+        assert_eq!(DecodedVideoSurfaceFormat::Yuv420p.as_str(), "Yuv420p");
+        assert_eq!(
+            DecodedVideoSurfaceFormat::Yuv420p10le.as_str(),
+            "Yuv420p10le"
+        );
+        assert_eq!(DecodedVideoSurfaceFormat::Rgba8.as_str(), "Rgba8");
+        assert_eq!(DecodedVideoSurfaceFormat::Bgra8.as_str(), "Bgra8");
+        assert_eq!(DecodedVideoSurfaceFormat::Other.as_str(), "Other");
     }
 
-    /// 取消所有预取任务。
-    pub fn cancel_all_prefetch_tasks(&self) {
-        for entry in self.prefetch_tasks.iter() {
-            entry.value().cancelled.store(true, Ordering::Relaxed);
-        }
+    #[test]
+    fn decoded_video_surface_format_declares_native_gpu_payload_support() {
+        assert!(DecodedVideoSurfaceFormat::Nv12.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::P010.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::Rgba8.supports_native_gpu_payload());
+        assert!(DecodedVideoSurfaceFormat::Bgra8.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Unknown.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Yuv420p.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Yuv420p10le.supports_native_gpu_payload());
+        assert!(!DecodedVideoSurfaceFormat::Other.supports_native_gpu_payload());
     }
 
-    /// 当前活跃预取任务数量。
-    pub fn active_prefetch_task_count(&self) -> usize {
-        self.prefetch_tasks.len()
+    #[test]
+    fn hw_accel_backend_has_stable_names() {
+        assert_eq!(HwAccelBackend::None.as_str(), "None");
+        assert_eq!(HwAccelBackend::Cuda.as_str(), "Cuda");
+        assert_eq!(HwAccelBackend::D3D12VA.as_str(), "D3D12VA");
+        assert_eq!(HwAccelBackend::D3D11VA.as_str(), "D3D11VA");
+        assert_eq!(HwAccelBackend::Dxva2.as_str(), "DXVA2");
+        assert_eq!(HwAccelBackend::VideoToolbox.as_str(), "VideoToolbox");
+        assert_eq!(HwAccelBackend::Vaapi.as_str(), "Vaapi");
+        assert_eq!(HwAccelBackend::Vdpau.as_str(), "VDPAU");
     }
 
-    /// 指定任务是否仍在活跃执行。
-    pub fn is_prefetch_task_active(&self, task_id: u64) -> bool {
-        self.prefetch_tasks.contains_key(&task_id)
+    #[test]
+    fn platform_hardware_backend_candidates_are_ordered_by_expected_native_path() {
+        let candidates = HwAccelBackend::platform_candidates();
+        #[cfg(target_os = "windows")]
+        assert_eq!(
+            candidates,
+            vec![
+                HwAccelBackend::D3D12VA,
+                HwAccelBackend::D3D11VA,
+                HwAccelBackend::Dxva2
+            ]
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(candidates, vec![HwAccelBackend::VideoToolbox]);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            candidates,
+            vec![HwAccelBackend::Vaapi, HwAccelBackend::Vdpau]
+        );
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        assert!(candidates.is_empty());
     }
-
-    pub fn metrics_snapshot(&self) -> DecoderMetricsSnapshot {
-        self.metrics.snapshot()
-    }
-
-    pub fn clear_all_caches(&self) {
-        self.cancel_all_prefetch_tasks();
-        self.prefetch_tasks.clear();
-        self.contexts.clear();
-        self.frame_cache.clear_all();
-        self.rgba_cache.lock().clear();
-    }
-
-    /// 清除全部 RGBA 图层帧缓存（大幅 seek 后调用，淘汰远离新位置的旧缓存帧）。
-    pub fn evict_rgba_cache(&self) {
-        self.rgba_cache.lock().clear();
-        // 同步清除进程全局预览帧缓存（decode_video_frame_at_time 使用的缓存）
-        crate::preview::clear_global_preview_frame_cache();
-    }
-
-    fn evict_rgba_asset(&self, asset_id: AssetId) {
-        let mut cache = self.rgba_cache.lock();
-        let keys = cache
-            .iter()
-            .filter_map(|(key, _)| (key.asset_id == asset_id).then_some(key.clone()))
-            .collect::<Vec<_>>();
-        for key in keys {
-            let _ = cache.pop(&key);
-        }
-    }
-}
-
-fn preview_decode_worker_threads() -> usize {
-    let max_threads = (num_cpus() - 1).clamp(1, 8);
-    std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .map(|value| value.clamp(1, max_threads))
-        .unwrap_or(2.min(max_threads))
-}
-
-fn num_cpus() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4)
-}
-
-fn decode_timeout_budget_ms() -> u64 {
-    static TIMEOUT_MS: OnceLock<u64> = OnceLock::new();
-    *TIMEOUT_MS.get_or_init(|| {
-        std::env::var("MONDRIAN_DECODE_TIMEOUT_BUDGET_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .or_else(|| {
-                std::env::var("MONDRIAN_PREVIEW_DECODE_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-            })
-            .filter(|value| *value >= 100)
-            .unwrap_or(2500)
-    })
-}
-
-fn rgba_to_yuv420p(frame: &RgbaFrame) -> Result<([Vec<u8>; 3], [u32; 3])> {
-    let width = frame.width as usize;
-    let height = frame.height as usize;
-    let expected_len = width.saturating_mul(height).saturating_mul(4);
-    if frame.data.len() < expected_len {
-        return Err(mondrian_core::MondrianError::DecodeFailed {
-            asset_id: "rgba_to_yuv420p".to_string(),
-            reason: format!(
-                "rgba buffer too small: actual={} expected={}",
-                frame.data.len(),
-                expected_len
-            ),
-        });
-    }
-
-    let mut y_plane = vec![0u8; width * height];
-    let uv_width = width.div_ceil(2);
-    let uv_height = height.div_ceil(2);
-    let mut u_plane = vec![0u8; uv_width * uv_height];
-    let mut v_plane = vec![0u8; uv_width * uv_height];
-
-    for y in 0..height {
-        for x in 0..width {
-            let i = (y * width + x) * 4;
-            let r = frame.data[i] as f32;
-            let g = frame.data[i + 1] as f32;
-            let b = frame.data[i + 2] as f32;
-
-            let luma = (0.257 * r + 0.504 * g + 0.098 * b + 16.0).round().clamp(0.0, 255.0);
-            y_plane[y * width + x] = luma as u8;
-        }
-    }
-
-    for uv_y in 0..uv_height {
-        for uv_x in 0..uv_width {
-            let base_x = uv_x * 2;
-            let base_y = uv_y * 2;
-
-            let mut u_acc = 0.0f32;
-            let mut v_acc = 0.0f32;
-            let mut count = 0.0f32;
-
-            for oy in 0..2 {
-                for ox in 0..2 {
-                    let px = base_x + ox;
-                    let py = base_y + oy;
-                    if px >= width || py >= height {
-                        continue;
-                    }
-
-                    let i = (py * width + px) * 4;
-                    let r = frame.data[i] as f32;
-                    let g = frame.data[i + 1] as f32;
-                    let b = frame.data[i + 2] as f32;
-
-                    let u = (-0.148 * r - 0.291 * g + 0.439 * b + 128.0).round().clamp(0.0, 255.0);
-                    let v = (0.439 * r - 0.368 * g - 0.071 * b + 128.0).round().clamp(0.0, 255.0);
-
-                    u_acc += u;
-                    v_acc += v;
-                    count += 1.0;
-                }
-            }
-
-            let idx = uv_y * uv_width + uv_x;
-            u_plane[idx] = (u_acc / count.max(1.0)).round().clamp(0.0, 255.0) as u8;
-            v_plane[idx] = (v_acc / count.max(1.0)).round().clamp(0.0, 255.0) as u8;
-        }
-    }
-
-    Ok((
-        [y_plane, u_plane, v_plane],
-        [frame.width, uv_width as u32, uv_width as u32],
-    ))
 }

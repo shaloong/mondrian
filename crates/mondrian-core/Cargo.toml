@@ -9,6 +9,7 @@ license.workspace    = true
 # 序列化
 serde      = { workspace = true }
 serde_json = { workspace = true }
+sha2       = { workspace = true }
 # ID
 uuid       = { workspace = true }
 # 时间
@@ -22,8 +23,17 @@ tracing    = { workspace = true }
 crossbeam-channel = { workspace = true }
 parking_lot       = { workspace = true }
 dashmap           = { workspace = true }
+lru               = "0.18"
 # 数学
 glam       = { workspace = true }
+# 颜色管理
+ocio-rs    = { workspace = true }
+icc-profile = "0.0.3"
+moxcms = "0.7.11"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 proptest   = "1"
+tempfile   = { workspace = true }
