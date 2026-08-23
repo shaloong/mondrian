@@ -1,5 +1,6 @@
 param(
-    [ValidateRange(60, 3600)][int]$ProcessTimeoutSeconds = 600,
+    [ValidateRange(0, 3600)][int]$BuildTimeoutSeconds = 0,
+    [ValidateRange(0, 3600)][int]$ProcessTimeoutSeconds = 0,
     [ValidateRange(0, 60)][int]$NaturalExitGraceSeconds = 5,
     [string]$RunRoot = "target/validation/runs",
     [string]$FixtureRoot = "tests/fixtures",
@@ -149,6 +150,32 @@ $startingDirty = Get-RepositoryDirty $repositoryRoot
 $fixtureRoot = Resolve-RepositoryPath $FixtureRoot
 $contractPath = Join-Path $repositoryRoot "tests/validation/golden-project.json"
 $contract = Get-Content -LiteralPath $contractPath -Raw | ConvertFrom-Json
+$commercialEngineContractPath = Join-Path $repositoryRoot "tests/validation/windows-commercial-engine.json"
+$commercialEngineContract = Get-Content -LiteralPath $commercialEngineContractPath -Raw | ConvertFrom-Json
+if ($commercialEngineContract.complete_golden.contract_id -ne $contract.id) {
+    throw "Commercial engine and Golden Project contracts do not reference the same contract identity."
+}
+$contractBuildTimeoutSeconds = [int]$commercialEngineContract.complete_golden.build_timeout_seconds
+$contractProcessTimeoutSeconds = [int]$commercialEngineContract.complete_golden.process_timeout_seconds
+$effectiveBuildTimeoutSeconds = if ($BuildTimeoutSeconds -eq 0) {
+    $contractBuildTimeoutSeconds
+} else {
+    $BuildTimeoutSeconds
+}
+$effectiveProcessTimeoutSeconds = if ($ProcessTimeoutSeconds -eq 0) {
+    $contractProcessTimeoutSeconds
+} else {
+    $ProcessTimeoutSeconds
+}
+foreach ($timeout in @($effectiveBuildTimeoutSeconds, $effectiveProcessTimeoutSeconds)) {
+    if ($timeout -lt 60 -or $timeout -gt 3600) {
+        throw "Complete Golden timeouts must be from 60 through 3600 seconds."
+    }
+}
+$timeoutContractStable = (
+    $effectiveBuildTimeoutSeconds -eq $contractBuildTimeoutSeconds -and
+    $effectiveProcessTimeoutSeconds -eq $contractProcessTimeoutSeconds
+)
 $requiredSliceIds = @($contract.execution_slices | ForEach-Object { [string]$_.id })
 $requiredPasses = [int]$contract.acceptance.consecutive_passes
 $timestamp = [DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")
@@ -191,6 +218,9 @@ try {
     if ($startingDirty -and -not $AllowDirtyDiagnostic) {
         throw "Complete Golden baseline qualification requires a clean repository. Use -AllowDirtyDiagnostic only for non-release diagnostics."
     }
+    if (-not $timeoutContractStable -and -not $AllowDirtyDiagnostic) {
+        throw "Complete Golden baseline qualification requires the contract-owned build and process timeouts. Use -AllowDirtyDiagnostic only for non-release timeout diagnostics."
+    }
 
     $failurePhase = "contract-and-fixture-validation"
     $global:LASTEXITCODE = 0
@@ -213,7 +243,7 @@ try {
         "cargo" `
         $buildArguments `
         $repositoryRoot `
-        $ProcessTimeoutSeconds `
+        $effectiveBuildTimeoutSeconds `
         $buildLogPath
     if ($buildResult.timed_out -or $buildResult.exit_code -ne 0) {
         throw "Complete Golden validation binary did not build successfully."
@@ -246,7 +276,7 @@ try {
             $goldenExecutable `
             $arguments `
             $repositoryRoot `
-            $ProcessTimeoutSeconds `
+            $effectiveProcessTimeoutSeconds `
             $logPath `
             $reportPath `
             $NaturalExitGraceSeconds
@@ -268,6 +298,7 @@ try {
             report_path = $reportPath
             report_sha256 = (Get-FileHash -LiteralPath $reportPath -Algorithm SHA256).Hash.ToLowerInvariant()
             process_log_path = $logPath
+            process_timeout_seconds = $effectiveProcessTimeoutSeconds
             elapsed_ms = [int64]$processResult.elapsed_ms
             exit_code = $processResult.exit_code
             forced_after_terminal_report = [bool]$processResult.forced_after_report
@@ -316,10 +347,10 @@ if ($null -eq $failureMessage -and -not $sourceStable -and -not $AllowDirtyDiagn
     $failureMessage = "Repository revision or cleanliness changed during the Complete Golden gate."
 }
 $executionPassed = $null -eq $failureMessage -and $reports.Count -eq $requiredPasses
-$baselineEligible = $executionPassed -and $sourceStable
+$baselineEligible = $executionPassed -and $sourceStable -and $timeoutContractStable
 $passed = $baselineEligible -or ($executionPassed -and $AllowDirtyDiagnostic)
 $aggregateReport = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     profile = "windows-alpha-complete-golden-project-consecutive"
     scope = "complete-golden-project"
     contract_id = [string]$contract.id
@@ -334,11 +365,17 @@ $aggregateReport = [ordered]@{
     build = [ordered]@{
         command = "cargo $($buildArguments -join ' ')"
         incremental = $false
+        timeout_seconds = $effectiveBuildTimeoutSeconds
         log_path = $buildLogPath
         elapsed_ms = if ($null -eq $buildResult) { $null } else { [int64]$buildResult.elapsed_ms }
         timed_out = if ($null -eq $buildResult) { $false } else { [bool]$buildResult.timed_out }
         exit_code = if ($null -eq $buildResult) { $null } else { $buildResult.exit_code }
         executable_sha256 = $builtExecutableSha256
+    }
+    timeouts = [ordered]@{
+        build_timeout_seconds = $effectiveBuildTimeoutSeconds
+        process_timeout_seconds = $effectiveProcessTimeoutSeconds
+        contract_matched = $timeoutContractStable
     }
     source_attestation = [ordered]@{
         starting_revision = $startingRevision

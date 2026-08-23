@@ -40,7 +40,15 @@ $goldenPath = Join-Path $contractRootAbsolute "golden-project.json"
 $stressPath = Join-Path $contractRootAbsolute "stress-project.json"
 $machineProfilePath = Join-Path $contractRootAbsolute "windows-alpha-reference.json"
 $playbackPlanPath = Join-Path $contractRootAbsolute "playback-reference-gates.json"
-$contractPaths = @($manifestPath, $goldenPath, $stressPath, $machineProfilePath, $playbackPlanPath)
+$commercialEnginePath = Join-Path $contractRootAbsolute "windows-commercial-engine.json"
+$contractPaths = @(
+    $manifestPath,
+    $goldenPath,
+    $stressPath,
+    $machineProfilePath,
+    $playbackPlanPath,
+    $commercialEnginePath
+)
 
 foreach ($path in $contractPaths) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -50,11 +58,39 @@ foreach ($path in $contractPaths) {
 if ($issues.Count -gt 0) { throw "Validation contracts are incomplete." }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
+$stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
 $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
+$commercialEngine = Get-Content -LiteralPath $commercialEnginePath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
+if ($commercialEngine.schema_version -ne 1) { Add-Issue "error" "commercial-engine.schema-unsupported" "Unsupported commercial engine schema: $($commercialEngine.schema_version)" }
+if (-not (Has-Property $commercialEngine "complete_golden")) {
+    Add-Issue "error" "commercial-engine.complete-golden-missing" "Commercial engine contract must define Complete Golden qualification"
+} else {
+    if ($commercialEngine.complete_golden.contract_id -ne $golden.id) {
+        Add-Issue "error" "commercial-engine.complete-golden-contract-mismatch" "Commercial engine contract must reference the current Golden Project contract"
+    }
+    if ($commercialEngine.complete_golden.report_schema_version -ne 3) {
+        Add-Issue "error" "commercial-engine.complete-golden-report-schema-unsupported" "Commercial engine contract must require Complete Golden report schema 3"
+    }
+    foreach ($field in @("build_timeout_seconds", "process_timeout_seconds")) {
+        if (-not (Has-Property $commercialEngine.complete_golden $field)) {
+            Add-Issue "error" "commercial-engine.complete-golden-timeout-missing" "Complete Golden qualification must independently declare '$field'"
+            continue
+        }
+        $timeoutSeconds = 0
+        if (
+            -not [int]::TryParse([string]$commercialEngine.complete_golden.$field, [ref]$timeoutSeconds) -or
+            $timeoutSeconds -lt 60 -or
+            $timeoutSeconds -gt 3600
+        ) {
+            Add-Issue "error" "commercial-engine.complete-golden-timeout-invalid" "Complete Golden '$field' must be an integer from 60 through 3600 seconds"
+        }
+    }
+}
 if ($playbackPlan.machine_profile -ne $machineProfile.id) { Add-Issue "error" "playback-plan.machine-profile-mismatch" "Playback plan references '$($playbackPlan.machine_profile)' but the configured profile is '$($machineProfile.id)'" }
 $diagnosticExecution = if (Has-Property $playbackPlan "diagnostic_execution") { $playbackPlan.diagnostic_execution } else { $null }
 $safeDiagnosticMachineIssueCodes = @("machine.logical-cpu", "machine.memory-class")
@@ -202,8 +238,6 @@ foreach ($entry in $manifest.entries) {
     $assetResults.Add([pscustomobject]$artifactResult)
 }
 
-$golden = Get-Content -LiteralPath $goldenPath -Raw | ConvertFrom-Json
-$stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
 if ($golden.schema_version -ne 4) {
     Add-Issue "error" "golden.schema-unsupported" "$($golden.id) has an unsupported Golden Project schema version"
 }

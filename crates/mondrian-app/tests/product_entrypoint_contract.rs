@@ -153,6 +153,41 @@ fn complete_golden_supervisor_build_is_non_incremental() {
 }
 
 #[test]
+fn complete_golden_supervisor_separates_contract_owned_deadlines() {
+    let supervisor =
+        include_str!("../../../scripts/validation/invoke-complete-golden-project-gate.ps1");
+    let commercial_engine_contract =
+        include_str!("../../../tests/validation/windows-commercial-engine.json");
+
+    for required_contract_field in ["build_timeout_seconds", "process_timeout_seconds"] {
+        assert!(
+            commercial_engine_contract.contains(required_contract_field),
+            "commercial qualification must own `{required_contract_field}`"
+        );
+    }
+    assert!(
+        supervisor.contains(
+            r#"Invoke-BoundedPlaybackGateProcess `
+        "cargo" `
+        $buildArguments `
+        $repositoryRoot `
+        $effectiveBuildTimeoutSeconds `"#
+        ),
+        "the cold build must use its independent contract-owned deadline"
+    );
+    assert!(
+        supervisor.contains(
+            r#"Invoke-TerminalReportGateProcess `
+            $goldenExecutable `
+            $arguments `
+            $repositoryRoot `
+            $effectiveProcessTimeoutSeconds `"#
+        ),
+        "each already-built Golden pass must use its independent execution deadline"
+    );
+}
+
+#[test]
 fn product_main_calls_only_the_app_ui_window_runner() {
     let main_rs = include_str!("../src/main.rs");
 
