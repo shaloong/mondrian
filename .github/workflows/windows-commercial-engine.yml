@@ -32,6 +32,11 @@ jobs:
     # observations can legitimately exceed three hours on the reference host.
     timeout-minutes: 360
     env:
+      # Optional reference-host egress configuration. Keep machine-specific
+      # proxy addresses in repository variables rather than source control.
+      http_proxy: ${{ vars.WINDOWS_REFERENCE_PROXY }}
+      https_proxy: ${{ vars.WINDOWS_REFERENCE_PROXY }}
+      no_proxy: 127.0.0.1,localhost
       QUALIFICATION_SOURCE_SHA: ${{ inputs.source_sha }}
       QUALIFICATION_MACHINE_ID: ${{ inputs.machine_id }}
       QUALIFICATION_REGENERATE_FIXTURES: ${{ inputs.regenerate_generated_fixtures }}
@@ -72,6 +77,97 @@ jobs:
           if (@(git status --porcelain --untracked-files=normal).Count -ne 0) {
             throw 'Commercial qualification requires a clean checkout.'
           }
+
+      - name: Activate MSVC x64 developer environment
+        shell: pwsh
+        run: |
+          $vsWhere = Join-Path ${env:ProgramFiles(x86)} `
+            'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vsWhere -PathType Leaf)) {
+            throw "Visual Studio Installer discovery is required at '$vsWhere'."
+          }
+
+          $installationPath = (& $vsWhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath).Trim()
+          if ([string]::IsNullOrWhiteSpace($installationPath)) {
+            throw 'A Visual Studio installation with the MSVC x64 tools is required.'
+          }
+
+          $vsDevCmd = Join-Path $installationPath 'Common7\Tools\VsDevCmd.bat'
+          $toolsVersionFile = Join-Path $installationPath `
+            'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          if (-not (Test-Path -LiteralPath $vsDevCmd -PathType Leaf) -or
+              -not (Test-Path -LiteralPath $toolsVersionFile -PathType Leaf)) {
+            throw "The MSVC developer environment is incomplete at '$installationPath'."
+          }
+
+          $toolsVersion = (Get-Content -LiteralPath $toolsVersionFile -Raw).Trim()
+          $compilerDirectory = Join-Path $installationPath `
+            "VC\Tools\MSVC\$toolsVersion\bin\Hostx64\x64"
+          $compiler = Join-Path $compilerDirectory 'cl.exe'
+          if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "The x64 MSVC compiler is required at '$compiler'."
+          }
+
+          $command = 'call "' + $vsDevCmd + `
+            '" -no_logo -arch=x64 -host_arch=x64 >nul && set'
+          $lines = & $env:ComSpec /d /s /c $command
+          if ($LASTEXITCODE -ne 0) {
+            throw "VsDevCmd failed with exit code $LASTEXITCODE."
+          }
+
+          foreach ($name in @('INCLUDE', 'LIB', 'LIBPATH')) {
+            $prefix = "$name="
+            $line = $lines | Where-Object {
+              $_.StartsWith($prefix, [System.StringComparison]::Ordinal)
+            } | Select-Object -First 1
+            if ([string]::IsNullOrWhiteSpace($line)) {
+              throw "VsDevCmd did not define $name."
+            }
+            $line | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          }
+
+          $pathLine = $lines | Where-Object {
+            $_.StartsWith('PATH=', [System.StringComparison]::OrdinalIgnoreCase) -and
+            $_.Contains($compilerDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+          } | Select-Object -First 1
+          if ([string]::IsNullOrWhiteSpace($pathLine)) {
+            throw 'VsDevCmd did not add the discovered x64 compiler to PATH.'
+          }
+          $pathValue = $pathLine.Substring($pathLine.IndexOf('=') + 1)
+          foreach ($entry in $pathValue.Split(';')) {
+            if (-not [string]::IsNullOrWhiteSpace($entry)) {
+              $entry | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
+          $compilerDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Prefer Git Bash over WSL
+        shell: pwsh
+        run: |
+          $gitBashDirectory = Join-Path $env:ProgramFiles 'Git\bin'
+          $gitBash = Join-Path $gitBashDirectory 'bash.exe'
+          if (-not (Test-Path -LiteralPath $gitBash -PathType Leaf)) {
+            throw "Git Bash is required at '$gitBash'."
+          }
+          $gitBashDirectory | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Isolate qualification temporary files
+        shell: pwsh
+        run: |
+          $qualificationTemp = Join-Path $env:RUNNER_TEMP `
+            "mondrian-commercial-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $qualificationTemp) {
+            throw "Qualification temp directory already exists: '$qualificationTemp'."
+          }
+          New-Item -ItemType Directory -Path $qualificationTemp -ErrorAction Stop | Out-Null
+          "TEMP=$qualificationTemp" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TMP=$qualificationTemp" | Out-File `
+            -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
@@ -122,3 +218,21 @@ jobs:
           path: target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/sealed/
           if-no-files-found: error
           retention-days: 90
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: windows-commercial-engine-diagnostics-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/golden/**/build.log
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/golden/**/process.log
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/golden/**/complete-golden*.json
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/golden/**/reference-assets.json
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/*.log
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/*report.jsonl
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/*decode-progress.jsonl
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/reference-*.json
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/evidence.json
+          if-no-files-found: warn
+          retention-days: 30
