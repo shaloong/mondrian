@@ -90,6 +90,44 @@ impl PreviewHardwareDecodePlan {
         }
     }
 
+    /// Reject codec profiles that the platform hardware families cannot
+    /// decode into Mondrian's supported native or CPU-transfer contracts.
+    ///
+    /// FFmpeg's codec hardware-config table is codec-wide and can report H.264
+    /// support for High 10/4:2:2/4:4:4 streams even when the actual device
+    /// cannot produce those profiles. Avoid opening a doomed device-backed
+    /// decoder; preferred requests fall back to software and required-native
+    /// requests remain explicitly unsupported.
+    pub(super) fn apply_stream_profile(&mut self, profile: ffmpeg::codec::Profile) {
+        use ffmpeg::codec::profile::H264;
+        use ffmpeg::codec::Profile;
+
+        let unsupported_h264 = matches!(
+            profile,
+            Profile::H264(
+                H264::High10
+                    | H264::High10Intra
+                    | H264::High422
+                    | H264::High422Intra
+                    | H264::High444
+                    | H264::High444Predictive
+                    | H264::High444Intra
+                    | H264::CAVLC444
+            )
+        );
+        if !unsupported_h264 {
+            return;
+        }
+
+        self.ffmpeg_codec_config.ffmpeg_codec_config_available = false;
+        self.decision = PreviewHardwareDecodeDecision::CpuRgbaCodecUnsupported;
+        self.candidates.clear();
+        self.candidate_index = None;
+        self.probe.reason = format!(
+            "codec profile {profile:?} is outside Mondrian's hardware-decode admission contract"
+        );
+    }
+
     fn resolve_backend_probes(
         request: PreviewHardwareDecodeRequest,
         access_mode: PreviewDecodeAccessMode,
@@ -431,6 +469,18 @@ pub(super) struct PreviewHardwareDecodeContextState {
     pub(super) preferred_hw_pixel_format: ffmpeg::ffi::AVPixelFormat,
 }
 
+/// FFmpeg `AVCodecContext::get_format` callback that selects the preferred
+/// hardware pixel format from the decoder-offered list.
+///
+/// # Safety
+/// - `context` must be the live codec context whose `opaque` field was set to
+///   a `Box<PreviewHardwareDecodeContextState>` pointer that outlives every
+///   decoder callback (the state is dropped after the codec context).
+/// - `pixel_formats` is an FFmpeg-provided list terminated by
+///   `AV_PIX_FMT_NONE`; the loop only dereferences entries before the
+///   terminator, as FFmpeg's `get_format` contract guarantees.
+/// - A null context, null list, or null opaque returns `AV_PIX_FMT_NONE` so
+///   FFmpeg falls back to software rather than dereferencing invalid state.
 pub(super) unsafe extern "C" fn preview_hardware_decode_get_format(
     context: *mut ffmpeg::ffi::AVCodecContext,
     pixel_formats: *const ffmpeg::ffi::AVPixelFormat,

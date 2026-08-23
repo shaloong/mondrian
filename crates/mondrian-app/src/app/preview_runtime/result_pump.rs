@@ -38,7 +38,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         timeout: Duration,
         pending_playback_demand: Option<mondrian_playback::FrameDemandIdentity>,
     ) -> PreviewWorkPoll {
-        let expired = self.scheduler.expire_realtime_current_older_than(timeout);
+        let expired = self.scheduler.expire_playback_current_older_than(timeout);
         if expired.is_empty() {
             return PreviewWorkPoll::default();
         }
@@ -176,6 +176,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             if result.canceled {
+                self.invalidate_evaluations_for_asset(result.key.asset_id);
                 if result.cancellation_phase == Some(MediaPreviewCancellationPhase::Queued) {
                     // A request that expired before codec execution is a
                     // scheduler deadline drop, not cooperative-cancellation
@@ -331,6 +332,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     self.invalidate_evaluations_for_asset(result.key.asset_id);
                 }
                 None => {
+                    // A retained timeline evaluation may be waiting on this
+                    // exact producer. Once it completes without publishing a
+                    // frame (cancellation, timeout, or failure), that wait is
+                    // no longer actionable. Re-resolve so the current
+                    // generation can re-admit work or project the retained
+                    // terminal failure instead of waiting forever.
+                    self.invalidate_evaluations_for_asset(result.key.asset_id);
                     if let Some(reason) = result.failure_reason {
                         self.scrub_adaptation
                             .borrow_mut()

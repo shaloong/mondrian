@@ -384,6 +384,20 @@ impl AppUiHost {
         self.preview_service.set_playback_hardware_decode_admission(admission);
     }
 
+    /// Request the UI-independent bounded CPU Viewer execution path after a
+    /// concrete Window GPU failure.
+    pub(crate) fn request_viewer_cpu_fallback(&self, reason: impl Into<String>) {
+        self.preview_service.request_viewer_cpu_fallback(reason);
+        self.mark_window_preview_pending();
+        self.preview_dirty.set(true);
+    }
+
+    /// Return to GPU Viewer execution after a replacement device generation
+    /// has published its native-import capabilities.
+    pub(crate) fn clear_viewer_cpu_fallback(&self) {
+        self.preview_service.clear_viewer_cpu_fallback();
+    }
+
     /// Apply the latest immutable Preview Viewer projection to its GPU owner.
     ///
     /// The low-frequency Host resource-policy Seam already applies the complete

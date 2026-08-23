@@ -13,12 +13,12 @@ use mondrian_core::types::{AssetId, ColorEngine};
 use mondrian_core::{Resolution, SourceSampleTarget, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
-    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeGeometry,
-    PreviewDecodeKey, PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
+    PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeKey,
+    PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
 };
 
 pub(crate) const MEDIA_PREVIEW_JOB_QUEUE_CAPACITY: usize = 48;
-pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 50_000;
+pub(crate) const MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US: u64 = 2_000_000;
 pub(crate) const MEDIA_PREVIEW_DECODE_SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const MEDIA_PREVIEW_MAX_DECODE_WORKERS: usize = 2;
 const MEDIA_PREVIEW_MAX_PENDING_REQUESTS: usize = MEDIA_PREVIEW_JOB_QUEUE_CAPACITY;
@@ -62,11 +62,11 @@ impl MediaPreviewKey {
     }
 
     /// Conservative decoded extent used for App-owned residency admission.
+    ///
+    /// Residency is charged at the decode representation's own extent
+    /// (source or proxy raster), never a consumer/output extent.
     pub(crate) const fn residency_resolution(&self) -> Resolution {
-        match self.decode.geometry() {
-            PreviewDecodeGeometry::FitWithin(resolution) => resolution,
-            PreviewDecodeGeometry::NativeSource { .. } => self.source_resolution,
-        }
+        self.decode.representation().extent_for_source(self.source_resolution)
     }
 
     /// Build one exact CPU-addressable key for App unit tests.
@@ -81,13 +81,17 @@ impl MediaPreviewKey {
         if !path.is_absolute() {
             path = std::env::temp_dir().join(path);
         }
-        let source =
-            mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(path, fingerprint, 0)
-                .expect("complete synthetic Preview source");
+        let source = mondrian_media::PreviewDecodeSource::from_frozen_cpu_stream(
+            path,
+            fingerprint,
+            0,
+            resolution,
+        )
+        .expect("complete synthetic Preview source");
         let decode = PreviewDecodeKey::new(
             source,
             SourceSampleTarget::covering(source_time),
-            PreviewDecodeGeometry::FitWithin(resolution),
+            mondrian_media::PreviewDecodeRepresentation::NativeCpu,
             source_color,
         )
         .expect("valid synthetic Preview decode key");
@@ -843,9 +847,7 @@ fn frame_work_deadline(
 fn media_preview_in_flight_deadline_policy(
     job: &MediaPreviewJob,
 ) -> mondrian_playback::FrameInFlightDeadlinePolicy {
-    if job.priority == MediaPreviewRequestPriority::Current
-        && job.access_mode == PreviewDecodeAccessMode::PlaybackCursor
-    {
+    if job.access_mode == PreviewDecodeAccessMode::PlaybackCursor {
         mondrian_playback::FrameInFlightDeadlinePolicy::FinishForLocality
     } else {
         mondrian_playback::FrameInFlightDeadlinePolicy::Cancel
@@ -1076,6 +1078,10 @@ impl MediaPreviewScheduler {
 
     pub(crate) fn begin_generation(&self) -> u64 {
         self.broker.begin_generation()
+    }
+
+    pub(crate) fn begin_generation_preserving_playback_locality(&self) -> u64 {
+        self.broker.begin_generation_preserving_playback_locality()
     }
 
     pub(crate) fn submit_job(
@@ -1387,12 +1393,12 @@ impl MediaPreviewScheduler {
         self.broker.cancel_key(key);
     }
 
-    pub(crate) fn expire_realtime_current_older_than(
+    pub(crate) fn expire_playback_current_older_than(
         &self,
         max_age: Duration,
     ) -> Vec<ExpiredMediaPreviewRequest> {
         self.broker
-            .expire_realtime_current_older_than(max_age)
+            .expire_playback_current_older_than(max_age)
             .into_iter()
             .map(|request| ExpiredMediaPreviewRequest {
                 key: request.key,

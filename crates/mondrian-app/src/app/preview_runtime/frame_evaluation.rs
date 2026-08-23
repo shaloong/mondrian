@@ -45,7 +45,7 @@ use mondrian_timeline::sequence::ProgramColorContext;
 use crate::app::preview_access_mode::MediaPreviewRequestPriority;
 use crate::app::preview_execution::PreviewOutputKey;
 use crate::app::preview_runtime::PreviewAuthoringSnapshot;
-use crate::app::preview_viewer_plan::ResolvedPreviewElement;
+use crate::app::preview_viewer_plan::{ResolvedPreviewElement, ResolvedPreviewTransitionInput};
 
 /// What changes the resolved picture for one timeline frame.
 ///
@@ -171,7 +171,9 @@ pub(crate) enum EvaluationState {
 /// invalidation never cascades to unrelated evaluations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EvaluationDependency {
-    MediaFrame(AssetId),
+    /// Exact media work has an admitted queued/in-flight producer. Transient
+    /// admission deferrals are deliberately never represented here.
+    MediaProducer(AssetId),
 }
 
 /// Typed reason why evaluation could not produce a plan.
@@ -270,6 +272,16 @@ impl EvaluationWorkingSet {
         self.waiting.clear();
     }
 
+    /// Release evaluations that pin native decoder resources.
+    ///
+    /// This is the decoder-family retirement half of Preview residency. It
+    /// must run before the Frame Store drops its native entries so an
+    /// evaluation cannot become an invisible owner outside Store budgets.
+    pub(crate) fn clear_decoder_resource_entries(&mut self) {
+        self.entries
+            .retain(|entry| !entry.evaluation.elements.iter().any(element_pins_decoder_resource));
+    }
+
     /// Return the retained evaluation for an exact key, if resident.
     pub(crate) fn get(
         &mut self,
@@ -305,14 +317,14 @@ impl EvaluationWorkingSet {
             entry.last_used = clock;
             return;
         }
-        if self.entries.len() >= Self::capacity() {
-            let least = self
+        if self.entries.len() >= Self::capacity()
+            && let Some(least) = self
                 .entries
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(index, _)| index)
-                .expect("non-empty working set");
+        {
             self.entries.remove(least);
         }
         self.entries
@@ -342,9 +354,31 @@ impl EvaluationWorkingSet {
     pub(crate) fn invalidate_for_asset(&mut self, asset_id: AssetId) {
         self.waiting.retain(|entry| {
             !entry.dependencies.iter().any(|dependency| {
-                matches!(dependency, EvaluationDependency::MediaFrame(dep) if *dep == asset_id)
+                matches!(dependency, EvaluationDependency::MediaProducer(dep) if *dep == asset_id)
             })
         });
         self.entries.clear();
+    }
+}
+
+fn element_pins_decoder_resource(element: &ResolvedPreviewElement) -> bool {
+    match element {
+        ResolvedPreviewElement::Media { frame, .. } => frame.decoder_resource_units() != 0,
+        ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+            transition_input_pins_decoder_resource(left)
+                || transition_input_pins_decoder_resource(right)
+        }
+        ResolvedPreviewElement::SolidColor(_)
+        | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+        | ResolvedPreviewElement::Adjustment(_) => false,
+    }
+}
+
+fn transition_input_pins_decoder_resource(input: &ResolvedPreviewTransitionInput) -> bool {
+    match input {
+        ResolvedPreviewTransitionInput::Media { frame, .. } => frame.decoder_resource_units() != 0,
+        ResolvedPreviewTransitionInput::Transparent
+        | ResolvedPreviewTransitionInput::SolidColor(_)
+        | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => false,
     }
 }

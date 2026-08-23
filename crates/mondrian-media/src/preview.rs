@@ -17,11 +17,11 @@ use mondrian_core::{
 pub use mondrian_core::{MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, Ordering};
+
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -44,9 +44,9 @@ mod playback_ring;
 mod seek_index;
 
 pub use decode_contract::{
-    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeGeometry,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeSource,
-    PreviewNativeSurfaceHint,
+    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeKey,
+    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
+    PreviewNativeSurfaceHint, PreviewRepresentationQuality,
 };
 pub use demux_worker::run_preview_demux_worker;
 pub use seek_index::{
@@ -381,6 +381,9 @@ pub enum PreviewNativeDecodeFallback {
     SamplingMetadataIncomplete,
     /// FFmpeg could not retain or expose the native decoder resource.
     ResourceRetentionFailed,
+    /// A hardware-preferred Session failed during runtime decode and the same
+    /// semantic request was recovered through a fresh software Session.
+    RuntimeHardwareFailure,
 }
 
 impl PreviewHardwareDecodeBlocker {
@@ -465,12 +468,22 @@ pub struct PreviewSourceColorContract {
     pub color_space: ColorSpace,
     /// Authority-aware encoded quantization-range interpretation.
     pub range: DecodedVideoRangeContract,
+    /// Explicit policy/authored fallback used only when a decoded YUV frame
+    /// omits its matrix coefficient. Stream/frame metadata still wins.
+    #[serde(default)]
+    pub yuv_matrix_fallback: Option<DecodedVideoMatrix>,
 }
 
 impl PreviewSourceColorContract {
     /// Build a source color contract from resolved input color and range authority.
     pub const fn new(color_space: ColorSpace, range: DecodedVideoRangeContract) -> Self {
-        Self { color_space, range }
+        Self { color_space, range, yuv_matrix_fallback: None }
+    }
+
+    /// Bind an explicit missing-matrix policy into decode and cache identity.
+    pub const fn with_yuv_matrix_fallback(mut self, matrix: DecodedVideoMatrix) -> Self {
+        self.yuv_matrix_fallback = Some(matrix);
+        self
     }
 
     /// Build an automatic contract with a stream-probe fallback.
@@ -499,9 +512,12 @@ impl<'a> PreviewDecodeRequest<'a> {
     ///
     /// This keeps access-mode scheduling and adaptive/hardware execution hints
     /// outside [`PreviewDecodeKey`] while preventing callers from rebuilding
-    /// path, revision, stream, time, geometry, or source color independently.
+    /// path, revision, stream, time, representation, or source color
+    /// independently. The request's extent cap is the representation's own
+    /// extent — never the consumer's output extent.
     pub fn from_key(key: &'a PreviewDecodeKey, access_mode: PreviewDecodeAccessMode) -> Self {
-        let (max_width, max_height) = key.geometry().maximum_dimensions();
+        let (max_width, max_height) =
+            key.representation().maximum_dimensions_for_source(key.source().source_extent());
         Self {
             path: key.source().path(),
             video_stream_index: Some(key.source().video_stream_index()),
@@ -967,15 +983,11 @@ impl PreviewDecodeCpuBudget {
         }
         .min(usable_threads)
         .max(1);
-        let max_decoder_threads_per_worker = if available_parallelism >= 16 {
-            6
-        } else if available_parallelism >= 8 {
-            4
-        } else {
-            3
-        }
-        .min(usable_threads)
-        .max(1);
+        // Playback and Interactive decoder residency are mutually exclusive.
+        // A Playback Session may therefore use the available decode budget
+        // without multiplying it across the idle NonPlayback workers. Keep a
+        // finite cap so very large hosts do not create excessive codec queues.
+        let max_decoder_threads_per_worker = usable_threads.clamp(1, 12);
         let decoder_threads_per_worker = (usable_threads / preview_worker_count)
             .max(1)
             .min(max_decoder_threads_per_worker);
@@ -1434,32 +1446,16 @@ impl PreviewDecodeDiagnostics {
     }
 }
 
-impl PreviewDecodeBackend {
-    fn as_u8(self) -> u8 {
-        match self {
-            Self::Auto => 0,
-            Self::Software => 1,
-            Self::ExternalFfmpegCpuRgba => 2,
-        }
-    }
-
-    fn from_u8(value: u8) -> Self {
-        match value {
-            1 => Self::Software,
-            2 => Self::ExternalFfmpegCpuRgba,
-            _ => Self::Auto,
-        }
-    }
-}
-
-static PREVIEW_DECODE_BACKEND: AtomicU8 = AtomicU8::new(0);
-
-pub fn set_preview_decode_backend(backend: PreviewDecodeBackend) {
-    PREVIEW_DECODE_BACKEND.store(backend.as_u8(), Ordering::Relaxed);
-}
-
+/// Current preview decode backend selection.
+///
+/// The product currently always runs `Auto`; a process-global setter had no
+/// production caller and created an unowned mutable seam, so it was removed.
+/// Backend choice belongs to explicit Session/worker configuration, not a
+/// latent global. `Auto` still honors the bounded
+/// `MONDRIAN_PREVIEW_EXTERNAL_FFMPEG_CPU_RGBA` environment opt-in for
+/// diagnostics.
 pub fn preview_decode_backend() -> PreviewDecodeBackend {
-    PreviewDecodeBackend::from_u8(PREVIEW_DECODE_BACKEND.load(Ordering::Relaxed))
+    PreviewDecodeBackend::Auto
 }
 
 pub use decoded_frame::*;
@@ -1560,24 +1556,63 @@ fn preview_trace(message: String) {
     }
 }
 
-fn preview_decode_threading_config() -> PreviewDecodeThreadingConfig {
+fn preview_decode_threading_config(
+    access_mode: PreviewDecodeAccessMode,
+    decode_pixels: u64,
+) -> PreviewDecodeThreadingConfig {
     let kind = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADING")
         .ok()
         .and_then(|value| PreviewDecodeThreadingKind::from_env(&value))
-        .unwrap_or_default();
+        .unwrap_or_else(|| default_threading_kind_for_software_decode(access_mode, decode_pixels));
     let budget = preview_decode_cpu_budget();
     let count = std::env::var("MONDRIAN_PREVIEW_DECODE_THREADS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .map(|value| value.clamp(1, budget.max_decoder_threads_per_worker))
-        .unwrap_or(budget.decoder_threads_per_worker);
+        .unwrap_or_else(|| default_decoder_threads_for_access_mode(budget, access_mode));
     PreviewDecodeThreadingConfig { kind, count }
+}
+
+/// Default software-decode threading kind for one access mode and frame size.
+///
+/// Slice-level threading parallelizes each UHD frame across its slice rows,
+/// while frame threading pipelines frames but keeps each 4K frame's entropy
+/// decode sequential. Measured on software H.264 High 4:2:2 10-bit
+/// 3840x2160@60000/1001: slice threading sustains the 16.7 ms frame budget
+/// (60/60 exact presentations, decode p95 ~25 ms), frame threading falls
+/// behind (53-55/60, decode p95 clamped at 40 ms). Lower resolutions keep
+/// frame threading so slice-coordination overhead is not imposed where the
+/// frame pipeline already wins; an explicit
+/// `MONDRIAN_PREVIEW_DECODE_THREADING` override always wins.
+fn default_threading_kind_for_software_decode(
+    access_mode: PreviewDecodeAccessMode,
+    decode_pixels: u64,
+) -> PreviewDecodeThreadingKind {
+    const UHD_PIXELS: u64 = 3_840 * 2_160;
+    if access_mode == PreviewDecodeAccessMode::PlaybackCursor && decode_pixels >= UHD_PIXELS {
+        PreviewDecodeThreadingKind::Slice
+    } else {
+        PreviewDecodeThreadingKind::Frame
+    }
+}
+
+fn default_decoder_threads_for_access_mode(
+    budget: PreviewDecodeCpuBudget,
+    access_mode: PreviewDecodeAccessMode,
+) -> usize {
+    if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+        budget.max_decoder_threads_per_worker
+    } else {
+        budget.decoder_threads_per_worker
+    }
 }
 
 fn preview_decode_threading_config_for_codec(
     codec_id: ffmpeg::codec::Id,
+    access_mode: PreviewDecodeAccessMode,
+    decode_pixels: u64,
 ) -> PreviewDecodeThreadingConfig {
-    let requested = preview_decode_threading_config();
+    let requested = preview_decode_threading_config(access_mode, decode_pixels);
     apply_preview_codec_threading_policy(codec_id, requested)
 }
 

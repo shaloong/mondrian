@@ -11,9 +11,34 @@ use crate::app::preview_media_source::{
     resolve_preview_media_source, PreviewMediaDecodePathResolution, PreviewMediaSourceOutcome,
     PreviewMediaSourceRequest, PreviewProxyGenerationIntent,
 };
+use crate::app::preview_quality::preview_representation_quality;
 use crate::app::preview_timeline_execution::{
-    PreviewTimelineMediaFrame, PreviewTimelineMediaRequest,
+    PreviewTimelineMediaFrame, PreviewTimelineMediaRequest, PreviewTimelineMediaWait,
 };
+
+/// Classify nonterminal admission outcomes without projecting expected
+/// generation races as Viewer failures.
+pub(super) const fn media_wait_for_admission(
+    admission: MediaPreviewRequestAdmission,
+) -> Option<PreviewTimelineMediaWait> {
+    match admission {
+        MediaPreviewRequestAdmission::Scheduled | MediaPreviewRequestAdmission::ExistingWork => {
+            Some(PreviewTimelineMediaWait::Producer)
+        }
+        MediaPreviewRequestAdmission::DeferredResidencyTransition
+        | MediaPreviewRequestAdmission::DeferredAggregateCapacity
+        | MediaPreviewRequestAdmission::DeferredExecutionPressure
+        | MediaPreviewRequestAdmission::ObsoleteGeneration => {
+            Some(PreviewTimelineMediaWait::RetryAdmission)
+        }
+        MediaPreviewRequestAdmission::AlreadyResident
+        | MediaPreviewRequestAdmission::BlockedCurrentDemand
+        | MediaPreviewRequestAdmission::BlockedAggregateCapacity
+        | MediaPreviewRequestAdmission::InvalidMediaIdentity
+        | MediaPreviewRequestAdmission::InvalidScheduling
+        | MediaPreviewRequestAdmission::WorkerUnavailable => None,
+    }
+}
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(super) fn media_frame_for_plan(
@@ -27,10 +52,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             transport.is_playing(),
             transport.seek_source(),
         ));
+        let representation_quality = preview_representation_quality(transport.runtime_scale());
         let key = match self.media_preview_key_for_timeline_request(
             snapshot,
             proxy_demands,
             &request,
+            representation_quality,
             true,
             access_mode == PreviewDecodeAccessMode::PlaybackCursor,
         ) {
@@ -75,7 +102,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         } else {
             MediaPreviewRequestIntent::Current(current_demand_id)
         };
-        let admission = if request.cpu_working_required {
+        let admission = if request.cpu_working_required || self.viewer_cpu_fallback_active.get() {
             self.request_cpu_working_media_preview(
                 key.clone(),
                 intent,
@@ -95,15 +122,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             )
         };
         self.last_current_media_admission.set(Some(admission.as_str()));
-        match admission {
-            MediaPreviewRequestAdmission::Scheduled
-            | MediaPreviewRequestAdmission::ExistingWork
-            | MediaPreviewRequestAdmission::DeferredResidencyTransition
-            | MediaPreviewRequestAdmission::DeferredAggregateCapacity
-            | MediaPreviewRequestAdmission::DeferredExecutionPressure => {
+        if let Some(wait) = media_wait_for_admission(admission) {
+            // An obsolete generation has no physical producer and must be
+            // retried from a fresh execution snapshot. Other pending outcomes
+            // retain an observable work/residency owner that will publish a
+            // retry edge.
+            if admission != MediaPreviewRequestAdmission::ObsoleteGeneration {
                 self.execution.borrow_mut().set_pending(true);
-                PreviewTimelineMediaFrame::Pending
             }
+            return PreviewTimelineMediaFrame::Pending { wait };
+        }
+        match admission {
             MediaPreviewRequestAdmission::AlreadyResident => {
                 match self.protected_cached_media_frame(&key, current_demand_id) {
                     Ok(Some(frame)) => PreviewTimelineMediaFrame::Ready(frame),
@@ -155,14 +184,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ),
                 }
             }
-            MediaPreviewRequestAdmission::ObsoleteGeneration => {
-                PreviewTimelineMediaFrame::Unavailable {
-                    reason: PreviewUnavailability::failed(
-                        PreviewOutputStage::TimelineEvaluation,
-                        "media request generation was superseded before Broker admission",
-                    ),
-                }
-            }
             MediaPreviewRequestAdmission::WorkerUnavailable => {
                 PreviewTimelineMediaFrame::Unavailable {
                     reason: PreviewUnavailability::failed(
@@ -173,6 +194,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     ),
                 }
             }
+            MediaPreviewRequestAdmission::Scheduled
+            | MediaPreviewRequestAdmission::ExistingWork => PreviewTimelineMediaFrame::Pending {
+                wait: PreviewTimelineMediaWait::Producer,
+            },
+            MediaPreviewRequestAdmission::DeferredResidencyTransition
+            | MediaPreviewRequestAdmission::DeferredAggregateCapacity
+            | MediaPreviewRequestAdmission::DeferredExecutionPressure
+            | MediaPreviewRequestAdmission::ObsoleteGeneration => PreviewTimelineMediaFrame::Pending {
+                wait: PreviewTimelineMediaWait::RetryAdmission,
+            },
         }
     }
 
@@ -222,6 +253,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         snapshot: &PreviewExecutionSnapshot<'_>,
         proxy_demands: &dyn PreviewProxyDemandSink,
         request: &PreviewTimelineMediaRequest,
+        representation_quality: mondrian_media::PreviewRepresentationQuality,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
@@ -238,7 +270,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             record_color_rejection,
             request_missing_proxy_generation,
             self.hardware_decode_admission.get(),
-            request.cpu_working_required,
+            request.cpu_working_required || self.viewer_cpu_fallback_active.get(),
+            representation_quality,
         )
     }
 
@@ -254,6 +287,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         source_time: mondrian_core::TimelineTime,
         target_width: u32,
         target_height: u32,
+        runtime_scale: mondrian_playback::PreviewResolutionScale,
         input_color: &MediaInputColorContext,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
@@ -272,6 +306,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             request_missing_proxy_generation,
             self.hardware_decode_admission.get(),
             false,
+            preview_representation_quality(runtime_scale),
         )
     }
 
@@ -284,13 +319,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         color_space_override: Option<ColorSpace>,
         alpha_interpretation: AlphaInterpretation,
         source_sample: mondrian_core::SourceSampleTarget,
-        target_width: u32,
-        target_height: u32,
+        _target_width: u32,
+        _target_height: u32,
         input_color: &MediaInputColorContext,
         record_color_rejection: bool,
         request_missing_proxy_generation: bool,
         hardware_admission: PreviewHardwareDecodeAdmissionState,
         cpu_working_required: bool,
+        representation_quality: mondrian_media::PreviewRepresentationQuality,
     ) -> Result<MediaPreviewKey, PreviewUnavailability> {
         let authoring = snapshot.authoring().ok_or_else(|| {
             PreviewUnavailability::blocked(
@@ -330,7 +366,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             color_space_override,
             alpha_interpretation,
             source_sample,
-            target_resolution: Resolution { width: target_width, height: target_height },
             input_color,
             prefer_proxy,
             request_missing_proxy_generation,
@@ -338,6 +373,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             proxy_color,
             hardware_admission,
             cpu_working_required,
+            representation_quality,
         }) {
             PreviewMediaSourceOutcome::Ready(resolved) => {
                 match resolved.path_resolution {

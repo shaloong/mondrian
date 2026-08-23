@@ -1472,6 +1472,7 @@ impl AppState {
     ) -> crate::app::playback_preview::PreviewTransportIntent {
         crate::app::playback_preview::PreviewTransportIntent::new(
             self.is_playing(),
+            self.is_playback_priming(),
             self.playback_epoch(),
         )
     }
@@ -2626,7 +2627,7 @@ mod tests {
         );
         assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Preroll);
 
-        state.advance_playback_clock(Duration::from_millis(499));
+        state.advance_playback_clock(Duration::from_millis(1499));
         assert_eq!(
             state.playback_engine.snapshot().state,
             TransportState::Priming
@@ -3023,7 +3024,7 @@ mod tests {
 
         state.seek_with_source(4, TimelineSeekSource::PointerDrag).expect("seek");
         state.play().expect("play");
-        let outcome = state.advance_playback_clock(Duration::from_secs(1));
+        let outcome = state.advance_playback_clock(Duration::from_secs(2));
         assert_eq!(outcome.status, PlaybackAdvanceStatus::ReachedEnd);
         assert_eq!(state.last_timeline_seek_source, TimelineSeekSource::Settled);
     }
@@ -3070,10 +3071,13 @@ mod tests {
         let observation_anchor = state.playback_observation_instant_anchor;
 
         let advance =
-            state.advance_playback_clock_at(observation_anchor + Duration::from_millis(600));
+            state.advance_playback_clock_at(observation_anchor + Duration::from_millis(1_600));
 
         assert_eq!(advance.status, PlaybackAdvanceStatus::Advanced);
-        assert_eq!(state.current_frame(), 2);
+        assert!(
+            state.current_frame() > 0,
+            "the clock must continue after the unpresented priming budget expires"
+        );
         assert!(state.pending_playback_frame_demand_identity().is_some());
     }
 

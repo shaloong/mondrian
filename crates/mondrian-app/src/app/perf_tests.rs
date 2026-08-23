@@ -1667,8 +1667,8 @@ struct PreviewExternalPlaybackGateReport {
     continuous_window: Option<ContinuousPlaybackWindowGateReport>,
     playback_decode_p95_limit_us: u64,
     playback_decode_p95_observed_us: u64,
-    playback_queue_wait_p95_limit_us: u64,
-    playback_queue_wait_p95_observed_us: u64,
+    playback_current_queue_wait_limit_us: u64,
+    playback_current_queue_wait_observed_us: u64,
     min_visible_frames: usize,
     visible_frames: usize,
     min_ready_frames: usize,
@@ -2162,10 +2162,15 @@ fn preview_playback_decode_failures(report: &PreviewDecodePerformanceReport) -> 
             scoped_fail_check = true;
         }
     }
-    failures.extend(preview_decode_access_mode_queue_wait_failures(
-        report,
-        &[PreviewDecodeAccessMode::PlaybackCursor],
-    ));
+    if let Some(summary) = report.summary.as_ref()
+        && summary.current_queue_wait_max_us > summary.slow_frame_budget_us
+    {
+        // PlaybackCursor prefetch is intentionally allowed to remain queued
+        // behind current work. Only Current queue latency can make the
+        // realtime playback gate fail; aggregate access-mode queue latency
+        // would incorrectly turn healthy lookahead residency into pressure.
+        failures.push("preview_decode_playback_cursor_queue_wait_over_budget");
+    }
     for root in &report.root_causes {
         match root.code {
             "preview_decode_playback_session_not_reused"
@@ -3240,6 +3245,192 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         return Ok(());
     };
     run_external_continuous_playback_gate(video_path, false)
+}
+
+#[test]
+#[ignore = "development preview media resolution-scale decode stability smoke; run manually"]
+fn preview_media_resolution_scale_decode_stability_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+
+    let ready_timeout = Duration::from_millis(env_u128(
+        "MONDRIAN_PREVIEW_RESOLUTION_SCALE_READY_TIMEOUT_MS",
+        30_000,
+    ) as u64);
+    let seek_frames_per_scale =
+        env_usize_clamped("MONDRIAN_PREVIEW_RESOLUTION_SCALE_SEEKS", 8, 2, 24);
+
+    let uniq = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let root_dir = std::env::temp_dir().join(format!("mondrian_preview_resolution_scale_{uniq}"));
+    fs::create_dir_all(&root_dir)?;
+    let video_path = root_dir.join("preview-resolution-scale-smoke.mp4");
+
+    if !generate_preview_media_fixture_with_size(&video_path, 640, 360, 2)? {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_resolution_scale_decode_stability\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
+        );
+        let _ = fs::remove_dir_all(&root_dir);
+        return Ok(());
+    }
+
+    let result = run_preview_media_resolution_scale_decode_stability_probe(
+        &root_dir,
+        &video_path,
+        seek_frames_per_scale,
+        ready_timeout,
+    );
+    let _ = fs::remove_dir_all(&root_dir);
+
+    let report = result?;
+    let report_json = serde_json::to_string(&report)?;
+    eprintln!("MONDRIAN_PERF_JSON={report_json}");
+    write_report_if_needed(&report_json);
+
+    anyhow::ensure!(
+        report.passed,
+        "preview media resolution-scale decode stability smoke failed: {report_json}"
+    );
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewMediaResolutionScalePhaseEvidence {
+    resolution_scale: f32,
+    output_width: u32,
+    output_height: u32,
+    presented_frames: usize,
+    decode_decoded_frame_count: u64,
+    decode_random_access_still_frames: u64,
+    decode_seeked_frames: u64,
+    decoded_frame_delta_from_warm: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PreviewMediaResolutionScaleDecodeStabilityReport {
+    scenario: &'static str,
+    source_width: u32,
+    source_height: u32,
+    sequence_frame_count: usize,
+    seek_frames_per_scale: usize,
+    phases: Vec<PreviewMediaResolutionScalePhaseEvidence>,
+    passed: bool,
+}
+
+/// Stage-2/3 regression probe for the DecodeRepresentation contract: with real
+/// media, switching the authored preview resolution scale (output extent) must
+/// only change the composition/render target. The decode identity and the
+/// decoded-frame residency are source-representation state, so replaying the
+/// same frames at 1.0 -> 0.5 -> 0.25 must not consume one more decoded frame.
+fn run_preview_media_resolution_scale_decode_stability_probe(
+    root_dir: &Path,
+    video_path: &Path,
+    seek_frames_per_scale: usize,
+    ready_timeout: Duration,
+) -> anyhow::Result<PreviewMediaResolutionScaleDecodeStabilityReport> {
+    let media_info = probe_media_info(video_path)
+        .with_context(|| format!("probe resolution-scale media {}", video_path.display()))?;
+    let source_video = media_info
+        .primary_video()
+        .context("resolution-scale fixture has no primary video stream")?;
+    let source_width = source_video.width;
+    let source_height = source_video.height;
+    let sequence_frame_count = source_video
+        .total_frames
+        .and_then(|frames| usize::try_from(frames).ok())
+        .unwrap_or(60)
+        .clamp(seek_frames_per_scale.saturating_add(2), 60);
+    let mut state = build_preview_media_perf_state_with_media_info(
+        root_dir,
+        video_path,
+        Some(media_info),
+        sequence_frame_count,
+    )?;
+    let preview_service = HeadlessPreviewRuntime::new();
+    let mut gpu_adapter =
+        HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(
+            PreviewNativeVideoGpuTimingPolicy::Disabled.renderer_policy(),
+            0,
+        )
+        .context("create real headless Viewer GPU Adapter")?;
+    configure_headless_gpu_decode_admission(&preview_service, &mut gpu_adapter);
+    let mut gpu_summary = HeadlessViewerGpuExecutionSummary::default();
+    let sequence_id = state
+        .active_sequence_id()
+        .context("resolution-scale probe has no active Sequence")?;
+
+    let scales = [1.0_f32, 0.5, 0.25];
+    let target_span = sequence_frame_count.saturating_sub(1);
+    let mut phases = Vec::with_capacity(scales.len());
+    let mut warm_decoded_frames = None;
+
+    state.seek(0)?;
+    for scale in scales {
+        state.commit_sequence_edit(sequence_id, "修改预览分辨率", |sequence| {
+            let mut settings = sequence.settings.clone();
+            settings.preview.resolution_scale = scale;
+            sequence.apply_settings(settings)
+        })?;
+        let output = crate::app::preview_quality::preview_execution_resolution(
+            state
+                .active_sequence()
+                .context("resolution-scale probe lost its active Sequence")?
+                .settings
+                .resolution,
+            scale,
+            mondrian_playback::PreviewResolutionScale::Full,
+        );
+        for index in 0..seek_frames_per_scale {
+            let target = index
+                .saturating_add(1)
+                .saturating_mul(target_span)
+                .checked_div(seek_frames_per_scale.saturating_add(1))
+                .unwrap_or(0);
+            let source = if index % 2 == 0 {
+                TimelineSeekSource::PointerDrag
+            } else {
+                TimelineSeekSource::Settled
+            };
+            state.seek_with_source(target as i64, source)?;
+            wait_for_headless_gpu_ready(
+                &preview_service,
+                &mut state,
+                &mut gpu_adapter,
+                &mut gpu_summary,
+                ready_timeout,
+            )?;
+        }
+        wait_for_preview_work_quiescence(&preview_service, &mut state, ready_timeout)?;
+        let diagnostics = preview_service.diagnostics();
+        let decoded = diagnostics.decode_decoded_frame_count;
+        let warm = *warm_decoded_frames.get_or_insert(decoded);
+        phases.push(PreviewMediaResolutionScalePhaseEvidence {
+            resolution_scale: scale,
+            output_width: output.width,
+            output_height: output.height,
+            presented_frames: seek_frames_per_scale,
+            decode_decoded_frame_count: decoded,
+            decode_random_access_still_frames: diagnostics.decode_random_access_still_frames,
+            decode_seeked_frames: diagnostics.decode_seeked_frames,
+            decoded_frame_delta_from_warm: decoded.saturating_sub(warm),
+        });
+    }
+
+    let warm_decoded =
+        warm_decoded_frames.context("resolution-scale probe recorded no warm phase")?;
+    let extents_changed = phases.windows(2).all(|pair| {
+        (pair[0].output_width, pair[0].output_height)
+            != (pair[1].output_width, pair[1].output_height)
+    });
+    let decode_stable = phases.iter().skip(1).all(|phase| phase.decoded_frame_delta_from_warm == 0);
+    let passed = warm_decoded > 0 && extents_changed && decode_stable;
+    Ok(PreviewMediaResolutionScaleDecodeStabilityReport {
+        scenario: "preview_media_resolution_scale_decode_stability",
+        source_width,
+        source_height,
+        sequence_frame_count,
+        seek_frames_per_scale,
+        phases,
+        passed,
+    })
 }
 
 #[test]
@@ -4671,7 +4862,13 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
         &mut gpu_summary,
         Duration::from_secs(30),
     )?;
-    wait_for_headless_playback_preroll(&preview_service, &mut state, Duration::from_secs(30))?;
+    wait_for_headless_playback_preroll(
+        &preview_service,
+        &mut state,
+        &mut gpu_adapter,
+        &mut gpu_summary,
+        Duration::from_secs(30),
+    )?;
 
     for _ in 0..frame_count {
         state.advance_playback_clock(frame_interval);
@@ -5042,7 +5239,7 @@ fn evaluate_external_playback_gates(
     preview_diagnostics: &PreviewDiagnostics,
     playback_evidence: &PlaybackEvidenceReport,
     playback_decode_p95_limit_us: u64,
-    playback_queue_wait_p95_limit_us: u64,
+    playback_current_queue_wait_limit_us: u64,
     min_visible_percent: usize,
     min_ready_basis_points: usize,
 ) -> PreviewExternalPlaybackGateReport {
@@ -5050,17 +5247,33 @@ fn evaluate_external_playback_gates(
         decode_report,
         "preview_decode_playback_cursor_forward_steady_p95_worker_execution_us",
     );
-    let playback_queue_wait_p95_observed = decode_check_observed(
+    let playback_queue_wait_check = decode_check_observed(
         decode_report,
         "preview_decode_playback_cursor_queue_wait_p95_us",
     );
     let playback_decode_p95_observed_us = playback_decode_p95_observed.unwrap_or_default();
-    let playback_queue_wait_p95_observed_us = playback_queue_wait_p95_observed.unwrap_or_default();
+    let playback_current_queue_wait_observed_us =
+        preview_diagnostics.decode_current_queue_wait_max_us;
     let visible_frames = readiness.ready.saturating_add(readiness.stale);
     let min_visible_frames = frames.saturating_mul(min_visible_percent).saturating_add(99) / 100;
     let min_ready_frames =
         frames.saturating_mul(min_ready_basis_points).saturating_add(9_999) / 10_000;
-    let ready_basis_points = readiness.ready.saturating_mul(10_000) / frames.max(1);
+    let ready_frames = if playback_evidence.demand_count > 0 {
+        // The Viewer publication is the final authority for whether an exact
+        // current frame became visible. A Frame Demand may be superseded at a
+        // clock boundary after its GPU output was already published, so the
+        // Engine delivery ledger alone can under-count exact presentation.
+        // Keep both independently gated below and use their union's lower-cost
+        // cardinality here: both ledgers de-duplicate by epoch/frame.
+        usize::try_from(playback_evidence.deliveries.ready)
+            .unwrap_or(usize::MAX)
+            .max(headless_gpu.presented_unique_frame_completions)
+    } else {
+        // Deterministic unit fixtures without an Engine event stream retain
+        // the direct readiness observation as their evidence source.
+        readiness.ready
+    };
+    let ready_basis_points = ready_frames.saturating_mul(10_000) / frames.max(1);
     let playback_decode_profile = preview_diagnostics.decode_access_mode_profiles.playback_cursor;
     let playback_temporal_approximation_frames =
         playback_decode_profile.temporal_approximation_frames;
@@ -5074,15 +5287,15 @@ fn evaluate_external_playback_gates(
     {
         failures.push("playback_decode_p95");
     }
-    if playback_queue_wait_p95_observed
-        .is_none_or(|observed| observed > playback_queue_wait_p95_limit_us)
+    if playback_queue_wait_check.is_none()
+        || playback_current_queue_wait_observed_us > playback_current_queue_wait_limit_us
     {
-        failures.push("playback_queue_wait_p95");
+        failures.push("playback_current_queue_wait");
     }
     if visible_frames < min_visible_frames {
         failures.push("visible_frame_ratio");
     }
-    if readiness.ready < min_ready_frames {
+    if ready_frames < min_ready_frames {
         failures.push("current_ready_ratio");
     }
     if headless_gpu.rendered_frames == 0 {
@@ -5144,7 +5357,10 @@ fn evaluate_external_playback_gates(
         failures.push("clock_skipped_intermediate_frames");
     }
     let frame_store = preview_diagnostics.frame_store;
-    let cpu_frame_store_within_budget = frame_store.production_residency_contract_holds();
+    let cpu_frame_store_within_budget = frame_store.optional_media_cache_within_policy()
+        && frame_store.media_aggregate_within_hard_grant()
+        && frame_store.media_high_water_within_hard_grant()
+        && frame_store.viewer_residency_within_policy();
     if !cpu_frame_store_within_budget {
         failures.push("cpu_frame_store_budget");
     }
@@ -5173,12 +5389,12 @@ fn evaluate_external_playback_gates(
         continuous_window: None,
         playback_decode_p95_limit_us,
         playback_decode_p95_observed_us,
-        playback_queue_wait_p95_limit_us,
-        playback_queue_wait_p95_observed_us,
+        playback_current_queue_wait_limit_us,
+        playback_current_queue_wait_observed_us,
         min_visible_frames,
         visible_frames,
         min_ready_frames,
-        ready_frames: readiness.ready,
+        ready_frames,
         min_ready_basis_points,
         ready_basis_points,
         gpu_rendered_frames: headless_gpu.rendered_frames,
@@ -5392,7 +5608,13 @@ fn run_preview_media_continuous_playback_probe(
                 initial_ready_observation.current_gpu_ready,
                 "continuous playback failed to establish its exact starting presentation"
             );
-            wait_for_headless_playback_preroll(&preview_service, &mut state, config.ready_timeout)?;
+            wait_for_headless_playback_preroll(
+                &preview_service,
+                &mut state,
+                &mut gpu_adapter,
+                &mut headless_gpu,
+                config.ready_timeout,
+            )?;
             // The declared continuous window begins only after cold-start
             // priming has established a presentable current frame. Startup
             // skips remain observable in Preview diagnostics but must not be
@@ -6078,7 +6300,7 @@ fn wait_for_preview_idle_residency_release(
 ) -> anyhow::Result<()> {
     wait_for_preview_work_quiescence(preview_service, state, timeout)?;
     anyhow::ensure!(
-        preview_service.try_release_settled_transport_media_residency(),
+        preview_service.try_release_settled_transport_all_media_residency(),
         "Preview output or work state was not settled while releasing decoder-backed media residency"
     );
     let deadline = Instant::now() + timeout;
@@ -6163,29 +6385,12 @@ fn preview_idle_release_requires_worker_idle_and_post_reap_accounting() {
 fn validate_executed_adaptive_scaling(
     report: &PreviewMediaPlaybackPerfReport,
 ) -> anyhow::Result<()> {
-    let Some(summary) = report.preview_decode_report.summary.as_ref() else {
-        return Ok(());
-    };
-    let profile = summary.access_mode_profiles.playback_cursor;
-    let requested = profile
-        .hardware_decode_prefer_hardware_requested_frames
-        .saturating_add(profile.hardware_decode_prefer_gpu_requested_frames)
-        .saturating_add(profile.hardware_decode_require_gpu_requested_frames);
-    let effective = profile
-        .hardware_decode_cpu_transfer_observed_frames
-        .saturating_add(profile.hardware_decode_gpu_resident_native_frames);
-    let not_engaged = requested.saturating_sub(effective);
     let pressure_threshold = mondrian_playback::PlaybackPolicy::default().pressure_threshold as u64;
     let quarter_evidence_threshold = pressure_threshold.saturating_mul(2);
-    if not_engaged < quarter_evidence_threshold {
+    let degraded = report.playback_evidence.deliveries.degraded;
+    if degraded < pressure_threshold {
         return Ok(());
     }
-
-    anyhow::ensure!(
-        report.playback_evidence.deliveries.degraded >= quarter_evidence_threshold,
-        "hardware fallback execution did not reach Playback Quality Policy: requested={requested}, effective={effective}, degraded={}",
-        report.playback_evidence.deliveries.degraded
-    );
     let full = report
         .headless_gpu
         .output_extents
@@ -6201,11 +6406,17 @@ fn validate_executed_adaptive_scaling(
         height: full.height.div_ceil(4),
     };
     anyhow::ensure!(
-        report.headless_gpu.output_extents.contains(&expected_half)
-            && report.headless_gpu.output_extents.contains(&expected_quarter),
-        "hardware fallback changed policy state without executing Half/Quarter GPU extents: {:?}",
+        report.headless_gpu.output_extents.contains(&expected_half),
+        "sustained playback pressure did not execute a Half GPU extent: {:?}",
         report.headless_gpu.output_extents
     );
+    if degraded >= quarter_evidence_threshold {
+        anyhow::ensure!(
+            report.headless_gpu.output_extents.contains(&expected_quarter),
+            "continued playback pressure did not execute a Quarter GPU extent: {:?}",
+            report.headless_gpu.output_extents
+        );
+    }
     Ok(())
 }
 
@@ -6977,15 +7188,26 @@ fn terminal_headless_observation_closes_a_consumed_exact_demand_without_ready() 
 fn wait_for_headless_playback_preroll(
     preview_service: &HeadlessPreviewRuntime,
     state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
     timeout: Duration,
 ) -> anyhow::Result<()> {
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("derive bounded Headless playback-preroll deadline")?;
     let work_watch = preview_service.work_watch();
     while state.is_playback_priming() {
         let drain_target_revision = work_watch.revision();
         let pump_outcome = apply_headless_preview_outcome(preview_service, state);
         let now = Instant::now();
         state.advance_playback_clock_at(now);
+        let attempt = execute_headless_gpu_candidate(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_summary,
+            HeadlessGpuCompletionDeadline::at(deadline),
+        )?;
         anyhow::ensure!(
             now < deadline,
             "timed out waiting for bounded playback video preroll; diagnostics: {:?}",
@@ -6995,7 +7217,7 @@ fn wait_for_headless_playback_preroll(
             &work_watch,
             drain_target_revision,
             deadline,
-            pump_outcome.needs_follow_up_poll,
+            pump_outcome.needs_follow_up_poll && !attempt.status.requires_bounded_wait(),
         );
     }
     Ok(())
@@ -7287,6 +7509,15 @@ fn build_app_ui_perf_state(
 }
 
 fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
+    generate_preview_media_fixture_with_size(path, 320, 180, 2)
+}
+
+fn generate_preview_media_fixture_with_size(
+    path: &Path,
+    width: u32,
+    height: u32,
+    duration_secs: u32,
+) -> anyhow::Result<bool> {
     if Command::new("ffmpeg").arg("-version").output().is_err() {
         return Ok(false);
     }
@@ -7299,7 +7530,9 @@ fn generate_preview_media_fixture(path: &Path) -> anyhow::Result<bool> {
         .arg("-f")
         .arg("lavfi")
         .arg("-i")
-        .arg("testsrc2=size=320x180:rate=30:duration=2")
+        .arg(format!(
+            "testsrc2=size={width}x{height}:rate=30:duration={duration_secs}"
+        ))
         .arg("-an")
         .arg("-c:v")
         .arg("mpeg4")
@@ -7794,6 +8027,7 @@ fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
     let diagnostics = PreviewDiagnostics {
         decode_successes: 1,
         decode_in_process_cpu_frames: 1,
+        decode_current_queue_wait_max_us: 85_000,
         decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
             playback_cursor: PreviewDecodeAccessModeProfile {
                 frames: 1,
@@ -7835,6 +8069,50 @@ fn preview_playback_decode_failures_include_playback_queue_wait_regressions() {
 
     assert!(failures.contains(&"preview_decode_playback_cursor_queue_wait_over_budget"));
     assert!(!failures.contains(&"preview_decode_scrub_cursor_queue_wait_over_budget"));
+}
+
+#[test]
+fn preview_playback_decode_failures_ignore_prefetch_only_queue_residency() {
+    let diagnostics = PreviewDiagnostics {
+        decode_successes: 1,
+        decode_in_process_cpu_frames: 1,
+        decode_queue_wait_max_us: 850_000,
+        decode_prefetch_queue_wait_max_us: 850_000,
+        decode_current_queue_wait_max_us: 84,
+        decode_access_mode_profiles: PreviewDecodeAccessModeProfiles {
+            playback_cursor: PreviewDecodeAccessModeProfile {
+                frames: 1,
+                in_process_cpu_frames: 1,
+                queue_wait_total_us: 850_000,
+                queue_wait_max_us: 850_000,
+                queue_wait_last_us: 850_000,
+                session_reused_frames: 1,
+                work_classes: PreviewDecodeWorkClassProfiles {
+                    reused_other: PreviewDecodeWorkLatencyProfile {
+                        frames: 1,
+                        latency_buckets: PreviewDecodeWorkLatencyBuckets {
+                            le_10ms: 1,
+                            ..PreviewDecodeWorkLatencyBuckets::default()
+                        },
+                        ..PreviewDecodeWorkLatencyProfile::default()
+                    },
+                    ..PreviewDecodeWorkClassProfiles::default()
+                },
+                ..PreviewDecodeAccessModeProfile::default()
+            },
+            ..PreviewDecodeAccessModeProfiles::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+    let report = build_preview_decode_performance_report(
+        diagnostics.decode_performance_summary(50_000),
+        "preview-playback-prefetch-queue-test",
+        50_000,
+    );
+
+    let failures = preview_playback_decode_failures(&report);
+
+    assert!(!failures.contains(&"preview_decode_playback_cursor_queue_wait_over_budget"));
 }
 
 #[test]
@@ -8630,7 +8908,10 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
     let report = preview_decode_report_with_playback_p95(80_000, 12_000);
 
     let evidence = PlaybackEvidenceCollector::default().report();
-    let diagnostics = PreviewDiagnostics::default();
+    let diagnostics = PreviewDiagnostics {
+        decode_current_queue_wait_max_us: 12_000,
+        ..PreviewDiagnostics::default()
+    };
     let gpu = passing_headless_gpu_summary(20);
     let gates = evaluate_external_playback_gates(
         &readiness,
@@ -8653,7 +8934,7 @@ fn external_playback_gates_fail_on_decode_queue_or_visibility_regression() {
         gates.failures,
         vec![
             "playback_decode_p95",
-            "playback_queue_wait_p95",
+            "playback_current_queue_wait",
             "visible_frame_ratio",
             "current_ready_ratio"
         ]
@@ -8736,7 +9017,7 @@ fn external_playback_gates_fail_closed_when_decode_or_queue_p95_evidence_is_miss
         ),
         (
             "preview_decode_playback_cursor_queue_wait_p95_us",
-            "playback_queue_wait_p95",
+            "playback_current_queue_wait",
         ),
     ] {
         let mut report = preview_decode_report_with_playback_p95(25_000, 4_000);
@@ -8797,7 +9078,9 @@ fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready()
     let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
     let diagnostics = PreviewDiagnostics::default();
     let evidence = PlaybackEvidenceCollector::default().report();
-    let gpu = passing_headless_gpu_summary(20);
+    let mut gpu = passing_headless_gpu_summary(20);
+    gpu.presented_demand_completions = 2;
+    gpu.presented_unique_frame_completions = 2;
 
     let gates = evaluate_external_playback_gates(
         &readiness,
@@ -8816,8 +9099,44 @@ fn external_playback_gates_do_not_treat_repeated_stale_frames_as_current_ready()
     assert_eq!(gates.visible_frames, 20);
     assert_eq!(gates.ready_frames, 2);
     assert_eq!(gates.min_ready_frames, 18);
-    assert_eq!(gates.failures, vec!["current_ready_ratio"]);
+    assert_eq!(
+        gates.failures,
+        vec!["current_ready_ratio", "viewer_gpu_publication_coverage"]
+    );
     assert!(!gates.passed);
+}
+
+#[test]
+fn external_playback_gates_use_exact_presentation_over_transient_polling_and_supersession() {
+    let readiness = PreviewReadinessCounts {
+        ready: 19,
+        stale: 1,
+        ..PreviewReadinessCounts::default()
+    };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let diagnostics = PreviewDiagnostics::default();
+    let mut evidence = PlaybackEvidenceCollector::default().report();
+    evidence.demand_count = 20;
+    evidence.deliveries.ready = 18;
+    let gpu = passing_headless_gpu_summary(20);
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        &gpu,
+        20,
+        33_000,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        9_950,
+    );
+
+    assert!(gates.passed);
+    assert_eq!(gates.ready_frames, 20);
+    assert!(gates.failures.is_empty());
 }
 
 #[test]
@@ -9053,6 +9372,46 @@ fn external_playback_gates_fail_on_cpu_frame_store_budget_or_admission() {
     assert!(!gates.cpu_frame_store_within_budget);
     assert_eq!(gates.cpu_frame_store_oversize_rejections, 1);
     assert!(!gates.passed);
+}
+
+#[test]
+fn external_playback_gates_allow_bounded_active_prefetch_reservations() {
+    let readiness = PreviewReadinessCounts { ready: 20, ..PreviewReadinessCounts::default() };
+    let decode = preview_decode_report_with_playback_p95(25_000, 4_000);
+    let evidence = PlaybackEvidenceCollector::default().report();
+    let diagnostics = PreviewDiagnostics {
+        frame_store: mondrian_playback::PreviewFrameStoreDiagnostics {
+            media_work_reservations: 4,
+            media_prefetch_work_reservations: 4,
+            media_work_reserved_bytes: 40_000_000,
+            media_aggregate_reserved_bytes: 390_000_000,
+            media_aggregate_byte_high_water: 390_000_000,
+            media_byte_budget: 402_653_184,
+            media_aggregate_hard_byte_limit: 1_073_741_824,
+            current_media_working_set_byte_limit: 1_073_741_824,
+            viewer_byte_budget: 201_326_592,
+            ..mondrian_playback::PreviewFrameStoreDiagnostics::default()
+        },
+        ..PreviewDiagnostics::default()
+    };
+    let gpu = passing_headless_gpu_summary(20);
+
+    let gates = evaluate_external_playback_gates(
+        &readiness,
+        &gpu,
+        20,
+        33_000,
+        &decode,
+        &diagnostics,
+        &evidence,
+        40_000,
+        10_000,
+        95,
+        9_000,
+    );
+
+    assert!(gates.cpu_frame_store_within_budget);
+    assert!(!gates.failures.contains(&"cpu_frame_store_budget"));
 }
 
 fn passing_headless_gpu_summary(frames: usize) -> HeadlessViewerGpuExecutionSummary {

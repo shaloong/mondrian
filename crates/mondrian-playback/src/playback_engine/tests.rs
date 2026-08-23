@@ -817,7 +817,7 @@ fn priming_deadline_remains_independent_from_media_frame_boundaries() {
     let mut engine = engine();
     engine.play(100, ts(10)).unwrap();
     let priming = engine.pending_frame_demand().expect("priming demand");
-    assert_eq!(priming.deadline, Some(ts(510)));
+    assert_eq!(priming.deadline, Some(ts(1510)));
 
     engine.tick(ts(200)).unwrap();
     assert_eq!(engine.pending_frame_demand(), Some(priming));
@@ -832,7 +832,7 @@ fn terminal_late_priming_demand_still_exposes_fallback_and_next_frame_wakes() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
     let priming = engine.pending_frame_demand().expect("priming demand");
-    assert_eq!(priming.deadline, Some(ts(500)));
+    assert_eq!(priming.deadline, Some(ts(1500)));
 
     let late = FrameDeliveryCandidate::for_demand(priming.identity(), FrameDeliveryKind::Late)
         .complete_at(ts(250));
@@ -841,19 +841,22 @@ fn terminal_late_priming_demand_still_exposes_fallback_and_next_frame_wakes() {
     assert!(engine.pending_frame_demand().is_none());
     assert_eq!(
         engine.time_until_next_wake(ts(250)).unwrap(),
-        Some(Duration::from_millis(250))
+        Some(Duration::from_millis(1250))
     );
 
-    assert_eq!(engine.tick(ts(499)).unwrap().state, TransportState::Priming);
-    let fallback = engine.tick(ts(500)).unwrap();
+    assert_eq!(
+        engine.tick(ts(1499)).unwrap().state,
+        TransportState::Priming
+    );
+    let fallback = engine.tick(ts(1500)).unwrap();
     assert_eq!(fallback.state, TransportState::Playing);
     assert_eq!(fallback.position.frame, 0);
     assert_eq!(
-        engine.time_until_next_wake(ts(500)).unwrap(),
+        engine.time_until_next_wake(ts(1500)).unwrap(),
         Some(Duration::from_millis(40))
     );
 
-    let advanced = engine.tick(ts(540)).unwrap();
+    let advanced = engine.tick(ts(1540)).unwrap();
     assert_eq!(advanced.position.frame, 1);
     let next = engine.pending_frame_demand().expect("next-frame demand");
     assert_ne!(next.identity(), priming.identity());
@@ -1167,6 +1170,49 @@ fn repeated_presentable_degradation_enters_resolution_recovery() {
     assert_eq!(
         engine.snapshot().preview_scale,
         PreviewResolutionScale::Half
+    );
+}
+
+#[test]
+fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
+    let policy = PlaybackPolicy {
+        pressure_window: 3,
+        pressure_threshold: 3,
+        ..PlaybackPolicy::default()
+    };
+    let mut engine = PlaybackEngine::new(Rational::new(1, 25), policy).unwrap();
+    engine.play(100, ts(0)).unwrap();
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).unwrap();
+
+    engine.tick(ts(40)).unwrap();
+    engine.tick(ts(80)).unwrap();
+    engine.tick(ts(120)).unwrap();
+
+    assert_eq!(engine.snapshot().state, TransportState::Recovering);
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Half
+    );
+    assert_eq!(
+        engine.pending_frame_demand().expect("recovery demand").target.frame,
+        3
+    );
+
+    for instant in [160, 200, 240] {
+        engine.tick(ts(instant)).unwrap();
+    }
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Half,
+        "a new scale must receive one terminal execution attempt before another reduction"
+    );
+
+    let half_attempt = current_delivery(&engine, FrameDeliveryKind::Late, ts(240));
+    engine.observe_frame_delivery(half_attempt).unwrap();
+    assert_eq!(
+        engine.snapshot().preview_scale,
+        PreviewResolutionScale::Quarter,
+        "a failed Half attempt may authorize the next bounded reduction"
     );
 }
 
@@ -1610,7 +1656,7 @@ fn priming_timeout_starts_at_deadline_and_catches_up_without_extra_drift() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
 
-    let snapshot = engine.tick(ts(750)).unwrap();
+    let snapshot = engine.tick(ts(1750)).unwrap();
 
     assert_eq!(snapshot.state, TransportState::Playing);
     assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));

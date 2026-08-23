@@ -150,7 +150,7 @@ fn test_media_job_with_generation(
 }
 
 #[test]
-fn only_current_playback_preserves_in_flight_work_after_presentation_deadline() {
+fn playback_cursor_work_preserves_in_flight_locality_after_deadline() {
     let cases = [
         (
             MediaPreviewRequestPriority::Current,
@@ -160,7 +160,7 @@ fn only_current_playback_preserves_in_flight_work_after_presentation_deadline() 
         (
             MediaPreviewRequestPriority::Prefetch,
             PreviewDecodeAccessMode::PlaybackCursor,
-            mondrian_playback::FrameInFlightDeadlinePolicy::Cancel,
+            mondrian_playback::FrameInFlightDeadlinePolicy::FinishForLocality,
         ),
         (
             MediaPreviewRequestPriority::Current,
@@ -451,7 +451,7 @@ fn media_preview_scheduler_reports_realtime_current_pressure_for_still_work() {
 }
 
 #[test]
-fn media_preview_scheduler_expires_only_stalled_realtime_current_requests() {
+fn media_preview_scheduler_expires_only_stalled_playback_current_requests() {
     let scheduler = MediaPreviewScheduler::with_max_pending(3);
     let generation = scheduler.begin_generation();
     let scrub = test_media_key(1);
@@ -486,18 +486,18 @@ fn media_preview_scheduler_expires_only_stalled_realtime_current_requests() {
         scheduled_request()
     );
 
-    assert!(scheduler.expire_realtime_current_older_than(Duration::from_secs(60)).is_empty());
+    assert!(scheduler.expire_playback_current_older_than(Duration::from_secs(60)).is_empty());
     assert_eq!(scheduler.pending_len(), 3);
 
-    let expired = scheduler.expire_realtime_current_older_than(Duration::ZERO);
-    assert_eq!(expired.len(), 2);
-    assert!(expired.iter().any(|request| request.key == scrub));
+    let expired = scheduler.expire_playback_current_older_than(Duration::ZERO);
+    assert_eq!(expired.len(), 1);
+    assert!(!expired.iter().any(|request| request.key == scrub));
     assert!(expired.iter().any(|request| request.key == playback));
     assert!(!expired.iter().any(|request| request.key == still));
-    assert!(!scheduler.has_pending_key(&scrub));
+    assert!(scheduler.has_pending_key(&scrub));
     assert!(!scheduler.has_pending_key(&playback));
     assert!(scheduler.has_pending_key(&still));
-    assert_eq!(scheduler.diagnostics().canceled_requests, 2);
+    assert_eq!(scheduler.diagnostics().canceled_requests, 1);
 }
 
 #[test]

@@ -115,6 +115,16 @@ fn runtime_key(effect_key: &str, definition_registry_revision: u64) -> EffectPlu
     }
 }
 
+fn lock_runtime_registry(
+) -> std::sync::MutexGuard<'static, HashMap<EffectPluginRuntimeKey, EffectPluginRuntimeState>> {
+    // A poisoned runtime registry must never panic the execution or admission
+    // path: recover the map and continue with the last recorded quarantine
+    // state rather than turning one plugin failure into a host panic.
+    plugin_runtime_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runtime status of the currently registered Definition generation.
 ///
 /// Replaced Definitions have independent quarantine state. A failure reported
@@ -136,9 +146,7 @@ fn runtime_status(
     definition_registry_revision: u64,
     contract: &EffectPluginContract,
 ) -> EffectPluginRuntimeStatus {
-    let state = plugin_runtime_registry()
-        .lock()
-        .expect("plugin runtime registry poisoned")
+    let state = lock_runtime_registry()
         .get(&runtime_key(key, definition_registry_revision))
         .cloned()
         .unwrap_or_default();
@@ -161,9 +169,7 @@ pub(crate) fn effect_plugin_is_runtime_available(
     if !contract.is_api_compatible() {
         return false;
     }
-    !plugin_runtime_registry()
-        .lock()
-        .expect("plugin runtime registry poisoned")
+    !lock_runtime_registry()
         .get(&runtime_key(key, definition_registry_revision))
         .map(|state| state.disabled)
         .unwrap_or(false)
@@ -192,7 +198,7 @@ pub(crate) fn record_plugin_runtime_failure(
     let Some(contract) = contract else {
         return;
     };
-    let mut registry = plugin_runtime_registry().lock().expect("plugin runtime registry poisoned");
+    let mut registry = lock_runtime_registry();
     let state = registry.entry(runtime_key(key, definition_registry_revision)).or_default();
     state.last_error = Some(reason.into());
     if matches!(
@@ -205,10 +211,7 @@ pub(crate) fn record_plugin_runtime_failure(
 
 #[cfg(test)]
 fn reset_plugin_runtime_state(key: &str, definition_registry_revision: u64) {
-    plugin_runtime_registry()
-        .lock()
-        .expect("plugin runtime registry poisoned")
-        .remove(&runtime_key(key, definition_registry_revision));
+    lock_runtime_registry().remove(&runtime_key(key, definition_registry_revision));
 }
 
 #[cfg(test)]

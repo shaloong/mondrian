@@ -17,9 +17,11 @@ fn media_dependency_from_pending(
     dependency: PreviewTimelinePendingDependency,
 ) -> Option<EvaluationDependency> {
     match dependency {
-        PreviewTimelinePendingDependency::Media(asset_id) => {
-            Some(EvaluationDependency::MediaFrame(asset_id))
-        }
+        PreviewTimelinePendingDependency::Media { asset_id, wait } => matches!(
+            wait,
+            crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer
+        )
+        .then_some(EvaluationDependency::MediaProducer(asset_id)),
         PreviewTimelinePendingDependency::BasicTitle(_)
         | PreviewTimelinePendingDependency::Temporal { .. } => None,
     }
@@ -31,9 +33,10 @@ fn media_pending_dependency_from_wait(
     dependencies: &[EvaluationDependency],
 ) -> Option<PreviewTimelinePendingDependency> {
     dependencies.first().map(|dependency| match dependency {
-        EvaluationDependency::MediaFrame(asset_id) => {
-            PreviewTimelinePendingDependency::Media(*asset_id)
-        }
+        EvaluationDependency::MediaProducer(asset_id) => PreviewTimelinePendingDependency::Media {
+            asset_id: *asset_id,
+            wait: crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer,
+        },
     })
 }
 
@@ -68,6 +71,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             && let Some(dependency) = media_pending_dependency_from_wait(&dependencies)
         {
             bump(&self.metrics.timeline_evaluation_wait_hits);
+            // Presentation resets the per-turn level before acquiring an
+            // evaluation. A retained producer wait is still backed by the
+            // Broker even though timeline resolution is intentionally
+            // deduplicated, so reassert the level on every cache hit.
+            self.execution.borrow_mut().set_pending(true);
             return FrameResolutionOutcome::Pending(dependency);
         }
         bump(&self.metrics.timeline_evaluation_misses);
@@ -252,8 +260,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             PreviewTimelineResolution::Pending { dependency } => match dependency {
-                PreviewTimelinePendingDependency::Media(asset_id) => {
-                    tracing::trace!(%asset_id, "viewer Timeline is waiting for media");
+                PreviewTimelinePendingDependency::Media { asset_id, wait } => {
+                    let wait = match wait {
+                        crate::app::preview_timeline_execution::PreviewTimelineMediaWait::Producer => "producer",
+                        crate::app::preview_timeline_execution::PreviewTimelineMediaWait::RetryAdmission => "admission_retry",
+                    };
+                    tracing::trace!(%asset_id, wait, "viewer Timeline is waiting for media");
                 }
                 PreviewTimelinePendingDependency::BasicTitle(request_identity) => {
                     tracing::trace!(
@@ -270,7 +282,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             },
             PreviewTimelineResolution::Unavailable { reason } => {
-                tracing::warn!(
+                tracing::debug!(
                     code = reason.code(),
                     detail = reason.detail(),
                     "viewer Timeline resolution failed"
@@ -301,5 +313,31 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod dependency_tests {
+    use super::*;
+    use crate::app::preview_timeline_execution::PreviewTimelineMediaWait;
+
+    #[test]
+    fn only_admitted_media_producers_become_retained_evaluation_waits() {
+        let asset_id = AssetId::new();
+        assert_eq!(
+            media_dependency_from_pending(PreviewTimelinePendingDependency::Media {
+                asset_id,
+                wait: PreviewTimelineMediaWait::Producer,
+            }),
+            Some(EvaluationDependency::MediaProducer(asset_id))
+        );
+        assert_eq!(
+            media_dependency_from_pending(PreviewTimelinePendingDependency::Media {
+                asset_id,
+                wait: PreviewTimelineMediaWait::RetryAdmission,
+            }),
+            None,
+            "transient admission pressure must re-enter scheduling on the next candidate pass"
+        );
     }
 }

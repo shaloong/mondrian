@@ -302,7 +302,6 @@ pub(super) fn resolve_media_path_for_preference(
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-        target_resolution: sequence.settings.resolution,
         input_color: &input_color,
         prefer_proxy,
         request_missing_proxy_generation: false,
@@ -310,6 +309,7 @@ pub(super) fn resolve_media_path_for_preference(
         proxy_color,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     let PreviewMediaSourceOutcome::Ready(resolved) = outcome else {
         anyhow::bail!("product Preview media resolution did not produce a decode path");
@@ -335,7 +335,6 @@ fn resolve_unavailable_reason(state: &AppState, asset: &AssetRecord) -> anyhow::
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-        target_resolution: sequence.settings.resolution,
         input_color: &input_color,
         prefer_proxy: false,
         request_missing_proxy_generation: false,
@@ -343,6 +342,7 @@ fn resolve_unavailable_reason(state: &AppState, asset: &AssetRecord) -> anyhow::
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     let PreviewMediaSourceOutcome::Unavailable(unavailable) = outcome else {
         anyhow::bail!("offline original did not become explicitly unavailable");

@@ -346,6 +346,36 @@ impl<T> DerefMut for ViewerGpuDeviceGenerationMember<T> {
     }
 }
 
+impl ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner> {
+    /// Progress terminal for the live owner.
+    ///
+    /// An empty replacement shell has no authoritative device generation yet,
+    /// so it reports no terminal rather than dereferencing a missing owner.
+    pub(crate) fn generation_terminal(&self) -> Option<ViewerGpuDeviceGenerationTerminal> {
+        self.value.as_ref().and_then(|owner| owner.generation_terminal())
+    }
+
+    /// Consume one progress observation from the live owner.
+    ///
+    /// An empty replacement shell has no progress domain and yields none.
+    pub(crate) fn try_observe(&self) -> Option<ViewerGpuDeviceProgressObservation> {
+        self.value.as_ref().and_then(|owner| owner.try_observe())
+    }
+
+    /// Reserve progress authority from the live owner.
+    ///
+    /// An empty replacement shell behaves like a shut-down owner so callers
+    /// take the explicit CPU-fallback path instead of dereferencing nothing.
+    pub(crate) fn reserve_submission(
+        &self,
+    ) -> Result<ViewerGpuDeviceProgressPermit<'_>, ViewerGpuDeviceProgressReserveError> {
+        match self.value.as_ref() {
+            Some(owner) => owner.reserve_submission(),
+            None => Err(ViewerGpuDeviceProgressReserveError::OwnerShutdown),
+        }
+    }
+}
+
 struct ViewerGpuDeviceGenerationState {
     terminal: Mutex<Option<ViewerGpuDeviceGenerationTerminal>>,
 }
@@ -919,7 +949,21 @@ where
     I: Send + 'static,
     D: ViewerGpuDeviceWait<I>,
 {
-    while let Ok(command) = command_receiver.recv() {
+    // Idle pacing: wgpu invokes `on_submitted_work_done` callbacks only from
+    // `Device::poll`. If a submission was registered while the worker had no
+    // pending command, the callback would otherwise stay staged forever and
+    // its completion notice would never reach the submission lifecycle. Keep
+    // polling on a bounded idle cadence so an already-completed submission
+    // still releases through its authoritative callback.
+    loop {
+        let command = match command_receiver.recv_timeout(policy.wait_quantum) {
+            Ok(command) => command,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = driver.wait(None, policy.wait_quantum);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
         match command {
             ViewerGpuDeviceProgressCommand::Track {
                 submission_id,
@@ -974,6 +1018,7 @@ fn drive_viewer_gpu_submission<I, D>(
 {
     let mut exact_wait = true;
     let mut terminal_reported = false;
+    let mut fence_satisfied = false;
 
     loop {
         if let Some(terminal) = health.terminal() {
@@ -1004,10 +1049,13 @@ fn drive_viewer_gpu_submission<I, D>(
         match wait {
             Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut)) => {}
             Ok(Ok(ViewerGpuDeviceWaitStatus::Satisfied)) => {
-                // If the callback was conservatively bound to a later shared
-                // queue submission, continue bounded latest-submission waits
-                // until its cleanup ticket appears.
+                // The fence is the authoritative GPU completion evidence:
+                // wgpu reports `WaitSucceeded` only after the exact submission
+                // finished executing. `fence_satisfied` records that fact; the
+                // post-poll barrier below publishes it, while a device-loss
+                // terminal observed from the same poll still dominates.
                 exact_wait = false;
+                fence_satisfied = true;
             }
             Ok(Err(reason)) => {
                 let terminal =
@@ -1068,7 +1116,12 @@ fn drive_viewer_gpu_submission<I, D>(
         // `Device::poll` is on this stack. Observe that release before pacing;
         // otherwise every already-complete frame pays an artificial full
         // wait quantum and 60 fps playback loses almost half its frame budget.
-        if callback_observed.load(Ordering::Acquire) {
+        // The bounded wait's `WaitSucceeded` fence result is also authoritative
+        // GPU completion evidence: publish it even when the supplementary
+        // callback races or lags this poll (wgpu 30 defers callback delivery),
+        // otherwise the completion notice stays stranded behind an unavailable
+        // callback and the quarantine deadline revokes the retained output.
+        if callback_observed.load(Ordering::Acquire) || fence_satisfied {
             // A progress failure still forbids publication, but this exact
             // post-poll callback lets the Adapter retire its quarantined
             // lifecycle owner. Actual device loss returned above instead.
@@ -1360,6 +1413,17 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn empty_device_generation_member_reports_no_terminal_and_no_observations() {
+        let member = ViewerGpuDeviceGenerationMember::<ViewerGpuDeviceProgressOwner>::empty();
+        assert!(member.generation_terminal().is_none());
+        assert!(member.try_observe().is_none());
+        assert!(matches!(
+            member.reserve_submission(),
+            Err(ViewerGpuDeviceProgressReserveError::OwnerShutdown)
+        ));
+    }
 
     type WaitCallLog = Arc<Mutex<Vec<Option<u64>>>>;
 

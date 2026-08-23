@@ -2345,11 +2345,18 @@ fn prepare_timeline_audio_input(
         return Ok(TimelineAudioInput::Silent { sample_rate, channel_layout });
     }
 
-    let temp_path = std::env::temp_dir().join(format!(
-        "mondrian-export-audio-{}-{}.f32",
-        job.id(),
-        chrono::Utc::now().timestamp_millis()
-    ));
+    let temp = tempfile::Builder::new()
+        .prefix("mondrian-export-audio-")
+        .suffix(".f32")
+        .tempfile()
+        .map_err(|error| {
+            JobExecutionResult::Failed(format!("分配唯一导出音频临时文件失败: {error}"))
+        })?;
+    let temp_path = temp.path().to_path_buf();
+    // The render helper creates the file itself, so drop the reserved handle
+    // first; the unique path keeps concurrent jobs and reruns isolated.
+    drop(temp);
+    let mut temp_guard = ExportAudioTempFile::armed(&temp_path);
     let resource_policy = execution_gate.resource_policy();
 
     match render_timeline_audio_to_pcm_f32(
@@ -2365,22 +2372,49 @@ fn prepare_timeline_audio_input(
         report,
     ) {
         JobExecutionResult::ReversibleWorkCompleted => {
+            temp_guard.defuse();
             Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channel_layout })
         }
         JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
-            let _ = std::fs::remove_file(&temp_path);
             Err(JobExecutionResult::Failed(
                 "audio preparation crossed publication authority inside reversible export work"
                     .to_owned(),
             ))
         }
-        JobExecutionResult::Cancelled => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(JobExecutionResult::Cancelled)
-        }
-        JobExecutionResult::Failed(reason) => {
-            let _ = std::fs::remove_file(&temp_path);
-            Err(JobExecutionResult::Failed(reason))
+        JobExecutionResult::Cancelled => Err(JobExecutionResult::Cancelled),
+        JobExecutionResult::Failed(reason) => Err(JobExecutionResult::Failed(reason)),
+    }
+}
+
+/// RAII cleanup for one export audio PCM artifact.
+///
+/// On any non-success path (or a panic) the guard removes the artifact and
+/// logs the deletion failure instead of silently leaking a potentially
+/// multi-gigabyte interleaved PCM file in the shared temp directory.
+struct ExportAudioTempFile {
+    path: Option<PathBuf>,
+}
+
+impl ExportAudioTempFile {
+    fn armed(path: &Path) -> Self {
+        Self { path: Some(path.to_path_buf()) }
+    }
+
+    fn defuse(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for ExportAudioTempFile {
+    fn drop(&mut self) {
+        let Some(path) = self.path.take() else { return };
+        if let Err(error) = std::fs::remove_file(&path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove export audio temporary artifact {}: {error}",
+                path.display()
+            );
         }
     }
 }

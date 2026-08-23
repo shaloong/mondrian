@@ -647,7 +647,7 @@ pub const MAX_BOUNDED_VIDEO_PREROLL_FRAMES: usize = 16;
 impl Default for PlaybackPolicy {
     fn default() -> Self {
         Self {
-            priming_limit: Duration::from_millis(500),
+            priming_limit: Duration::from_millis(1_500),
             minimum_video_preroll_frames: MAX_BOUNDED_VIDEO_PREROLL_FRAMES,
             pressure_window: 12,
             pressure_threshold: 8,
@@ -802,6 +802,7 @@ pub struct PlaybackEngine {
     last_timestamp: MonotonicTimestamp,
     preview_scale: PreviewResolutionScale,
     quality_revision: u64,
+    quality_change_awaiting_delivery: bool,
     recent_pressure: Vec<bool>,
     consecutive_healthy: usize,
     next_demand_sequence: u64,
@@ -850,6 +851,7 @@ impl PlaybackEngine {
             last_timestamp: MonotonicTimestamp::ZERO,
             preview_scale: PreviewResolutionScale::Full,
             quality_revision: 0,
+            quality_change_awaiting_delivery: false,
             recent_pressure: Vec::with_capacity(policy.pressure_window),
             consecutive_healthy: 0,
             next_demand_sequence: 1,
@@ -1514,6 +1516,17 @@ impl PlaybackEngine {
             FrameDeliveryKind::Ready | FrameDeliveryKind::Degraded
         );
         let healthy = delivery.kind() == FrameDeliveryKind::Ready;
+        let quality_attempt_observed = delivery.kind() != FrameDeliveryKind::Canceled;
+        if self.quality_change_awaiting_delivery && quality_attempt_observed {
+            self.quality_change_awaiting_delivery = false;
+            if healthy {
+                // Missed demands accumulated while the new spatial work was
+                // still being materialized do not prove that scale is itself
+                // insufficient. A timely first result starts a fresh pressure
+                // window and prevents Full -> Half -> Quarter thrash.
+                self.recent_pressure.clear();
+            }
+        }
         if self.state == TransportState::Priming && presentable {
             self.priming_current_presentable = true;
             self.try_complete_observed_priming(completed_at)?;
@@ -1528,25 +1541,9 @@ impl PlaybackEngine {
             self.consecutive_healthy = 0;
         }
 
-        if self.pressure_count() >= self.policy.pressure_threshold
-            && self.recent_pressure.len() == self.policy.pressure_window
-            && matches!(
-                self.state,
-                TransportState::Playing | TransportState::Recovering
-            )
-        {
-            self.state = TransportState::Recovering;
-            let lowered = self.preview_scale.lower();
-            if lowered != self.preview_scale {
-                self.preview_scale = lowered;
-                self.quality_revision = self
-                    .quality_revision
-                    .checked_add(1)
-                    .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-                self.refresh_frame_demand(self.last_timestamp)?;
-            }
-            self.recent_pressure.clear();
-        } else if self.state == TransportState::Recovering
+        let (pressure_applied, _) = self.apply_pressure_scale_down()?;
+        if !pressure_applied
+            && self.state == TransportState::Recovering
             && self.consecutive_healthy >= self.policy.healthy_deliveries_to_recover
         {
             self.preview_scale = match self.preview_scale {
@@ -1559,6 +1556,7 @@ impl PlaybackEngine {
                 .quality_revision
                 .checked_add(1)
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+            self.quality_change_awaiting_delivery = true;
             self.refresh_frame_demand(self.last_timestamp)?;
             self.consecutive_healthy = 0;
             if self.preview_scale == PreviewResolutionScale::Full {
@@ -1892,6 +1890,7 @@ impl PlaybackEngine {
             .ok_or(PlaybackError::TransportArithmeticOverflow)?;
         self.recent_pressure.clear();
         self.consecutive_healthy = 0;
+        self.quality_change_awaiting_delivery = false;
         self.active_demand = None;
         self.terminal_delivery = None;
         self.priming_current_presentable = false;
@@ -1940,9 +1939,58 @@ impl PlaybackEngine {
                 && demand.target == self.position
         });
         if !current_matches {
-            self.refresh_frame_demand(now)?;
+            let missed_presentation = self.active_demand.is_some_and(|demand| {
+                demand.kind == FrameDemandKind::TimedPlayback
+                    && demand.epoch == self.epoch
+                    && demand.quality_revision == self.quality_revision
+                    && demand.target != self.position
+                    && self.terminal_delivery
+                        != Some((demand.epoch, demand.quality_revision, demand.sequence))
+                    && matches!(
+                        self.state,
+                        TransportState::Playing | TransportState::Recovering
+                    )
+            });
+            let quality_changed = if missed_presentation {
+                self.push_pressure(true);
+                self.consecutive_healthy = 0;
+                self.apply_pressure_scale_down()?.1
+            } else {
+                false
+            };
+            if !quality_changed {
+                self.refresh_frame_demand(now)?;
+            }
         }
         Ok(())
+    }
+
+    fn apply_pressure_scale_down(&mut self) -> Result<(bool, bool), PlaybackError> {
+        if self.quality_change_awaiting_delivery
+            || self.pressure_count() < self.policy.pressure_threshold
+            || self.recent_pressure.len() != self.policy.pressure_window
+            || !matches!(
+                self.state,
+                TransportState::Playing | TransportState::Recovering
+            )
+        {
+            return Ok((false, false));
+        }
+
+        self.state = TransportState::Recovering;
+        let lowered = self.preview_scale.lower();
+        let quality_changed = lowered != self.preview_scale;
+        if quality_changed {
+            self.preview_scale = lowered;
+            self.quality_revision = self
+                .quality_revision
+                .checked_add(1)
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+            self.quality_change_awaiting_delivery = true;
+            self.refresh_frame_demand(self.last_timestamp)?;
+        }
+        self.recent_pressure.clear();
+        Ok((true, quality_changed))
     }
 
     fn refresh_frame_demand_for_clock_handoff(

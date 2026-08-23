@@ -187,7 +187,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             self.playback_presentation_ticket(snapshot),
                         ))
                     }
-                } else if transport.is_playing() {
+                } else if transport.is_playing() || self.viewer_cpu_fallback_active.get() {
                     // Playback presentation is a read/projection seam on the
                     // UI thread. A cache miss must be executed by the GPU
                     // candidate path (or a future bounded fallback worker),

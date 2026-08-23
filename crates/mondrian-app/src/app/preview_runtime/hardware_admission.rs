@@ -1,7 +1,6 @@
 //! Preview Runtime Adapter for application-owned hardware-decode admission.
 
 use super::*;
-use mondrian_media::PreviewDecodeGeometry;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Set playback hardware-decode admission selected by the app runtime.
@@ -62,18 +61,28 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         _access_mode: PreviewDecodeAccessMode,
         key: &MediaPreviewKey,
     ) -> PreviewHardwareDecodeRequest {
+        if self.viewer_cpu_fallback_active.get() {
+            return PreviewHardwareDecodeRequest::Auto;
+        }
         let request = self
             .hardware_decode_admission
             .get()
             .request_for_surface(key.native_surface_hint());
-        if matches!(key.decode.geometry(), PreviewDecodeGeometry::FitWithin(_))
+        if key.decode.representation().is_cpu_addressable()
             && request == PreviewHardwareDecodeRequest::PreferGpuResident
         {
-            // The immutable key's CPU-addressable/scaled geometry is the
+            // The immutable key's CPU-addressable representation is the
             // payload authority. A later hardware-admission observation may
             // still prefer hardware decode, but cannot mutate that key into a
             // native-surface request.
-            PreviewHardwareDecodeRequest::PreferHardwareDecode
+            if key.native_surface_hint().is_some() {
+                PreviewHardwareDecodeRequest::PreferHardwareDecode
+            } else {
+                // The current native contract only admits proven NV12/P010.
+                // Do not repeatedly open a hardware Session for a profile or
+                // chroma layout that cannot produce either supported surface.
+                PreviewHardwareDecodeRequest::Auto
+            }
         } else {
             request
         }

@@ -63,7 +63,14 @@ foundation:
   Its [Execution Resource Coordination](execution-resource-coordination.md)
   Module publishes immutable product admission/budget decisions while every
   execution domain retains its own queue, workers, cancellation, and terminal
-  evidence.
+  evidence. Preview frame evaluation is a bounded semantic working set, not a
+  second decoded-frame cache: decoder-family retirement drops evaluation-held
+  native surfaces before Frame Store entries. Stable waits name an admitted
+  media producer; residency/capacity/execution-pressure deferrals are retry
+  admission and are never memoized as producer waits. A concrete Window GPU
+  failure enters one bounded background CPU Viewer Adapter, never an inline UI
+  thread composite, and leaves it only after a replacement GPU generation is
+  ready.
 - `mondrian-assets`: SQLite-backed Project asset-library index and durable
   file/generated-source records. It consumes only the foundation-owned media
   probe contract; FFmpeg and generated-pixel execution cannot enter this

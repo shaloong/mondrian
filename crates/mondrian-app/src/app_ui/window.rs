@@ -3520,14 +3520,14 @@ fn poll_viewer_heterogeneous_completion(
                         format!("device generation terminal {failure_context}: {error}"),
                     ));
             }
-            host.record_preview_gpu_output_blocker(
-                &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                    reason: format!(
-                        "Viewer GPU device generation failed {failure_context} while completing submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
-                        completed.submission_id.get()
-                    ),
-                },
+            let fallback_reason = format!(
+                "Viewer GPU device generation failed {failure_context} while completing submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
+                completed.submission_id.get()
             );
+            host.record_preview_gpu_output_blocker(
+                &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: fallback_reason.clone() },
+            );
+            host.request_viewer_cpu_fallback(fallback_reason);
             unregister_program_scopes_textures(session);
             if !retire_window_published_gpu_output(session, host) {
                 host.clear_external_viewer_frame();
@@ -3552,8 +3552,11 @@ fn poll_viewer_heterogeneous_completion(
                     quarantine.submission_id.get()
                 );
                 host.record_preview_gpu_output_blocker(
-                    &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: fallback_reason },
+                    &PreviewGpuOutputBlocker::CpuFallbackRequested {
+                        reason: fallback_reason.clone(),
+                    },
                 );
+                host.request_viewer_cpu_fallback(fallback_reason);
                 begin_window_viewer_gpu_quarantine(
                     session,
                     host,
@@ -3569,13 +3572,13 @@ fn poll_viewer_heterogeneous_completion(
         }
     } else if let Some((failed_submission_id, error)) = device_failure {
         let failure_context = window_viewer_gpu_generation_failure_context(failed_submission_id);
-        host.record_preview_gpu_output_blocker(
-            &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                reason: format!(
-                    "Viewer GPU device generation failed {failure_context}; GPU output remains disabled until the generation is rebuilt: {error}"
-                ),
-            },
+        let fallback_reason = format!(
+            "Viewer GPU device generation failed {failure_context}; GPU output remains disabled until the generation is rebuilt: {error}"
         );
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
+            reason: fallback_reason.clone(),
+        });
+        host.request_viewer_cpu_fallback(fallback_reason);
         unregister_program_scopes_textures(session);
         if !retire_window_published_gpu_output(session, host) {
             host.clear_external_viewer_frame();
@@ -3774,18 +3777,18 @@ fn prepare_viewer_gpu_preview(
 
     let _ = poll_viewer_heterogeneous_completion(device, session, host);
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
+        let fallback_reason = format!(
+            "Window Viewer GPU device generation is terminal; publication remains disabled until rebuild: {}",
+            terminal.reason
+        );
         unregister_program_scopes_textures(session);
         if !retire_window_published_gpu_output(session, host) {
             host.clear_external_viewer_frame();
         }
-        host.record_preview_gpu_output_blocker(
-            &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                reason: format!(
-                    "Window Viewer GPU device generation is terminal; publication remains disabled until rebuild: {}",
-                    terminal.reason
-                ),
-            },
-        );
+        host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
+            reason: fallback_reason.clone(),
+        });
+        host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
     if session.viewer_gpu_submissions.is_occupied() {
@@ -3808,12 +3811,14 @@ fn prepare_viewer_gpu_preview(
     // Advance copy-fence retirement on every prepare tick, including Loading
     // ticks for a following seek.
     if let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources() {
+        let fallback_reason = format!("native video source retirement failed: {error}");
         unregister_program_scopes_textures(session);
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
             feature: "native_video_source_retirement".to_owned(),
             reason: error.to_string(),
         });
         tracing::warn!("native video source retirement failed: {error}");
+        host.request_viewer_cpu_fallback(fallback_reason);
         if !retire_window_published_gpu_output(session, host) {
             host.clear_external_viewer_frame();
         }
@@ -3946,7 +3951,7 @@ fn prepare_viewer_gpu_preview(
                 None,
             );
             session.viewer_gpu_output_telemetry.record_unavailable_skip();
-            tracing::warn!(
+            tracing::debug!(
                 code = reason.code(),
                 stage = ?reason.stage(),
                 detail = reason.detail(),
@@ -4111,7 +4116,7 @@ fn prepare_viewer_gpu_preview(
             host.record_preview_gpu_output_blocker(
                 &PreviewGpuOutputBlocker::CpuFallbackRequested { reason: reason.clone() },
             );
-            tracing::error!(%reason, "Window Viewer entered explicit CPU fallback");
+            host.request_viewer_cpu_fallback(reason);
             finish_prepare!();
         }
     };
@@ -4287,6 +4292,7 @@ fn prepare_viewer_gpu_preview(
                 height = frame.height,
                 "viewer GPU preview recording failed: {error}"
             );
+            host.request_viewer_cpu_fallback(error.to_string());
             finish_prepare!();
         }
     };
@@ -4312,6 +4318,7 @@ fn prepare_viewer_gpu_preview(
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
             reason: reason.clone(),
         });
+        host.request_viewer_cpu_fallback(reason.clone());
     }
     let heterogeneous_recorded = record.heterogeneous_continuation_count() != 0;
     let stage_diagnostics = record.stage_diagnostics;
@@ -4339,6 +4346,7 @@ fn prepare_viewer_gpu_preview(
     let output_lease = match session.viewer_gpu_execution.take_presentation_output(&mut record) {
         Ok(lease) => lease,
         Err(error) => {
+            let fallback_reason = format!("submitted Viewer output lease transfer failed: {error}");
             session.viewer_gpu_output_telemetry.record_missing_output_texture();
             tracing::error!(
                 sequence_id = %frame.sequence_id,
@@ -4384,6 +4392,7 @@ fn prepare_viewer_gpu_preview(
                     WindowViewerGpuDeferredCleanup::ClearFrameResources,
                 );
             }
+            host.request_viewer_cpu_fallback(fallback_reason);
             finish_prepare!();
         }
     };
@@ -5161,6 +5170,7 @@ impl AppUiWindowSession {
         };
         let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
         host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
+        host.clear_viewer_cpu_fallback();
 
         Ok(Self {
             viewer_gpu_device_progress,

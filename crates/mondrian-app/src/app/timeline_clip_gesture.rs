@@ -443,23 +443,10 @@ fn apply_prepared_bulk_trim(
     sequence: &mut Sequence,
     plan: PreparedBulkTrim,
 ) -> mondrian_core::Result<()> {
-    for updated in plan.updates {
-        let clip_id = updated.id;
-        let Some(slot) = sequence
-            .video_tracks
-            .iter_mut()
-            .chain(&mut sequence.audio_tracks)
-            .find_map(|track| track.clips.iter_mut().find(|clip| clip.id == clip_id))
-        else {
-            return Err(MondrianError::ClipNotFound { clip_id: clip_id.to_string() });
-        };
-        *slot = updated;
-    }
-    for track in sequence.video_tracks.iter_mut().chain(&mut sequence.audio_tracks) {
-        track.clips.sort_by_key(|clip| clip.position);
-    }
-    sequence.compact_structural_references();
-    Ok(())
+    // The Sequence owns clip re-sorting and structural compaction; the app
+    // only hands over validated replacement clips, never re-derives track
+    // placement itself.
+    sequence.apply_bulk_trim(plan.updates)
 }
 
 fn resolve_track_index(

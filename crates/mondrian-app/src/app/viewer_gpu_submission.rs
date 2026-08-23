@@ -207,6 +207,33 @@ where
 
     /// Observe callback, deadline, and quarantine state without blocking.
     pub(crate) fn poll(&mut self, now: Instant) -> ViewerGpuSubmissionPoll<O, C> {
+        if let Some(completed) = self.consume_completion_notice() {
+            return completed;
+        }
+        self.poll_deadline_state(now)
+    }
+
+    /// Observe deadline/quarantine state and any already-arrived completion.
+    ///
+    /// The wgpu work-done callback is the authoritative GPU completion
+    /// evidence; the device progress worker's post-poll barrier is only an
+    /// auxiliary queue-observation. A barrier that races or lags the callback
+    /// must not defer the exact completion, otherwise the retained output is
+    /// revoked by the quarantine deadline and the presentation pipeline
+    /// re-submits the same frame forever.
+    pub(crate) fn poll_deadline_only(&mut self, now: Instant) -> ViewerGpuSubmissionPoll<O, C> {
+        if let Some(completed) = self.consume_completion_notice() {
+            return completed;
+        }
+        self.poll_deadline_state(now)
+    }
+
+    /// Consume one already-arrived authoritative completion notice.
+    ///
+    /// `None` means no exact notice is pending; the caller then observes
+    /// deadline/quarantine state. Stale notices whose owner was already
+    /// retired are counted as orphaned and never manufacture completion.
+    fn consume_completion_notice(&mut self) -> Option<ViewerGpuSubmissionPoll<O, C>> {
         loop {
             match self.completion_receiver.try_recv() {
                 Ok(notice) => {
@@ -227,30 +254,20 @@ where
                             ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded,
                         )
                     });
-                    return ViewerGpuSubmissionPoll::Completed(ViewerGpuCompletedSubmission {
-                        submission_id: in_flight.submission_id,
-                        owner: in_flight.owner,
-                        completion: notice.completion,
-                        completion_observed_at: notice.observed_at,
-                        quarantine_reason,
-                    });
+                    return Some(ViewerGpuSubmissionPoll::Completed(
+                        ViewerGpuCompletedSubmission {
+                            submission_id: in_flight.submission_id,
+                            owner: in_flight.owner,
+                            completion: notice.completion,
+                            completion_observed_at: notice.observed_at,
+                            quarantine_reason,
+                        },
+                    ));
                 }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => return None,
             }
         }
-
-        self.poll_deadline_state(now)
-    }
-
-    /// Observe only deadline/quarantine state while an exact callback remains
-    /// staged behind the device progress domain's post-poll barrier.
-    ///
-    /// A wgpu work-done callback can be invoked before device-lost in the same
-    /// native poll. Adapters use this form until the progress worker publishes
-    /// that the poll returned with a healthy generation.
-    pub(crate) fn poll_deadline_only(&mut self, now: Instant) -> ViewerGpuSubmissionPoll<O, C> {
-        self.poll_deadline_state(now)
     }
 
     fn poll_deadline_state(&mut self, now: Instant) -> ViewerGpuSubmissionPoll<O, C> {
@@ -285,6 +302,36 @@ where
             });
         }
         ViewerGpuSubmissionPoll::Pending { submission_id, quarantined }
+    }
+
+    /// Complete one submission on fence-barrier authority without its callback
+    /// batch.
+    ///
+    /// The device progress worker publishes its bounded wait only after wgpu
+    /// reported `WaitSucceeded` for the exact submission, which is the
+    /// authoritative GPU completion evidence. The `on_submitted_work_done`
+    /// callback batch is a supplementary carrier that may race or lag that
+    /// fence (wgpu 30 defers callback delivery), so an absent batch must not
+    /// strand the completion behind a quarantine that revokes the retained
+    /// output and forces the pipeline to re-submit the same frame forever.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retire_after_fence_barrier(
+        &mut self,
+        now: Instant,
+    ) -> Option<ViewerGpuSubmissionPoll<O, C>>
+    where
+        C: Default,
+    {
+        let in_flight = self.in_flight.take()?;
+        Some(ViewerGpuSubmissionPoll::Completed(
+            ViewerGpuCompletedSubmission {
+                submission_id: in_flight.submission_id,
+                owner: in_flight.owner,
+                completion: C::default(),
+                completion_observed_at: now,
+                quarantine_reason: in_flight.quarantine,
+            },
+        ))
     }
 
     /// Revoke publication authority after a concrete device failure.
@@ -468,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn callback_remains_staged_until_post_poll_progress_barrier() {
+    fn callback_completion_is_consumed_without_requiring_the_progress_barrier() {
         let now = Instant::now();
         let callback = callback_slot();
         let mut lifecycle = ViewerGpuSubmissionLifecycle::new();
@@ -476,19 +523,18 @@ mod tests {
             commit_test_submission(&mut lifecycle, now + Duration::from_secs(1), &callback);
         callback.lock().expect("callback slot").take().expect("registered callback")(9);
 
+        // The wgpu work-done callback is the authoritative GPU completion
+        // evidence. It must complete the submission even when the progress
+        // worker's post-poll barrier races or lags the callback; otherwise the
+        // retained output is revoked by the quarantine deadline and the
+        // presentation pipeline re-submits the same frame forever.
         assert!(matches!(
             lifecycle.poll_deadline_only(now),
-            ViewerGpuSubmissionPoll::Pending {
-                submission_id: pending,
-                quarantined: false,
-            } if pending == submission_id
-        ));
-        assert!(lifecycle.is_occupied());
-        assert!(matches!(
-            lifecycle.poll(now),
             ViewerGpuSubmissionPoll::Completed(completed)
                 if completed.submission_id == submission_id && completed.completion == 9
         ));
+        assert!(!lifecycle.is_occupied());
+        assert!(matches!(lifecycle.poll(now), ViewerGpuSubmissionPoll::Idle));
     }
 
     #[test]

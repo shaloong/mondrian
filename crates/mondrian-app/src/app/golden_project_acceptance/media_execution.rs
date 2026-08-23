@@ -53,7 +53,6 @@ pub(super) fn decode_media_with_preference(
         color_space_override: request.color_space_override,
         alpha_interpretation: request.alpha_interpretation,
         source_sample: request.source_sample,
-        target_resolution: request.target_resolution,
         input_color: &request.input_color,
         prefer_proxy,
         request_missing_proxy_generation: false,
@@ -61,6 +60,7 @@ pub(super) fn decode_media_with_preference(
         proxy_color,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: request.cpu_working_required,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     }) {
         PreviewMediaSourceOutcome::Ready(resolved) => resolved,
         PreviewMediaSourceOutcome::ColorRejected(rejected) => {

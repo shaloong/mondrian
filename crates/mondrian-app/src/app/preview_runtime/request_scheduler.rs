@@ -405,6 +405,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 snapshot,
                 proxy_demands,
                 &demand,
+                crate::app::preview_quality::preview_representation_quality(runtime_scale),
                 false,
                 false,
             ) {
@@ -506,10 +507,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if !transport.is_playing() {
             return;
         }
-        if self.execution.borrow().is_pending() {
-            bump(&self.metrics.prefetch_skipped_current_pending);
-            return;
-        }
         if self.playback_sustained_pressure_active() {
             bump(&self.metrics.playback_prefetch_skipped_sustained_pressure);
             return;
@@ -517,7 +514,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let worker_queue = self.jobs.diagnostics();
         if worker_queue.queued_current_jobs > 0 || worker_queue.in_flight_current_jobs > 0 {
             bump(&self.metrics.prefetch_skipped_current_work);
-            return;
         }
         let prefetch_pressure = worker_queue
             .queued_prefetch_jobs
@@ -842,12 +838,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         scheduled
     }
 
-    /// Inspect the same bounded forward media window used by playback prefetch.
+    /// Maintain and inspect the bounded forward media window used by playback prefetch.
     ///
-    /// This does not claim that a Viewer output is presented. It reports only
+    /// This does not claim that a Viewer output is presented. During Priming it
+    /// also admits missing work from the inspected prefix, so startup progress
+    /// cannot depend on a later Viewer-candidate evaluation after the current
+    /// frame has already consumed most of the priming deadline. It reports only
     /// whether immediate future frames have media payloads and how much of the
-    /// media-bearing prefix is resident; the Playback Engine separately
-    /// requires current-frame presentation before releasing its clock anchor.
+    /// media-bearing prefix was resident at this observation; the Playback
+    /// Engine separately requires current-frame presentation before releasing
+    /// its clock anchor.
     pub(super) fn playback_video_preroll_readiness(
         &self,
         snapshot: &PreviewExecutionSnapshot<'_>,
@@ -887,10 +887,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             color_context,
             window.saturating_sub(prefetch_pressure),
         );
-        Some(PreviewVideoPreroll {
+        let readiness = PreviewVideoPreroll {
             ready_media_frames: plan.ready_media_frames,
             preservable_media_frames: plan.preservable_media_frames,
-        })
+        };
+        let preroll_deadline_at =
+            transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline);
+        self.admit_future_media_prefix(plan, preroll_deadline_at);
+        Some(readiness)
     }
 
     pub(super) fn preview_decode_adaptive_hints(

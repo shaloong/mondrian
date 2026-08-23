@@ -1206,6 +1206,16 @@ impl HeadlessViewerGpuAdapter {
         self.physical_outputs.drain().into_iter().flatten().count() != 0
     }
 
+    /// Release only the retained prepared physical owner.
+    ///
+    /// A prepared successor can never be promoted once the transport reached
+    /// its natural end (no next frame demand exists), so its retained
+    /// capacity-one lease would otherwise report as a second live presentation
+    /// output and reject every later ordinary record.
+    pub(crate) fn clear_prepared_physical_output(&mut self) -> bool {
+        self.physical_outputs.take_prepared().is_some()
+    }
+
     /// Clear only the physical publication produced by one exact submission.
     ///
     /// A late callback or cleanup failure from an older submission must not
@@ -1405,7 +1415,15 @@ impl HeadlessViewerGpuAdapter {
             self.collect_native_import_gpu_timings_after_device_poll();
         }
         let initial = if callback_barrier_observed {
-            self.submission_lifecycle.poll(observation_time)
+            match self.submission_lifecycle.poll(observation_time) {
+                ViewerGpuSubmissionPoll::Pending { .. } => self
+                    .submission_lifecycle
+                    .retire_after_fence_barrier(observation_time)
+                    .unwrap_or_else(|| {
+                        self.submission_lifecycle.poll_deadline_only(observation_time)
+                    }),
+                poll => poll,
+            }
         } else {
             self.submission_lifecycle.poll_deadline_only(observation_time)
         };

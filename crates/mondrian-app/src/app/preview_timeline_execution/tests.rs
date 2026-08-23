@@ -8,6 +8,10 @@ use std::sync::{
 
 use super::*;
 
+fn pending_media_frame() -> PreviewTimelineMediaFrame {
+    PreviewTimelineMediaFrame::Pending { wait: PreviewTimelineMediaWait::Producer }
+}
+
 fn tt(frame: i64, time_base: Rational) -> mondrian_core::TimelineTime {
     mondrian_core::TimelineTime::new(
         frame.checked_mul(time_base.num).expect("test time fits"),
@@ -277,7 +281,7 @@ fn preview_execution_admission_fails_before_media_demand_or_decode() {
     let mut media_called = false;
     let mut media = |_| {
         media_called = true;
-        PreviewTimelineMediaFrame::Pending
+        pending_media_frame()
     };
     let result = resolve_preview_timeline(
         &sequence,
@@ -594,7 +598,7 @@ fn nested_child_still_requires_a_complete_cpu_materialization_route() {
         color_context(&parent),
         &mut |_| {
             media_called = true;
-            PreviewTimelineMediaFrame::Pending
+            pending_media_frame()
         },
         &mut |_| panic!("media-only nested child must not request title rasterization"),
     );
@@ -626,7 +630,7 @@ fn temporal_preview_schedules_the_complete_cross_zero_set_before_publishing() {
         color_context(&sequence),
         &mut |request: PreviewTimelineMediaRequest| {
             scheduled.push(request);
-            PreviewTimelineMediaFrame::Pending
+            pending_media_frame()
         },
         &mut |_| panic!("temporal media must not request titles"),
     );
@@ -705,7 +709,7 @@ fn temporal_preview_schedules_and_publishes_finite_lookahead() {
         color_context(&sequence),
         &mut |request: PreviewTimelineMediaRequest| {
             scheduled.push(request);
-            PreviewTimelineMediaFrame::Pending
+            pending_media_frame()
         },
         &mut |_| panic!("temporal media must not request titles"),
     );
@@ -833,7 +837,7 @@ fn temporal_preview_cache_identity_is_generation_and_source_complete() {
     };
     let mut media = |_: PreviewTimelineMediaRequest| {
         media_calls += 1;
-        PreviewTimelineMediaFrame::Pending
+        pending_media_frame()
     };
     let mut title = |_| panic!("temporal media must not request titles");
     let canceled_result = resolve_preview_timeline_with_graph(
@@ -1351,7 +1355,7 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     let mut observed_resolution = None;
     let mut media = |request: PreviewTimelineMediaRequest| {
         observed_resolution = Some(request.target_resolution);
-        PreviewTimelineMediaFrame::Pending
+        pending_media_frame()
     };
     let result = resolve_preview_timeline(
         &parent,
@@ -1367,7 +1371,7 @@ fn nested_sequence_keeps_its_own_canvas_under_shared_runtime_quality() {
     assert!(matches!(
         result,
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media(pending_id)
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
         } if pending_id == asset_id
     ));
     assert_eq!(
@@ -1432,7 +1436,7 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
         .expect("insert media clip");
     let target = Resolution { width: 64, height: 36 };
 
-    let mut pending = |_| PreviewTimelineMediaFrame::Pending;
+    let mut pending = |_| pending_media_frame();
     assert!(matches!(
         resolve_preview_timeline(
             &sequence,
@@ -1445,7 +1449,7 @@ fn media_pending_and_unavailable_are_distinct_terminal_shapes() {
             &mut |_| panic!("media plan must not request titles"),
         ),
         PreviewTimelineResolution::Pending {
-            dependency: PreviewTimelinePendingDependency::Media(pending_id)
+            dependency: PreviewTimelinePendingDependency::Media { asset_id: pending_id, .. }
         } if pending_id == asset_id
     ));
 
