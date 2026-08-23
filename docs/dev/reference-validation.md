@@ -109,6 +109,14 @@ baseline-eligible reports and their hashes into one artifact. Release rejects an
 artifact whose source SHA, contract hash, report hashes, exact gate set, machine
 qualification, diagnostic flags, or executable identity do not match.
 
+Complete Golden qualification owns two independent external deadlines in that
+contract: a 60-minute non-incremental cold-build deadline and a 30-minute
+deadline for each already-built Golden execution. The aggregate report records
+both effective values and each pass repeats its process deadline. Baseline
+evidence is ineligible if an override was used or if either value differs from
+the commercial-engine contract, preventing compiler time from consuming the
+normative Golden execution window.
+
 This is an engine qualification, not a candidate-package qualification. Until
 the Windows clean-machine installation/upgrade/rollback/uninstall loop in M2 is
 implemented, GitHub Release remains a draft. Linux and macOS remain ordinary CI
@@ -256,8 +264,9 @@ pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1 `
 
 Baseline qualification is fail-closed: the repository must be clean at start
 and finish, the exact Git revision must remain unchanged, and the aggregate
-schema-v2 report records that revision plus the SHA-256 of the executable that
-produced all three reports. `-AllowDirtyDiagnostic` is available for local
+schema-v3 report records that revision, the two contract-owned deadlines, plus
+the SHA-256 of the executable that produced all three reports.
+`-AllowDirtyDiagnostic` is available for local
 investigation, but its report is `passed-diagnostic` and never
 `baseline_eligible`.
 

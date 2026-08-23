@@ -67,6 +67,10 @@ function Assert-GoldenReport([object]$Report, [object]$Contract, [string]$Source
         $Report.complete_golden_project -ne $true -or
         $Report.required_consecutive_passes -ne $Contract.complete_golden.required_consecutive_passes -or
         $Report.consecutive_passes -ne $Contract.complete_golden.required_consecutive_passes -or
+        $Report.build.timeout_seconds -ne $Contract.complete_golden.build_timeout_seconds -or
+        $Report.timeouts.build_timeout_seconds -ne $Contract.complete_golden.build_timeout_seconds -or
+        $Report.timeouts.process_timeout_seconds -ne $Contract.complete_golden.process_timeout_seconds -or
+        $Report.timeouts.contract_matched -ne $true -or
         $Report.source_attestation.stable -ne $true -or
         $Report.source_attestation.allow_dirty_diagnostic -ne $false
     ) {
@@ -79,6 +83,9 @@ function Assert-GoldenReport([object]$Report, [object]$Contract, [string]$Source
     $passEvidence = @($Report.evidence.passes)
     if ($passEvidence.Count -ne $Contract.complete_golden.required_consecutive_passes) {
         throw "Complete Golden evidence does not retain every required pass."
+    }
+    if (@($passEvidence | Where-Object { $_.process_timeout_seconds -ne $Contract.complete_golden.process_timeout_seconds }).Count -ne 0) {
+        throw "Complete Golden evidence did not apply the contract-owned process timeout to every pass."
     }
     if (@($passEvidence.run_id | Sort-Object -Unique).Count -ne $passEvidence.Count) {
         throw "Complete Golden evidence reused a run identity."
