@@ -7,11 +7,33 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PackagedWorkerDiscoveryError {
+    #[error("configured {purpose} worker does not exist: {path}")]
+    ConfiguredPathMissing {
+        purpose: &'static str,
+        path: PathBuf,
+    },
+    #[error("cannot resolve the current product executable for {purpose}: {source}")]
+    CurrentExecutable {
+        purpose: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error(
+        "packaged {purpose} worker is unavailable beside current executable {current_executable}"
+    )]
+    ProductExecutableMissing {
+        purpose: &'static str,
+        current_executable: PathBuf,
+    },
+}
+
 /// Maximum product time admitted for one physical media Probe Helper.
 pub(crate) const MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(120);
 
-pub(crate) fn discover_preview_demux_worker() -> Option<PathBuf> {
-    discover_packaged_app_worker("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", "Preview demux")
+pub(crate) fn discover_preview_demux_worker() -> Result<PathBuf, PackagedWorkerDiscoveryError> {
+    discover_required_packaged_app_worker("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH", "Preview demux")
 }
 
 pub(crate) fn discover_media_probe_worker() -> Option<PathBuf> {
@@ -50,6 +72,44 @@ fn discover_packaged_app_worker(override_environment: &str, purpose: &str) -> Op
     candidate.is_file().then_some(candidate)
 }
 
+fn discover_required_packaged_app_worker(
+    override_environment: &str,
+    purpose: &'static str,
+) -> Result<PathBuf, PackagedWorkerDiscoveryError> {
+    if let Some(path) = std::env::var_os(override_environment) {
+        let path = PathBuf::from(path);
+        return path
+            .is_file()
+            .then_some(path.clone())
+            .ok_or(PackagedWorkerDiscoveryError::ConfiguredPathMissing { purpose, path });
+    }
+
+    let current = std::env::current_exe()
+        .map_err(|source| PackagedWorkerDiscoveryError::CurrentExecutable { purpose, source })?;
+    if current.file_stem().is_some_and(|name| name.eq_ignore_ascii_case("mondrian")) {
+        return Ok(current);
+    }
+
+    let Some(directory) = current.parent() else {
+        return Err(PackagedWorkerDiscoveryError::ProductExecutableMissing {
+            purpose,
+            current_executable: current,
+        });
+    };
+    let profile_directory = if directory.file_name().is_some_and(|name| name == "deps") {
+        directory.parent().unwrap_or(directory)
+    } else {
+        directory
+    };
+    let candidate = profile_directory.join(format!("mondrian{}", std::env::consts::EXE_SUFFIX));
+    candidate.is_file().then_some(candidate).ok_or(
+        PackagedWorkerDiscoveryError::ProductExecutableMissing {
+            purpose,
+            current_executable: current,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,5 +128,24 @@ mod tests {
             .is_none_or(|path| path != std::path::Path::new("definitely/missing/mondrian-worker")));
         // SAFETY: restore the unique process environment key after the test.
         unsafe { std::env::remove_var(variable) };
+    }
+
+    #[test]
+    fn required_worker_rejects_a_missing_configured_path_without_fallback() {
+        let variable = format!(
+            "MONDRIAN_TEST_REQUIRED_MISSING_WORKER_{}",
+            std::process::id()
+        );
+        // SAFETY: this unique variable is not observed by another test or any
+        // production module.
+        unsafe { std::env::set_var(&variable, "definitely/missing/mondrian-worker") };
+        let result = discover_required_packaged_app_worker(&variable, "test worker");
+        // SAFETY: restore the unique process environment key after the test.
+        unsafe { std::env::remove_var(variable) };
+
+        assert!(matches!(
+            result,
+            Err(PackagedWorkerDiscoveryError::ConfiguredPathMissing { purpose: "test worker", .. })
+        ));
     }
 }

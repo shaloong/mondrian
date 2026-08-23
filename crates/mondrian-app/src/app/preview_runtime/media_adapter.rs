@@ -188,7 +188,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewTimelineMediaFrame::Unavailable {
                     reason: PreviewUnavailability::failed(
                         PreviewOutputStage::MediaDecode,
-                        "no Preview media worker is available",
+                        self.media_worker_start_failure.as_deref().unwrap_or(
+                            "no Preview media worker is available",
+                        ),
                     ),
                 }
             }

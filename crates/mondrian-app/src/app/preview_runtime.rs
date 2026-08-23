@@ -336,6 +336,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     visual_ready: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionPrefixReady>>,
     visual_failures: RefCell<HashMap<VisualExecutionTaskKey, String>>,
     media_execution_failures: RefCell<HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>>,
+    media_worker_start_failure: Option<String>,
     media_worker_health_failed: Cell<bool>,
     last_current_media_admission: Cell<Option<&'static str>>,
     last_gpu_loading_reason: Cell<Option<&'static str>>,
@@ -356,6 +357,19 @@ pub struct PreviewProductionRuntime<O: Clone> {
     decode_worker_count: usize,
     decode_execution_watch: PreviewDecodeWorkerExecutionWatch,
     metrics: PreviewMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewWorkerIsolation {
+    RequiredPackaged,
+    #[cfg(test)]
+    DirectTestAdapter,
+}
+
+impl PreviewWorkerIsolation {
+    const fn requires_packaged_worker(self) -> bool {
+        matches!(self, Self::RequiredPackaged)
+    }
 }
 
 impl<O: Clone> PreviewProductionRuntime<O> {
@@ -483,18 +497,38 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             preview_decode_cpu_budget(),
             0,
             MediaPreviewScheduler::with_clock_for_test(clock),
+            PreviewWorkerIsolation::DirectTestAdapter,
         )
     }
 
     fn with_worker_count(decode_cpu_budget: PreviewDecodeCpuBudget, worker_count: usize) -> Self {
         let scheduler = MediaPreviewScheduler::default();
-        Self::with_worker_count_and_scheduler(decode_cpu_budget, worker_count, scheduler)
+        Self::with_worker_count_and_scheduler(
+            decode_cpu_budget,
+            worker_count,
+            scheduler,
+            PreviewWorkerIsolation::RequiredPackaged,
+        )
+    }
+
+    #[cfg(test)]
+    fn with_direct_worker_count_for_test(
+        decode_cpu_budget: PreviewDecodeCpuBudget,
+        worker_count: usize,
+    ) -> Self {
+        Self::with_worker_count_and_scheduler(
+            decode_cpu_budget,
+            worker_count,
+            MediaPreviewScheduler::default(),
+            PreviewWorkerIsolation::DirectTestAdapter,
+        )
     }
 
     fn with_worker_count_and_scheduler(
         decode_cpu_budget: PreviewDecodeCpuBudget,
         worker_count: usize,
         scheduler: MediaPreviewScheduler,
+        worker_isolation: PreviewWorkerIsolation,
     ) -> Self {
         let (work_notifier, work_watch) = preview_work_notification_channel();
         let (job_tx, job_rx) = scheduler.job_queue();
@@ -528,7 +562,27 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut decode_worker_count = 0;
         let mut workers = Vec::new();
         let mut decode_execution_observers = Vec::new();
+        let (demux_worker_executable, mut media_worker_start_failure) = if worker_count == 0
+            || !worker_isolation.requires_packaged_worker()
+        {
+            (None, None)
+        } else {
+            match super::packaged_worker::discover_preview_demux_worker() {
+                Ok(executable) => (Some(executable), None),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "Preview media workers were not started because required demux isolation is unavailable"
+                    );
+                    scheduler.close();
+                    (None, Some(error.to_string()))
+                }
+            }
+        };
         for worker_index in 0..worker_count {
+            if worker_isolation.requires_packaged_worker() && demux_worker_executable.is_none() {
+                break;
+            }
             let worker_jobs = job_rx.clone();
             let worker_results = result_tx.clone();
             let worker_work_notifier = work_notifier.clone();
@@ -537,10 +591,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_decode_residency = Arc::clone(&decode_residency);
             let worker_lane = media_preview_worker_lane(worker_index, worker_count);
             let (worker_decode_context_bootstrap, execution_observer) =
-                match super::packaged_worker::discover_preview_demux_worker() {
-                    Some(executable) =>
-                        mondrian_media::PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(executable),
-                    None => mondrian_media::PreviewDecodeSessionContext::observed_bootstrap(),
+                match demux_worker_executable.clone() {
+                    Some(executable) => mondrian_media::PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(executable),
+                    #[cfg(test)]
+                    None if worker_isolation == PreviewWorkerIsolation::DirectTestAdapter => {
+                        mondrian_media::PreviewDecodeSessionContext::observed_bootstrap()
+                    }
+                    None => unreachable!("required packaged worker was checked before spawn"),
                 };
             let worker_decode_context_bootstrap = worker_decode_context_bootstrap
                 .with_worker_resources(decode_worker_resources.clone());
@@ -566,12 +623,23 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
                 Err(err) => {
                     decode_residency.unregister_worker(worker_lane);
+                    if media_worker_start_failure.is_none() {
+                        media_worker_start_failure = Some(format!(
+                            "failed to start Preview media worker {worker_index}: {err}"
+                        ));
+                    }
                     tracing::warn!(
                         worker_index,
                         "failed to start production preview worker: {err}"
                     );
                 }
             }
+        }
+        if worker_count > 0 && decode_worker_count == 0 {
+            scheduler.close();
+            media_worker_start_failure.get_or_insert_with(|| {
+                "no configured Preview media worker could be started".to_owned()
+            });
         }
 
         Self {
@@ -615,7 +683,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             visual_ready: RefCell::new(HashMap::new()),
             visual_failures: RefCell::new(HashMap::new()),
             media_execution_failures: RefCell::new(HashMap::new()),
-            media_worker_health_failed: Cell::new(false),
+            media_worker_health_failed: Cell::new(media_worker_start_failure.is_some()),
+            media_worker_start_failure,
             last_current_media_admission: Cell::new(None),
             last_gpu_loading_reason: Cell::new(None),
             visual_terminal_candidates: RefCell::new(Vec::new()),

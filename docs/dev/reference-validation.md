@@ -100,11 +100,45 @@ mutable or “latest” URLs are prohibited.
 3. `Release` has the same asset strictness and additionally requires three
    consecutive Golden Project passes plus export/reimport and recovery evidence.
 
+The source-qualified Windows release engine is governed by
+`tests/validation/windows-commercial-engine.json`. A trusted manual run of
+`.github/workflows/windows-commercial-engine.yml` checks out one exact
+`main`/`develop` commit on the prepared reference machine, runs the complete
+three-pass Golden gate and the full Video+Audio Playback gate, then seals the two
+baseline-eligible reports and their hashes into one artifact. Release rejects an
+artifact whose source SHA, contract hash, report hashes, exact gate set, machine
+qualification, diagnostic flags, or executable identity do not match.
+
+Complete Golden qualification owns two independent external deadlines in that
+contract: a 60-minute non-incremental cold-build deadline and a 30-minute
+deadline for each already-built Golden execution. The aggregate report records
+both effective values and each pass repeats its process deadline. Baseline
+evidence is ineligible if an override was used or if either value differs from
+the commercial-engine contract, preventing compiler time from consuming the
+normative Golden execution window.
+
+This is an engine qualification, not a candidate-package qualification. Until
+the Windows clean-machine installation/upgrade/rollback/uninstall loop in M2 is
+implemented, GitHub Release remains a draft. Linux and macOS remain ordinary CI
+targets and are not emitted as release artifacts before their M4 real-machine
+qualification exists.
+
 Run manifest validation:
 
 ```powershell
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Pr
 pwsh -File scripts/validation/validate-reference-assets.ps1 -Tier Nightly -Scope Playback
+```
+
+After both baseline gates have run for the same clean source, the sealing step
+used by the reference workflow can also be reproduced locally:
+
+```powershell
+pwsh -File scripts/validation/resolve-commercial-engine-evidence.ps1 `
+  -GoldenReportPath <complete-golden-consecutive-report.json> `
+  -PlaybackReportPath <playback-evidence.json> `
+  -OutputDirectory target/validation/sealed-commercial-engine `
+  -ExpectedSourceSha <40-character-git-sha>
 ```
 
 Inspect the current top-level Golden coverage ledger without generating media:
@@ -227,6 +261,14 @@ pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1
 pwsh -File scripts/validation/invoke-complete-golden-project-gate.ps1 `
   -FixtureRoot target/validation/golden-fixtures
 ```
+
+Baseline qualification is fail-closed: the repository must be clean at start
+and finish, the exact Git revision must remain unchanged, and the aggregate
+schema-v3 report records that revision, the two contract-owned deadlines, plus
+the SHA-256 of the executable that produced all three reports.
+`-AllowDirtyDiagnostic` is available for local
+investigation, but its report is `passed-diagnostic` and never
+`baseline_eligible`.
 
 The script validates the contract and fixtures, builds the feature-gated
 `mondrian-golden` executable once, and requests three runs. Before executing
