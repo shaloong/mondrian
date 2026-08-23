@@ -141,12 +141,12 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
         self.current.as_ref()
     }
 
-    /// Retained prepared physical owner, irrespective of semantic identity.
     /// Consume the retained prepared owner, if any.
     ///
     /// The caller is responsible for dropping the returned publication, which
     /// retires its move-only lease. Used when the transport has no next frame
     /// so a prepared successor can never be promoted.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn take_prepared(&mut self) -> Option<ViewerGpuPhysicalPublication<K, O, L>> {
         self.prepared.take()
     }

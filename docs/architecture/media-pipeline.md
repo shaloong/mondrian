@@ -1417,6 +1417,19 @@ at most retain hardware decode with CPU transfer; neither can authorize
 are canonicalized once into `PreviewDecodeGeometry`. A CPU-addressable key
 remains `FitWithin` even if a later observation gains native support, so
 scheduler promotion cannot mutate one cache identity into a native payload.
+CPU Preview decode also distinguishes the media representation from the Viewer
+output extent. Authored Preview scale, Window size, and nested composition
+resolution are spatial targets and never enter `PreviewDecodeKey`. Playback's
+temporary `PreviewResolutionScale` is different: each coherently sampled frame
+request projects `Full`, `Half`, or `Quarter` into an explicit media
+representation (`NativeCpu`, `Reduced(2)`, or `Reduced(4)`). That choice rotates
+the decode/cache identity and charges residency at the materialized source
+raster. Returning to Full restores the original identity, so the full and
+reduced frames may coexist without invalidating one another. A renderer-admitted
+native surface remains at source extent and is sampled directly into the lower
+Viewer target; reduced CPU decode must not force a native surface through host
+memory. Divisor one and empty proxy representations are rejected at the decode
+key boundary to prevent duplicate or non-materializable cache identities.
 When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a

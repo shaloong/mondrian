@@ -314,6 +314,7 @@ where
     /// fence (wgpu 30 defers callback delivery), so an absent batch must not
     /// strand the completion behind a quarantine that revokes the retained
     /// output and forces the pipeline to re-submit the same frame forever.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retire_after_fence_barrier(
         &mut self,
         now: Instant,

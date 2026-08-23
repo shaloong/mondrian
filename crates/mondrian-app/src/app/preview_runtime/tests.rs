@@ -3520,6 +3520,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
             media.source_sample.time(),
             width,
             height,
+            mondrian_playback::PreviewResolutionScale::Full,
             &input_color,
             false,
             false,
@@ -3546,6 +3547,20 @@ fn media_preview_key_for_simple_sequence_frame<O: Clone>(
     service: &PreviewProductionRuntime<O>,
     state: &AppState,
     frame: i64,
+) -> MediaPreviewKey {
+    media_preview_key_for_simple_sequence_frame_at_scale(
+        service,
+        state,
+        frame,
+        mondrian_playback::PreviewResolutionScale::Full,
+    )
+}
+
+fn media_preview_key_for_simple_sequence_frame_at_scale<O: Clone>(
+    service: &PreviewProductionRuntime<O>,
+    state: &AppState,
+    frame: i64,
+    runtime_scale: mondrian_playback::PreviewResolutionScale,
 ) -> MediaPreviewKey {
     let sequence = state.active_sequence().expect("media sequence");
     let snapshot = state.preview_execution_snapshot(Instant::now());
@@ -3581,6 +3596,7 @@ fn media_preview_key_for_simple_sequence_frame<O: Clone>(
             media.source_sample.time(),
             width,
             height,
+            runtime_scale,
             &input_color,
             false,
             false,
@@ -3793,6 +3809,21 @@ fn future_media_window_invalidates_scale_extent_color_revision_and_library_edges
             full.len(),
             "runtime scale changes execution semantics, not dependency cardinality"
         );
+        assert_ne!(
+            half, full,
+            "runtime recovery scale must rotate the media representation identity"
+        );
+        assert!(full.iter().all(|key| matches!(
+            key.decode.representation(),
+            mondrian_media::PreviewDecodeRepresentation::NativeCpu
+                | mondrian_media::PreviewDecodeRepresentation::NativeSurface
+                | mondrian_media::PreviewDecodeRepresentation::Proxy(_)
+        )));
+        assert!(half.iter().all(|key| matches!(
+            key.decode.representation(),
+            mondrian_media::PreviewDecodeRepresentation::Reduced { divisor }
+                if divisor.get() == 2
+        )));
 
         let resized = service
             .future_media_frame_keys_at_scale_for_test(
@@ -10565,6 +10596,7 @@ fn failed_current_media_preview_cache_does_not_leave_viewer_loading() {
             mondrian_core::TimelineTime::ZERO,
             width,
             height,
+            mondrian_playback::PreviewResolutionScale::Full,
             &input_color,
             true,
             false,
@@ -10965,6 +10997,7 @@ fn media_preview_cache_identity_changes_with_range_override() {
                 mondrian_core::TimelineTime::ZERO,
                 width,
                 height,
+                mondrian_playback::PreviewResolutionScale::Full,
                 &input_color,
                 false,
                 false,
@@ -11027,6 +11060,7 @@ fn playing_cached_media_preview_defers_sync_raster_composite() {
             mondrian_core::TimelineTime::ZERO,
             width,
             height,
+            mondrian_playback::PreviewResolutionScale::Full,
             &input_color,
             true,
             false,
@@ -13016,4 +13050,62 @@ fn media_preview_decode_cancellation_drops_late_playback_current_work() {
         ),
         Some(MediaPreviewCancelReason::Unknown),
     );
+}
+
+#[test]
+fn preview_representation_quality_selects_a_reduced_decode_identity() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let full_key = media_preview_key_for_simple_sequence_frame_at_scale(
+        &service,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Full,
+    );
+    assert_eq!(
+        full_key.decode.representation(),
+        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+    );
+    assert_eq!(
+        full_key.residency_resolution(),
+        Resolution { width: 3840, height: 2160 }
+    );
+
+    let reduced_key = media_preview_key_for_simple_sequence_frame_at_scale(
+        &service,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Half,
+    );
+    assert_eq!(
+        reduced_key.decode.representation(),
+        mondrian_media::PreviewDecodeRepresentation::Reduced {
+            divisor: std::num::NonZeroU32::new(2).expect("divisor"),
+        }
+    );
+    assert_eq!(
+        reduced_key.residency_resolution(),
+        Resolution { width: 1920, height: 1080 },
+        "residency must be charged at the reduced representation raster"
+    );
+    assert_ne!(
+        full_key, reduced_key,
+        "a representation-quality switch rotates the decode-policy identity; an output-extent change never does"
+    );
+
+    let full_again = media_preview_key_for_simple_sequence_frame_at_scale(
+        &service,
+        &state,
+        1,
+        mondrian_playback::PreviewResolutionScale::Full,
+    );
+    assert_eq!(
+        full_again, full_key,
+        "returning to Full must restore the exact original decode identity and cache hit"
+    );
+
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
 }

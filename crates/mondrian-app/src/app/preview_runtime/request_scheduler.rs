@@ -405,6 +405,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 snapshot,
                 proxy_demands,
                 &demand,
+                crate::app::preview_quality::preview_representation_quality(runtime_scale),
                 false,
                 false,
             ) {

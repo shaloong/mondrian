@@ -308,6 +308,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             proxy_color: Some(proxy_color(8)),
             hardware_admission: gpu_admission(),
             cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
         })
     else {
         panic!("fresh H.264 proxy should resolve into the canonical App key");
@@ -344,6 +345,7 @@ fn fresh_h264_proxy_owns_stream_zero_and_nv12_while_original_keeps_absolute_stre
             proxy_color: Some(proxy_color(8)),
             hardware_admission: gpu_admission(),
             cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
         })
     else {
         panic!("a color-incompatible proxy must safely fall back to the original");
@@ -455,6 +457,7 @@ fn filename_log_suggestion_cannot_change_preview_color_plan_but_override_does() 
                 proxy_color: None,
                 hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
                 cpu_working_required: true,
+                representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
             })
         else {
             panic!("synthetic source should resolve");
@@ -588,6 +591,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         proxy_color: Some(proxy_color(10)),
         hardware_admission: gpu_admission(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     let PreviewMediaSourceOutcome::Ready(resolved) = outcome else {
         panic!("valid media source should resolve");
@@ -630,6 +634,7 @@ fn complete_resolution_emits_one_canonical_key_and_proxy_intent() {
         proxy_color: Some(proxy_color(10)),
         hardware_admission: gpu_admission(),
         cpu_working_required: true,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     let PreviewMediaSourceOutcome::Ready(cpu_resolved) = cpu_outcome else {
         panic!("CPU-working media source should resolve");
@@ -688,6 +693,7 @@ fn undiscovered_hardware_or_unmapped_surface_keeps_cpu_geometry() {
             proxy_color: None,
             hardware_admission,
             cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
         })
     };
 
@@ -745,6 +751,7 @@ fn unproven_sampling_blocks_preview_proxy_precision_and_native_surface_admission
         proxy_color: Some(proxy_color(8)),
         hardware_admission: gpu_admission(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     assert!(matches!(
         &outcome,
@@ -786,6 +793,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     assert!(matches!(
         unavailable,
@@ -810,6 +818,7 @@ fn unavailable_and_color_rejected_sources_are_explicit_outcomes() {
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     assert!(matches!(
         rejected,
@@ -841,6 +850,7 @@ fn assume_rec709_policy_binds_yuv_matrix_into_decode_identity() {
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: true,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     let PreviewMediaSourceOutcome::Ready(ready) = outcome else {
         panic!("assumed Rec.709 source must produce a decode identity")
@@ -875,6 +885,7 @@ fn changed_source_revision_is_rejected_before_decode_uses_stale_probe_facts() {
         proxy_color: None,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: false,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     });
     assert!(matches!(
         outcome,

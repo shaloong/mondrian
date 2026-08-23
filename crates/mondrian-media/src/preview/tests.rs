@@ -42,11 +42,13 @@ use crate::decoder::{
 };
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
-use mondrian_core::{MondrianError, SourceSampleTarget, TimelineTime};
+use mondrian_core::{
+    MondrianError, Rational, SourceSampleTarget, TimelineTime, VideoCodec, VideoCodecProfile,
+};
 use serde::Serialize;
 use std::any::Any;
 use std::ffi::c_void;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3483,4 +3485,142 @@ struct PreviewDecodeSequenceFrameReport {
     threading_kind: &'static str,
     threading_count: u32,
     stage_durations: PreviewDecodeStageDurations,
+}
+
+fn reduced_test_stream() -> crate::info::VideoStreamInfo {
+    use crate::info::{PixelFormat, VideoStreamInfo};
+    VideoStreamInfo {
+        index: 0,
+        codec: VideoCodec::H264,
+        duration: Some(Duration::from_secs(1)),
+        codec_profile: VideoCodecProfile::H264Main,
+        width: 64,
+        height: 64,
+        frame_rate: Rational::new(25, 1),
+        frame_rate_proven: true,
+        pixel_format: PixelFormat::Yuv420p,
+        pixel_format_proven: true,
+        color_range: DecodedVideoRange::Limited,
+        color_interpretation: mondrian_core::DetectedColorInterpretation::decoder_unavailable(),
+        color_metadata: None,
+        color_metadata_hints: Vec::new(),
+        hdr_metadata: Vec::new(),
+        bit_depth: 8,
+        has_alpha: false,
+        avg_bitrate: 1,
+        total_frames: Some(25),
+    }
+}
+
+#[test]
+fn reduced_representation_materializes_the_reduced_raster_not_the_source_raster() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-reduced.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    clear_thread_local_preview_decode_session();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+    let source = crate::preview::PreviewDecodeSource::from_probed_stream(
+        path.as_path(),
+        fingerprint,
+        &reduced_test_stream(),
+    )
+    .expect("valid reduced source");
+    let color = test_source_color();
+    let half_key = crate::preview::PreviewDecodeKey::new(
+        source,
+        SourceSampleTarget::covering(TimelineTime::new(10, 25).expect("frame 10")),
+        crate::preview::PreviewDecodeRepresentation::Reduced {
+            divisor: NonZeroU32::new(2).expect("divisor"),
+        },
+        color,
+    )
+    .expect("valid reduced key");
+    let request = crate::preview::PreviewDecodeRequest::from_key(
+        &half_key,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    );
+    let outcome =
+        decode_preview_frame_cancellable(request, || false).expect("reduced decode must succeed");
+    let PreviewDecodeOutcome::Frame(frame) = outcome else {
+        panic!("reduced decode must return an RGBA frame");
+    };
+    assert_eq!(
+        (frame.width, frame.height),
+        (32, 32),
+        "a Reduced(2) representation must materialize the reduced raster, never the 64x64 source raster"
+    );
+    clear_thread_local_preview_decode_session();
+}
+
+#[test]
+fn full_and_reduced_representations_decode_independently_from_the_same_source() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-full-reduced.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+
+    let key_for = |representation: crate::preview::PreviewDecodeRepresentation, frame: usize| {
+        let source = crate::preview::PreviewDecodeSource::from_probed_stream(
+            path.as_path(),
+            fingerprint,
+            &reduced_test_stream(),
+        )
+        .expect("valid source");
+        crate::preview::PreviewDecodeKey::new(
+            source,
+            SourceSampleTarget::covering(
+                TimelineTime::new(i64::try_from(frame).expect("frame in range"), 25)
+                    .expect("frame"),
+            ),
+            representation,
+            test_source_color(),
+        )
+        .expect("valid key")
+    };
+
+    for (index, (representation, expected)) in [
+        (
+            crate::preview::PreviewDecodeRepresentation::NativeCpu,
+            (64, 64),
+        ),
+        (
+            crate::preview::PreviewDecodeRepresentation::Reduced {
+                divisor: NonZeroU32::new(2).expect("divisor"),
+            },
+            (32, 32),
+        ),
+        (
+            crate::preview::PreviewDecodeRepresentation::Reduced {
+                divisor: NonZeroU32::new(4).expect("divisor"),
+            },
+            (16, 16),
+        ),
+        (
+            crate::preview::PreviewDecodeRepresentation::NativeCpu,
+            (64, 64),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let key = key_for(representation, index + 10);
+        let request = crate::preview::PreviewDecodeRequest::from_key(
+            &key,
+            PreviewDecodeAccessMode::RandomAccessStillFrame,
+        );
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("representation {index} must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("representation {index} must return an RGBA frame");
+        };
+        assert_eq!(
+            (frame.width, frame.height),
+            expected,
+            "representation {index} materialized the wrong raster"
+        );
+    }
 }

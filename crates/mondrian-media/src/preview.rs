@@ -46,7 +46,7 @@ mod seek_index;
 pub use decode_contract::{
     PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeKey,
     PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
-    PreviewNativeSurfaceHint,
+    PreviewNativeSurfaceHint, PreviewRepresentationQuality,
 };
 pub use demux_worker::run_preview_demux_worker;
 pub use seek_index::{

@@ -60,6 +60,7 @@ pub(super) fn decode_media_with_preference(
         proxy_color,
         hardware_admission: PreviewHardwareDecodeAdmissionState::default(),
         cpu_working_required: request.cpu_working_required,
+        representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
     }) {
         PreviewMediaSourceOutcome::Ready(resolved) => resolved,
         PreviewMediaSourceOutcome::ColorRejected(rejected) => {

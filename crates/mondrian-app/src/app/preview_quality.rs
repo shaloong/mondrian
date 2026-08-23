@@ -4,6 +4,7 @@
 //! the same legal runtime scale instead of maintaining parallel clamp rules.
 
 use mondrian_core::Resolution;
+use mondrian_media::PreviewRepresentationQuality;
 use mondrian_playback::PreviewResolutionScale;
 
 /// Normalize an authored preview resolution scale for execution.
@@ -37,6 +38,25 @@ pub(crate) fn preview_execution_resolution(
     }
 }
 
+/// Project Playback's runtime-only spatial recovery choice into the media
+/// representation requested for CPU-addressable Preview decode.
+///
+/// This mapping is deliberately independent of the authored Viewer scale and
+/// output extent. Playback owns the temporary quality revision; media owns the
+/// resulting source-raster representation identity.
+pub(crate) fn preview_representation_quality(
+    runtime_scale: PreviewResolutionScale,
+) -> PreviewRepresentationQuality {
+    let divisor = runtime_scale.dimension_divisor();
+    if divisor == 1 {
+        PreviewRepresentationQuality::Full
+    } else {
+        std::num::NonZeroU32::new(divisor).map_or(PreviewRepresentationQuality::Full, |divisor| {
+            PreviewRepresentationQuality::Reduced { divisor }
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +84,26 @@ mod tests {
         assert_eq!(
             preview_execution_resolution(logical, 0.5, PreviewResolutionScale::Quarter),
             Resolution { width: 240, height: 135 }
+        );
+    }
+
+    #[test]
+    fn runtime_scale_maps_to_media_representation_without_output_extent() {
+        assert_eq!(
+            preview_representation_quality(PreviewResolutionScale::Full),
+            PreviewRepresentationQuality::Full
+        );
+        assert_eq!(
+            preview_representation_quality(PreviewResolutionScale::Half),
+            PreviewRepresentationQuality::Reduced {
+                divisor: std::num::NonZeroU32::new(2).expect("test divisor"),
+            }
+        );
+        assert_eq!(
+            preview_representation_quality(PreviewResolutionScale::Quarter),
+            PreviewRepresentationQuality::Reduced {
+                divisor: std::num::NonZeroU32::new(4).expect("test divisor"),
+            }
         );
     }
 }

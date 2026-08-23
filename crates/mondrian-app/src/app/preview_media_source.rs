@@ -81,6 +81,10 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) hardware_admission: PreviewHardwareDecodeAdmissionState,
     /// Bind CPU-addressability into the decoded-frame cache key.
     pub(crate) cpu_working_required: bool,
+    /// Working raster quality for the media's own representation. A reduced
+    /// quality is a decode-policy choice that keeps the media raster identity
+    /// decoupled from every consumer/output extent.
+    pub(crate) representation_quality: mondrian_media::PreviewRepresentationQuality,
 }
 
 /// Canonical media request and side-effect intent produced by resolution.
@@ -254,6 +258,7 @@ pub(crate) fn resolve_preview_media_source(
         &decode_source,
         payload_requirement,
         hardware_request,
+        request.representation_quality,
     ) {
         Ok(representation) => representation,
         Err(error) => {

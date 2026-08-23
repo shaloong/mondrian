@@ -95,9 +95,10 @@ pub use preview::{
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
     PreviewIsolatedDemuxExecutionEvidence, PreviewNativeDecodeFallback, PreviewNativeDecodedFrame,
     PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint, PreviewScrubAdaptiveClass,
-    PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy,
-    PreviewSeekIndexSource, PreviewSourceColorContract, PreviewTemporalExtentSource, RgbaFrame,
+    PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint, PreviewRepresentationQuality,
+    PreviewScrubAdaptiveClass, PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics,
+    PreviewSeekIndexCachePolicy, PreviewSeekIndexSource, PreviewSourceColorContract,
+    PreviewTemporalExtentSource, RgbaFrame,
 };
 #[cfg(target_os = "linux")]
 pub use preview::{
