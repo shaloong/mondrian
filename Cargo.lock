@@ -3307,7 +3307,7 @@ dependencies = [
 [[package]]
 name = "ocio-rs"
 version = "0.2.1"
-source = "git+https://github.com/shaloong/ocio-rs.git?rev=9b7837cfdcb94a9710009b4b9a098f2c8a304e15#9b7837cfdcb94a9710009b4b9a098f2c8a304e15"
+source = "git+https://github.com/shaloong/ocio-rs.git?rev=933c65dc4e8e4e22767174f0e22b07fe7af42e07#933c65dc4e8e4e22767174f0e22b07fe7af42e07"
 dependencies = [
  "ocio-sys",
  "thiserror 1.0.69",
@@ -3316,7 +3316,7 @@ dependencies = [
 [[package]]
 name = "ocio-sys"
 version = "0.2.1"
-source = "git+https://github.com/shaloong/ocio-rs.git?rev=9b7837cfdcb94a9710009b4b9a098f2c8a304e15#9b7837cfdcb94a9710009b4b9a098f2c8a304e15"
+source = "git+https://github.com/shaloong/ocio-rs.git?rev=933c65dc4e8e4e22767174f0e22b07fe7af42e07#933c65dc4e8e4e22767174f0e22b07fe7af42e07"
 dependencies = [
  "cc",
  "cmake",

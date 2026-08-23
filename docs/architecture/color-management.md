@@ -7,9 +7,10 @@ ACES, and Custom OCIO are product-level modes over that shared integration, not
 three renderer engines. Missing processors or configs required by a selected
 mode must surface as errors instead of falling back to different color science.
 
-The Rust integration is `ocio-rs` 0.2.1 with the `bundled` feature enabled, so
-normal application builds exercise the real OpenColorIO bridge rather than a
-stub runtime.
+The Rust integration pins `ocio-rs` 0.2.1 revision `933c65dc` with the `bundled`
+feature enabled, so normal application builds exercise the real OpenColorIO
+bridge rather than a stub runtime. Its Windows bundled path consumes the exact
+CMake install directly and does not depend on a machine-global `pkg-config`.
 
 The bundled endpoint/input config is packaged as
 `crates/mondrian-core/assets/ocio/mondrian_default_ocio_v2.ocio`. Standard mode
