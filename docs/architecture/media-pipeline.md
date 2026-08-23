@@ -369,6 +369,11 @@ method probes media synchronously.
 
 Decoding and frame caching belong to media/renderer/export paths, not UI widgets. UI panels may request thumbnails or waveform data through app adapters, but must not own FFmpeg state. Waveform and thumbnail execution are owned by the UI-independent App services described above; the media crate owns only its decode and streaming-analysis primitives.
 
+Media frame caches must use a security-supported `lru` dependency. Dependency
+upgrades must preserve the documented capacity bounds, eviction order, cache-key
+identity, and thread ownership; workspace tests and `cargo deny` jointly guard
+that contract.
+
 The media decode layer exposes three access contracts, matching the way mature
 NLEs separate playback, interactive navigation, and precise still extraction:
 
@@ -1439,6 +1444,9 @@ native surface remains at source extent and is sampled directly into the lower
 Viewer target; reduced CPU decode must not force a native surface through host
 memory. Divisor one and empty proxy representations are rejected at the decode
 key boundary to prevent duplicate or non-materializable cache identities.
+Tests that assert fixed residency counts must inject an explicit machine-resource
+profile; they must not inherit product host detection because that detection can
+legitimately select a reduced realtime representation.
 When background preview completion changes Viewer lifecycle, the app host may
 perform one preview-aware model refresh, then adapt its payload-free feedback
 without requesting preview again. A feedback transition must not trigger a

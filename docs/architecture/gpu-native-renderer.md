@@ -1111,6 +1111,9 @@ export color health contract.
 Viewer spatial prefilter, separable Lanczos, working composite, OCIO output, and
 optional ICC display-calibration output textures share one device-scoped,
 exact-contract, byte-bounded resource pool.
+Renderer caches must use a security-supported `lru` dependency. Dependency
+upgrades must preserve VRAM budgets, eviction order, and exact cache-key
+semantics; renderer tests and `cargo deny` jointly guard that contract.
 The working compositor also owns one fixed 128-slot, dynamically-offset uniform
 arena. Per-pass uniforms use ordered `Queue::write_buffer` writes into that
 persistent buffer and one persistent bind group; frame cleanup resets only the

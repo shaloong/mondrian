@@ -142,13 +142,7 @@ fn generation_rollover_reuses_semantically_valid_evaluations() {
     // The host profile is an independent picture input: conservative Linux
     // runners intentionally lower realtime Preview to Half. Pin a Standard
     // profile so play/pause changes only scheduling state in this test.
-    state.execution_resources =
-        crate::app::execution_resource_coordination::ExecutionResourceCoordinator::new(
-            crate::app::execution_resource_coordination::MachineResourceProfile::from_capacity(
-                Some(16 * 1024 * 1024 * 1024),
-                8,
-            ),
-        );
+    pin_standard_execution_resources(&mut state);
     // `play` from Stopped intentionally restarts at frame zero. Establish a
     // paused transport at the fixture's exact frame so this test varies only
     // scheduling generation, never semantic frame content.
@@ -1079,6 +1073,16 @@ fn commit_preview_test_media(
     library.commit_media_probe(candidate, None).expect("insert video asset")
 }
 
+fn pin_standard_execution_resources(state: &mut AppState) {
+    state.execution_resources =
+        crate::app::execution_resource_coordination::ExecutionResourceCoordinator::new(
+            crate::app::execution_resource_coordination::MachineResourceProfile::from_capacity(
+                Some(16 * 1024 * 1024 * 1024),
+                8,
+            ),
+        );
+}
+
 fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
     ensure_test_ocio_loaded();
     let root = unique_preview_test_root("mondrian-preview-invalid-video");
@@ -1091,6 +1095,7 @@ fn state_with_invalid_video_asset() -> (AppState, AssetId, PathBuf) {
         commit_preview_test_media(&library, media_path, rec709_video_media_info(file_size));
 
     let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
     state.test_set_asset_library(Some(library));
     let mut sequence = Sequence::new("media");
     let tb = sequence.time_base();
@@ -1118,6 +1123,7 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
     }
 
     let mut state = AppState::new();
+    pin_standard_execution_resources(&mut state);
     state.test_set_asset_library(Some(library));
     let mut sequence = Sequence::new("multi-track media");
     let tb = sequence.time_base();
@@ -1129,6 +1135,19 @@ fn state_with_two_invalid_video_assets() -> (AppState, PathBuf) {
     state.test_set_sequence(Some(sequence));
     state.seek(0).expect("seek");
     (state, root)
+}
+
+#[test]
+fn invalid_media_fixtures_pin_full_realtime_preview_quality() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.play().expect("play deterministic media fixture");
+    assert_eq!(
+        state.playback_preview_resolution_scale(),
+        mondrian_playback::PreviewResolutionScale::Full,
+        "fixed residency assertions must not inherit the host machine profile"
+    );
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
 }
 
 fn state_with_icc_display_policy(color: Color) -> AppState {
