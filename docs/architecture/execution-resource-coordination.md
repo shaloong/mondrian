@@ -482,6 +482,13 @@ Import dispatch or parallelism changed. Explicit diagnostics observe that
 policy immediately. Admission rejection advances both revisions because its
 bounded rejection counter and terminal record are real product evidence.
 
+Host integration validation exercises the packaged Isolated Media Probe Helper
+rather than replacing it with an in-process probe. Its orchestration wait remains
+bounded, but admits normal debug-build process cold-start and scheduling jitter;
+the wait is a correctness deadline, not a three-second media-probe performance
+service-level objective. The Helper retains its independent 120-second product
+deadline and process-reaping contract.
+
 Closing or replacing the Project:
 
 - advances the import generation;

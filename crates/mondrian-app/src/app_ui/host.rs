@@ -2747,7 +2747,7 @@ mod tests {
     }
 
     fn poll_host_background_tasks_until_imports_idle(host: &mut AppUiHost) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while host.app_state().pending_media_import_batches() > 0 {
             host.poll_background_tasks(Rect::new(0.0, 0.0, 1280.0, 720.0));
             if host.app_state().pending_media_import_batches() == 0 {
@@ -4624,7 +4624,7 @@ mod tests {
         );
 
         let bounds = Rect::new(0.0, 0.0, 1280.0, 720.0);
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut terminal_poll_requested_refresh = false;
         while host.app_state().media_asset_mutation_diagnostics().outstanding > 0 {
             let outcome = host.poll_background_tasks(bounds);
