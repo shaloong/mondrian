@@ -1677,19 +1677,29 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
 }
 
 #[test]
-fn preview_transform_projection_does_not_double_apply_resolution_scale() {
-    let mut media = test_media_frame_with_size(180, 960, 540, 42);
-    media.set_logical_resolution(Resolution { width: 3840, height: 2160 });
+fn preview_transform_projection_preserves_fit_across_quality_and_proxy_extents() {
+    let cases = [
+        (3840, 2160, Resolution { width: 1920, height: 1080 }),
+        (1920, 1080, Resolution { width: 960, height: 540 }),
+        (1280, 720, Resolution { width: 480, height: 270 }),
+        (960, 540, Resolution { width: 480, height: 270 }),
+    ];
 
-    let projected = project_preview_media_transform(
-        [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
-        &media,
-        Resolution { width: 1920, height: 1080 },
-        Resolution { width: 960, height: 540 },
-    )
-    .expect("valid preview projection");
+    for (source_width, source_height, output_sampled) in cases {
+        let mut media = test_media_frame_with_size(180, source_width, source_height, 42);
+        media.set_logical_resolution(Resolution { width: 3840, height: 2160 });
 
-    assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let projected = project_preview_media_transform(
+            [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+            &media,
+            Resolution { width: 1920, height: 1080 },
+            output_sampled,
+        )
+        .expect("valid preview projection");
+
+        assert!((projected[0] * source_width as f32 - output_sampled.width as f32).abs() < 0.01);
+        assert!((projected[4] * source_height as f32 - output_sampled.height as f32).abs() < 0.01);
+    }
 }
 
 #[test]

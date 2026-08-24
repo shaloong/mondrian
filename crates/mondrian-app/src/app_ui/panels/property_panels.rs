@@ -335,12 +335,20 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     let position_x_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.position.clone());
     let position_y_parameter = position_x_parameter.clone();
-    let scale_parameter =
+    let scale_x_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.scale.clone());
+    let scale_y_parameter = scale_x_parameter.clone();
+    let anchor_x_parameter =
+        model.visual_parameters.as_ref().and_then(|targets| targets.anchor.clone());
+    let anchor_y_parameter = anchor_x_parameter.clone();
     let rotation_parameter =
         model.visual_parameters.as_ref().and_then(|targets| targets.rotation.clone());
     let position_x = model.position_x;
     let position_y = model.position_y;
+    let scale_x = model.scale_x_percent;
+    let scale_y = model.scale_y_percent;
+    let anchor_x = model.anchor_x;
+    let anchor_y = model.anchor_y;
     let has_target = selected_clip.is_some();
     let can_edit = has_target && model.is_editable;
     let subtitle = model.edit_disabled_reason.as_deref().unwrap_or(if has_target {
@@ -669,11 +677,13 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
     panel = panel.with_section(
         PropertySection::new("变换")
             .with_row(PropertyRow::new(
-                "Position X",
-                numeric_slider_input_control(
+                "位置 X (px)",
+                numeric_slider_input_control_with_hard_range(
                     model.position_x,
                     -4096.0,
                     4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
                     Some(1.0),
                     0,
                     can_edit,
@@ -687,11 +697,13 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Position Y",
-                numeric_slider_input_control(
+                "位置 Y (px)",
+                numeric_slider_input_control_with_hard_range(
                     model.position_y,
                     -4096.0,
                     4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
                     Some(1.0),
                     0,
                     can_edit,
@@ -705,25 +717,87 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Scale",
-                numeric_slider_input_control(
-                    model.scale_percent,
-                    0.0,
+                "缩放 X (%)",
+                numeric_slider_input_control_with_hard_range(
+                    model.scale_x_percent,
+                    -400.0,
                     400.0,
+                    -100_000.0,
+                    100_000.0,
                     Some(1.0),
                     0,
                     can_edit,
                     move |value| {
                         inspector_parameter_action(
                             selected_clip,
-                            scale_parameter.clone(),
-                            PropertyValue::Vec2(glam::Vec2::splat(value.max(0.0) / 100.0)),
+                            scale_x_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(value / 100.0, scale_y / 100.0)),
                         )
                     },
                 ),
             ))
             .with_row(PropertyRow::new(
-                "Rotation",
+                "缩放 Y (%)",
+                numeric_slider_input_control_with_hard_range(
+                    model.scale_y_percent,
+                    -400.0,
+                    400.0,
+                    -100_000.0,
+                    100_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            scale_y_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(scale_x / 100.0, value / 100.0)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "锚点 X (px)",
+                numeric_slider_input_control_with_hard_range(
+                    model.anchor_x,
+                    -4096.0,
+                    4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            anchor_x_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(value, anchor_y)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "锚点 Y (px)",
+                numeric_slider_input_control_with_hard_range(
+                    model.anchor_y,
+                    -4096.0,
+                    4096.0,
+                    -1_000_000.0,
+                    1_000_000.0,
+                    Some(1.0),
+                    0,
+                    can_edit,
+                    move |value| {
+                        inspector_parameter_action(
+                            selected_clip,
+                            anchor_y_parameter.clone(),
+                            PropertyValue::Vec2(glam::Vec2::new(anchor_x, value)),
+                        )
+                    },
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "旋转 (°)",
                 numeric_slider_input_control(
                     model.rotation_degrees,
                     -180.0,

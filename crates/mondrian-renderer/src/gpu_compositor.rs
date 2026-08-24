@@ -1953,7 +1953,21 @@ fn require_straight_compatible_alpha(
 }
 
 fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
-    layer.opacity.clamp(0.0, 1.0) == 0.0
+    if layer.opacity.clamp(0.0, 1.0) == 0.0 {
+        return true;
+    }
+
+    match layer.source {
+        GpuCompositeLayerSource::CpuFrame(_)
+        | GpuCompositeLayerSource::GpuFrame(_)
+        | GpuCompositeLayerSource::SolidColor(_) => affine_has_zero_area(layer.transform),
+        GpuCompositeLayerSource::Adjustment => false,
+    }
+}
+
+fn affine_has_zero_area(transform: [f32; 6]) -> bool {
+    let determinant = transform[0] * transform[4] - transform[3] * transform[1];
+    transform.iter().all(|value| value.is_finite()) && determinant == 0.0
 }
 
 fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
@@ -3290,12 +3304,8 @@ mod tests {
         singular.transform = [0.0; 6];
         let layers = [singular];
         let request = GpuCompositeRequest { layers: &layers, ..request };
-        assert_eq!(
-            validate_request(&request).expect_err("singular solid transform must stay blocked"),
-            GpuCompositeError::Blocked {
-                reason: GpuCompositingBlockerReason::UnsupportedTransform,
-            }
-        );
+        validate_request(&request)
+            .expect("a zero-area solid contributes no pixels and needs no fallback");
     }
 
     #[test]
@@ -3393,7 +3403,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_composite_request_rejects_singular_media_transform() {
+    fn gpu_composite_request_skips_zero_area_media_transform() {
         let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
             width: 8,
             height: 8,
@@ -3415,14 +3425,8 @@ mod tests {
             layers: &[layer],
         };
 
-        let err = validate_request(&request).expect_err("singular transform should be blocked");
-
-        assert_eq!(
-            err,
-            GpuCompositeError::Blocked {
-                reason: GpuCompositingBlockerReason::UnsupportedTransform
-            }
-        );
+        validate_request(&request)
+            .expect("a zero-area authored layer contributes no pixels and needs no fallback");
     }
 
     #[test]

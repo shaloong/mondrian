@@ -718,6 +718,11 @@ Transition endpoints use this same projection; Basic Title uses the equivalent
 cropped-title projection. A 4K-authored clip exported at 1080p must keep the
 same composition, not apply its auto-fit scale a second time.
 
+A finite media or solid transform with an exactly zero affine determinant has
+zero raster area and contributes no pixels. CPU and GPU compositors skip that
+layer; it is not an unsupported-transform fallback. Non-finite and nonzero
+near-singular transforms remain invalid because they cannot be sampled safely.
+
 ## Current Implementation
 
 `mondrian-renderer::timeline_render_plan` lowers one Sequence frame through one
@@ -2145,6 +2150,14 @@ CPU fallback is never silently used. Health reports distinguish:
 - `Pass` — Clean GPU color output.
 - `Warn` — GPU blocked but CPU fallback succeeded.
 - `Fail` — Fail-closed color rejection.
+
+`ViewerGpuExecutionRecord::fallback_reasons` belongs to an already successful
+record: it reports internal source/import or stage fallback evidence for the
+frame that was actually produced. The Window records that evidence but must not
+invalidate the Preview generation or request a second whole-frame CPU retry.
+Only an unsuccessful Viewer record or an explicit pre-recording blocker may
+request the CPU fallback path. This preserves the completed frame while still
+making every fallback observable.
 
 ### GPU Preview Cache Key
 

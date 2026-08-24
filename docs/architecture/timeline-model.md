@@ -623,6 +623,16 @@ owns one placement range, one closed `ClipSourceTimeMap`, a stable
 membership, blend mode, and placement-local audio Component Edits. Its content
 is one closed `ClipContent` payload:
 
+Picture transforms use one explicit authoring-space contract:
+`T(position) * R(rotation) * S(scale) * T(-anchor)`. Anchor is measured in
+full source-authoring pixels; position is the canvas-pixel coordinate where
+that anchor is placed; scale is independent and unitless on X and Y. Decode
+quality, proxy extent, Viewer zoom, and Preview output extent never mutate
+these values. Product auto-fit sets anchor to source center, position to canvas
+center, and one uniform `min(canvas/source)` scale. Equal source and canvas
+extents therefore produce 100% scale and the identity matrix, filling the
+canvas exactly.
+
 Visual-effect insertion accepts a complete `EffectNode`, not only an
 `EffectType`. The effects domain owns registered definitions and canonical
 parameter defaults, while Timeline owns placement, ordered instance storage,

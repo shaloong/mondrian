@@ -968,17 +968,49 @@ mod tests {
     }
 
     #[test]
-    fn sampled_extent_projection_preserves_authored_fit() {
-        let projected = project_affine_to_sampled_extents(
-            [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
-            Resolution { width: 3840, height: 2160 },
-            Resolution { width: 960, height: 540 },
-            Resolution { width: 1920, height: 1080 },
-            Resolution { width: 960, height: 540 },
-        )
-        .expect("valid sampled extents");
+    fn sampled_extent_projection_preserves_authored_fit_across_preview_and_proxy_sizes() {
+        let source_authoring = Resolution { width: 3840, height: 2160 };
+        let output_authoring = Resolution { width: 1920, height: 1080 };
+        let cases = [
+            (
+                Resolution { width: 3840, height: 2160 },
+                Resolution { width: 1920, height: 1080 },
+            ),
+            (
+                Resolution { width: 1920, height: 1080 },
+                Resolution { width: 960, height: 540 },
+            ),
+            (
+                Resolution { width: 1280, height: 720 },
+                Resolution { width: 480, height: 270 },
+            ),
+            (
+                Resolution { width: 960, height: 540 },
+                Resolution { width: 480, height: 270 },
+            ),
+        ];
 
-        assert_eq!(projected, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        for (source_sampled, output_sampled) in cases {
+            let projected = project_affine_to_sampled_extents(
+                [0.5, 0.0, 0.0, 0.0, 0.5, 0.0],
+                source_authoring,
+                source_sampled,
+                output_authoring,
+                output_sampled,
+            )
+            .expect("valid sampled extents");
+
+            let bottom_right = glam::Vec2::new(
+                projected[0] * source_sampled.width as f32
+                    + projected[1] * source_sampled.height as f32
+                    + projected[2],
+                projected[3] * source_sampled.width as f32
+                    + projected[4] * source_sampled.height as f32
+                    + projected[5],
+            );
+            assert!((bottom_right.x - output_sampled.width as f32).abs() < 0.01);
+            assert!((bottom_right.y - output_sampled.height as f32).abs() < 0.01);
+        }
     }
 
     #[test]

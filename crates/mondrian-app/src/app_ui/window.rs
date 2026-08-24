@@ -3757,6 +3757,15 @@ fn fail_viewer_gpu_frame(host: &AppUiHost, frame: &mut PreviewGpuFrame) {
     }
 }
 
+fn report_successful_viewer_gpu_fallbacks(
+    reasons: &[String],
+    mut record_diagnostic: impl FnMut(&str),
+) {
+    for reason in reasons {
+        record_diagnostic(reason);
+    }
+}
+
 fn prepare_viewer_gpu_preview(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -4330,12 +4339,11 @@ fn prepare_viewer_gpu_preview(
             session.viewer_gpu_execution.native_import_support(),
         ),
     );
-    for reason in &record.fallback_reasons {
+    report_successful_viewer_gpu_fallbacks(&record.fallback_reasons, |reason| {
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::CpuFallbackRequested {
-            reason: reason.clone(),
+            reason: reason.to_owned(),
         });
-        host.request_viewer_cpu_fallback(reason.clone());
-    }
+    });
     let heterogeneous_recorded = record.heterogeneous_continuation_count() != 0;
     let stage_diagnostics = record.stage_diagnostics;
     if let Some(terminal) = session.viewer_gpu_device_progress.generation_terminal() {
@@ -7143,6 +7151,18 @@ mod tests {
             .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
             .spatial_runtime
             .is_none());
+    }
+
+    #[test]
+    fn successful_viewer_gpu_fallback_evidence_does_not_replace_the_completed_frame() {
+        let reasons = vec!["native import used the admitted CPU working source".to_owned()];
+        let mut diagnostics = Vec::new();
+
+        report_successful_viewer_gpu_fallbacks(&reasons, |reason| {
+            diagnostics.push(reason.to_owned());
+        });
+
+        assert_eq!(diagnostics, reasons);
     }
 
     #[test]

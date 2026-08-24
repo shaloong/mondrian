@@ -3113,7 +3113,8 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
         Clip::new_solid_color(AssetId::new(), color, tt(4, tb), tt(18, tb)).expect("valid clip");
     clip.is_disabled = true;
     clip.transform.set_position(glam::Vec2::new(192.0, 108.0));
-    clip.transform.set_scale(glam::Vec2::splat(1.25));
+    clip.transform.set_scale(glam::Vec2::new(1.25, 0.75));
+    clip.transform.set_anchor_point(glam::Vec2::new(320.0, 180.0));
     clip.apply_property_mutation(PropertyMutation::SetStaticValue {
         path: Transform2D::ROTATION_PATH.to_string(),
         value: PropertyValue::Float(15.0),
@@ -3172,7 +3173,10 @@ fn app_state_models_map_sequence_selection_and_basic_inspector_values() {
     assert_eq!(models.inspector.tint.to_rgba8(), color.to_rgba8());
     assert_eq!(models.inspector.position_x, 192.0);
     assert_eq!(models.inspector.position_y, 108.0);
-    assert_eq!(models.inspector.scale_percent, 125.0);
+    assert_eq!(models.inspector.scale_x_percent, 125.0);
+    assert_eq!(models.inspector.scale_y_percent, 75.0);
+    assert_eq!(models.inspector.anchor_x, 320.0);
+    assert_eq!(models.inspector.anchor_y, 180.0);
     assert_eq!(models.inspector.rotation_degrees, 15.0);
     assert_eq!(models.inspector.in_frame, 4.0);
     assert_eq!(models.inspector.out_frame, 22.0);
@@ -5447,7 +5451,10 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         shows_tint: true,
         position_x: 0.0,
         position_y: 0.0,
-        scale_percent: 100.0,
+        scale_x_percent: 100.0,
+        scale_y_percent: 100.0,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
         rotation_degrees: 0.0,
         visual_parameters: None,
         in_frame: 0.0,
@@ -5569,7 +5576,10 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
         shows_tint: true,
         position_x: 0.0,
         position_y: 0.0,
-        scale_percent: 100.0,
+        scale_x_percent: 100.0,
+        scale_y_percent: 100.0,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
         rotation_degrees: 0.0,
         visual_parameters: None,
         in_frame: 0.0,

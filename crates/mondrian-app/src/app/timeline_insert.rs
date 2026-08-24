@@ -326,7 +326,7 @@ fn create_asset_clip(
     }
 }
 
-fn auto_fit_picture(
+pub(super) fn auto_fit_picture(
     sequence: &mondrian_timeline::Sequence,
     clip: &mut Clip,
     media_width: u32,
@@ -352,5 +352,38 @@ fn insert_error(reason: impl Into<String>) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: "timeline_insert_asset".to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mondrian_core::AssetId;
+
+    #[test]
+    fn auto_fit_same_sized_picture_fills_canvas_with_centered_anchor() {
+        let sequence = mondrian_timeline::Sequence::new("same-sized auto fit");
+        let resolution = sequence.settings.resolution;
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+
+        auto_fit_picture(&sequence, &mut clip, resolution.width, resolution.height);
+
+        let anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
+        let position = clip.transform.get_position(TimelineTime::ZERO);
+        let scale = clip.transform.get_scale(TimelineTime::ZERO);
+        let matrix = clip.transform.evaluate_matrix(TimelineTime::ZERO);
+        let expected_center = glam::Vec2::new(
+            resolution.width as f32 * 0.5,
+            resolution.height as f32 * 0.5,
+        );
+        assert_eq!(anchor, expected_center);
+        assert_eq!(position, expected_center);
+        assert_eq!(scale, glam::Vec2::ONE);
+        assert_eq!(matrix, glam::Mat3::IDENTITY);
     }
 }

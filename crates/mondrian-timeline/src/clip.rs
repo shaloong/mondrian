@@ -122,8 +122,8 @@ impl Transform2D {
         let sin_r = rot.sin();
 
         // pos + R * S * (v - anchor) for vertex v
-        let tx = pos.x + scale.x * (cos_r * (-anchor.x) - sin_r * (-anchor.y));
-        let ty = pos.y + scale.y * (sin_r * (-anchor.x) + cos_r * (-anchor.y));
+        let tx = pos.x - scale.x * cos_r * anchor.x + scale.y * sin_r * anchor.y;
+        let ty = pos.y - scale.x * sin_r * anchor.x - scale.y * cos_r * anchor.y;
 
         glam::Mat3::from_cols(
             glam::Vec3::new(scale.x * cos_r, scale.x * sin_r, 0.0),
@@ -2053,6 +2053,32 @@ mod tests {
         let m = t.evaluate_matrix(tt(0));
         assert!((m.col(2).x - 100.0).abs() < 0.01, "tx={}", m.col(2).x);
         assert!((m.col(2).y - 100.0).abs() < 0.01, "ty={}", m.col(2).y);
+    }
+
+    #[test]
+    fn non_uniform_scale_rotates_anchor_with_each_source_axis() {
+        let mut transform = Transform2D::identity();
+        transform.set_position(glam::Vec2::new(100.0, 200.0));
+        transform.set_scale(glam::Vec2::new(2.0, 3.0));
+        transform.set_anchor_point(glam::Vec2::new(10.0, 20.0));
+        transform
+            .properties
+            .set_static_value(Transform2D::ROTATION_PATH, PropertyValue::Float(90.0))
+            .expect("set rotation");
+
+        let matrix = transform.evaluate_matrix(tt(0));
+        let mapped_anchor = matrix.transform_point2(glam::Vec2::new(10.0, 20.0));
+
+        assert!(
+            (mapped_anchor.x - 100.0).abs() < 0.01,
+            "x={}",
+            mapped_anchor.x
+        );
+        assert!(
+            (mapped_anchor.y - 200.0).abs() < 0.01,
+            "y={}",
+            mapped_anchor.y
+        );
     }
 
     #[test]

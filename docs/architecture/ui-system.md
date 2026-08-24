@@ -67,6 +67,14 @@ candidate title before recording one Sequence snapshot. The generic legacy
 solid-color tint row is hidden for Basic Title so two controls cannot claim
 authority over its fill.
 
+The Transform Inspector exposes the complete authored spatial value rather
+than a UI-only uniform approximation. Position X/Y are sequence-canvas pixels,
+Anchor X/Y are full source-authoring pixels, Scale X/Y are independent percent
+views of the unitless domain values, and Rotation is degrees. Editing one
+vector component preserves the other component. Preview Full/1/2/1/4,
+proxy/original selection, and Viewer Fit zoom change only execution or
+presentation sampling and never rewrite these controls.
+
 `CurveEditor` is a normalized interaction Module, not an automation owner. It
 keeps high-frequency pointer motion local and emits exactly one committed
 `CurveEdit::{Insert, Move, Delete}` for a pointer gesture; keyboard edits are

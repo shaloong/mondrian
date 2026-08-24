@@ -1566,6 +1566,8 @@ pub struct InspectorVisualParameterTargets {
     pub position: Option<AnimationParameterAddress>,
     /// Transform scale parameter, absent for Clip kinds that expose opacity only.
     pub scale: Option<AnimationParameterAddress>,
+    /// Transform anchor parameter, absent for Clip kinds that expose opacity only.
+    pub anchor: Option<AnimationParameterAddress>,
     /// Transform rotation parameter, absent for Clip kinds that expose opacity only.
     pub rotation: Option<AnimationParameterAddress>,
 }
@@ -1597,8 +1599,14 @@ pub struct InspectorPanelModel {
     pub position_x: f32,
     /// Vertical transform position in sequence pixels.
     pub position_y: f32,
-    /// Uniform transform scale shown in UI percent units.
-    pub scale_percent: f32,
+    /// Horizontal transform scale shown in UI percent units.
+    pub scale_x_percent: f32,
+    /// Vertical transform scale shown in UI percent units.
+    pub scale_y_percent: f32,
+    /// Horizontal anchor coordinate in source-authoring pixels.
+    pub anchor_x: f32,
+    /// Vertical anchor coordinate in source-authoring pixels.
+    pub anchor_y: f32,
     /// Transform rotation shown in degrees.
     pub rotation_degrees: f32,
     /// Stable author targets for direct visual parameter gestures.
@@ -1796,11 +1804,13 @@ impl InspectorPanelModel {
         let opacity = (clip.transform.evaluate_opacity(clip_author_time) * 100.0).clamp(0.0, 100.0);
         let position = clip.transform.get_position(clip_author_time);
         let scale = clip.transform.get_scale(clip_author_time);
+        let anchor = clip.transform.get_anchor_point(clip_author_time);
         let intrinsic_parameters = clip.intrinsic_parameter_bag();
         let visual_parameters = InspectorVisualParameterTargets {
             opacity: intrinsic_parameters.address_for_path(Transform2D::OPACITY_PATH),
             position: intrinsic_parameters.address_for_path(Transform2D::POSITION_PATH),
             scale: intrinsic_parameters.address_for_path(Transform2D::SCALE_PATH),
+            anchor: intrinsic_parameters.address_for_path(Transform2D::ANCHOR_POINT_PATH),
             rotation: intrinsic_parameters.address_for_path(Transform2D::ROTATION_PATH),
         };
         let is_editable = !selected_clip_track_is_locked(state, resolved_selection);
@@ -1840,7 +1850,10 @@ impl InspectorPanelModel {
             shows_tint: clip.is_solid_color(),
             position_x: position.x,
             position_y: position.y,
-            scale_percent: scale.x * 100.0,
+            scale_x_percent: scale.x * 100.0,
+            scale_y_percent: scale.y * 100.0,
+            anchor_x: anchor.x,
+            anchor_y: anchor.y,
             rotation_degrees: clip_rotation_degrees(clip, time),
             visual_parameters: Some(visual_parameters),
             in_frame: clip
@@ -1950,7 +1963,10 @@ impl InspectorPanelModel {
             shows_tint: false,
             position_x: 0.0,
             position_y: 0.0,
-            scale_percent: 100.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
+            anchor_x: 0.0,
+            anchor_y: 0.0,
             rotation_degrees: 0.0,
             visual_parameters: None,
             in_frame: 0.0,
@@ -1983,7 +1999,10 @@ impl InspectorPanelModel {
             shows_tint: true,
             position_x: 12.0,
             position_y: -8.0,
-            scale_percent: 100.0,
+            scale_x_percent: 100.0,
+            scale_y_percent: 100.0,
+            anchor_x: 0.0,
+            anchor_y: 0.0,
             rotation_degrees: 0.0,
             visual_parameters: None,
             in_frame: 0.0,
