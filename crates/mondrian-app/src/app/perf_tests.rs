@@ -76,7 +76,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mondrian_core::types::Rational;
+use mondrian_core::types::{Rational, Resolution};
 use mondrian_effects::{EffectNode, EffectNodeExt};
 #[cfg(feature = "validation")]
 use mondrian_media::AudioPlaybackSnapshot;
@@ -1522,6 +1522,32 @@ fn continuous_window_duration_and_startup_headroom_respect_frame_phase() {
 }
 
 #[test]
+fn source_full_playback_probe_authors_the_source_extent_at_unit_scale() {
+    let mut sequence = Sequence::new("Source Full playback probe");
+    let source_resolution = Resolution { width: 3840, height: 2160 };
+
+    configure_preview_media_authored_output(
+        &mut sequence,
+        PreviewMediaAuthoredOutput::SourceFull,
+        source_resolution,
+    )
+    .expect("configure source-Full authored output");
+
+    assert_eq!(sequence.settings.resolution, source_resolution);
+    assert_eq!(sequence.settings.preview.resolution_scale, 1.0);
+}
+
+#[test]
+fn real_media_probe_rate_maps_to_the_nearest_supported_sequence_grid() {
+    assert_eq!(
+        canonical_preview_probe_sequence_frame_rate(Rational::new(724_800, 12_097))
+            .expect("map the observed 59.916 fps cadence"),
+        Rational::FPS_5994
+    );
+    assert!(canonical_preview_probe_sequence_frame_rate(Rational::new(48, 1)).is_err());
+}
+
+#[test]
 fn continuous_playback_window_reports_early_end_and_short_duration_without_bailing() {
     let mut playback = PlaybackEvidenceCollector::default().report();
     playback.first_epoch = Some(7);
@@ -1584,6 +1610,7 @@ struct PreviewMediaPlaybackPerfReport {
     frames: usize,
     frame_interval_ns: u64,
     media_probe: PreviewPlaybackMediaProbeReport,
+    authored_output: PreviewMediaAuthoredOutputEvidence,
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     /// GPU work owned by the uninterrupted playback window only.
@@ -1607,6 +1634,21 @@ struct PreviewMediaPlaybackPerfReport {
     process_memory_evidence: PreviewProcessMemoryEvidenceReport,
     native_video_gpu_timing: ProfessionalNativeVideoGpuTimingReport,
     cases: Vec<PerfCaseReport>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PreviewMediaAuthoredOutput {
+    SequenceDefault,
+    SourceFull,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewMediaAuthoredOutputEvidence {
+    mode: PreviewMediaAuthoredOutput,
+    resolution: Resolution,
+    resolution_scale: f32,
+    full_extent: HeadlessViewerGpuExtent,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1659,6 +1701,7 @@ struct PreviewMediaPlaybackProbeConfig {
     probe_cancellation_recovery: bool,
     native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy,
     absolute_deadline: Option<Instant>,
+    authored_output: PreviewMediaAuthoredOutput,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3191,6 +3234,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             probe_cancellation_recovery: false,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
+            authored_output: PreviewMediaAuthoredOutput::SequenceDefault,
         },
     );
 
@@ -4753,6 +4797,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             probe_cancellation_recovery: true,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
+            authored_output: PreviewMediaAuthoredOutput::SourceFull,
         },
     );
     let _ = fs::remove_dir_all(&root_dir);
@@ -5116,6 +5161,7 @@ fn run_external_continuous_playback_gate(
                 PreviewNativeVideoGpuTimingPolicy::Disabled
             },
             absolute_deadline: Some(deadline),
+            authored_output: PreviewMediaAuthoredOutput::SourceFull,
         },
     );
     let _ = fs::remove_dir_all(&root_dir);
@@ -5548,12 +5594,54 @@ fn run_preview_media_continuous_playback_probe(
             .with_context(|| format!("probe playback media {}", video_path.display()))?,
     };
     let media_probe = PreviewPlaybackMediaProbeReport::from_media_info(&media_info)?;
+    let source_video = media_info
+        .primary_video()
+        .context("continuous playback probe found no primary video")?;
+    let source_resolution = Resolution {
+        width: source_video.width,
+        height: source_video.height,
+    };
     let mut state = build_preview_media_perf_state_with_media_info(
         root_dir,
         video_path,
         Some(media_info),
         config.sequence_frame_count,
     )?;
+    if config.authored_output == PreviewMediaAuthoredOutput::SourceFull {
+        let sequence_id = state
+            .active_sequence_id()
+            .context("source-Full playback probe has no active Sequence")?;
+        state.commit_sequence_edit(
+            sequence_id,
+            "配置源分辨率 Full 预览探针",
+            |sequence| {
+                configure_preview_media_authored_output(
+                    sequence,
+                    config.authored_output,
+                    source_resolution,
+                )
+            },
+        )?;
+    }
+    let authored_sequence = state
+        .active_sequence()
+        .context("continuous playback probe lost its active Sequence")?;
+    let authored_resolution = authored_sequence.settings.resolution;
+    let authored_resolution_scale = authored_sequence.settings.preview.resolution_scale;
+    let authored_full_resolution = crate::app::preview_quality::preview_execution_resolution(
+        authored_resolution,
+        authored_resolution_scale,
+        mondrian_playback::PreviewResolutionScale::Full,
+    );
+    let authored_output = PreviewMediaAuthoredOutputEvidence {
+        mode: config.authored_output,
+        resolution: authored_resolution,
+        resolution_scale: authored_resolution_scale,
+        full_extent: HeadlessViewerGpuExtent {
+            width: authored_full_resolution.width,
+            height: authored_full_resolution.height,
+        },
+    };
     let preview_service = HeadlessPreviewRuntime::new();
     let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
         preview_service.decode_execution_watch(),
@@ -5883,6 +5971,7 @@ fn run_preview_media_continuous_playback_probe(
         frames: config.frame_count,
         frame_interval_ns: config.frame_interval_ns,
         media_probe,
+        authored_output,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
@@ -5909,6 +5998,14 @@ fn run_preview_media_continuous_playback_probe(
             .chain(std::iter::once(gpu_candidate_case))
             .collect(),
     };
+    if config.authored_output == PreviewMediaAuthoredOutput::SourceFull {
+        anyhow::ensure!(
+            report.headless_gpu.output_extents.contains(&report.authored_output.full_extent),
+            "source-Full playback window never executed its authored Full GPU extent {:?}: {:?}",
+            report.authored_output.full_extent,
+            report.headless_gpu.output_extents
+        );
+    }
     validate_executed_adaptive_scaling(&report)?;
     if let Some(journal) = decode_execution_journal {
         journal.finish()?;
@@ -7577,11 +7674,14 @@ fn build_preview_media_perf_state_with_media_info(
         .filter(|video| {
             video.frame_rate_proven && video.frame_rate.num > 0 && video.frame_rate.den > 0
         })
-        .map(|video| video.frame_rate.reduce());
+        .map(|video| canonical_preview_probe_sequence_frame_rate(video.frame_rate))
+        .transpose()?;
     let asset_id = commit_perf_media_probe(&library, video_path, media_info)?;
 
     let mut sequence = Sequence::new("Preview media perf");
-    sequence.settings.frame_rate = probed_frame_rate.unwrap_or(Rational::FPS_30);
+    let mut settings = sequence.settings.clone();
+    settings.frame_rate = probed_frame_rate.unwrap_or(Rational::FPS_30);
+    sequence.apply_settings(settings)?;
     let tb = sequence.time_base();
     let duration = tt(frame_count as i64, tb);
     sequence.video_tracks[0]
@@ -7597,6 +7697,51 @@ fn build_preview_media_perf_state_with_media_info(
     state.test_set_sequences(vec![sequence.clone()]);
     state.test_set_sequence(Some(sequence));
     Ok(state)
+}
+
+fn configure_preview_media_authored_output(
+    sequence: &mut Sequence,
+    mode: PreviewMediaAuthoredOutput,
+    source_resolution: Resolution,
+) -> mondrian_core::Result<()> {
+    if mode == PreviewMediaAuthoredOutput::SequenceDefault {
+        return Ok(());
+    }
+    let mut settings = sequence.settings.clone();
+    settings.resolution = source_resolution;
+    settings.preview.resolution_scale = 1.0;
+    sequence.apply_settings(settings)
+}
+
+fn canonical_preview_probe_sequence_frame_rate(frame_rate: Rational) -> anyhow::Result<Rational> {
+    anyhow::ensure!(
+        frame_rate.num > 0 && frame_rate.den > 0,
+        "preview probe frame rate must be positive: {frame_rate}"
+    );
+    let observed = frame_rate.num as f64 / frame_rate.den as f64;
+    let candidate = Rational::SEQUENCE_FRAME_RATES
+        .iter()
+        .copied()
+        .min_by(|left, right| {
+            let left_distance = (observed - left.num as f64 / left.den as f64).abs();
+            let right_distance = (observed - right.num as f64 / right.den as f64).abs();
+            left_distance.total_cmp(&right_distance)
+        })
+        .context("Sequence frame-rate catalog is empty")?;
+    let difference = (i128::from(frame_rate.num) * i128::from(candidate.den)
+        - i128::from(candidate.num) * i128::from(frame_rate.den))
+    .unsigned_abs();
+    let relative_denominator = (candidate.num as u128)
+        .checked_mul(frame_rate.den as u128)
+        .context("preview probe frame-rate tolerance denominator overflow")?;
+    let scaled_difference = difference
+        .checked_mul(1_000)
+        .context("preview probe frame-rate tolerance numerator overflow")?;
+    anyhow::ensure!(
+        scaled_difference <= relative_denominator,
+        "probed frame rate {frame_rate} is not within 0.1% of a supported Sequence rate (nearest {candidate})"
+    );
+    Ok(candidate)
 }
 
 fn probe_external_preview_media_info(video_path: &Path) -> anyhow::Result<MediaInfo> {

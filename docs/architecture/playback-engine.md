@@ -1003,6 +1003,13 @@ than transient polling classifications, and evaluates Frame Store cache,
 aggregate hard-grant, high-water, and Viewer budgets while bounded Prefetch
 leases are active. Zero outstanding work is a separate shutdown/quiescence
 contract and is never required inside the continuous playback window.
+External real-media playback validation authors the Sequence to the probed
+primary-video extent at preview scale `1.0`. A near-standard probed average
+rate is mapped to the nearest supported exact Sequence grid only within 0.1%;
+other rates fail instead of creating an invalid authoring state or silently
+changing cadence. The report records that authored resolution, scale, and Full
+extent, and the gate requires the continuous GPU window to execute that exact
+Full extent before runtime Half/Quarter recovery can count as valid evidence.
 
 The Engine must never silently:
 
