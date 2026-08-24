@@ -1225,6 +1225,10 @@ processing; widgets never own a wgpu resource or choose a reconstruction
 filter. Spatial external textures render only when their presentation identity
 matches current layout exactly, so dock resize and zoom changes cannot stretch
 old display/device code values while a replacement frame is prepared.
+Both Fit and fixed zoom compute the displayed canvas width from the exact
+Sequence sample aspect ratio. Preview Full/Half/Quarter and proxy selection
+change only the sampled texture; they do not change this presentation geometry
+or the meaning of authored X/Y, anchor, and scale values.
 External GPU frame identity also includes the resolved monitor adaptation.
 The preview model derives that display-referred identity when it looks up a
 registered external texture while retaining the unadapted identity for CPU

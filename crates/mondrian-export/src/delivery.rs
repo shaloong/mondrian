@@ -83,6 +83,10 @@ pub struct ResolvedExportColorTarget {
 pub struct ResolvedExportDeliveryContract {
     /// Exact encoded raster size; execution must not normalize it.
     pub resolution: Resolution,
+    /// Exact encoded sample aspect ratio inherited from Sequence Program Output.
+    pub sample_aspect_ratio: mondrian_core::SampleAspectRatio,
+    /// Exact encoded scan order. Current delivery admission is progressive-only.
+    pub field_order: mondrian_core::timeline_data::FieldOrder,
     /// Exact encoded sample depth.
     pub bit_depth: DeliveryBitDepth,
     /// Exact encoded range.
@@ -138,6 +142,13 @@ pub fn resolve_export_delivery(
 
     Ok(ResolvedExportDeliveryContract {
         resolution,
+        sample_aspect_ratio: settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+            ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleColorOutput,
+                "Sequence Program Output 像素宽高比未解析",
+            )
+        })?,
+        field_order: settings.field_order,
         bit_depth,
         video_range,
         chroma_sampling,

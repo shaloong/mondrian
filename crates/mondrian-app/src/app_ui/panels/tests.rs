@@ -6100,6 +6100,7 @@ fn test_video_media_info(path: &Path) -> mondrian_media::MediaInfo {
             codec_profile: mondrian_media::VideoCodecProfile::Unknown,
             width: 1920,
             height: 1080,
+            picture: Default::default(),
             frame_rate: Rational::FPS_24,
             frame_rate_proven: true,
             pixel_format: mondrian_media::info::PixelFormat::Yuv420p,

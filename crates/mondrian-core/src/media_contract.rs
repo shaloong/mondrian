@@ -5,7 +5,8 @@
 //! does not depend on the concrete media Adapter.
 
 use crate::{
-    AudioChannelLayout, ColorSpace, Rational, VideoHdrMetadataPayload, MAX_AUDIO_CHANNELS,
+    AudioChannelLayout, ColorSpace, PictureStreamMetadata, Rational, VideoHdrMetadataPayload,
+    MAX_AUDIO_CHANNELS,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1286,6 +1287,9 @@ pub struct VideoStreamInfo {
     pub width: u32,
     /// Encoded raster height.
     pub height: u32,
+    /// Exact scan, sample geometry, and source display-orientation evidence.
+    #[serde(default)]
+    pub picture: PictureStreamMetadata,
     /// Canonicalized average frame rate.
     pub frame_rate: Rational,
     /// Whether the frame rate came from positive decoder evidence.
@@ -1512,6 +1516,7 @@ mod tests {
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture: PictureStreamMetadata::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format: PixelFormat::P010,

@@ -53,6 +53,8 @@ pub enum TimelineTemporalSource {
         /// Explicit alpha interpretation that must be normalized before the
         /// tile enters the frozen set.
         alpha_interpretation: AlphaInterpretation,
+        /// Placement-local scan and sample-geometry interpretation.
+        picture_overrides: mondrian_core::PictureInterpretationOverrides,
         /// Sequence input policy for automatic tone mapping.
         auto_tone_map: bool,
     },
@@ -584,6 +586,10 @@ fn collect_media_batch(
                 source_sample,
                 color_space_override: media.color_space_override,
                 alpha_interpretation: media.alpha_interpretation,
+                picture_overrides: mondrian_core::PictureInterpretationOverrides {
+                    pixel_aspect_ratio: media.pixel_aspect_ratio_override,
+                    field_order: media.field_order_override,
+                },
                 auto_tone_map: media.auto_tone_map,
             })
         },

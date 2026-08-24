@@ -151,6 +151,8 @@ fn generate_layer(
         Arc::new(DecodedVideoLayer {
             frame: frame.result.frame,
             source_resolution: Resolution { width, height },
+            picture_geometry: ResolvedPictureGeometry::square(Resolution { width, height })
+                .expect("non-empty perf picture geometry"),
             source_fingerprint: MediaFileFingerprint::default(),
             video_stream_index: 0,
             decode_diagnostics: None,

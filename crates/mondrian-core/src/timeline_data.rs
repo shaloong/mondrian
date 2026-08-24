@@ -173,6 +173,16 @@ pub struct MediaInterpretation {
     pub alpha: AlphaInterpretation,
 }
 
+impl MediaInterpretation {
+    /// Closed picture-geometry override projection for execution Adapters.
+    pub const fn picture_overrides(&self) -> crate::PictureInterpretationOverrides {
+        crate::PictureInterpretationOverrides {
+            pixel_aspect_ratio: self.pixel_aspect_ratio_override,
+            field_order: self.field_order_override,
+        }
+    }
+}
+
 /// Closed set of authored Clip payloads.
 ///
 /// Payload-specific data lives inside the matching variant, so a persisted
@@ -313,7 +323,7 @@ impl crate::AuthoringFootprint for ClipContent {
 }
 
 /// Pixel aspect ratio presets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum PixelAspectRatio {
     #[default]
     Square,
@@ -328,23 +338,29 @@ pub enum PixelAspectRatio {
 }
 
 impl PixelAspectRatio {
+    /// Exact sample aspect ratio used by execution and delivery.
+    pub fn exact_ratio(self) -> Option<crate::SampleAspectRatio> {
+        let (numerator, denominator) = match self {
+            Self::Square => (1, 1),
+            Self::D1DvNtsc => (10, 11),
+            Self::D1DvNtscWidescreen => (40, 33),
+            Self::D1DvPal => (12, 11),
+            Self::D1DvPalWidescreen => (16, 11),
+            Self::Anamorphic2x => (2, 1),
+            Self::HdAnamorphic1080 => (4, 3),
+            Self::DvcproHd => (3, 2),
+            Self::Unknown => return None,
+        };
+        crate::SampleAspectRatio::new(numerator, denominator)
+    }
+
     pub fn ratio(self) -> Option<f32> {
-        match self {
-            Self::Square => Some(1.0),
-            Self::D1DvNtsc => Some(0.9091),
-            Self::D1DvNtscWidescreen => Some(1.2121),
-            Self::D1DvPal => Some(1.0940),
-            Self::D1DvPalWidescreen => Some(1.4587),
-            Self::Anamorphic2x => Some(2.0),
-            Self::HdAnamorphic1080 => Some(1.333),
-            Self::DvcproHd => Some(1.5),
-            Self::Unknown => None,
-        }
+        self.exact_ratio().map(|ratio| ratio.to_f64() as f32)
     }
 }
 
 /// Field order for interlaced media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum FieldOrder {
     #[default]
     Progressive,

@@ -1194,6 +1194,7 @@ fn reimport_and_compare<const N: usize>(
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
         target_resolution: expected.resolution,
         input_color,

@@ -1020,6 +1020,7 @@ fn rec709_video_media_info(file_size: u64) -> MediaInfo {
             codec_profile: mondrian_media::VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture: Default::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format: PixelFormat::Yuv420p10le,
@@ -8127,6 +8128,7 @@ fn export_test_media_dependencies(
                     video_stream_index: Some(0),
                     picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
                     source_resolution: Some(Resolution { width: 1, height: 1 }),
+                    picture: Some(Default::default()),
                     audio_components: HashMap::new(),
                     interpretation: interpretations.get(&asset_id).copied().unwrap_or_default(),
                     color_diagnostic,
@@ -10755,6 +10757,7 @@ fn current_media_grant_rejection_is_blocked_without_phantom_pending_work() {
         asset_id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Straight,
+        picture_overrides: Default::default(),
         source_sample: mondrian_core::SourceSampleTarget::covering(
             mondrian_core::TimelineTime::ZERO,
         ),

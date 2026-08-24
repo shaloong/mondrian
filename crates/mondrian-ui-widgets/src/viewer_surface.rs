@@ -8,7 +8,7 @@
 mod model;
 mod paint;
 
-use mondrian_core::Color;
+use mondrian_core::{Color, SampleAspectRatio};
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::*;
 use mondrian_ui_core::widget::{
@@ -305,6 +305,7 @@ pub struct ViewerSurface {
     preview_quality_label: String,
     source_width: u32,
     source_height: u32,
+    sample_aspect_ratio: f32,
     playing: bool,
     enabled: bool,
     frame_content: Option<ViewerFrameContent>,
@@ -347,6 +348,7 @@ impl ViewerSurface {
             preview_quality_label: "1/1".into(),
             source_width: source_width.max(1),
             source_height: source_height.max(1),
+            sample_aspect_ratio: 1.0,
             playing: false,
             enabled: true,
             frame_content: None,
@@ -414,6 +416,12 @@ impl ViewerSurface {
         self.zoom_scale = scale
             .filter(|scale| scale.is_finite() && *scale > 0.0)
             .map(|scale| scale.clamp(0.01, 32.0));
+        self
+    }
+
+    /// Set the exact Sequence sample aspect ratio used for canvas presentation.
+    pub fn with_sample_aspect_ratio(mut self, ratio: SampleAspectRatio) -> Self {
+        self.sample_aspect_ratio = ratio.to_f64() as f32;
         self
     }
 
@@ -564,6 +572,7 @@ impl ViewerSurface {
             self.bounds,
             self.source_width,
             self.source_height,
+            self.sample_aspect_ratio,
             self.zoom_scale,
         )
     }

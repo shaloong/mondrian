@@ -16,6 +16,70 @@ fn create_state_with_sequence() -> AppState {
     state
 }
 
+fn install_drag_video_asset(state: &mut AppState) -> (PathBuf, AssetId) {
+    let root = std::env::temp_dir().join(format!(
+        "mondrian-timeline-drop-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create drag fixture root");
+    let media_path = root.join("source.mp4");
+    std::fs::write(&media_path, [0_u8]).expect("write drag media fixture");
+    let media_path = std::fs::canonicalize(media_path).expect("canonical drag media fixture");
+    let library = AssetLibrary::open(root.join("library")).expect("open drag fixture library");
+    let candidate = mondrian_assets::AssetMediaProbeCandidate::new(
+        media_path.clone(),
+        mondrian_media::MediaFileFingerprint::capture(&media_path),
+        mondrian_media::MediaInfo {
+            duration: Duration::from_secs(2),
+            file_size: 1,
+            container: "mp4".to_owned(),
+            video_streams: vec![mondrian_media::VideoStreamInfo {
+                index: 0,
+                codec: mondrian_core::VideoCodec::H264,
+                duration: Some(Duration::from_secs(2)),
+                codec_profile: mondrian_media::VideoCodecProfile::H264High,
+                width: 1920,
+                height: 1080,
+                picture: Default::default(),
+                frame_rate: Rational::FPS_30,
+                frame_rate_proven: true,
+                pixel_format: mondrian_core::PixelFormat::Yuv420p,
+                pixel_format_proven: true,
+                color_range: mondrian_media::DecodedVideoRange::Unknown,
+                color_interpretation: mondrian_media::DetectedColorInterpretation {
+                    candidate_color_space: None,
+                    confidence: mondrian_media::VideoColorInterpretationConfidence::None,
+                    source: mondrian_media::VideoColorSpaceSource::MissingMetadata,
+                    method: mondrian_media::VideoColorDetectionMethod::MissingMetadata,
+                    evidence: Vec::new(),
+                    warnings: vec![
+                        mondrian_media::VideoColorInterpretationWarning::MissingCicpTags,
+                    ],
+                    user_overridable: true,
+                },
+                color_metadata: None,
+                color_metadata_hints: Vec::new(),
+                hdr_metadata: Vec::new(),
+                bit_depth: 8,
+                has_alpha: false,
+                avg_bitrate: 8_000_000,
+                total_frames: Some(60),
+            }],
+            audio_streams: Vec::new(),
+            has_video: true,
+            has_audio: false,
+        },
+    )
+    .expect("valid drag media candidate");
+    let asset_id = library.commit_media_probe(candidate, None).expect("commit drag media");
+    state.test_set_asset_library(Some(library));
+    (root, asset_id)
+}
+
 fn primary_track_clip_lens(state: &AppState) -> (usize, usize) {
     let seq = state.active_sequence().expect("sequence should exist");
     (
@@ -218,7 +282,7 @@ fn set_clip_media_interpretation_is_undoable() {
         color_space_override: Some(ColorSpace::SonySLog3SGamut3Cine),
         frame_rate_override: Some(Rational::FPS_23976),
         pixel_aspect_ratio_override: Some(PixelAspectRatio::HdAnamorphic1080),
-        field_order_override: Some(FieldOrder::UpperFirst),
+        field_order_override: Some(FieldOrder::Progressive),
         alpha: AlphaInterpretation::Premultiplied,
     };
     state
@@ -1445,6 +1509,7 @@ fn moving_track_is_undoable_and_preserves_clips() {
 #[test]
 fn dropping_linked_clip_creates_missing_audio_track_at_target_index() {
     let mut state = create_state_with_sequence();
+    let (fixture_root, asset_id) = install_drag_video_asset(&mut state);
     let removed_audio_id =
         state.active_sequence().expect("sequence should exist").audio_tracks[2].id;
     state
@@ -1456,7 +1521,6 @@ fn dropping_linked_clip_creates_missing_audio_track_at_target_index() {
 
     let target_track_id =
         state.active_sequence().expect("sequence should exist").video_tracks[2].id;
-    let asset_id = AssetId::new();
     state.begin_drag_asset(
         asset_id,
         "AV Clip".to_string(),
@@ -1483,11 +1547,15 @@ fn dropping_linked_clip_creates_missing_audio_track_at_target_index() {
         .expect("linked audio clip should exist");
     assert!(video_clip.link_group.is_some());
     assert_eq!(audio_clip.media_asset_id(), Some(asset_id));
+
+    drop(state);
+    std::fs::remove_dir_all(fixture_root).expect("remove drag fixture");
 }
 
 #[test]
 fn dropping_linked_clip_after_video_reorder_uses_current_track_index() {
     let mut state = create_state_with_sequence();
+    let (fixture_root, asset_id) = install_drag_video_asset(&mut state);
     let moved_video_track_id =
         state.active_sequence().expect("sequence should exist").video_tracks[2].id;
     let anchor_track_id =
@@ -1500,7 +1568,7 @@ fn dropping_linked_clip_after_video_reorder_uses_current_track_index() {
         .expect("move track before drop");
 
     state.begin_drag_asset(
-        AssetId::new(),
+        asset_id,
         "Moved Track AV".to_string(),
         AssetKind::Video,
         Duration::from_secs(1),
@@ -1517,6 +1585,9 @@ fn dropping_linked_clip_after_video_reorder_uses_current_track_index() {
         .clips
         .iter()
         .any(|clip| clip.link_group == seq.video_tracks[0].clips[0].link_group));
+
+    drop(state);
+    std::fs::remove_dir_all(fixture_root).expect("remove drag fixture");
 }
 
 #[test]

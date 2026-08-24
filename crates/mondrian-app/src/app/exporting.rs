@@ -375,6 +375,7 @@ fn resolve_export_media_dependencies(
                 }),
                 source_resolution: primary_video
                     .map(|video| Resolution { width: video.width, height: video.height }),
+                picture: primary_video.map(|video| video.picture),
                 audio_components,
                 interpretation: asset.interpretation,
                 color_diagnostic,

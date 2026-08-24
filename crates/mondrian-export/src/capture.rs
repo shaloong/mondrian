@@ -1051,6 +1051,7 @@ mod tests {
                         width: 1920,
                         height: 1080,
                     }),
+                    picture: Some(Default::default()),
                     audio_components: HashMap::new(),
                     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation::default(
                     ),

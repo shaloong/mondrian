@@ -185,6 +185,10 @@ pub struct ExpectedVideoSignalConstraints {
     pub color_transfer: Option<String>,
     /// Exact matrix-coefficients tag.
     pub color_matrix: Option<String>,
+    /// Exact encoded sample aspect ratio.
+    pub sample_aspect_ratio: Option<mondrian_core::SampleAspectRatio>,
+    /// Exact encoded field-order tag.
+    pub field_order: Option<String>,
     /// Require primaries, transfer, and matrix tags to be absent.
     pub require_color_tags_absent: bool,
     /// Finished-output static HDR metadata policy.
@@ -256,6 +260,10 @@ pub struct ProbedVideoStream {
     pub color_transfer: Option<String>,
     /// Encoded matrix tag.
     pub color_matrix: Option<String>,
+    /// Encoded sample aspect ratio as reported by ffprobe.
+    pub sample_aspect_ratio: Option<String>,
+    /// Encoded field-order tag as reported by ffprobe.
+    pub field_order: Option<String>,
     /// Whether ST 2086 mastering-display metadata is present on the first frame.
     pub mastering_display_metadata_present: bool,
     /// Whether CTA-861.3 content-light metadata is present on the first frame.
@@ -344,6 +352,8 @@ struct FfprobeStream {
     color_space: Option<String>,
     color_transfer: Option<String>,
     color_primaries: Option<String>,
+    sample_aspect_ratio: Option<String>,
+    field_order: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u32>,
     channel_layout: Option<String>,
@@ -938,6 +948,30 @@ fn validate_video_signal(
         expected.color_range.as_deref(),
         stream.color_range.as_deref(),
     )?;
+    if let Some(expected_ratio) = expected.sample_aspect_ratio {
+        let actual_ratio =
+            stream.sample_aspect_ratio.as_deref().and_then(parse_ratio_i64).and_then(
+                |(numerator, denominator)| {
+                    mondrian_core::SampleAspectRatio::new(
+                        u32::try_from(numerator).ok()?,
+                        u32::try_from(denominator).ok()?,
+                    )
+                },
+            );
+        if actual_ratio != Some(expected_ratio) {
+            return Err(format!(
+                "导出像素宽高比不匹配：期望 {}/{}, 实际 {}",
+                expected_ratio.numerator(),
+                expected_ratio.denominator(),
+                stream.sample_aspect_ratio.as_deref().unwrap_or("<missing>")
+            ));
+        }
+    }
+    validate_exact_video_field(
+        "场序",
+        expected.field_order.as_deref(),
+        stream.field_order.as_deref(),
+    )?;
     if expected.require_color_tags_absent {
         for (name, actual) in [
             ("色彩原色", stream.color_primaries.as_deref()),
@@ -1073,6 +1107,8 @@ fn build_output_probe(
                 color_primaries: stream.color_primaries.clone(),
                 color_transfer: stream.color_transfer.clone(),
                 color_matrix: stream.color_space.clone(),
+                sample_aspect_ratio: stream.sample_aspect_ratio.clone(),
+                field_order: stream.field_order.clone(),
                 mastering_display_metadata_present: side_data.is_some_and(|side_data| {
                     side_data.iter().any(|data| {
                         data.side_data_type.as_deref().is_some_and(|kind| {
@@ -1307,7 +1343,10 @@ fn summarize_report(report: &FfprobeReport) -> MediaStreamSummary {
 
 fn parse_ratio_i64(raw: &str) -> Option<(i64, i64)> {
     let trimmed = raw.trim();
-    let (numerator, denominator) = trimmed.split_once('/').unwrap_or((trimmed, "1"));
+    let (numerator, denominator) = trimmed
+        .split_once('/')
+        .or_else(|| trimmed.split_once(':'))
+        .unwrap_or((trimmed, "1"));
     let mut numerator = numerator.trim().parse::<i64>().ok()?;
     let mut denominator = denominator.trim().parse::<i64>().ok()?;
     if numerator <= 0 || denominator <= 0 {
@@ -1361,6 +1400,8 @@ mod tests {
                     color_space: Some("bt2020nc".to_string()),
                     color_transfer: Some("smpte2084".to_string()),
                     color_primaries: Some("bt2020".to_string()),
+                    sample_aspect_ratio: Some("1:1".to_string()),
+                    field_order: Some("progressive".to_string()),
                     ..FfprobeStream::default()
                 },
                 FfprobeStream {
@@ -1625,6 +1666,8 @@ mod tests {
                     color_primaries: Some("bt2020".to_owned()),
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
+                    sample_aspect_ratio: Some(mondrian_core::SampleAspectRatio::SQUARE),
+                    field_order: Some("progressive".to_owned()),
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Unspecified,
                 }),
@@ -1634,7 +1677,7 @@ mod tests {
             expected_duration_secs: None,
         };
 
-        assert!(validate_report(&report, &expected).is_ok());
+        validate_report(&report, &expected).expect("complete encoded signal must validate");
     }
 
     #[test]
@@ -1700,6 +1743,7 @@ mod tests {
     fn parse_ratio_i64_reduces_fraction_and_number() {
         assert_eq!(parse_ratio_i64("25/1"), Some((25, 1)));
         assert_eq!(parse_ratio_i64("60000/2002"), Some((30_000, 1_001)));
+        assert_eq!(parse_ratio_i64("40:33"), Some((40, 33)));
         assert_eq!(parse_ratio_i64("24"), Some((24, 1)));
         assert_eq!(parse_ratio_i64("0/0"), None);
     }
@@ -1827,6 +1871,8 @@ mod tests {
                     color_primaries: Some("bt709".to_owned()),
                     color_transfer: Some("iec61966-2-1".to_owned()),
                     color_matrix: Some("bt709".to_owned()),
+                    sample_aspect_ratio: None,
+                    field_order: None,
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Absent,
                 }),
@@ -1893,6 +1939,8 @@ mod tests {
                     color_primaries: Some("bt2020".to_owned()),
                     color_transfer: Some("smpte2084".to_owned()),
                     color_matrix: Some("bt2020nc".to_owned()),
+                    sample_aspect_ratio: None,
+                    field_order: None,
                     require_color_tags_absent: false,
                     static_hdr_metadata: ExpectedStaticHdrMetadata::Exact(
                         ExpectedStaticHdrMetadataConstraints {

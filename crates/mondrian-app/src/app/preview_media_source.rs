@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use mondrian_assets::{AssetKind, AssetRecord};
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
-use mondrian_core::{Resolution, TimelineTime};
+use mondrian_core::{
+    PictureInterpretationOverrides, Resolution, ResolvedPictureGeometry, TimelineTime,
+};
 use mondrian_media::{
     DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
     PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
@@ -72,6 +74,7 @@ pub(crate) struct PreviewMediaSourceRequest<'a> {
     pub(crate) asset: &'a AssetRecord,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
+    pub(crate) picture_overrides: PictureInterpretationOverrides,
     pub(crate) source_sample: mondrian_core::SourceSampleTarget,
     pub(crate) input_color: &'a MediaInputColorContext,
     pub(crate) prefer_proxy: bool,
@@ -139,6 +142,8 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
     ProxyPathResolutionFailed { reason: String },
     #[error("physical Preview decode contract is invalid: {reason}")]
     DecodeContractInvalid { reason: String },
+    #[error("picture interpretation is unsupported: {reason}")]
+    PictureInterpretationUnsupported { reason: String },
 }
 
 /// Exhaustive result of adapting one asset into Preview execution semantics.
@@ -246,6 +251,21 @@ pub(crate) fn resolve_preview_media_source(
         width: primary_video.width,
         height: primary_video.height,
     };
+    let picture_geometry = match ResolvedPictureGeometry::resolve_with_overrides(
+        source_resolution,
+        primary_video.picture,
+        request.picture_overrides,
+    ) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            return unavailable(
+                &request,
+                PreviewMediaSourceUnavailableReason::PictureInterpretationUnsupported {
+                    reason: error.to_string(),
+                },
+            );
+        }
+    };
     let payload_requirement = if request.cpu_working_required {
         PreviewDecodePayloadRequirement::CpuAddressable
     } else {
@@ -290,6 +310,7 @@ pub(crate) fn resolve_preview_media_source(
         asset_id: request.asset.id,
         decode,
         source_resolution,
+        picture_geometry,
         alpha_interpretation: request.alpha_interpretation,
         working_color_space: request.input_color.working_color_space,
         input_tone_map: request.input_color.input_tone_map,

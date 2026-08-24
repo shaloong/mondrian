@@ -649,6 +649,7 @@ mod tests {
                     codec_profile: VideoCodecProfile::H264High,
                     width: 1920,
                     height: 1080,
+                    picture: Default::default(),
                     frame_rate: Rational::FPS_25,
                     frame_rate_proven: true,
                     pixel_format: PixelFormat::Yuv420p,

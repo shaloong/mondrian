@@ -132,6 +132,21 @@ fn validate_placement_asset(
         _ => false,
     };
     if compatible {
+        if track_kind == PlacementTrackKind::Video
+            && matches!(asset.kind, AssetKind::Video | AssetKind::StillImage)
+        {
+            let video = asset
+                .media_probe()
+                .and_then(|probe| probe.primary_video())
+                .ok_or_else(|| placement_error("素材没有可执行的视频流"))?;
+            mondrian_core::ResolvedPictureGeometry::resolve(
+                mondrian_core::Resolution { width: video.width, height: video.height },
+                video.picture,
+                None,
+                None,
+            )
+            .map_err(|error| placement_error(format!("素材图片解释不受支持：{error}")))?;
+        }
         Ok(())
     } else {
         Err(MondrianError::UnsupportedFormat {

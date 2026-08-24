@@ -65,6 +65,7 @@ pub(crate) struct PreviewTimelineMediaRequest {
     pub(crate) asset_id: AssetId,
     pub(crate) color_space_override: Option<ColorSpace>,
     pub(crate) alpha_interpretation: AlphaInterpretation,
+    pub(crate) picture_overrides: mondrian_core::PictureInterpretationOverrides,
     /// Exact source-local decode target. The media Adapter alone lowers this
     /// value into an FFmpeg stream PTS.
     pub(crate) source_sample: mondrian_core::SourceSampleTarget,
@@ -880,6 +881,7 @@ where
             source_sample,
             color_space_override,
             alpha_interpretation,
+            picture_overrides,
             auto_tone_map,
         } => {
             let request = preview_temporal_media_request(
@@ -887,6 +889,7 @@ where
                 *source_sample,
                 *color_space_override,
                 *alpha_interpretation,
+                *picture_overrides,
                 *auto_tone_map,
                 target_resolution,
                 color_context,
@@ -1230,6 +1233,7 @@ fn collect_prepared_visual_media_demands(
                     source_sample,
                     color_space_override,
                     alpha_interpretation,
+                    picture_overrides,
                     auto_tone_map,
                 } = &demand.source
                 {
@@ -1238,6 +1242,7 @@ fn collect_prepared_visual_media_demands(
                         *source_sample,
                         *color_space_override,
                         *alpha_interpretation,
+                        *picture_overrides,
                         *auto_tone_map,
                         target_resolution,
                         color_context,
@@ -1997,6 +2002,10 @@ fn preview_timeline_media_request(
         asset_id: media.asset_id,
         color_space_override: media.color_space_override,
         alpha_interpretation: media.alpha_interpretation,
+        picture_overrides: mondrian_core::PictureInterpretationOverrides {
+            pixel_aspect_ratio: media.pixel_aspect_ratio_override,
+            field_order: media.field_order_override,
+        },
         source_sample: media.source_sample,
         target_resolution,
         input_color: color_context.media_input(media.auto_tone_map),
@@ -2030,6 +2039,7 @@ fn preview_temporal_media_request(
     source_sample: mondrian_core::SourceSampleTarget,
     color_space_override: Option<ColorSpace>,
     alpha_interpretation: AlphaInterpretation,
+    picture_overrides: mondrian_core::PictureInterpretationOverrides,
     auto_tone_map: bool,
     target_resolution: Resolution,
     color_context: &ProgramColorContext,
@@ -2038,6 +2048,7 @@ fn preview_temporal_media_request(
         asset_id,
         color_space_override,
         alpha_interpretation,
+        picture_overrides,
         source_sample,
         target_resolution,
         input_color: color_context.media_input(auto_tone_map),

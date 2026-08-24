@@ -148,7 +148,10 @@ impl ExportVideoSignalContract {
         }
     }
 
-    fn validation_constraints(self) -> crate::validator::ExpectedVideoSignalConstraints {
+    fn validation_constraints(
+        self,
+        delivery: &ResolvedExportDeliveryContract,
+    ) -> crate::validator::ExpectedVideoSignalConstraints {
         let tags = self.color_space.ffmpeg_tags();
         crate::validator::ExpectedVideoSignalConstraints {
             pixel_format: Some(self.pixel_format.to_owned()),
@@ -156,6 +159,8 @@ impl ExportVideoSignalContract {
             color_primaries: tags.map(|tags| tags.color_primaries.to_owned()),
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
             color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
+            sample_aspect_ratio: Some(delivery.sample_aspect_ratio),
+            field_order: Some("progressive".to_owned()),
             require_color_tags_absent: tags.is_none(),
             static_hdr_metadata: crate::validator::ExpectedStaticHdrMetadata::Absent,
         }
@@ -172,7 +177,7 @@ pub fn expected_export_video_signal(
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<crate::validator::ExpectedVideoSignalConstraints, String> {
     let mut constraints =
-        ExportVideoSignalContract::resolve(settings, delivery).validation_constraints();
+        ExportVideoSignalContract::resolve(settings, delivery).validation_constraints(delivery);
     if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
         let mastering_display = settings
             .delivery
@@ -205,12 +210,19 @@ pub(crate) fn apply_export_video_signal_args(
     delivery: &ResolvedExportDeliveryContract,
 ) {
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
+    let mut filters = Vec::new();
     if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
-        cmd.arg("-vf").arg(format!(
+        filters.push(format!(
             "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
             matrix.scale_name()
         ));
     }
+    filters.push(format!(
+        "setsar={}/{}",
+        delivery.sample_aspect_ratio.numerator(),
+        delivery.sample_aspect_ratio.denominator()
+    ));
+    cmd.arg("-vf").arg(filters.join(",")).arg("-field_order").arg("progressive");
     cmd.arg("-pix_fmt").arg(contract.pixel_format);
     if let Some(range) = contract.codec_range {
         cmd.arg("-color_range").arg(range);

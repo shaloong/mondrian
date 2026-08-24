@@ -8,12 +8,14 @@
 use crate::decoder::decoded_video_range_from_ffmpeg;
 use ffmpeg_next as ffmpeg;
 use mondrian_core::icc::parse_icc_display_profile;
+use mondrian_core::timeline_data::FieldOrder;
 use mondrian_core::types::*;
 pub use mondrian_core::{
     is_picture_file_extension, resolve_video_color_metadata_declarations, AudioCodec,
     AudioStreamInfo, ChannelLayout, DecodedVideoRange, DetectedColorInterpretation, MediaInfo,
-    MediaProbeSnapshot, PixelFormat, ProResVariant, ProvenVideoSampling, VideoCodec,
-    VideoCodecProfile, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    MediaProbeSnapshot, PictureOrientation, PictureStreamMetadata, PixelFormat, ProResVariant,
+    ProvenVideoSampling, SampleAspectRatio, VideoCodec, VideoCodecProfile,
+    VideoColorDetectionMethod, VideoColorInterpretationConfidence,
     VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
     VideoColorMetadataDeclaration, VideoColorMetadataDeclarationResolution, VideoColorMetadataHint,
     VideoColorMetadataHintAuthority, VideoColorMetadataHintScope, VideoColorSpaceSource,
@@ -548,6 +550,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
         let params = stream.parameters();
         match params.medium() {
             ffmpeg::media::Type::Video => {
+                let picture = picture_stream_metadata(&stream, &params);
                 let stream_duration =
                     duration_from_stream_ticks(stream.duration(), stream.time_base());
                 let mut color_metadata_hints = collect_color_metadata_hints(
@@ -601,6 +604,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         codec_profile: map_video_codec_profile(decoder.profile()),
                         width,
                         height,
+                        picture,
                         frame_rate,
                         frame_rate_proven,
                         pixel_format,
@@ -636,6 +640,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     codec_profile: VideoCodecProfile::Unknown,
                     width,
                     height,
+                    picture,
                     frame_rate,
                     frame_rate_proven,
                     pixel_format,
@@ -1404,6 +1409,99 @@ fn collect_hdr_metadata_summaries(
         .collect()
 }
 
+fn picture_stream_metadata(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+    parameters: &ffmpeg::codec::Parameters,
+) -> PictureStreamMetadata {
+    // SAFETY: Parameters owns a valid AVCodecParameters for this shared borrow.
+    let raw = unsafe { &*parameters.as_ptr() };
+    let sample_aspect_ratio = u32::try_from(raw.sample_aspect_ratio.num)
+        .ok()
+        .zip(u32::try_from(raw.sample_aspect_ratio.den).ok())
+        .and_then(|(numerator, denominator)| SampleAspectRatio::new(numerator, denominator));
+    let field_order = picture_field_order(raw.field_order);
+    let orientation = stream
+        .side_data()
+        .find(|side_data| side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
+        .map(|side_data| picture_orientation_from_display_matrix(side_data.data()))
+        .unwrap_or_else(|| {
+            picture_orientation_from_legacy_metadata(stream.metadata().get("rotate"))
+        });
+    PictureStreamMetadata { sample_aspect_ratio, field_order, orientation }
+}
+
+fn picture_field_order(value: ffmpeg::ffi::AVFieldOrder) -> Option<FieldOrder> {
+    use ffmpeg::ffi::AVFieldOrder::*;
+    match value {
+        AV_FIELD_PROGRESSIVE => Some(FieldOrder::Progressive),
+        AV_FIELD_TT | AV_FIELD_TB => Some(FieldOrder::UpperFirst),
+        AV_FIELD_BB | AV_FIELD_BT => Some(FieldOrder::LowerFirst),
+        AV_FIELD_UNKNOWN => None,
+    }
+}
+
+fn picture_orientation_from_legacy_metadata(value: Option<&str>) -> PictureOrientation {
+    let Some(rotation) = value.and_then(|value| value.trim().parse::<i32>().ok()) else {
+        return PictureOrientation::Identity;
+    };
+    picture_orientation_from_clockwise_degrees(rotation)
+}
+
+fn picture_orientation_from_clockwise_degrees(degrees: i32) -> PictureOrientation {
+    match degrees.rem_euclid(360) {
+        0 => PictureOrientation::Identity,
+        90 => PictureOrientation::RotateClockwise90,
+        180 => PictureOrientation::Rotate180,
+        270 => PictureOrientation::RotateClockwise270,
+        _ => PictureOrientation::Unsupported,
+    }
+}
+
+fn picture_orientation_from_display_matrix(bytes: &[u8]) -> PictureOrientation {
+    const DISPLAY_MATRIX_BYTES: usize = 9 * std::mem::size_of::<i32>();
+    if bytes.len() < DISPLAY_MATRIX_BYTES {
+        return PictureOrientation::Unsupported;
+    }
+    let mut matrix = [0_i32; 9];
+    for (destination, chunk) in matrix.iter_mut().zip(bytes.chunks_exact(4).take(9)) {
+        *destination = i32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    // FFmpeg's row-vector display convention is:
+    // p' = a*p + c*q + x, q' = b*p + d*q + y.
+    let Some((a, b)) = cardinal_axis(matrix[0], matrix[1]) else {
+        return PictureOrientation::Unsupported;
+    };
+    let Some((c, d)) = cardinal_axis(matrix[3], matrix[4]) else {
+        return PictureOrientation::Unsupported;
+    };
+    match (a, c, b, d) {
+        (1, 0, 0, 1) => PictureOrientation::Identity,
+        (0, -1, 1, 0) => PictureOrientation::RotateClockwise90,
+        (-1, 0, 0, -1) => PictureOrientation::Rotate180,
+        (0, 1, -1, 0) => PictureOrientation::RotateClockwise270,
+        (-1, 0, 0, 1) => PictureOrientation::MirrorHorizontal,
+        (1, 0, 0, -1) => PictureOrientation::MirrorVertical,
+        (0, 1, 1, 0) => PictureOrientation::Transpose,
+        (0, -1, -1, 0) => PictureOrientation::Transverse,
+        _ => PictureOrientation::Unsupported,
+    }
+}
+
+fn cardinal_axis(horizontal: i32, vertical: i32) -> Option<(i8, i8)> {
+    let horizontal_abs = i64::from(horizontal).abs();
+    let vertical_abs = i64::from(vertical).abs();
+    let major = horizontal_abs.max(vertical_abs);
+    let minor = horizontal_abs.min(vertical_abs);
+    if major == 0 || minor.saturating_mul(100) > major {
+        return None;
+    }
+    if horizontal_abs > vertical_abs {
+        Some((horizontal.signum() as i8, 0))
+    } else {
+        Some((0, vertical.signum() as i8))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PictureFrameDrain {
     NeedInput,
@@ -1983,6 +2081,104 @@ fn map_audio_codec(id: ffmpeg::codec::Id) -> AudioCodec {
 mod tests {
     use super::*;
     use ffmpeg::util::color::{Primaries, Space, TransferCharacteristic};
+
+    fn display_matrix_bytes(matrix: [i32; 9]) -> Vec<u8> {
+        matrix.into_iter().flat_map(i32::to_ne_bytes).collect()
+    }
+
+    #[test]
+    fn display_matrix_classification_preserves_all_cardinal_orientations() {
+        let fixed = 1 << 16;
+        let unit = 1 << 30;
+        for (matrix, expected) in [
+            (
+                [fixed, 0, 0, 0, fixed, 0, 0, 0, unit],
+                PictureOrientation::Identity,
+            ),
+            (
+                [0, fixed, 0, -fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::RotateClockwise90,
+            ),
+            (
+                [-fixed, 0, 0, 0, -fixed, 0, 0, 0, unit],
+                PictureOrientation::Rotate180,
+            ),
+            (
+                [0, -fixed, 0, fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::RotateClockwise270,
+            ),
+            (
+                [-fixed, 0, 0, 0, fixed, 0, 0, 0, unit],
+                PictureOrientation::MirrorHorizontal,
+            ),
+            (
+                [fixed, 0, 0, 0, -fixed, 0, 0, 0, unit],
+                PictureOrientation::MirrorVertical,
+            ),
+            (
+                [0, fixed, 0, fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::Transpose,
+            ),
+            (
+                [0, -fixed, 0, -fixed, 0, 0, 0, 0, unit],
+                PictureOrientation::Transverse,
+            ),
+        ] {
+            assert_eq!(
+                picture_orientation_from_display_matrix(&display_matrix_bytes(matrix)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn arbitrary_or_truncated_display_matrix_fails_closed() {
+        let diagonal = 46_341;
+        assert_eq!(
+            picture_orientation_from_display_matrix(&display_matrix_bytes([
+                diagonal,
+                diagonal,
+                0,
+                -diagonal,
+                diagonal,
+                0,
+                0,
+                0,
+                1 << 30,
+            ])),
+            PictureOrientation::Unsupported
+        );
+        assert_eq!(
+            picture_orientation_from_display_matrix(&[0; 8]),
+            PictureOrientation::Unsupported
+        );
+    }
+
+    #[test]
+    fn ffmpeg_field_orders_map_to_progressive_or_first_field_semantics() {
+        use ffmpeg::ffi::AVFieldOrder::*;
+        assert_eq!(picture_field_order(AV_FIELD_UNKNOWN), None);
+        assert_eq!(
+            picture_field_order(AV_FIELD_PROGRESSIVE),
+            Some(FieldOrder::Progressive)
+        );
+        assert_eq!(
+            picture_field_order(AV_FIELD_TT),
+            Some(FieldOrder::UpperFirst)
+        );
+        assert_eq!(
+            picture_field_order(AV_FIELD_TB),
+            Some(FieldOrder::UpperFirst)
+        );
+        assert_eq!(
+            picture_field_order(AV_FIELD_BB),
+            Some(FieldOrder::LowerFirst)
+        );
+        assert_eq!(
+            picture_field_order(AV_FIELD_BT),
+            Some(FieldOrder::LowerFirst)
+        );
+    }
 
     fn cicp_metadata_from_interpretation(
         interpretation: &DetectedColorInterpretation,

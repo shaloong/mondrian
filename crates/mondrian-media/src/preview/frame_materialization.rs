@@ -339,6 +339,13 @@ fn materialize_decoded_frame_inner(
     source_color: PreviewSourceColorContract,
     session_output_lease: Option<PreviewDecodeSessionOutputLease>,
 ) -> Result<PreviewDecodedFramePayload> {
+    if decoded.is_interlaced() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "decoded frame is interlaced but no deinterlacing execution path was admitted"
+                .to_owned(),
+        });
+    }
     if hardware_decode_plan.request.prefers_gpu_residency() {
         if preview_hardware_frame_format(decoded.format()) {
             match materialize_native_decoded_frame(decoded, source_color, session_output_lease) {

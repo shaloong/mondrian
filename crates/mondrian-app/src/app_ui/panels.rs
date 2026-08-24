@@ -23,8 +23,8 @@ use mondrian_core::types::{
     EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, TimeScale,
-    TimelineDisplayContract, TimelineDisplayFormat, TimelineTime, TimelineTimeRange,
+    AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, SampleAspectRatio,
+    TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime, TimelineTimeRange,
     WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
@@ -702,6 +702,7 @@ pub struct ViewerPanelModel {
     pub preview_resolution_scale: f32,
     pub width: u32,
     pub height: u32,
+    pub sample_aspect_ratio: SampleAspectRatio,
     pub playing: bool,
     pub preview_waiting: bool,
     pub enabled: bool,
@@ -893,6 +894,11 @@ impl ViewerPanelModel {
             preview_resolution_scale,
             width: resolution.width,
             height: resolution.height,
+            sample_aspect_ratio: sequence
+                .settings
+                .pixel_aspect_ratio
+                .exact_ratio()
+                .unwrap_or_default(),
             playing: state.is_playing(),
             preview_waiting,
             enabled: true,
@@ -935,6 +941,7 @@ impl ViewerPanelModel {
             preview_resolution_scale: 1.0,
             width: 16,
             height: 9,
+            sample_aspect_ratio: SampleAspectRatio::SQUARE,
             playing: false,
             preview_waiting: false,
             enabled: false,
@@ -2597,6 +2604,7 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
         .with_duration_label(model.duration_label.clone())
         .with_zoom_label(model.zoom_label.clone())
         .with_zoom_scale(model.zoom_scale)
+        .with_sample_aspect_ratio(model.sample_aspect_ratio)
         .with_preview_quality_label(model.preview_quality_label.clone())
         .with_canvas_background(model.canvas_background)
         .playing(model.playing)

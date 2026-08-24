@@ -646,6 +646,7 @@ mod tests {
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
+            picture: mondrian_core::PictureStreamMetadata::default(),
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format,

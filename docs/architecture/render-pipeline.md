@@ -709,6 +709,9 @@ interpretation.
 
 Clip transforms are authored against stable source and Sequence picture
 extents, not against whichever decode/output sizes an execution happens to use.
+For file-backed pictures, the shared `ResolvedPictureGeometry` first converts
+encoded coordinates through exact source SAR and cardinal orientation; the
+authored Clip affine is composed outside that conversion exactly once.
 Preview and Export therefore lower them through the renderer-owned
 `project_affine_to_sampled_extents`: source authoring extent → decoded sampled
 extent and Sequence authoring extent → composite sampled extent. Export freezes
@@ -717,6 +720,11 @@ width/height in its cache key. Media, nested Sequence, Solid Color, and both
 Transition endpoints use this same projection; Basic Title uses the equivalent
 cropped-title projection. A 4K-authored clip exported at 1080p must keep the
 same composition, not apply its auto-fit scale a second time.
+
+Export freezes source picture metadata beside the physical stream and source
+fingerprint. Its decode-cache identity includes the resolved picture geometry,
+temporal Effect requests retain the same placement overrides, and post-encode
+validation proves the Sequence sample-aspect and progressive field-order tags.
 
 A finite media or solid transform with an exactly zero affine determinant has
 zero raster area and contributes no pixels. CPU and GPU compositors skip that

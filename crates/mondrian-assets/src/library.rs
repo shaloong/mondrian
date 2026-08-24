@@ -1745,6 +1745,7 @@ mod tests {
                 codec_profile: VideoCodecProfile::Unknown,
                 width: 1920,
                 height: 1080,
+                picture: Default::default(),
                 frame_rate: mondrian_core::types::Rational::FPS_30,
                 frame_rate_proven: true,
                 pixel_format: PixelFormat::Yuv420p,

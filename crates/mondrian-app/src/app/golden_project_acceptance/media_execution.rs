@@ -52,6 +52,7 @@ pub(super) fn decode_media_with_preference(
         asset,
         color_space_override: request.color_space_override,
         alpha_interpretation: request.alpha_interpretation,
+        picture_overrides: request.picture_overrides,
         source_sample: request.source_sample,
         input_color: &request.input_color,
         prefer_proxy,

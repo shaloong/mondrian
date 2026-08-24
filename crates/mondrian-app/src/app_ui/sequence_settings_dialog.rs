@@ -240,11 +240,7 @@ const PIXEL_ASPECT_RATIO_OPTIONS: [PixelAspectRatio; 9] = [
     PixelAspectRatio::Unknown,
 ];
 
-const FIELD_ORDER_OPTIONS: [FieldOrder; 3] = [
-    FieldOrder::Progressive,
-    FieldOrder::UpperFirst,
-    FieldOrder::LowerFirst,
-];
+const FIELD_ORDER_OPTIONS: [FieldOrder; 1] = [FieldOrder::Progressive];
 
 const TIMELINE_DISPLAY_FORMAT_OPTIONS: [TimelineDisplayFormat; 3] = [
     TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame),

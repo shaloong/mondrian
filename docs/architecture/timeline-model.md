@@ -48,6 +48,12 @@ resolution, frame rate, audio sample rate/layout, preview settings, and
 color-management constraints. Audio layout is the sole persisted channel
 authority; no parallel channel-count field can diverge from it.
 
+Sequence Program Output currently admits only progressive scan and a known
+pixel-aspect preset. Clip-local media interpretation similarly rejects an
+explicit unknown PAR or non-progressive override. Source SAR and orientation
+are evaluated before the authored Clip transform; Sequence PAR never mutates a
+Clip's X/Y, anchor, scale, or Auto Fit values.
+
 ### Structurally Shared Author Collections
 
 Large ordered author collections use `mondrian_core::AuthoringList<T>`, an

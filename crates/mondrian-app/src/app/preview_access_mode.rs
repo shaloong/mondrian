@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
 use mondrian_core::types::{AssetId, ColorEngine};
-use mondrian_core::{Resolution, SourceSampleTarget, WorkingColorSpace};
+use mondrian_core::{Resolution, ResolvedPictureGeometry, SourceSampleTarget, WorkingColorSpace};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeKey,
@@ -35,6 +35,9 @@ pub(crate) struct MediaPreviewKey {
     /// physical raster while representing the original Asset's full logical
     /// extent on the Timeline.
     pub(crate) source_resolution: Resolution,
+    /// Resolved source SAR, orientation, and progressive scan contract.
+    /// This is semantic presentation identity, not physical decode geometry.
+    pub(crate) picture_geometry: ResolvedPictureGeometry,
     /// Author interpretation applied after physical decode.
     pub(crate) alpha_interpretation: AlphaInterpretation,
     pub(crate) working_color_space: WorkingColorSpace,
@@ -99,6 +102,8 @@ impl MediaPreviewKey {
             asset_id: AssetId::new(),
             decode,
             source_resolution: resolution,
+            picture_geometry: ResolvedPictureGeometry::square(resolution)
+                .expect("non-empty synthetic Preview geometry"),
             alpha_interpretation: AlphaInterpretation::Straight,
             working_color_space: WorkingColorSpace::LinearRec709,
             input_tone_map: false,

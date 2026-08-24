@@ -786,10 +786,6 @@ fn compile_flat_clip(
             } else {
                 ac.source_sample
             };
-            let transform = apply_pixel_aspect_to_affine(
-                ac.transform_matrix,
-                interpretation.pixel_aspect_ratio_override,
-            );
             TimelineRenderPlanElement::Media(TimelineMediaPlan {
                 placement,
                 asset_id,
@@ -801,7 +797,7 @@ fn compile_flat_clip(
                 source_sample,
                 opacity,
                 blend_mode: ac.blend_mode,
-                transform,
+                transform: ac.transform_matrix,
                 effect_graph,
                 frame_seed,
                 auto_tone_map: source.auto_tone_map_media(),
@@ -853,21 +849,6 @@ pub fn project_affine_to_sampled_extents(
         output_y * transform[5],
     ];
     projected.iter().all(|value| value.is_finite()).then_some(projected)
-}
-
-fn apply_pixel_aspect_to_affine(
-    mut transform: [f32; 6],
-    pixel_aspect_ratio: Option<PixelAspectRatio>,
-) -> [f32; 6] {
-    let Some(ratio) = pixel_aspect_ratio.and_then(PixelAspectRatio::ratio) else {
-        return transform;
-    };
-    if (ratio - 1.0).abs() <= f32::EPSILON {
-        return transform;
-    }
-    transform[0] *= ratio;
-    transform[3] *= ratio;
-    transform
 }
 
 fn normalize_resolution_scale(scale: f32) -> f32 {
@@ -1131,7 +1112,7 @@ mod tests {
         let interpretation = clip.media_interpretation_mut().expect("media interpretation");
         interpretation.color_space_override = Some(mondrian_core::types::ColorSpace::Srgb);
         interpretation.pixel_aspect_ratio_override = Some(PixelAspectRatio::Anamorphic2x);
-        interpretation.field_order_override = Some(FieldOrder::UpperFirst);
+        interpretation.field_order_override = Some(FieldOrder::Progressive);
         interpretation.alpha = AlphaInterpretation::Premultiplied;
         seq.video_tracks[0].add_clip(clip).expect("add clip");
 
@@ -1147,12 +1128,12 @@ mod tests {
             media.pixel_aspect_ratio_override,
             Some(PixelAspectRatio::Anamorphic2x)
         );
-        assert_eq!(media.field_order_override, Some(FieldOrder::UpperFirst));
+        assert_eq!(media.field_order_override, Some(FieldOrder::Progressive));
         assert_eq!(
             media.alpha_interpretation,
             AlphaInterpretation::Premultiplied
         );
-        assert!((media.transform[0] - 2.0).abs() < 1.0e-6);
+        assert_eq!(media.transform, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
     }
 
     #[test]

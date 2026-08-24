@@ -737,6 +737,10 @@ pub struct ExportMediaDependency {
     /// Export may decode a delivery-sized sample, but authored Clip transforms
     /// remain expressed against this source extent.
     pub source_resolution: Option<mondrian_core::Resolution>,
+    /// Source SAR, scan, and display-orientation facts frozen from the same probe.
+    /// Audio-only dependencies retain `None`.
+    #[serde(default)]
+    pub picture: Option<mondrian_core::PictureStreamMetadata>,
     /// Frozen physical bindings for the audio Components used by this snapshot.
     #[serde(default)]
     pub audio_components: HashMap<AudioSourceComponentId, AudioSourceSelection>,

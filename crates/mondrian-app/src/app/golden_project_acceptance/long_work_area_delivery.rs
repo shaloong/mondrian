@@ -459,6 +459,7 @@ fn decode_sampled_frame(
         asset_id: asset.id,
         color_space_override: None,
         alpha_interpretation: AlphaInterpretation::Ignore,
+        picture_overrides: Default::default(),
         source_sample: SourceSampleTarget::covering(TimelineTime::from_frame_position(
             FramePosition::new(frame, time_base),
         )?),

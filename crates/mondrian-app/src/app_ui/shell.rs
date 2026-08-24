@@ -3429,7 +3429,7 @@ mod tests {
         );
         root.handle_shell_action(
             app_shell_sequence_settings_draft_changed_action(
-                SequenceSettingsDraftUpdatePayload::FieldOrder(FieldOrder::UpperFirst),
+                SequenceSettingsDraftUpdatePayload::FieldOrder(FieldOrder::Progressive),
             ),
             &platform,
             None,
@@ -3587,7 +3587,7 @@ mod tests {
             payload.settings.pixel_aspect_ratio,
             PixelAspectRatio::Anamorphic2x
         );
-        assert_eq!(payload.settings.field_order, FieldOrder::UpperFirst);
+        assert_eq!(payload.settings.field_order, FieldOrder::Progressive);
         assert_eq!(
             payload.settings.timeline_display.format,
             TimelineDisplayFormat::Timecode(SmpteCountingMode::DropFrame)

@@ -7,6 +7,7 @@
 use std::sync::{Arc, OnceLock};
 
 use mondrian_core::types::{ColorSpace, Resolution};
+use mondrian_core::{compose_picture_affine, ResolvedPictureGeometry};
 #[cfg(any(test, feature = "validation"))]
 use mondrian_media::PreviewDecodeTemporalSelection;
 use mondrian_media::{
@@ -28,6 +29,7 @@ pub(crate) struct MediaPreviewFrame {
     payload: MediaPreviewPayload,
     sampled_resolution: Resolution,
     logical_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
     identity: PreviewSemanticIdentity,
     cross_call_reusable: bool,
     presentation_quality: FramePresentationQuality,
@@ -56,6 +58,7 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Working(frame),
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
             cross_call_reusable: true,
             presentation_quality,
@@ -77,6 +80,7 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Source(source),
             sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
             cross_call_reusable: true,
             presentation_quality,
@@ -98,6 +102,7 @@ impl MediaPreviewFrame {
             payload: MediaPreviewPayload::Native(source),
             sampled_resolution,
             logical_resolution,
+            source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
             cross_call_reusable: true,
             presentation_quality,
@@ -120,6 +125,12 @@ impl MediaPreviewFrame {
             }
             MediaPreviewPayload::Native(_) => 0,
         }
+    }
+
+    /// Bind resolved source picture geometry before Clip-local authoring transforms.
+    pub(crate) fn with_picture_geometry(mut self, geometry: ResolvedPictureGeometry) -> Self {
+        self.source_to_display_affine = geometry.source_to_display_affine();
+        self
     }
 
     pub(crate) fn decoder_resource_units(&self) -> usize {
@@ -329,8 +340,9 @@ pub(crate) fn project_preview_media_transform(
     output_authoring: Resolution,
     output_sampled: Resolution,
 ) -> Option<[f32; 6]> {
+    let interpreted = compose_picture_affine(transform, frame.source_to_display_affine)?;
     project_affine_to_sampled_extents(
-        transform,
+        interpreted,
         frame.logical_resolution(),
         Resolution { width: frame.width(), height: frame.height() },
         output_authoring,

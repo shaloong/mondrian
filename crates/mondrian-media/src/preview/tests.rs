@@ -2258,6 +2258,38 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
 }
 
 #[test]
+fn interlaced_decoded_frame_fails_before_native_or_cpu_materialization() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
+    // SAFETY: the test owns this AVFrame exclusively and only sets FFmpeg's public scan flag.
+    unsafe {
+        (*decoded.as_mut_ptr()).flags |= ffmpeg::ffi::AV_FRAME_FLAG_INTERLACED;
+        (*decoded.as_mut_ptr()).interlaced_frame = 1;
+    }
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let error = materialize_decoded_frame(
+        &decoded,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        2,
+        Path::new("synthetic-interlaced"),
+        test_source_color(),
+    )
+    .expect_err("interlaced pixels must not bypass progressive-only admission");
+
+    assert!(error.to_string().contains("interlaced"));
+}
+
+#[test]
 fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
     let pixel_format = if cfg!(target_endian = "little") {
         ffmpeg::util::format::pixel::Pixel::GBRAPF32LE
@@ -3552,6 +3584,7 @@ fn reduced_test_stream() -> crate::info::VideoStreamInfo {
         codec_profile: VideoCodecProfile::H264Main,
         width: 64,
         height: 64,
+        picture: mondrian_core::PictureStreamMetadata::default(),
         frame_rate: Rational::new(25, 1),
         frame_rate_proven: true,
         pixel_format: PixelFormat::Yuv420p,

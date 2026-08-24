@@ -24,8 +24,8 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
-    AudioSourceComponentId, ExecutionCancellationToken, Resolution, SequenceId, TimelineTime,
-    TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
+    AudioSourceComponentId, ExecutionCancellationToken, Resolution, ResolvedPictureGeometry,
+    SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
@@ -1967,6 +1967,7 @@ enum TimelineAudioInput {
 struct DecodedVideoLayer {
     frame: CpuColorFrame,
     source_resolution: Resolution,
+    picture_geometry: ResolvedPictureGeometry,
     source_fingerprint: MediaFileFingerprint,
     video_stream_index: u32,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -3052,6 +3053,7 @@ enum SequenceRenderTarget<'a> {
 struct PreparedExportTemporalLayer {
     frame: CpuColorFrame,
     source_resolution: Resolution,
+    source_to_display_affine: [f32; 6],
 }
 
 enum ResolvedExportTransitionInput {
@@ -3354,6 +3356,7 @@ struct ExportDecodeCacheKey {
     media_input_color: mondrian_timeline::sequence::MediaInputColorContext,
     decode_resolution: Resolution,
     source_resolution: Resolution,
+    picture_geometry: ResolvedPictureGeometry,
 }
 
 impl ExportDecodeCacheKey {
@@ -3369,6 +3372,7 @@ impl ExportDecodeCacheKey {
         auto_tone_map: bool,
         decode_resolution: Resolution,
         source_resolution: Resolution,
+        picture_geometry: ResolvedPictureGeometry,
     ) -> Result<Self, String> {
         if !dependency.source_fingerprint.authorizes_reuse() {
             return Err(format!(
@@ -3396,6 +3400,7 @@ impl ExportDecodeCacheKey {
             media_input_color: color_context.media_input(auto_tone_map),
             decode_resolution,
             source_resolution,
+            picture_geometry,
         })
     }
 }
@@ -3964,18 +3969,27 @@ fn render_prepared_visual_node_into(
                 ));
             }
             TimelineRenderPlanElement::Media(media) => {
-                let (resolved_frame, source_resolution) =
+                let (resolved_frame, source_resolution, source_to_display_affine) =
                     if let Some(temporal) = temporal_layers.get(&media.placement) {
-                        (&temporal.frame, temporal.source_resolution)
+                        (
+                            &temporal.frame,
+                            temporal.source_resolution,
+                            temporal.source_to_display_affine,
+                        )
                     } else {
                         let decoded = decoded_media[index].as_ref().ok_or_else(|| {
                             "media plan was not resolved before compositing".to_owned()
                         })?;
-                        (&decoded.frame, decoded.source_resolution)
+                        (
+                            &decoded.frame,
+                            decoded.source_resolution,
+                            decoded.picture_geometry.source_to_display_affine(),
+                        )
                     };
                 let frame = heterogeneous_media[index].as_ref().unwrap_or(resolved_frame);
-                let transform = project_export_affine(
+                let transform = project_export_picture_affine(
                     media.transform,
+                    source_to_display_affine,
                     source_resolution,
                     decoded_frame_resolution(frame),
                     author_resolution,
@@ -4326,6 +4340,24 @@ fn decode_export_media_plan(
             media.asset_id
         )
     })?;
+    let picture_metadata = dependency.picture.ok_or_else(|| {
+        format!(
+            "asset={} export snapshot has no source picture interpretation",
+            media.asset_id
+        )
+    })?;
+    let picture_geometry = ResolvedPictureGeometry::resolve(
+        source_resolution,
+        picture_metadata,
+        media.pixel_aspect_ratio_override,
+        media.field_order_override,
+    )
+    .map_err(|error| {
+        format!(
+            "asset={} export picture interpretation is unsupported: {error}",
+            media.asset_id
+        )
+    })?;
     let key = ExportDecodeCacheKey::new(
         media.asset_id,
         dependency,
@@ -4337,6 +4369,7 @@ fn decode_export_media_plan(
         media.auto_tone_map,
         Resolution { width, height },
         source_resolution,
+        picture_geometry,
     )?;
     if let Some(decoded) = cache.get(&key) {
         if decoded.source_fingerprint != dependency.source_fingerprint
@@ -4356,6 +4389,7 @@ fn decode_export_media_plan(
             source_sample: media.source_sample,
             decode_resolution: Resolution { width, height },
             source_resolution,
+            picture_geometry,
             source_color: PreviewSourceColorContract::new(input_color_space, input_video_range),
             alpha_interpretation: media.alpha_interpretation,
             input_transform: RenderInputTransform::to_working(
@@ -4472,25 +4506,36 @@ fn resolve_export_temporal_batches(
             return Err("export temporal dependency preparation was canceled".to_owned());
         }
         let mut source_resolution = None;
+        let mut source_to_display_affine = None;
         let mut resolved = Vec::with_capacity(batch.source_demands().len());
         for demand in batch.source_demands() {
-            let (frame, current_source_resolution) = resolve_export_temporal_source(
-                context,
-                closure,
-                node_id,
-                materialization,
-                &color_context,
-                resolution,
-                batch,
-                demand,
-                decode_cache,
-            )?;
+            let (frame, current_source_resolution, current_source_to_display_affine) =
+                resolve_export_temporal_source(
+                    context,
+                    closure,
+                    node_id,
+                    materialization,
+                    &color_context,
+                    resolution,
+                    batch,
+                    demand,
+                    decode_cache,
+                )?;
             if source_resolution
                 .replace(current_source_resolution)
                 .is_some_and(|previous| previous != current_source_resolution)
             {
                 return Err(format!(
                     "Clip {} temporal requests resolved with inconsistent authoring extents",
+                    batch.placement().clip_id
+                ));
+            }
+            if source_to_display_affine
+                .replace(current_source_to_display_affine)
+                .is_some_and(|previous| previous != current_source_to_display_affine)
+            {
+                return Err(format!(
+                    "Clip {} temporal requests resolved with inconsistent picture geometry",
                     batch.placement().clip_id
                 ));
             }
@@ -4528,6 +4573,8 @@ fn resolve_export_temporal_batches(
         let layer = PreparedExportTemporalLayer {
             frame,
             source_resolution: source_resolution.unwrap_or(resolution),
+            source_to_display_affine: source_to_display_affine
+                .unwrap_or([1.0, 0.0, 0.0, 0.0, 1.0, 0.0]),
         };
         if layers.insert(batch.placement(), layer).is_some() {
             return Err(format!(
@@ -4550,17 +4597,18 @@ fn resolve_export_temporal_source(
     batch: &TimelineTemporalDemandBatch,
     demand: &mondrian_renderer::TimelineTemporalSourceDemand,
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
-) -> Result<(CpuColorFrame, Resolution), String> {
+) -> Result<(CpuColorFrame, Resolution, [f32; 6]), String> {
     if context.cancellation.is_canceled() {
         return Err("export temporal source resolution was canceled".to_owned());
     }
     let identity = identity_compiled_effect_graph()
         .ok_or_else(|| "renderer could not prepare the identity Effect graph".to_owned())?;
-    let (frame, source_resolution) = match &demand.source {
+    let (frame, source_resolution, source_to_display_affine) = match &demand.source {
         TimelineTemporalSource::Media {
             asset_id,
             source_sample,
             color_space_override,
+            picture_overrides,
             alpha_interpretation,
             auto_tone_map,
         } => {
@@ -4568,8 +4616,8 @@ fn resolve_export_temporal_source(
                 placement: demand.placement,
                 asset_id: *asset_id,
                 color_space_override: *color_space_override,
-                pixel_aspect_ratio_override: None,
-                field_order_override: None,
+                pixel_aspect_ratio_override: picture_overrides.pixel_aspect_ratio,
+                field_order_override: picture_overrides.field_order,
                 alpha_interpretation: *alpha_interpretation,
                 frame_rate_override: None,
                 source_sample: *source_sample,
@@ -4592,7 +4640,11 @@ fn resolve_export_temporal_source(
                 context.visual_session,
                 context.cancellation,
             )?;
-            (decoded.frame.clone(), decoded.source_resolution)
+            (
+                decoded.frame.clone(),
+                decoded.source_resolution,
+                decoded.picture_geometry.source_to_display_affine(),
+            )
         }
         TimelineTemporalSource::NestedSequence { sequence_id, .. } => {
             let child_id = export_nested_child(
@@ -4627,6 +4679,7 @@ fn resolve_export_temporal_source(
                     color_context,
                 )?,
                 child_author_resolution,
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             )
         }
         TimelineTemporalSource::SolidColor { color } => {
@@ -4640,6 +4693,7 @@ fn resolve_export_temporal_source(
                     color_space: color_context.working_color_space,
                 }),
                 materialization.author_resolution(),
+                [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             )
         }
     };
@@ -4663,7 +4717,7 @@ fn resolve_export_temporal_source(
             batch.placement().clip_id
         ));
     }
-    Ok((frame, source_resolution))
+    Ok((frame, source_resolution, source_to_display_affine))
 }
 
 fn export_temporal_tile(
@@ -4772,6 +4826,7 @@ fn export_temporal_source_identity(
                 asset_id,
                 source_sample,
                 color_space_override,
+                picture_overrides,
                 alpha_interpretation,
                 auto_tone_map,
             } => {
@@ -4785,6 +4840,9 @@ fn export_temporal_source_identity(
                 }]);
                 hasher.update(
                     serde_json::to_vec(color_space_override).map_err(|error| error.to_string())?,
+                );
+                hasher.update(
+                    serde_json::to_vec(picture_overrides).map_err(|error| error.to_string())?,
                 );
                 hasher.update(
                     serde_json::to_vec(alpha_interpretation).map_err(|error| error.to_string())?,
@@ -4911,6 +4969,27 @@ fn project_export_affine(
     .ok_or_else(|| format!("{source_kind} export transform geometry is invalid"))
 }
 
+fn project_export_picture_affine(
+    transform: [f32; 6],
+    source_to_display_affine: [f32; 6],
+    source_authoring: Resolution,
+    source_sampled: Resolution,
+    output_authoring: Resolution,
+    output_sampled: Resolution,
+    source_kind: &str,
+) -> Result<[f32; 6], String> {
+    let interpreted = mondrian_core::compose_picture_affine(transform, source_to_display_affine)
+        .ok_or_else(|| format!("{source_kind} picture interpretation geometry is invalid"))?;
+    project_export_affine(
+        interpreted,
+        source_authoring,
+        source_sampled,
+        output_authoring,
+        output_sampled,
+        source_kind,
+    )
+}
+
 fn lower_export_transition_input<'a>(
     closure: &PreparedExportVisualClosure,
     parent_node_id: PreparedVisualFrameNodeId,
@@ -4928,8 +5007,9 @@ fn lower_export_transition_input<'a>(
             TimelineTransitionInputPlan::Media(media),
             ResolvedExportTransitionInput::Decoded(frame),
         ) => {
-            let transform = project_export_affine(
+            let transform = project_export_picture_affine(
                 media.transform,
+                frame.picture_geometry.source_to_display_affine(),
                 frame.source_resolution,
                 decoded_frame_resolution(&frame.frame),
                 author_resolution,
@@ -5023,8 +5103,9 @@ fn lower_export_transition_input<'a>(
                     return Err("transparent Transition input cannot own temporal pixels".to_owned())
                 }
             };
-            let transform = project_export_affine(
+            let transform = project_export_picture_affine(
                 transform,
+                temporal.source_to_display_affine,
                 temporal.source_resolution,
                 decoded_frame_resolution(&temporal.frame),
                 author_resolution,
@@ -5099,6 +5180,7 @@ struct ExportVideoLayerDecodeRequest<'a> {
     source_sample: mondrian_core::SourceSampleTarget,
     decode_resolution: Resolution,
     source_resolution: Resolution,
+    picture_geometry: ResolvedPictureGeometry,
     source_color: PreviewSourceColorContract,
     alpha_interpretation: AlphaInterpretation,
     input_transform: RenderInputTransform,
@@ -5125,6 +5207,7 @@ fn decode_video_layer_scaled(
         source_sample,
         decode_resolution,
         source_resolution,
+        picture_geometry,
         source_color,
         alpha_interpretation,
         input_transform,
@@ -5228,6 +5311,7 @@ fn decode_video_layer_scaled(
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.result.frame,
         source_resolution,
+        picture_geometry,
         source_fingerprint: dependency.source_fingerprint,
         video_stream_index,
         decode_diagnostics: Some(decode_diagnostics),
@@ -6229,6 +6313,8 @@ mod tests {
     ) -> ResolvedExportDeliveryContract {
         ResolvedExportDeliveryContract {
             resolution: crate::preset::Resolution { width: 1_920, height: 1_080 },
+            sample_aspect_ratio: mondrian_core::SampleAspectRatio::SQUARE,
+            field_order: mondrian_core::timeline_data::FieldOrder::Progressive,
             bit_depth,
             video_range,
             chroma_sampling,
@@ -6394,10 +6480,15 @@ mod tests {
             video_stream_index: Some(0),
             picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
             source_resolution: Some(Resolution { width: 1, height: 1 }),
+            picture: Some(Default::default()),
             audio_components: HashMap::new(),
             interpretation,
             color_diagnostic,
         }
+    }
+
+    fn square_picture_geometry(resolution: Resolution) -> ResolvedPictureGeometry {
+        ResolvedPictureGeometry::square(resolution).expect("non-empty test picture geometry")
     }
 
     #[test]
@@ -6508,6 +6599,7 @@ mod tests {
                 auto_tone_map,
                 decode_resolution,
                 source_resolution,
+                square_picture_geometry(source_resolution),
             )
             .expect("complete cache identity")
         };
@@ -6548,6 +6640,7 @@ mod tests {
                 source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 decode_resolution: Resolution { width: 16, height: 16 },
                 source_resolution: Resolution { width: 16, height: 16 },
+                picture_geometry: square_picture_geometry(Resolution { width: 16, height: 16 }),
                 source_color: PreviewSourceColorContract::new(
                     ColorSpace::Rec709,
                     DecodedVideoRangeContract::OverrideLimited,
@@ -6601,6 +6694,7 @@ mod tests {
                     source_sample: mondrian_core::SourceSampleTarget::covering(source_time),
                     decode_resolution: Resolution { width: 16, height: 16 },
                     source_resolution: Resolution { width: 16, height: 16 },
+                    picture_geometry: square_picture_geometry(Resolution { width: 16, height: 16 }),
                     source_color: PreviewSourceColorContract::new(
                         ColorSpace::Rec709,
                         DecodedVideoRangeContract::OverrideLimited,
@@ -6682,6 +6776,7 @@ mod tests {
                 source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
                 decode_resolution: Resolution { width: 16, height: 16 },
                 source_resolution: Resolution { width: 16, height: 16 },
+                picture_geometry: square_picture_geometry(Resolution { width: 16, height: 16 }),
                 source_color: PreviewSourceColorContract::new(
                     ColorSpace::Rec709,
                     DecodedVideoRangeContract::OverrideLimited,
@@ -6730,6 +6825,7 @@ mod tests {
             false,
             Resolution { width: 1_920, height: 1_080 },
             Resolution { width: 3_840, height: 2_160 },
+            square_picture_geometry(Resolution { width: 3_840, height: 2_160 }),
         )
         .expect("complete cache identity");
 
@@ -6798,6 +6894,7 @@ mod tests {
             false,
             Resolution { width: 1, height: 1 },
             Resolution { width: 1, height: 1 },
+            square_picture_geometry(Resolution { width: 1, height: 1 }),
         )
         .expect_err("picture dependency without exact stream must be rejected");
         assert!(error.contains("physical video stream"));
@@ -9892,8 +9989,10 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-color_range", "tv"]));
         assert!(args.windows(2).any(|pair| {
             pair[0] == "-vf"
-                && pair[1] == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020"
+                && pair[1]
+                    == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setsar=1/1"
         }));
+        assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
     }
 
     #[test]
@@ -10060,6 +10159,11 @@ mod tests {
         assert_eq!(expected.color_primaries.as_deref(), Some("bt2020"));
         assert_eq!(expected.color_transfer.as_deref(), Some("smpte2084"));
         assert_eq!(expected.color_matrix.as_deref(), Some("bt2020nc"));
+        assert_eq!(
+            expected.sample_aspect_ratio,
+            Some(mondrian_core::SampleAspectRatio::SQUARE)
+        );
+        assert_eq!(expected.field_order.as_deref(), Some("progressive"));
         assert!(!expected.require_color_tags_absent);
         assert_eq!(
             expected.static_hdr_metadata,

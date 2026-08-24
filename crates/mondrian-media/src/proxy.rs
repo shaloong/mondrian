@@ -1142,13 +1142,14 @@ fn ffmpeg_proxy_command(
         ));
     }
     let filter_graph = format!(
-        "{setparams},scale=-2:{height}:flags=lanczos:in_range={scale_range}:out_range={scale_range}"
+        "{setparams},setsar=1,scale=-2:{height}:flags=lanczos:in_range={scale_range}:out_range={scale_range}"
     );
     let mut cmd = crate::ffmpeg_command();
     cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        .arg("-noautorotate")
         .arg("-i")
         .arg(source_path)
         .arg("-map")
@@ -1505,6 +1506,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:v:0"]));
+        assert!(args.iter().any(|arg| arg == "-noautorotate"));
         assert_eq!(PROXY_PRIMARY_VIDEO_STREAM_INDEX, 0);
     }
 
@@ -1541,7 +1543,7 @@ mod tests {
             .expect("video filter graph");
         assert_eq!(
             filter,
-            "setparams=range=full,scale=-2:720:flags=lanczos:in_range=pc:out_range=pc"
+            "setparams=range=full,setsar=1,scale=-2:720:flags=lanczos:in_range=pc:out_range=pc"
         );
     }
 

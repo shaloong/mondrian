@@ -1735,14 +1735,30 @@ impl AppState {
             });
         }
 
-        // Resolve media dimensions for auto-fit before borrowing seq.
-        let media_dim = if matches!(dragging.kind, AssetKind::Video | AssetKind::StillImage) {
-            self.asset_library()
+        // Resolve source display geometry for auto-fit before borrowing seq.
+        let media_picture = if matches!(dragging.kind, AssetKind::Video | AssetKind::StillImage) {
+            let video = self
+                .asset_library()
                 .and_then(|lib| lib.get_asset(dragging.asset_id).ok().flatten())
                 .and_then(|asset| {
                     asset.media_probe().and_then(|probe| probe.primary_video()).cloned()
                 })
-                .map(|v| (v.width, v.height))
+                .ok_or_else(|| mondrian_core::MondrianError::UnsupportedFormat {
+                    format: "素材没有与当前修订一致的视频图片合同".to_owned(),
+                })?;
+            Some(
+                mondrian_core::ResolvedPictureGeometry::resolve(
+                    mondrian_core::Resolution { width: video.width, height: video.height },
+                    video.picture,
+                    None,
+                    None,
+                )
+                .map_err(|error| {
+                    mondrian_core::MondrianError::UnsupportedFormat {
+                        format: format!("素材图片解释不受支持：{error}"),
+                    }
+                })?,
+            )
         } else {
             None
         };
@@ -1778,11 +1794,8 @@ impl AppState {
                     Clip::new(dragging.asset_id, start_time, duration)?
                 };
                 clip.label = Some(dragging.name.clone());
-                if let Some((mw, mh)) = media_dim
-                    && mw > 0
-                    && mh > 0
-                {
-                    super::timeline_insert::auto_fit_picture(seq, &mut clip, mw, mh);
+                if let Some(picture) = media_picture {
+                    super::timeline_insert::auto_fit_picture(seq, &mut clip, picture)?;
                 }
                 let clip_id = clip.id;
 

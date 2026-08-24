@@ -131,6 +131,7 @@ fn video_media_info(file_size: u64) -> MediaInfo {
         codec_profile: mondrian_media::VideoCodecProfile::Unknown,
         width: 1920,
         height: 1080,
+        picture: Default::default(),
         frame_rate: Rational::FPS_24,
         frame_rate_proven: true,
         pixel_format: PixelFormat::Yuv420p,

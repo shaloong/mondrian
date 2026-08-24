@@ -370,6 +370,12 @@ _Avoid_: Persisted authoring time base, UI snap setting
 The deterministic affine conversion from source and output authoring extents to
 the concrete sampled extents used by one Preview or Export execution. Authored
 Clip transforms never change when decode quality or delivery resolution changes.
+One resolved picture contract applies encoded sample aspect ratio and cardinal
+display orientation before the Clip transform, rejects unsupported matrices and
+non-progressive scan before pixel execution, and keeps Sequence sample aspect
+ratio at the Viewer/delivery boundary. Proxy generation preserves the original
+stored orientation and resets only the proxy's physical SAR, so source and proxy
+share the same interpretation.
 _Avoid_: Applying authoring-space scale directly to a downsampled source,
 delivery-size-dependent author state, decoding one cache entry at multiple
 unstated extents

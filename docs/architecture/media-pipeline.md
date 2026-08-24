@@ -2,6 +2,21 @@
 
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
+## Picture scan and stored geometry
+
+Media probing publishes one typed `PictureStreamMetadata` contract containing
+exact sample aspect ratio, scan order, and the cardinal orientation classified
+from FFmpeg display-matrix side data (with legacy rotate metadata only as a
+fallback). Arbitrary matrices remain `Unsupported`; Preview and Export must
+resolve these facts through `ResolvedPictureGeometry` before execution. The
+decoder also rejects an interlaced `AVFrame`, so incorrect or incomplete probe
+metadata cannot let field-coded pixels bypass the progressive-only contract.
+
+Proxy FFmpeg commands disable automatic rotation and normalize the generated
+proxy's physical SAR to 1:1 before scaling. The original source metadata remains
+the sole interpretation authority applied later by Preview/Export. A proxy may
+change sampled extent, but never source orientation or display geometry.
+
 ## Realtime audio output evidence
 
 `RealtimeAudioOutput` owns the concrete CPAL stream and a fixed-capacity

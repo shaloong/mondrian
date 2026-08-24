@@ -76,7 +76,22 @@ impl AppState {
                     clip.label = Some(asset.name.clone());
                     clip.link_group = link_group;
                     if let Some(video) = media_probe.and_then(|probe| probe.primary_video()) {
-                        auto_fit_picture(sequence, &mut clip, video.width, video.height);
+                        auto_fit_picture(
+                            sequence,
+                            &mut clip,
+                            mondrian_core::ResolvedPictureGeometry::resolve(
+                                mondrian_core::Resolution {
+                                    width: video.width,
+                                    height: video.height,
+                                },
+                                video.picture,
+                                None,
+                                None,
+                            )
+                            .map_err(|error| {
+                                insert_error(format!("素材图片解释不受支持：{error}"))
+                            })?,
+                        )?;
                     }
                     placements.push(InsertEditPlacement {
                         track_id,
@@ -329,23 +344,27 @@ fn create_asset_clip(
 pub(super) fn auto_fit_picture(
     sequence: &mondrian_timeline::Sequence,
     clip: &mut Clip,
-    media_width: u32,
-    media_height: u32,
-) {
-    if media_width == 0 || media_height == 0 {
-        return;
+    picture: mondrian_core::ResolvedPictureGeometry,
+) -> mondrian_core::Result<()> {
+    let [media_width, media_height] = picture.display_extent();
+    if !media_width.is_finite()
+        || !media_height.is_finite()
+        || media_width <= 0.0
+        || media_height <= 0.0
+    {
+        return Err(insert_error("素材显示尺寸无效"));
     }
     let sequence_width = sequence.settings.resolution.width.max(1) as f32;
     let sequence_height = sequence.settings.resolution.height.max(1) as f32;
-    let fit_scale =
-        (sequence_width / media_width as f32).min(sequence_height / media_height as f32);
-    clip.transform.set_anchor_point(glam::Vec2::new(
-        media_width as f32 * 0.5,
-        media_height as f32 * 0.5,
-    ));
+    let media_width = media_width as f32;
+    let media_height = media_height as f32;
+    let fit_scale = (sequence_width / media_width).min(sequence_height / media_height);
+    clip.transform
+        .set_anchor_point(glam::Vec2::new(media_width * 0.5, media_height * 0.5));
     clip.transform.set_scale(glam::Vec2::new(fit_scale, fit_scale));
     clip.transform
         .set_position(glam::Vec2::new(sequence_width * 0.5, sequence_height * 0.5));
+    Ok(())
 }
 
 fn insert_error(reason: impl Into<String>) -> MondrianError {
@@ -371,7 +390,12 @@ mod tests {
         )
         .expect("clip");
 
-        auto_fit_picture(&sequence, &mut clip, resolution.width, resolution.height);
+        auto_fit_picture(
+            &sequence,
+            &mut clip,
+            mondrian_core::ResolvedPictureGeometry::square(resolution).expect("square picture"),
+        )
+        .expect("auto fit");
 
         let anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
         let position = clip.transform.get_position(TimelineTime::ZERO);
@@ -385,5 +409,34 @@ mod tests {
         assert_eq!(position, expected_center);
         assert_eq!(scale, glam::Vec2::ONE);
         assert_eq!(matrix, glam::Mat3::IDENTITY);
+    }
+
+    #[test]
+    fn auto_fit_uses_display_geometry_after_sar_and_orientation() {
+        let sequence = mondrian_timeline::Sequence::new("oriented auto fit");
+        let mut clip = Clip::new(
+            AssetId::new(),
+            TimelineTime::ZERO,
+            TimelineTime::new(1, 1).expect("duration"),
+        )
+        .expect("clip");
+        let picture = mondrian_core::ResolvedPictureGeometry::resolve(
+            mondrian_core::Resolution { width: 720, height: 480 },
+            mondrian_core::PictureStreamMetadata {
+                sample_aspect_ratio: mondrian_core::SampleAspectRatio::new(40, 33),
+                orientation: mondrian_core::PictureOrientation::RotateClockwise90,
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .expect("picture");
+
+        auto_fit_picture(&sequence, &mut clip, picture).expect("auto fit");
+
+        let [display_width, display_height] = picture.display_extent();
+        let anchor = clip.transform.get_anchor_point(TimelineTime::ZERO);
+        assert!((f64::from(anchor.x) - display_width * 0.5).abs() < 1.0e-4);
+        assert!((f64::from(anchor.y) - display_height * 0.5).abs() < 1.0e-4);
     }
 }

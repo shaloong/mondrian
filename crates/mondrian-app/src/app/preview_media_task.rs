@@ -950,6 +950,7 @@ fn decode_media_preview_inner(
 ) -> MediaPreviewResult {
     let decode_started_at = Instant::now();
     let logical_resolution = job.key.source_resolution;
+    let picture_geometry = job.key.picture_geometry;
     let priority = job.priority;
     let access_mode = job.access_mode;
     let deadline_at = job.deadline_at;
@@ -1041,6 +1042,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,
@@ -1135,6 +1137,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,
@@ -1222,6 +1225,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
                 error: None,

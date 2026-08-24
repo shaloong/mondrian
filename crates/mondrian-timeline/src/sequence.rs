@@ -830,6 +830,19 @@ impl SequenceSettings {
                 ),
             });
         }
+        if self.pixel_aspect_ratio.exact_ratio().is_none() {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_owned(),
+                reason: "序列像素宽高比不能是 Unknown；请选择一个可执行的精确比例".to_owned(),
+            });
+        }
+        if self.field_order != FieldOrder::Progressive {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "sequence_settings_validate".to_owned(),
+                reason: "当前版本只允许逐行 Sequence；隔行交付需要真实的场采样与编码路径"
+                    .to_owned(),
+            });
+        }
         if !Self::AUDIO_SAMPLE_RATES.contains(&self.audio_sample_rate) {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_string(),
@@ -2351,6 +2364,32 @@ fn validate_clip_local_author_contract(
     clip.validate_time_state()?;
     if let Some(title) = clip.content.basic_title() {
         title.validate_author_state()?;
+    }
+    if let Some(interpretation) = clip.content.media_interpretation() {
+        if interpretation
+            .pixel_aspect_ratio_override
+            .is_some_and(|ratio| ratio.exact_ratio().is_none())
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_sequence_author_contract".to_owned(),
+                reason: format!(
+                    "Clip {} has an Unknown pixel-aspect override; use Auto or an exact ratio",
+                    clip.id
+                ),
+            });
+        }
+        if interpretation
+            .field_order_override
+            .is_some_and(|order| order != FieldOrder::Progressive)
+        {
+            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
+                step_id: "validate_sequence_author_contract".to_owned(),
+                reason: format!(
+                    "Clip {} requests interlaced interpretation without an admitted deinterlacing path",
+                    clip.id
+                ),
+            });
+        }
     }
     clip.transform.to_property_bag().validate().map_err(|error| {
         mondrian_core::MondrianError::WorkflowStepFailed {
@@ -3978,6 +4017,23 @@ mod tests {
             ..Default::default()
         };
         assert!(bad_preview.validate().is_err());
+    }
+
+    #[test]
+    fn sequence_settings_reject_inert_scan_and_unknown_geometry_contracts() {
+        let interlaced = SequenceSettings {
+            field_order: FieldOrder::UpperFirst,
+            ..Default::default()
+        };
+        let error = interlaced.validate().expect_err("interlaced output must fail closed");
+        assert!(error.to_string().contains("逐行"));
+
+        let unknown_par = SequenceSettings {
+            pixel_aspect_ratio: PixelAspectRatio::Unknown,
+            ..Default::default()
+        };
+        let error = unknown_par.validate().expect_err("unknown authored PAR must fail closed");
+        assert!(error.to_string().contains("Unknown"));
     }
 
     #[test]
