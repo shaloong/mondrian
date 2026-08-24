@@ -1270,9 +1270,6 @@ fn preview_seek_index_records_distinct_keyframe_packets() {
     assert_eq!(index.keyframe_at_or_before(199), Some(100));
     assert_eq!(index.keyframe_at_or_before(200), Some(200));
     assert_eq!(index.keyframe_at_or_before(1_000), Some(200));
-    assert_eq!(index.nearest_keyframe(60), Some(50));
-    assert_eq!(index.nearest_keyframe(90), Some(100));
-    assert_eq!(index.nearest_keyframe(150), Some(100));
     assert_eq!(index.adjacent_keyframe_radius(50), Some(50));
     assert_eq!(index.adjacent_keyframe_radius(100), Some(100));
     assert_eq!(index.adjacent_keyframe_radius(150), Some(50));
@@ -1286,6 +1283,17 @@ fn preview_seek_index_records_distinct_keyframe_packets() {
             source: PreviewSeekIndexSource::SessionObserved,
         }
     );
+}
+
+#[test]
+fn preview_seek_index_uses_decode_timestamp_for_reordered_keyframe_anchor() {
+    let mut index = PreviewSeekIndex::from_probe_keyframes(vec![-41]);
+
+    index.observe_packet(&test_packet(Some(10), Some(-41), true));
+
+    assert_eq!(index.keyframe_at_or_before(10), Some(-41));
+    assert_eq!(index.keyframe_after(-41), None);
+    assert_eq!(index.diagnostics().keyframes, 1);
 }
 
 #[test]

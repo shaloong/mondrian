@@ -704,6 +704,21 @@ impl PreviewDecodeAccessPolicy {
         frames_decoded >= self.forward_decode_budget_frames
     }
 
+    /// Preserve the caller's exact source sample as temporal selection
+    /// authority for every access mode.
+    ///
+    /// Scrub may seek from or present a nearby keyframe, but a container index
+    /// can include negative decode-preroll keyframes that are not themselves
+    /// presentable frames. Rewriting the target to such an anchor makes the
+    /// selector scan for an impossible output until its budget is exhausted.
+    fn decode_target_pts(self, requested_pts: i64) -> i64 {
+        match self.access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor
+            | PreviewDecodeAccessMode::ScrubCursor
+            | PreviewDecodeAccessMode::RandomAccessStillFrame => requested_pts,
+        }
+    }
+
     fn adapt_for_request(
         mut self,
         seek_index: &PreviewSeekIndex,

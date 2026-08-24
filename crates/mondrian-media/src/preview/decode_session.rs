@@ -219,7 +219,12 @@ impl PreviewDecodeSessionContext {
         resources: PreviewDecodeWorkerResources,
     ) -> Self {
         Self {
-            sessions: PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None },
+            sessions: PreviewDecodeSessions {
+                playback: None,
+                interactive: None,
+                interactive_overflow: None,
+                cpu_still: None,
+            },
             execution_observer,
             demux_worker,
             resources,
@@ -434,15 +439,21 @@ pub fn clear_thread_local_preview_decode_session() {
 
 struct PreviewDecodeSessions {
     playback: Option<PreviewDecodeSession>,
-    /// Shared latest-wins Viewer session. Scrub and exact Still have distinct
-    /// seek policies but never need simultaneous codec/DPB residency.
+    /// Primary latest-wins Viewer session. Scrub and exact Still retain
+    /// distinct seek policies while sharing this locality slot.
     interactive: Option<PreviewDecodeSession>,
+    /// One bounded overflow Session for a second simultaneously retained
+    /// native media layer in the same Viewer candidate.
+    interactive_overflow: Option<PreviewDecodeSession>,
     cpu_still: Option<PreviewDecodeSession>,
 }
 
 impl PreviewDecodeSessions {
     fn is_empty(&self) -> bool {
-        self.playback.is_none() && self.interactive.is_none() && self.cpu_still.is_none()
+        self.playback.is_none()
+            && self.interactive.is_none()
+            && self.interactive_overflow.is_none()
+            && self.cpu_still.is_none()
     }
 
     fn available_slot(
@@ -450,43 +461,59 @@ impl PreviewDecodeSessions {
         access_mode: PreviewDecodeAccessMode,
         hardware_decode_request: PreviewHardwareDecodeRequest,
     ) -> Option<PreviewDecodeSessionSlot> {
-        let slot = match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => PreviewDecodeSessionSlot::Playback,
-            PreviewDecodeAccessMode::ScrubCursor => PreviewDecodeSessionSlot::Interactive,
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => Some(PreviewDecodeSessionSlot::Playback),
+            PreviewDecodeAccessMode::ScrubCursor => select_interactive_session_slot(
+                self.interactive
+                    .as_ref()
+                    .is_none_or(PreviewDecodeSession::native_output_released),
+                self.interactive_overflow
+                    .as_ref()
+                    .is_none_or(PreviewDecodeSession::native_output_released),
+            ),
             PreviewDecodeAccessMode::RandomAccessStillFrame
                 if hardware_decode_request.prefers_gpu_residency() =>
             {
-                PreviewDecodeSessionSlot::Interactive
+                select_interactive_session_slot(
+                    self.interactive
+                        .as_ref()
+                        .is_none_or(PreviewDecodeSession::native_output_released),
+                    self.interactive_overflow
+                        .as_ref()
+                        .is_none_or(PreviewDecodeSession::native_output_released),
+                )
             }
-            PreviewDecodeAccessMode::RandomAccessStillFrame => PreviewDecodeSessionSlot::CpuStill,
-        };
-        if !slot.requires_released_native_outputs() {
-            return Some(slot);
+            PreviewDecodeAccessMode::RandomAccessStillFrame => {
+                Some(PreviewDecodeSessionSlot::CpuStill)
+            }
         }
-        self.interactive
-            .as_ref()
-            .is_none_or(PreviewDecodeSession::native_output_released)
-            .then_some(slot)
     }
 
     fn slot_mut(&mut self, slot: PreviewDecodeSessionSlot) -> &mut Option<PreviewDecodeSession> {
         match slot {
             PreviewDecodeSessionSlot::Playback => &mut self.playback,
             PreviewDecodeSessionSlot::Interactive => &mut self.interactive,
+            PreviewDecodeSessionSlot::InteractiveOverflow => &mut self.interactive_overflow,
             PreviewDecodeSessionSlot::CpuStill => &mut self.cpu_still,
         }
     }
 
     fn resident_session_count(&self) -> usize {
-        [&self.playback, &self.interactive, &self.cpu_still]
-            .into_iter()
-            .filter(|session| session.is_some())
-            .count()
+        [
+            &self.playback,
+            &self.interactive,
+            &self.interactive_overflow,
+            &self.cpu_still,
+        ]
+        .into_iter()
+        .filter(|session| session.is_some())
+        .count()
     }
 
     fn clear(&mut self) {
         self.playback = None;
         self.interactive = None;
+        self.interactive_overflow = None;
         self.cpu_still = None;
     }
 }
@@ -495,12 +522,20 @@ impl PreviewDecodeSessions {
 enum PreviewDecodeSessionSlot {
     Playback,
     Interactive,
+    InteractiveOverflow,
     CpuStill,
 }
 
-impl PreviewDecodeSessionSlot {
-    fn requires_released_native_outputs(self) -> bool {
-        self == Self::Interactive
+const fn select_interactive_session_slot(
+    primary_released: bool,
+    overflow_released: bool,
+) -> Option<PreviewDecodeSessionSlot> {
+    if primary_released {
+        Some(PreviewDecodeSessionSlot::Interactive)
+    } else if overflow_released {
+        Some(PreviewDecodeSessionSlot::InteractiveOverflow)
+    } else {
+        None
     }
 }
 
@@ -1488,11 +1523,7 @@ impl PreviewDecodeSession {
             self.frame_duration_pts,
             adaptive_hints,
         );
-        let decode_target_pts = if policy.keyframe_only {
-            self.seek_index.nearest_keyframe(target_pts).unwrap_or(target_pts)
-        } else {
-            target_pts
-        };
+        let decode_target_pts = policy.decode_target_pts(target_pts);
         self.decoder.skip_frame(if policy.keyframe_only {
             ffmpeg::codec::discard::Discard::NonKey
         } else {
@@ -2719,7 +2750,12 @@ mod session_topology_tests {
     use super::*;
 
     fn empty_sessions() -> PreviewDecodeSessions {
-        PreviewDecodeSessions { playback: None, interactive: None, cpu_still: None }
+        PreviewDecodeSessions {
+            playback: None,
+            interactive: None,
+            interactive_overflow: None,
+            cpu_still: None,
+        }
     }
 
     fn retained_candidate(start_pts: i64, duration_pts: i64) -> RetainedDecodedCandidate {
@@ -2762,6 +2798,19 @@ mod session_topology_tests {
     }
 
     #[test]
+    fn two_simultaneous_interactive_native_outputs_use_bounded_distinct_slots() {
+        assert_eq!(
+            select_interactive_session_slot(true, true),
+            Some(PreviewDecodeSessionSlot::Interactive)
+        );
+        assert_eq!(
+            select_interactive_session_slot(false, true),
+            Some(PreviewDecodeSessionSlot::InteractiveOverflow)
+        );
+        assert_eq!(select_interactive_session_slot(false, false), None);
+    }
+
+    #[test]
     fn cpu_exact_keeps_a_physically_separate_slot() {
         let sessions = empty_sessions();
         let cpu_slot = sessions
@@ -2790,9 +2839,10 @@ mod session_topology_tests {
             ),
             Some(PreviewDecodeSessionSlot::Interactive)
         );
-        assert!(!PreviewDecodeSessionSlot::Playback.requires_released_native_outputs());
-        assert!(PreviewDecodeSessionSlot::Interactive.requires_released_native_outputs());
-        assert!(!PreviewDecodeSessionSlot::CpuStill.requires_released_native_outputs());
+        assert_eq!(
+            select_interactive_session_slot(true, true),
+            Some(PreviewDecodeSessionSlot::Interactive)
+        );
     }
 
     #[test]
@@ -2910,5 +2960,19 @@ mod session_topology_tests {
                 PreviewDecodeAccessMode::ScrubCursor,
             )
             .expect("scrub uses the deterministic first duplicate candidate");
+    }
+}
+
+#[cfg(test)]
+mod scrub_target_tests {
+    use super::*;
+
+    #[test]
+    fn scrub_keeps_requested_sample_when_nearest_probe_keyframe_is_negative_preroll() {
+        let policy =
+            PreviewDecodeAccessPolicy::for_access_mode(PreviewDecodeAccessMode::ScrubCursor);
+        let index = PreviewSeekIndex::from_probe_keyframes(vec![-41, 79]);
+        assert_eq!(index.keyframe_at_or_before(7), Some(-41));
+        assert_eq!(policy.decode_target_pts(7), 7);
     }
 }

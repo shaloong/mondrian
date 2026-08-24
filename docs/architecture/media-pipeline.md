@@ -872,9 +872,11 @@ typed device-removed fence sentinel: the bridge clears that exact retained
 source and preserves `NativeDeviceRemoved` evidence. A wgpu device loss,
 timeout, generic backend string error, Adapter drop, or generation rotation is
 not a decoder-copy release proof and must retain the source fail-closed.
-The worker-owned context contains one continuous Playback slot, one shared
+The worker-owned context contains one continuous Playback slot, one primary
 native-capable Interactive slot for scrub and GPU-resident exact Still work,
-and one physically separate CPU Still slot. Sharing the Interactive slot is an
+one bounded Interactive overflow slot for a second simultaneously retained
+native layer, and one physically separate CPU Still slot. Sharing either
+Interactive slot is an
 execution-locality decision, not a semantic shortcut: every request derives its
 own seek, precision, decode-budget, approximation, and cancellation policy from
 its declared access mode. CPU still extraction cannot reconfigure the native
@@ -882,9 +884,12 @@ Interactive slot.
 Every logical native output carries one RAII token inside the retained FFmpeg
 resource; App Frame Store clones and renderer copy-fence clones share that token
 instead of incrementing it again. The token charges both one strongly retained
-worker-family counter and the originating Session's local counter. The shared
+worker-family counter and the originating Session's local counter. An
 Interactive slot may seek/flush or cross between Scrub and native exact Still
-only after its local count reaches zero. Playback remains a continuous pipeline
+only after its local count reaches zero. The primary slot is preferred; the
+overflow slot is admitted only while the primary native output remains owned,
+and a third simultaneous Interactive native request waits at the same
+cooperatively cancellable `OutputLease` checkpoint. Playback remains a continuous pipeline
 and may have multiple logical outputs in flight; dropping/replacing its Session
 does not drop their family charges or retained FFmpeg surfaces. Clearing a
 context always releases its codec/demux owners promptly, while family retirement
@@ -2406,7 +2411,11 @@ path/fingerprint/video-stream. That first production path gives scrub and still
 decode real keyframe/GOP evidence without a full packet scan before first frame.
 When a container exposes no usable index, sessions continue to learn keyframe
 anchors from decoded packets and report `SessionObserved` instead of pretending
-the source was probe-backed.
+the source was probe-backed. Packet-observed anchors use DTS when available and
+fall back to PTS; the decode target remains the exact requested presentation
+coordinate. A keyframe anchor selects only the input seek origin and must never
+rewrite that target, including frame-zero requests whose valid preroll starts at
+a negative DTS.
 `ScrubCursor` derives its effective selection/decode budget per request from
 that evidence: probe-backed anchors use bounded approximate-first-frame selection,
 missing or session-only evidence gets a bounded responsiveness-first budget, and exact
