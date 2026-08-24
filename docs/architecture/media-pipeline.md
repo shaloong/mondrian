@@ -185,6 +185,12 @@ restarts and expose resident/peak/capacity, evictions, cancellations, and each
 class's worst wall duration. Acceptance may constrain steady sequential
 latency without falsely relabeling cold-open or random-seek cost.
 
+The deterministic cache unit gate proves cancellation-token propagation,
+canceled-result semantics, and zero success/failure admission. It does not
+apply a wall-clock SLA to a synthetic worker because caller-to-join time also
+contains unbounded host scheduler delay. The manual real-child qualification
+gate remains the sole owner of the 50 ms FFmpeg kill/wait/join requirement.
+
 ## Waveform analysis
 
 `mondrian-media::WaveformEnvelopeBuilder` is a streaming, partition-invariant
