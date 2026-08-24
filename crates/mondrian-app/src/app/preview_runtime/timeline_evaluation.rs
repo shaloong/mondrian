@@ -65,6 +65,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.evaluation_working_set.borrow_mut().get(evaluation_key, clock)
         {
             bump(&self.metrics.timeline_evaluation_hits);
+            self.request_timeline_render_cache_lookup(&evaluation);
             return FrameResolutionOutcome::Ready(evaluation);
         }
         if let Some(dependencies) = self.evaluation_working_set.borrow().waiting_for(evaluation_key)
@@ -116,6 +117,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     // per-dependency extraction lands; the working set is
                     // still cleared on media arrival.
                     dependencies: Arc::from([]),
+                    render_cache_identity: plan.render_cache_identity,
                 });
                 let clock = self.evaluation_working_set_clock.get();
                 self.evaluation_working_set.borrow_mut().insert(
@@ -124,6 +126,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     clock,
                 );
                 self.evaluation_working_set_clock.set(clock.saturating_add(1));
+                self.request_timeline_render_cache_lookup(&evaluation);
                 FrameResolutionOutcome::Ready(evaluation)
             }
             PreviewTimelineResolution::Empty => FrameResolutionOutcome::Empty,
@@ -139,6 +142,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewTimelineResolution::Unavailable { reason } => {
                 FrameResolutionOutcome::Unavailable(reason)
             }
+        }
+    }
+
+    fn request_timeline_render_cache_lookup(&self, evaluation: &ResolvedFrameEvaluation) {
+        if let Some(identity) = evaluation.render_cache_identity {
+            let _ = self
+                .timeline_render_cache
+                .borrow()
+                .request_lookup(identity, evaluation.color_context.working_color_space);
         }
     }
 

@@ -142,6 +142,7 @@ pub(crate) mod preview_media_source;
 pub(crate) mod preview_media_task;
 pub(crate) mod preview_quality;
 pub(crate) mod preview_raster_frame;
+pub(crate) mod preview_render_cache;
 pub mod preview_runtime;
 pub(crate) mod preview_scheduler_policy;
 pub(crate) mod preview_timeline_execution;

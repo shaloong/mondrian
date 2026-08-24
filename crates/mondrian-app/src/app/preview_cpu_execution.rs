@@ -130,6 +130,8 @@ pub(crate) struct PreviewCpuExecutionDurations {
 
 pub(crate) struct PreviewCompositeOutput {
     pub(crate) rgba: Vec<u8>,
+    /// Exact post-effect/post-composite working frame before display adaptation.
+    pub(crate) working_frame: CpuColorFrame,
     pub(crate) composite_diagnostics: TimelineCompositeDiagnostics,
     pub(crate) input_color_diagnostics: Vec<RenderColorTransformDiagnostics>,
     pub(crate) input_color_stage_diagnostics: RenderColorStageDiagnostics,
@@ -405,6 +407,16 @@ pub(crate) fn composite_resolved_preview(
 ) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let composite =
         composite_resolved_preview_working(width, height, resolved, color_context, scratch)?;
+    present_preview_working(composite, color_context, scratch)
+}
+
+/// Apply only the production Program Output/monitor boundary to an already
+/// materialized working composite, including a verified Timeline cache hit.
+pub(crate) fn present_preview_working(
+    composite: PreviewWorkingCompositeOutput,
+    color_context: &ProgramColorContext,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<PreviewCompositeOutput, PreviewCpuExecutionError> {
     let output_boundary_started_at = Instant::now();
     let mut execution_durations = composite.execution_durations;
     let boundary = output_boundary_from_color_context(color_context)?;
@@ -425,6 +437,7 @@ pub(crate) fn composite_resolved_preview(
             duration_us(output_boundary_started_at.elapsed());
         PreviewCompositeOutput {
             rgba: output.rgba,
+            working_frame: composite.frame,
             composite_diagnostics: composite.composite_diagnostics,
             input_color_diagnostics: composite.input_color_diagnostics,
             input_color_stage_diagnostics: composite.input_color_stage_diagnostics,

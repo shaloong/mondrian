@@ -38,8 +38,8 @@ use crate::app::preview_access_mode::{
 #[cfg(test)]
 use crate::app::preview_cpu_execution::composite_resolved_preview_working;
 use crate::app::preview_cpu_execution::{
-    composite_resolved_preview, output_boundary_from_color_context, PreviewCompositeOutput,
-    PreviewCpuExecutionDurations,
+    composite_resolved_preview, output_boundary_from_color_context, present_preview_working,
+    PreviewCompositeOutput, PreviewCpuExecutionDurations, PreviewWorkingCompositeOutput,
 };
 use crate::app::preview_cpu_fallback_task::{
     PreviewCpuFallbackRequest, PreviewCpuFallbackResult, PreviewCpuFallbackSubmission,
@@ -107,9 +107,10 @@ use crate::app::preview_viewer_plan::gpu_composite_layers_for_resolved;
 #[cfg(test)]
 use crate::app::preview_viewer_plan::viewer_preview_cache_key_for_resolved_plan;
 use crate::app::preview_viewer_plan::{
-    prepare_gpu_composite_layers_with_heterogeneous_effects, resolved_preview_decode_execution,
-    resolved_preview_media_protections, resolved_preview_presentation_quality,
-    PreparedPreviewViewerGpuLayers, PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
+    gpu_layer_for_cached_working, prepare_gpu_composite_layers_with_heterogeneous_effects,
+    resolved_preview_decode_execution, resolved_preview_media_protections,
+    resolved_preview_presentation_quality, PreparedPreviewViewerGpuLayers,
+    PreviewViewerGpuLayerPreparationError, ResolvedPreviewElement,
 };
 use crate::app::preview_visual_dependencies::PreviewVisualDependencyObserver;
 use crate::app::preview_visual_execution_task::{
@@ -332,6 +333,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     cpu_fallback_in_flight:
         RefCell<Option<(u64, mondrian_playback::PlaybackEpoch, PreviewOutputKey)>>,
     cpu_fallback_failure: RefCell<Option<(PreviewOutputKey, String)>>,
+    timeline_render_cache: RefCell<crate::app::preview_render_cache::PreviewTimelineRenderCache>,
     visual_ready: RefCell<HashMap<VisualExecutionTaskKey, VisualExecutionPrefixReady>>,
     visual_failures: RefCell<HashMap<VisualExecutionTaskKey, String>>,
     media_execution_failures: RefCell<HashMap<MediaPreviewKey, (u64, MediaPreviewFailureReason)>>,
@@ -453,6 +455,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             elements: Arc::clone(&resolved.elements),
             color_context: resolved.color_context.clone(),
+            render_cache_identity: resolved.render_cache_identity,
+            cached_working: resolved
+                .render_cache_identity
+                .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity)),
         };
         match task.submit(request) {
             PreviewCpuFallbackSubmission::Scheduled => {
@@ -530,6 +536,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         worker_isolation: PreviewWorkerIsolation,
     ) -> Self {
         let (work_notifier, work_watch) = preview_work_notification_channel();
+        let timeline_render_cache =
+            crate::app::preview_render_cache::PreviewTimelineRenderCache::start(
+                work_notifier.clone(),
+            );
         let (job_tx, job_rx) = scheduler.job_queue();
         let (result_tx, result_rx) =
             mpsc::sync_channel::<MediaPreviewResult>(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
@@ -686,6 +696,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             viewer_cpu_fallback_active: Cell::new(false),
             cpu_fallback_in_flight: RefCell::new(None),
             cpu_fallback_failure: RefCell::new(None),
+            timeline_render_cache: RefCell::new(timeline_render_cache),
             visual_ready: RefCell::new(HashMap::new()),
             visual_failures: RefCell::new(HashMap::new()),
             media_execution_failures: RefCell::new(HashMap::new()),
@@ -1089,6 +1100,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     cpu_cache_key: evaluation.output_key.clone(),
                     cache_reusable,
                     color_context: evaluation.color_context.clone(),
+                    render_cache_identity: evaluation.render_cache_identity,
                 }
             }
             FrameResolutionOutcome::Empty => {
@@ -1187,6 +1199,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         let mut media_residency_protections =
             resolved_preview_media_protections(&resolved.elements);
+        let cached_working = resolved
+            .render_cache_identity
+            .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity));
+        if cached_working.is_some() {
+            media_residency_protections.clear();
+        }
         let mut cache_key = resolved.cache_key.clone();
         let program_output_boundary =
             match output_boundary_from_color_context(&resolved.color_context) {
@@ -1199,19 +1217,26 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let heterogeneous_decision = self.heterogeneous_effect_decision.get();
         let prepared_gpu_layers = {
             let mut scratch = self.scratch.borrow_mut();
-            prepare_gpu_composite_layers_with_heterogeneous_effects(
-                &resolved.elements,
-                resolved.color_context.working_color_space,
-                &mut scratch,
-                heterogeneous_decision.cpu_prefix_grant(),
-            )
-            .map_err(|error| {
-                let blocker = match &error {
-                    PreviewViewerGpuLayerPreparationError::Compositing { reason } => Some(*reason),
-                    _ => None,
-                };
-                (blocker, error.to_string())
-            })
+            match cached_working {
+                Some(frame) => gpu_layer_for_cached_working(frame, &mut scratch)
+                    .map(|layer| PreparedPreviewViewerGpuLayers::Ordinary { layers: vec![layer] })
+                    .map_err(|reason| (Some(reason), format!("cached working frame: {reason:?}"))),
+                None => prepare_gpu_composite_layers_with_heterogeneous_effects(
+                    &resolved.elements,
+                    resolved.color_context.working_color_space,
+                    &mut scratch,
+                    heterogeneous_decision.cpu_prefix_grant(),
+                )
+                .map_err(|error| {
+                    let blocker = match &error {
+                        PreviewViewerGpuLayerPreparationError::Compositing { reason } => {
+                            Some(*reason)
+                        }
+                        _ => None,
+                    };
+                    (blocker, error.to_string())
+                }),
+            }
         };
         let prepared_gpu_layers = match prepared_gpu_layers {
             Ok(prepared) => prepared,
@@ -1867,7 +1892,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut outcome = PreviewWorkPoll::default();
         while let Some(result) = task.try_poll() {
             match result {
-                PreviewCpuFallbackResult::Ready(ready) => {
+                PreviewCpuFallbackResult::Ready(mut ready) => {
+                    if let Some(frame) = ready.render_cache_frame.take() {
+                        self.timeline_render_cache.borrow_mut().publish(frame);
+                    }
                     if ready.generation == active_generation
                         && active_epoch == Some(ready.epoch)
                         && self.viewer_cpu_fallback_active.get()
@@ -1933,6 +1961,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         }
         outcome
+    }
+
+    fn pump_timeline_render_cache_results(&self) -> PreviewWorkPoll {
+        PreviewWorkPoll {
+            visible_change: self.timeline_render_cache.borrow_mut().pump(),
+            ..PreviewWorkPoll::default()
+        }
     }
 
     fn observe_visual_execution_disconnect(
@@ -2254,6 +2289,7 @@ struct ResolvedPlanView {
     cpu_cache_key: PreviewOutputKey,
     cache_reusable: bool,
     color_context: ProgramColorContext,
+    render_cache_identity: Option<mondrian_render_cache::TimelineRenderCacheIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2380,6 +2416,7 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
             }
         }
         outcome.merge(self.pump_visual_execution_results(pending_demand));
+        outcome.merge(self.pump_timeline_render_cache_results());
         outcome.merge(self.pump_cpu_fallback_results());
         for candidate in self.take_visual_terminal_candidates(pending_demand) {
             if !outcome

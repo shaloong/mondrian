@@ -12,6 +12,7 @@ members = [
     "crates/mondrian-export",
     "crates/mondrian-project",
     "crates/mondrian-playback",
+    "crates/mondrian-render-cache",
     "crates/mondrian-audio",
     "crates/mondrian-app",
     "crates/mondrian-editor-state",
@@ -49,6 +50,7 @@ mondrian-effects  = { path = "crates/mondrian-effects" }
 mondrian-export   = { path = "crates/mondrian-export" }
 mondrian-project  = { path = "crates/mondrian-project" }
 mondrian-playback = { path = "crates/mondrian-playback" }
+mondrian-render-cache = { path = "crates/mondrian-render-cache" }
 mondrian-audio    = { path = "crates/mondrian-audio" }
 
 # ---- 新 UI 架构 ----
@@ -153,6 +155,7 @@ ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 zip              = "0.6"
+zstd             = "0.11"
 
 [profile.dev]
 opt-level = 1          # 适度优化，加快媒体解码调试体验

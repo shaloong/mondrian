@@ -534,6 +534,10 @@ pub struct PreviewDiagnostics {
     /// aggregate hard current-working-set grant. App diagnostics do not
     /// reconstruct or rename that capacity authority.
     pub frame_store: mondrian_playback::PreviewFrameStoreDiagnostics,
+    /// Persistent post-composite Timeline cache queue and disk evidence.
+    pub timeline_render_cache: mondrian_render_cache::TimelineRenderCacheDiagnostics,
+    /// Whether the optional persistent cache worker could not start.
+    pub timeline_render_cache_start_failed: bool,
     /// Source/media color transforms into the timeline working space.
     pub color_input_transform_calls: u64,
     /// Pixels processed by source/media color transforms into the timeline working space.

@@ -215,13 +215,32 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 );
                             }
                         };
-                    let output = match composite_resolved_preview(
-                        width,
-                        height,
-                        &evaluation.elements,
-                        &evaluation.color_context,
-                        &mut self.scratch.borrow_mut(),
-                    ) {
+                    let cached_working = evaluation.render_cache_identity.and_then(|identity| {
+                        self.timeline_render_cache.borrow().ready_frame(identity)
+                    });
+                    let render_cache_hit = cached_working.is_some();
+                    let execution = match cached_working {
+                        Some(frame) => present_preview_working(
+                            PreviewWorkingCompositeOutput {
+                                frame,
+                                composite_diagnostics: TimelineCompositeDiagnostics::default(),
+                                input_color_diagnostics: Vec::new(),
+                                input_color_stage_diagnostics: RenderColorStageDiagnostics::default(
+                                ),
+                                execution_durations: PreviewCpuExecutionDurations::default(),
+                            },
+                            &evaluation.color_context,
+                            &mut self.scratch.borrow_mut(),
+                        ),
+                        None => composite_resolved_preview(
+                            width,
+                            height,
+                            &evaluation.elements,
+                            &evaluation.color_context,
+                            &mut self.scratch.borrow_mut(),
+                        ),
+                    };
+                    let output = match execution {
                         Ok(rgba) => rgba,
                         Err(err) => {
                             let reason = err.unavailability();
@@ -243,6 +262,19 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         self.record_color_transform(diagnostics);
                     }
                     self.record_color_stage(output.color_stage_diagnostics);
+                    if !render_cache_hit && let Some(identity) = evaluation.render_cache_identity {
+                        match mondrian_render_cache::TimelineRenderCacheFrame::new(
+                            identity,
+                            output.working_frame.into_rgba_f32(),
+                        ) {
+                            Ok(frame) => self.timeline_render_cache.borrow_mut().publish(frame),
+                            Err(error) => tracing::warn!(
+                                %identity,
+                                %error,
+                                "rejected invalid Timeline render-cache publication"
+                            ),
+                        }
+                    }
                     let frame_packaging_started_at = Instant::now();
                     let key = preview_raster_resource_key(&output_key);
                     match PreviewRasterFrame::new(

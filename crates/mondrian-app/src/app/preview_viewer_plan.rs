@@ -15,7 +15,7 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{identity_compiled_effect_graph, CompiledEffectGraph, EffectFrameExtent};
 use mondrian_playback::FramePresentationQuality;
 use mondrian_renderer::{
-    GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
+    CpuColorFrame, GpuCompositingBlockerReason, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchGrant, HeterogeneousCpuPrefixBatchItem,
     HeterogeneousCpuPrefixBatchRequest, HeterogeneousGpuContinuationBinding,
     HeterogeneousGpuContinuationRequest, HeterogeneousGpuResourceGrant,
@@ -26,7 +26,8 @@ use mondrian_renderer::{
 use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_execution::{
-    PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentityBuilder,
+    PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentity,
+    PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::MediaPreviewFrame;
 
@@ -248,6 +249,65 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     PreviewOutputKey::new(sequence_id, width, height, builder.finish_identity())
 }
 
+/// Stable identity of only the resolved media revisions/source samples in one plan.
+///
+/// Generated layers are represented by their position tags so a media-free plan
+/// still has one deterministic fingerprint. Effect and color semantics remain
+/// separate cache-key components.
+pub(crate) fn viewer_preview_media_fingerprint(
+    elements: &[ResolvedPreviewElement],
+) -> PreviewSemanticIdentity {
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.media-set.v1");
+    elements.len().hash(&mut builder);
+    for element in elements {
+        match element {
+            ResolvedPreviewElement::Media { frame, .. } => {
+                1_u8.hash(&mut builder);
+                frame.identity().hash(&mut builder);
+            }
+            ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
+                2_u8.hash(&mut builder);
+                hash_transition_media_identity(left, &mut builder);
+                hash_transition_media_identity(right, &mut builder);
+            }
+            ResolvedPreviewElement::SolidColor(_)
+            | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
+            | ResolvedPreviewElement::Adjustment(_) => 0_u8.hash(&mut builder),
+        }
+    }
+    builder.finish_identity()
+}
+
+/// Stable identity of the exact working/output color contract shaping a plan.
+pub(crate) fn viewer_preview_color_fingerprint(
+    color_context: &ProgramColorContext,
+) -> PreviewSemanticIdentity {
+    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.color-context.v1");
+    color_context.working_color_space.hash(&mut builder);
+    color_context.output_color_space.hash(&mut builder);
+    color_context.output_tone_map.hash(&mut builder);
+    color_context.engine.hash(&mut builder);
+    color_context.output_transform.hash(&mut builder);
+    builder.finish_identity()
+}
+
+fn hash_transition_media_identity(
+    input: &ResolvedPreviewTransitionInput,
+    builder: &mut PreviewSemanticIdentityBuilder,
+) {
+    match input {
+        ResolvedPreviewTransitionInput::Media { frame, .. } => {
+            1_u8.hash(builder);
+            frame.identity().hash(builder);
+        }
+        ResolvedPreviewTransitionInput::Transparent
+        | ResolvedPreviewTransitionInput::SolidColor(_)
+        | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => {
+            0_u8.hash(builder);
+        }
+    }
+}
+
 fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut impl Hasher) {
     match input {
         ResolvedPreviewTransitionInput::Transparent => 0u8.hash(hasher),
@@ -430,6 +490,32 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
         }
     }
     Ok(layers)
+}
+
+/// Lower one verified post-composite Timeline cache hit as a single identity
+/// working layer. The ordinary Viewer output/monitor stages remain unchanged.
+pub(crate) fn gpu_layer_for_cached_working(
+    frame: CpuColorFrame,
+    scratch: &mut TimelineCompositeScratch,
+) -> Result<ViewerGpuExecutionLayer, GpuCompositingBlockerReason> {
+    let graph =
+        identity_compiled_effect_graph().ok_or(GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    let effect_plan = scratch
+        .get_or_lower_effect_gpu_plan(&graph)
+        .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
+    Ok(ViewerGpuExecutionLayer::Source(
+        ViewerGpuSourceLayer::Media {
+            frame: Some(frame),
+            gpu_source: None,
+            native_source: None,
+            heterogeneous_input: None,
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan,
+            frame_seed: 0,
+        },
+    ))
 }
 
 /// Lower one resolved Viewer plan without executing heterogeneous work.
@@ -995,6 +1081,38 @@ mod heterogeneous_tests {
             .expect("prepare heterogeneous tracer")
             .evaluate(TimelineTime::ZERO)
             .expect("compile heterogeneous tracer")
+    }
+
+    #[test]
+    fn verified_render_cache_frame_lowers_as_one_identity_working_layer() {
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            data: vec![[0.25, 0.5, 1.0, 1.0]; (WIDTH * HEIGHT) as usize],
+            color_space: WORKING_SPACE,
+        });
+        let mut scratch = TimelineCompositeScratch::default();
+        let layer = gpu_layer_for_cached_working(frame.clone(), &mut scratch)
+            .expect("identity cached layer");
+        let ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            frame: Some(lowered),
+            gpu_source: None,
+            native_source: None,
+            heterogeneous_input: None,
+            opacity,
+            blend_mode,
+            transform,
+            frame_seed,
+            ..
+        }) = layer
+        else {
+            panic!("cache hit must be one ordinary CPU-working source");
+        };
+        assert!(lowered.shares_storage_with(&frame));
+        assert_eq!(opacity, 1.0);
+        assert_eq!(blend_mode, BlendMode::Normal);
+        assert_eq!(transform, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        assert_eq!(frame_seed, 0);
     }
 
     fn working_frame(identity_salt: u64) -> MediaPreviewFrame {

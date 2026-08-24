@@ -222,6 +222,28 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
         panic!("solid Timeline should resolve twice");
     };
     assert_eq!(first.plan.cache_key, second.plan.cache_key);
+    assert_eq!(
+        first.plan.render_cache_identity,
+        second.plan.render_cache_identity
+    );
+    assert!(first.plan.render_cache_identity.is_some());
+
+    let mut cache_disabled = sequence.clone();
+    cache_disabled.settings.preview.cache_enabled = false;
+    let disabled = resolve_preview_timeline(
+        &cache_disabled,
+        &[],
+        3,
+        target,
+        PreviewResolutionScale::Full,
+        color_context(&cache_disabled),
+        &mut |_| panic!("solid plan must not request media"),
+        &mut |_| panic!("solid plan must not request titles"),
+    );
+    let PreviewTimelineResolution::Ready(disabled) = disabled else {
+        panic!("cache-disabled Timeline should resolve");
+    };
+    assert!(disabled.plan.render_cache_identity.is_none());
 }
 
 #[test]
@@ -1666,6 +1688,7 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         !frame.permits_cross_call_reuse() && !resolved.plan.cache_reusable,
         "a nested stateful/uncacheable dependency must prevent outer Viewer reuse"
     );
+    assert!(resolved.plan.render_cache_identity.is_none());
 }
 
 #[test]

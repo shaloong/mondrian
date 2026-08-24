@@ -1171,6 +1171,14 @@ identity. The final-frame key also includes the effective preview color context,
 including the versioned `OutputTransformIntent`, so monitor/output or rendering
 transform changes invalidate previously rendered pixels. Unresolved
 media requests still bypass this cache until their source frame is available.
+This short-lived Viewer raster cache is not the Timeline Render Cache. The
+latter persists complete working-linear post-composite frames through the
+separate `mondrian-render-cache` worker. Preview performs only nonblocking
+lookups/publications, retains at most one verified working hit, and feeds that
+hit back into the ordinary GPU Program Output/monitor path as one identity
+layer. Cache miss, corruption, queue pressure, or worker failure keeps ordinary
+production materialization authoritative. The cache never puts filesystem,
+compression, or GPU readback work on the Window/presentation thread.
 The product window and renderer context use the same renderer-owned wgpu device
 feature contract for native NV12/P010 texture formats. Adapter-supported format
 features are requested during device creation; P010 additionally requires the

@@ -13,6 +13,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     pub fn diagnostics(&self) -> PreviewDiagnostics {
         let scheduler = self.scheduler.diagnostics();
         let frame_store = self.frame_store.borrow().diagnostics();
+        let timeline_render_cache = self.timeline_render_cache.borrow().diagnostics();
+        let timeline_render_cache_start_failed =
+            self.timeline_render_cache.borrow().start_failure().is_some();
         let decode_cancellation = self.metrics.decode_cancellation.borrow().report();
         let cancellation = decode_cancellation.all;
         let decode_residency = self.decode_residency.diagnostics();
@@ -259,6 +262,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             viewer_frame_cache_hits: self.metrics.viewer_frame_cache_hits.get(),
             viewer_frame_cache_misses: self.metrics.viewer_frame_cache_misses.get(),
             frame_store,
+            timeline_render_cache,
+            timeline_render_cache_start_failed,
             color_input_transform_calls: self.metrics.color_input_transform_calls.get(),
             color_input_transform_pixels: self.metrics.color_input_transform_pixels.get(),
             color_output_transform_calls: self.metrics.color_output_transform_calls.get(),

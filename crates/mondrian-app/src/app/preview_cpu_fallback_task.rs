@@ -10,13 +10,17 @@ use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
 
 use mondrian_playback::PlaybackEpoch;
+use mondrian_render_cache::{TimelineRenderCacheFrame, TimelineRenderCacheIdentity};
 use mondrian_renderer::{
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, TimelineCompositeDiagnostics,
-    TimelineCompositeScratch,
+    CpuColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
+    TimelineCompositeDiagnostics, TimelineCompositeScratch,
 };
 use mondrian_timeline::sequence::ProgramColorContext;
 
-use super::preview_cpu_execution::{composite_resolved_preview, PreviewCpuExecutionDurations};
+use super::preview_cpu_execution::{
+    composite_resolved_preview, present_preview_working, PreviewCpuExecutionDurations,
+    PreviewWorkingCompositeOutput,
+};
 use super::preview_execution::PreviewOutputKey;
 use super::preview_raster_frame::{
     preview_raster_presentation_contract, preview_raster_resource_key, PreviewRasterFrame,
@@ -35,6 +39,8 @@ pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) height: u32,
     pub(crate) elements: Arc<[ResolvedPreviewElement]>,
     pub(crate) color_context: ProgramColorContext,
+    pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
+    pub(crate) cached_working: Option<CpuColorFrame>,
 }
 
 pub(crate) struct PreviewCpuFallbackReady {
@@ -43,6 +49,7 @@ pub(crate) struct PreviewCpuFallbackReady {
     pub(crate) output_key: PreviewOutputKey,
     pub(crate) frame: PreviewRasterFrame,
     pub(crate) execution: PreviewCpuFallbackExecutionEvidence,
+    pub(crate) render_cache_frame: Option<TimelineRenderCacheFrame>,
 }
 
 pub(crate) struct PreviewCpuFallbackExecutionEvidence {
@@ -143,13 +150,14 @@ fn cpu_fallback_worker(
             Err("Viewer CPU fallback worker panicked".to_owned())
         });
         let result = match result {
-            Ok((frame, execution)) => {
+            Ok((frame, execution, render_cache_frame)) => {
                 PreviewCpuFallbackResult::Ready(Box::new(PreviewCpuFallbackReady {
                     generation: request.generation,
                     epoch: request.epoch,
                     output_key: request.output_key,
                     frame,
                     execution,
+                    render_cache_frame,
                 }))
             }
             Err(reason) => PreviewCpuFallbackResult::Failed(PreviewCpuFallbackFailed {
@@ -169,35 +177,73 @@ fn cpu_fallback_worker(
 fn execute_cpu_fallback(
     request: &PreviewCpuFallbackRequest,
     scratch: &mut TimelineCompositeScratch,
-) -> Result<(PreviewRasterFrame, PreviewCpuFallbackExecutionEvidence), String> {
+) -> Result<
+    (
+        PreviewRasterFrame,
+        PreviewCpuFallbackExecutionEvidence,
+        Option<TimelineRenderCacheFrame>,
+    ),
+    String,
+> {
     let contract = preview_raster_presentation_contract(&request.color_context)
         .map_err(|error| error.to_string())?;
-    let execution = composite_resolved_preview(
-        request.width,
-        request.height,
-        &request.elements,
-        &request.color_context,
-        scratch,
-    )
+    let execution = match &request.cached_working {
+        Some(frame) => present_preview_working(
+            PreviewWorkingCompositeOutput {
+                frame: frame.clone(),
+                composite_diagnostics: TimelineCompositeDiagnostics::default(),
+                input_color_diagnostics: Vec::new(),
+                input_color_stage_diagnostics: RenderColorStageDiagnostics::default(),
+                execution_durations: PreviewCpuExecutionDurations::default(),
+            },
+            &request.color_context,
+            scratch,
+        ),
+        None => composite_resolved_preview(
+            request.width,
+            request.height,
+            &request.elements,
+            &request.color_context,
+            scratch,
+        ),
+    }
     .map_err(|error| error.to_string())?;
+    let super::preview_cpu_execution::PreviewCompositeOutput {
+        rgba,
+        working_frame,
+        composite_diagnostics,
+        input_color_diagnostics,
+        input_color_stage_diagnostics,
+        color_diagnostics,
+        monitor_color_diagnostics,
+        color_stage_diagnostics,
+        execution_durations,
+    } = execution;
     let frame = PreviewRasterFrame::new(
         preview_raster_resource_key(&request.output_key),
         request.width,
         request.height,
         contract.color_space,
-        execution.rgba,
+        rgba,
     )
     .map_err(|error| error.to_string())?;
+    let render_cache_frame = request
+        .render_cache_identity
+        .filter(|_| request.cached_working.is_none())
+        .and_then(|identity| {
+            TimelineRenderCacheFrame::new(identity, working_frame.into_rgba_f32()).ok()
+        });
     Ok((
         frame,
         PreviewCpuFallbackExecutionEvidence {
-            composite_diagnostics: execution.composite_diagnostics,
-            input_color_diagnostics: execution.input_color_diagnostics,
-            input_color_stage_diagnostics: execution.input_color_stage_diagnostics,
-            color_diagnostics: execution.color_diagnostics,
-            monitor_color_diagnostics: execution.monitor_color_diagnostics,
-            color_stage_diagnostics: execution.color_stage_diagnostics,
-            execution_durations: execution.execution_durations,
+            composite_diagnostics,
+            input_color_diagnostics,
+            input_color_stage_diagnostics,
+            color_diagnostics,
+            monitor_color_diagnostics,
+            color_stage_diagnostics,
+            execution_durations,
         },
+        render_cache_frame,
     ))
 }

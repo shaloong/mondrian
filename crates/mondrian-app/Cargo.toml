@@ -51,6 +51,7 @@ path = "src/bin/viewer_gpu_output_budget.rs"
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
 mondrian-playback = { workspace = true }
+mondrian-render-cache = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
@@ -116,3 +117,4 @@ winres = "0.1"
 mondrian-editor-state = { workspace = true, features = ["test-support"] }
 mondrian-export = { workspace = true, features = ["validation"] }
 mondrian-renderer = { workspace = true, features = ["validation"] }
+tempfile = { workspace = true }

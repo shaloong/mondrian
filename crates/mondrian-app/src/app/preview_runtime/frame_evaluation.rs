@@ -40,6 +40,7 @@ use mondrian_core::display_contract::DisplayOutputIdentity;
 use mondrian_core::types::{AssetId, ColorSpace, SequenceId};
 use mondrian_core::SequenceRevision;
 use mondrian_playback::PreviewResolutionScale;
+use mondrian_render_cache::TimelineRenderCacheIdentity;
 use mondrian_timeline::sequence::ProgramColorContext;
 
 use crate::app::preview_access_mode::MediaPreviewRequestPriority;
@@ -197,6 +198,8 @@ pub(crate) struct ResolvedFrameEvaluation {
     pub(crate) resolved_quality: ResolvedFrameQuality,
     pub(crate) reuse_policy: EvaluationReusePolicy,
     pub(crate) dependencies: Arc<[EvaluationDependency]>,
+    /// Persistent post-composite cache identity, only for reusable enabled plans.
+    pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
 }
 
 /// Spatial quality of the resolved evaluation itself.

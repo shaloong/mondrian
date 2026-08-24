@@ -22,6 +22,10 @@ use mondrian_effects::{
     EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
 use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
+use mondrian_render_cache::{
+    TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
+    TimelineRenderCacheIdentityBuilder, TimelineRenderCacheQuality,
+};
 use mondrian_renderer::{
     basic_title_raster_request_identity, execute_cpu_working_transform_with_session,
     prepare_bound_visual_frame_closure, project_basic_title_transform, BasicTitleRasterFrame,
@@ -55,7 +59,8 @@ use super::preview_media_frame::{project_preview_media_transform, MediaPreviewFr
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::{
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
-    viewer_preview_cache_key_for_resolved_plan, viewer_preview_plan_allows_cross_call_reuse,
+    viewer_preview_cache_key_for_resolved_plan, viewer_preview_color_fingerprint,
+    viewer_preview_media_fingerprint, viewer_preview_plan_allows_cross_call_reuse,
     ResolvedPreviewElement, ResolvedPreviewTransitionInput,
 };
 
@@ -147,6 +152,7 @@ pub(crate) struct ResolvedPreviewPlan {
     pub(crate) cache_key: PreviewOutputKey,
     pub(crate) cache_reusable: bool,
     pub(crate) color_context: ProgramColorContext,
+    pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
 }
 
 /// Ordered execution fact emitted while materializing nested Sequences.
@@ -459,6 +465,7 @@ where
             };
         }
     };
+    let visual_author = preview_render_cache_visual_author_fingerprint(&closure);
     if let Err(error) = scratch.borrow().admit_cpu_active_working_set(
         materialization_bytes,
         TimelineCpuCompositePrecision::Float32,
@@ -495,12 +502,74 @@ where
         &color_context,
     );
     let cache_reusable = viewer_preview_plan_allows_cross_call_reuse(&elements);
+    let render_cache_identity =
+        (cache_reusable && sequence.settings.preview.cache_enabled).then(|| {
+            let mut program =
+                PreviewSemanticIdentityBuilder::new(b"mondrian.preview.render-cache-program.v1");
+            cache_key.plan_identity.hash(&mut program);
+            preview_render_format_code(sequence.settings.preview.format).hash(&mut program);
+            TimelineRenderCacheIdentityBuilder::new()
+                .visual_author_fingerprint(visual_author)
+                .program_fingerprint(program.finish_identity().semantic_fingerprint())
+                .media_fingerprint(
+                    viewer_preview_media_fingerprint(&elements).semantic_fingerprint(),
+                )
+                .color_fingerprint(
+                    viewer_preview_color_fingerprint(&color_context).semantic_fingerprint(),
+                )
+                .frame(frame)
+                .extent(target_resolution.width, target_resolution.height)
+                .quality(
+                    if resolved_preview_presentation_quality(&elements)
+                        == FramePresentationQuality::Ready
+                    {
+                        TimelineRenderCacheQuality::Full
+                    } else {
+                        TimelineRenderCacheQuality::Half
+                    },
+                )
+                .format(
+                    TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+                    TimelineRenderCacheAlpha::StraightCoverage,
+                )
+                .finish()
+        });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
-        plan: ResolvedPreviewPlan { elements, cache_key, cache_reusable, color_context },
+        plan: ResolvedPreviewPlan {
+            elements,
+            cache_key,
+            cache_reusable,
+            color_context,
+            render_cache_identity,
+        },
         facts: execution.facts,
         #[cfg(test)]
         semantic_trace,
     })
+}
+
+fn preview_render_format_code(format: mondrian_timeline::sequence::PreviewRenderFormat) -> u8 {
+    match format {
+        mondrian_timeline::sequence::PreviewRenderFormat::IFrameOnly => 1,
+        mondrian_timeline::sequence::PreviewRenderFormat::ProResProxy => 2,
+        mondrian_timeline::sequence::PreviewRenderFormat::DnxHrLb => 3,
+        mondrian_timeline::sequence::PreviewRenderFormat::LosslessRgba => 4,
+    }
+}
+
+fn preview_render_cache_visual_author_fingerprint<T>(
+    closure: &PreparedVisualFrameClosure<T>,
+) -> [u8; 32] {
+    let mut identity =
+        PreviewSemanticIdentityBuilder::new(b"mondrian.preview.visual-author-closure.v1");
+    closure.len().hash(&mut identity);
+    for node in closure.nodes() {
+        node.sequence_id().hash(&mut identity);
+        node.sequence_revision().hash(&mut identity);
+        node.frame().hash(&mut identity);
+        node.program().visual_author_fingerprint().hash(&mut identity);
+    }
+    identity.finish_identity().semantic_fingerprint()
 }
 
 #[derive(Clone, Copy)]

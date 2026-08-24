@@ -13,6 +13,7 @@ mondrian-app
   -> mondrian-editor-state
   -> mondrian-project
   -> mondrian-playback
+  -> mondrian-render-cache
   -> mondrian-audio
   -> mondrian-ui-* crates
   -> mondrian-assets / mondrian-timeline / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
@@ -92,6 +93,11 @@ foundation:
   Master, epoch/revision invalidation, frame-delivery recovery policy, and
   transport snapshots. It has no UI, codec, GPU, device, asset-library, or
   concrete timeline ownership.
+- `mondrian-render-cache`: bounded asynchronous storage for verified,
+  content-addressed post-composite working-linear Timeline frames. It owns the
+  lossless artifact format, validation, atomic publication and local disk LRU;
+  it owns no Preview scheduling, Viewer display transform or implicit Export
+  substitution. See [Timeline Render Cache](timeline-render-cache.md).
 - `mondrian-effects`: visual-effect registry, typed execution contracts,
   definition/resource-bound Effect preparation, RGBA graph
   compilation/execution, mask rasterization, and visual plugin-effect

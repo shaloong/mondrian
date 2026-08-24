@@ -5,6 +5,11 @@ stores editing decisions, project settings, sequence structure, and asset-librar
 metadata. Rebuildable caches, proxies, waveforms, thumbnails, and preview renders
 must live outside `.mdp`.
 
+Persistent Timeline render-cache artifacts live in a versioned machine-local
+cache namespace. Project/Sequence authoring persists only enablement and format
+intent; no artifact path, LRU state, checksum, cache hit, or rendered pixel is
+Project state. See [Timeline Render Cache](timeline-render-cache.md).
+
 ## Persistent Project Document
 
 `mondrian-project::ProjectDocument` is the canonical saved project payload inside

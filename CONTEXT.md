@@ -197,6 +197,11 @@ _Avoid_: Unit `Unavailable`, error string parsing, missing dependency reported a
 The UI-independent resolved element representation and pure lowering Module that owns stable cache identity, aggregate presentation quality and decode provenance, deferred-composite detection, and renderer GPU-layer admission. Window and Headless Adapters consume the same result and blocker semantics.
 _Avoid_: Window-owned plan hashing, Headless-specific lowering, cache identity derived from rendered pixels, presentation side effects during lowering
 
+**Timeline Render Cache**
+: The independently bounded persistent Module for complete post-Effect/post-composite working-linear frames. Its content address binds the recursive Prepared Visual author closure, resolved program/Effect and media identities, color/alpha context, exact frame, geometry, quality, authored Preview format and physical artifact format. One worker owns bounded lookup/publication queues, lossless compression, checksummed validation, durable atomic publication and local disk LRU. Preview retains at most one verified hit and re-enters the ordinary Viewer output/monitor stages; Busy/Miss/failure renders normally. Export use is forbidden without an explicit immutable quality policy.
+
+_Avoid_: UI raster as persistent cache, frame-number-only key, filesystem/compression on the playback thread, GPU readback on every realtime frame, global invalidation, cache hit as implicit Export substitution
+
 **Preview CPU Execution**:
 The UI-independent App Module that prepares source frames into working-linear inputs, composites one Preview Viewer Plan through renderer semantics, and applies the Program Output plus monitor adaptation for a final CPU raster. It returns pixels, complete color/composite facts, and stage durations; presentation Adapters only project those facts.
 The presentation-only boundary retains Program Output descriptor/diagnostics but consumes its uniquely owned Float32 pixels through monitor adaptation, so the two exact OCIO stages use one float raster and quantize once. The retained Program Output API remains separate for scopes and other consumers that need those pixels.

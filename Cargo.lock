@@ -2314,6 +2314,7 @@ dependencies = [
  "mondrian-platform",
  "mondrian-playback",
  "mondrian-project",
+ "mondrian-render-cache",
  "mondrian-renderer",
  "mondrian-storage",
  "mondrian-timeline",
@@ -2333,6 +2334,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
  "tiny-skia",
  "tokio",
@@ -2528,6 +2530,20 @@ dependencies = [
  "serde_json",
  "sha2",
  "zip",
+]
+
+[[package]]
+name = "mondrian-render-cache"
+version = "0.2.0"
+dependencies = [
+ "mondrian-core",
+ "mondrian-storage",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "zstd",
 ]
 
 [[package]]

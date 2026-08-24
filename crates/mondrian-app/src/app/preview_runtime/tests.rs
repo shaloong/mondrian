@@ -318,6 +318,7 @@ fn evaluation_working_set_dedupes_wait_entries_and_invalidates_by_asset() {
         resolved_quality: ResolvedFrameQuality::Full,
         reuse_policy: EvaluationReusePolicy::Reusable,
         dependencies: Arc::from([]),
+        render_cache_identity: None,
     });
     set.insert(key, Arc::clone(&ready), 1);
     assert!(set.get(key, 2).is_some());
@@ -396,6 +397,7 @@ fn evaluation_working_set_retires_native_decoder_resource_owners() {
         resolved_quality: ResolvedFrameQuality::Full,
         reuse_policy: EvaluationReusePolicy::Reusable,
         dependencies: Arc::from([]),
+        render_cache_identity: None,
     });
     set.insert(key, evaluation, 1);
     assert!(set.get(key, 2).is_some());
