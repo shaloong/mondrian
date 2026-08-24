@@ -538,6 +538,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             work_notifier.clone(),
         ));
         let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default();
+        let initial_frame_store = mondrian_playback::PreviewFrameStoreConfig::default();
         let (visual_execution, visual_execution_start_failure) =
             match VisualExecutionTask::new_with_notifier(
                 mondrian_playback::SystemMonotonicRuntimeClock::default(),
@@ -640,6 +641,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 "no configured Preview media worker could be started".to_owned()
             });
         }
+        decode_worker_resources.reconfigure_session_residency(
+            mondrian_media::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(
+                initial_frame_store.current_media_working_set_resource_unit_limit,
+                decode_worker_count.max(1),
+            ),
+        );
 
         Self {
             work_notifier: work_notifier.clone(),
@@ -2429,6 +2436,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         bump(&self.metrics.resource_decision_applications);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);
+        self.decode_worker_resources.reconfigure_session_residency(
+            mondrian_media::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(
+                decision.frame_store.current_media_working_set_resource_unit_limit,
+                self.decode_worker_count.max(1),
+            ),
+        );
         self.title_task
             .borrow_mut()
             .set_cache_byte_budget(decision.title_cache_budget_bytes);

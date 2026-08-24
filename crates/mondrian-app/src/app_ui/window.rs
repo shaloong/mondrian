@@ -7172,8 +7172,8 @@ mod tests {
             buffer_creations: 1,
             uniform_writes: 7,
             high_watermark_slots: 3,
+            high_watermark_pages: 1,
             frame_resets: 2,
-            exhaustions: 0,
         };
         telemetry.record_compositor_uniform_arena(arena);
 

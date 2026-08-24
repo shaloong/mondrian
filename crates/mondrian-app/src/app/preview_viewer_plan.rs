@@ -30,8 +30,6 @@ use super::preview_execution::{
 };
 use super::preview_media_frame::MediaPreviewFrame;
 
-const MAX_PREVIEW_GPU_LAYERS: usize = 5;
-
 pub(crate) enum ResolvedPreviewElement {
     SolidColor(TimelineSolidColorLayer),
     HeterogeneousSolidColor {
@@ -431,9 +429,6 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
             }
         }
     }
-    if layers.len() > MAX_PREVIEW_GPU_LAYERS {
-        return Err(GpuCompositingBlockerReason::TooManyLayers);
-    }
     Ok(layers)
 }
 
@@ -545,12 +540,6 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
             }
         }
     }
-    if layers.len() > MAX_PREVIEW_GPU_LAYERS {
-        return Err(PreviewViewerGpuLayerPreparationError::Compositing {
-            reason: GpuCompositingBlockerReason::TooManyLayers,
-        });
-    }
-
     let (items, continuations) = builder.into_parts();
     if items.is_empty() {
         return Ok(PreparedPreviewViewerGpuLayers::Ordinary { layers });
@@ -1070,6 +1059,37 @@ mod heterogeneous_tests {
                 frame_seed: 31,
             },
             prepared_route: Box::new(prepared_route),
+        }
+    }
+
+    fn ordinary_solid(graph: Arc<CompiledEffectGraph>, frame_seed: i64) -> ResolvedPreviewElement {
+        ResolvedPreviewElement::SolidColor(TimelineSolidColorLayer {
+            color: mondrian_core::Color { r: 0.2, g: 0.4, b: 0.6, a: 0.75 },
+            opacity: 0.8,
+            blend_mode: BlendMode::Screen,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: graph,
+            frame_seed,
+        })
+    }
+
+    #[test]
+    fn ordinary_gpu_lowering_preserves_stacks_beyond_the_legacy_five_layer_limit() {
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        let resolved: Vec<_> = (0..9)
+            .map(|frame_seed| ordinary_solid(Arc::clone(&graph), frame_seed))
+            .collect();
+
+        let layers = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+            .expect("layer count is not a compositing blocker");
+
+        assert_eq!(layers.len(), 9);
+        for (index, layer) in layers.iter().enumerate() {
+            assert!(matches!(
+                layer,
+                ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor { layer, .. })
+                    if layer.frame_seed == index as i64
+            ));
         }
     }
 

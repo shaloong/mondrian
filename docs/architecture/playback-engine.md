@@ -1574,11 +1574,13 @@ current seek/flush policy for the new generation only when its packet-source
 execution family also matches; decoder reuse does not grant the old media frame
 publication authority or make canceled partial output cacheable.
 
-GPU-resident scrub and exact Still decode share one Interactive session. Each
+GPU-resident scrub and exact Still decode share a resource-governed Interactive
+Session set. Each
 native output carries a lease through the Frame Store and renderer source copy;
 the session is ineligible for seek/flush until the final clone retires. While it
 is leased, the worker remains at a cancellable `OutputLease` backpressure point
-and records `output_lease_wait_us` rather than opening a spare surface pool or
+and records `output_lease_wait_us` when every slot admitted by the current-media
+resource-unit grant is leased, rather than opening an uncharged surface pool or
 blocking inside the codec. This bounds discontinuous decoder residency without
 assuming that generation count, elapsed time, cache eviction, or
 `avcodec_flush_buffers` alone proves downstream surface release. The access
@@ -1591,8 +1593,8 @@ family. The worker still waits for the final output lease before seek/flush,
 and a successful exact request alone does not authorize destruction of a
 healthy codec/DPB/frames context. Teardown occurs for a changed contract,
 poisoned helper, residency-family retirement, idle retirement, or shutdown.
-This preserves one native surface pool without opening an alternating pool
-while the old output is leased. The immutable device cache and bounded seek
+This preserves bounded native surface pools for admitted multilayer candidates
+without opening an uncharged pool while older outputs are leased. The immutable device cache and bounded seek
 index survive mutable-session retirement because neither owns codec continuity
 or decoder surfaces.
 

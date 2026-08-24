@@ -24,8 +24,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const MAX_GPU_COMPOSITE_LAYERS: usize = 5;
-const GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS: u32 = 128;
+const GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS: usize = 128;
 const GPU_COMPOSITOR_SHADER: &str = r#"
 struct VsOut {
     @builtin(position) position: vec4<f32>,
@@ -422,8 +421,6 @@ pub enum GpuCompositingBlockerReason {
     UnsupportedTransform,
     /// A source frame is not already GPU-resident and uploads were disallowed.
     FrameNotGpuResident,
-    /// Too many layers for the bounded GPU composite path.
-    TooManyLayers,
     /// GPU compositor is not initialized (device/queue unavailable).
     GpuUnavailable,
 }
@@ -435,7 +432,6 @@ impl GpuCompositingBlockerReason {
             Self::EffectRequiresCpu => "effect_requires_cpu",
             Self::UnsupportedTransform => "unsupported_transform",
             Self::FrameNotGpuResident => "frame_not_gpu_resident",
-            Self::TooManyLayers => "too_many_layers",
             Self::GpuUnavailable => "gpu_unavailable",
         }
     }
@@ -448,7 +444,6 @@ impl GpuCompositingBlockerReason {
             }
             Self::UnsupportedTransform => "Transform cannot be represented by GPU compositor",
             Self::FrameNotGpuResident => "Frame requires CPU-to-GPU upload before compositing",
-            Self::TooManyLayers => "Too many layers for bounded GPU compositing",
             Self::GpuUnavailable => "GPU device/queue not available for compositing",
         }
     }
@@ -513,15 +508,9 @@ impl GpuCompositingDiagnostics {
 /// Returns the capability classification and structured diagnostics about
 /// why GPU compositing is or is not possible.
 pub fn evaluate_gpu_compositing_capability(
-    layer_count: usize,
     has_any_unsupported_transform: bool,
     all_frames_gpu_resident: bool,
 ) -> GpuCompositingCapability {
-    if layer_count > MAX_GPU_COMPOSITE_LAYERS {
-        return GpuCompositingCapability::CpuFallback {
-            reason: GpuCompositingBlockerReason::TooManyLayers,
-        };
-    }
     if has_any_unsupported_transform {
         return GpuCompositingCapability::CpuFallback {
             reason: GpuCompositingBlockerReason::UnsupportedTransform,
@@ -601,7 +590,7 @@ pub struct GpuSolidSourceRecord {
     pub materialized_pixels: u64,
 }
 
-/// Bounded uniform-arena evidence for the compositor hot path.
+/// Paged uniform-arena evidence for the compositor hot path.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GpuCompositorUniformArenaDiagnostics {
     /// Persistent GPU buffers created for this arena.
@@ -610,10 +599,10 @@ pub struct GpuCompositorUniformArenaDiagnostics {
     pub uniform_writes: u64,
     /// Peak slots reserved within one frame lifetime.
     pub high_watermark_slots: u32,
+    /// Peak reusable uniform-buffer pages required by one frame lifetime.
+    pub high_watermark_pages: u32,
     /// Frame-lifetime resets after ordered submission.
     pub frame_resets: u64,
-    /// Attempts rejected because callers did not reset the bounded arena.
-    pub exhaustions: u64,
 }
 
 /// Point-in-time evidence for compositor texture-binding object reuse.
@@ -691,12 +680,6 @@ pub enum GpuCompositeError {
         /// Unsupported source or mask texture format.
         texture_format: GpuColorFrameTextureFormat,
     },
-    /// The bounded per-frame uniform arena was not reset after ordered submission.
-    #[error("GPU compositor uniform arena exhausted at {capacity} slots")]
-    UniformArenaExhausted {
-        /// Fixed slot capacity.
-        capacity: u32,
-    },
     /// Renderer frame identity allocation is exhausted.
     #[error(transparent)]
     FrameId(#[from] GpuColorFrameIdAllocationError),
@@ -724,8 +707,8 @@ pub struct GpuFrameCompositor {
     accum_texture_layout: wgpu::BindGroupLayout,
     layer_texture_cache_key: GpuColorFrameBindGroupCacheKey,
     accum_texture_cache_key: GpuColorFrameBindGroupCacheKey,
-    uniform_buffer: wgpu::Buffer,
-    uniform_bind_group: wgpu::BindGroup,
+    uniform_layout: wgpu::BindGroupLayout,
+    uniform_size: u64,
     uniform_stride: u64,
     uniform_arena: Mutex<GpuCompositeUniformArenaState>,
     texture_bind_group_creations: AtomicU64,
@@ -742,8 +725,41 @@ enum GpuCompositeTextureBinding<'a> {
 }
 
 struct GpuCompositeUniformArenaState {
-    next_slot: u32,
+    pages: Vec<GpuCompositeUniformPage>,
+    next_slot: usize,
     diagnostics: GpuCompositorUniformArenaDiagnostics,
+}
+
+struct GpuCompositeUniformPage {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
+fn create_uniform_page(
+    device: &wgpu::Device,
+    uniform_layout: &wgpu::BindGroupLayout,
+    uniform_size: u64,
+    uniform_stride: u64,
+) -> GpuCompositeUniformPage {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mondrian_gpu_working_compositor_uniform_page"),
+        size: uniform_stride.saturating_mul(GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS as u64),
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("mondrian_gpu_working_compositor_uniform_page_bind_group"),
+        layout: uniform_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                buffer: &buffer,
+                offset: 0,
+                size: wgpu::BufferSize::new(uniform_size),
+            }),
+        }],
+    });
+    GpuCompositeUniformPage { buffer, bind_group }
 }
 
 #[repr(C)]
@@ -869,24 +885,8 @@ impl GpuFrameCompositor {
         let uniform_alignment =
             u64::from(device.limits().min_uniform_buffer_offset_alignment.max(1));
         let uniform_stride = uniform_size.div_ceil(uniform_alignment) * uniform_alignment;
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mondrian_gpu_working_compositor_uniform_arena"),
-            size: uniform_stride.saturating_mul(u64::from(GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS)),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mondrian_gpu_working_compositor_uniform_arena_bind_group"),
-            layout: &uniform_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniform_buffer,
-                    offset: 0,
-                    size: wgpu::BufferSize::new(uniform_size),
-                }),
-            }],
-        });
+        let initial_uniform_page =
+            create_uniform_page(device, &uniform_layout, uniform_size, uniform_stride);
         let procedural_dummy = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mondrian_gpu_procedural_dummy"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -927,10 +927,11 @@ impl GpuFrameCompositor {
             accum_texture_layout,
             layer_texture_cache_key,
             accum_texture_cache_key,
-            uniform_buffer,
-            uniform_bind_group,
+            uniform_layout,
+            uniform_size,
             uniform_stride,
             uniform_arena: Mutex::new(GpuCompositeUniformArenaState {
+                pages: vec![initial_uniform_page],
                 next_slot: 0,
                 diagnostics: GpuCompositorUniformArenaDiagnostics {
                     buffer_creations: 1,
@@ -1568,23 +1569,40 @@ impl GpuFrameCompositor {
         layer_binding: GpuCompositeTextureBinding<'_>,
         uniforms: GpuCompositeUniforms,
     ) -> Result<(), GpuCompositeError> {
-        let uniform_offset = {
+        let (uniform_buffer, uniform_bind_group, uniform_offset) = {
             let mut arena = self.uniform_arena.lock();
-            if arena.next_slot >= GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS {
-                arena.diagnostics.exhaustions = arena.diagnostics.exhaustions.saturating_add(1);
-                return Err(GpuCompositeError::UniformArenaExhausted {
-                    capacity: GPU_COMPOSITOR_UNIFORM_ARENA_SLOTS,
-                });
-            }
             let slot = arena.next_slot;
+            let page_index = slot / GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS;
+            let page_slot = slot % GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS;
+            if page_index == arena.pages.len() {
+                arena.pages.push(create_uniform_page(
+                    device,
+                    &self.uniform_layout,
+                    self.uniform_size,
+                    self.uniform_stride,
+                ));
+                arena.diagnostics.buffer_creations =
+                    arena.diagnostics.buffer_creations.saturating_add(1);
+            }
             arena.next_slot = arena.next_slot.saturating_add(1);
             arena.diagnostics.uniform_writes = arena.diagnostics.uniform_writes.saturating_add(1);
-            arena.diagnostics.high_watermark_slots =
-                arena.diagnostics.high_watermark_slots.max(arena.next_slot);
-            u64::from(slot).saturating_mul(self.uniform_stride)
+            arena.diagnostics.high_watermark_slots = arena
+                .diagnostics
+                .high_watermark_slots
+                .max(u32::try_from(arena.next_slot).unwrap_or(u32::MAX));
+            arena.diagnostics.high_watermark_pages = arena
+                .diagnostics
+                .high_watermark_pages
+                .max(u32::try_from(page_index.saturating_add(1)).unwrap_or(u32::MAX));
+            let page = &arena.pages[page_index];
+            (
+                page.buffer.clone(),
+                page.bind_group.clone(),
+                u64::try_from(page_slot).unwrap_or(u64::MAX).saturating_mul(self.uniform_stride),
+            )
         };
         queue.write_buffer(
-            &self.uniform_buffer,
+            &uniform_buffer,
             uniform_offset,
             bytemuck::bytes_of(&uniforms),
         );
@@ -1655,7 +1673,7 @@ impl GpuFrameCompositor {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &layer_bind_group, &[]);
         pass.set_bind_group(1, &accum_bind_group, &[]);
-        pass.set_bind_group(2, &self.uniform_bind_group, &[uniform_offset as u32]);
+        pass.set_bind_group(2, &uniform_bind_group, &[uniform_offset as u32]);
         pass.draw(0..4, 0..1);
         Ok(())
     }
@@ -1892,7 +1910,6 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
     let contributing_layers =
         request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
     let capability = evaluate_gpu_compositing_capability(
-        contributing_layers.clone().count(),
         contributing_layers.clone().any(|layer| !gpu_transform_supported(layer)),
         contributing_layers
             .clone()
@@ -2087,34 +2104,23 @@ mod tests {
 
     #[test]
     fn gpu_compositing_capability_classifies_single_layer() {
-        let cap = evaluate_gpu_compositing_capability(1, false, true);
+        let cap = evaluate_gpu_compositing_capability(false, true);
         assert_eq!(cap, GpuCompositingCapability::GpuNative);
     }
 
     #[test]
     fn gpu_compositing_capability_classifies_upload_needed() {
-        let cap = evaluate_gpu_compositing_capability(1, false, false);
+        let cap = evaluate_gpu_compositing_capability(false, false);
         assert_eq!(cap, GpuCompositingCapability::GpuWithUpload);
     }
 
     #[test]
     fn gpu_compositing_capability_rejects_unsupported_transform() {
-        let cap = evaluate_gpu_compositing_capability(1, true, true);
+        let cap = evaluate_gpu_compositing_capability(true, true);
         assert!(matches!(
             cap,
             GpuCompositingCapability::CpuFallback {
                 reason: GpuCompositingBlockerReason::UnsupportedTransform
-            }
-        ));
-    }
-
-    #[test]
-    fn gpu_compositing_capability_rejects_too_many_layers() {
-        let cap = evaluate_gpu_compositing_capability(MAX_GPU_COMPOSITE_LAYERS + 1, false, true);
-        assert!(matches!(
-            cap,
-            GpuCompositingCapability::CpuFallback {
-                reason: GpuCompositingBlockerReason::TooManyLayers
             }
         ));
     }
@@ -2199,7 +2205,6 @@ mod tests {
             GpuCompositingBlockerReason::EffectRequiresCpu,
             GpuCompositingBlockerReason::UnsupportedTransform,
             GpuCompositingBlockerReason::FrameNotGpuResident,
-            GpuCompositingBlockerReason::TooManyLayers,
             GpuCompositingBlockerReason::GpuUnavailable,
         ];
         let mut codes: Vec<_> = reasons.iter().map(|r| r.code()).collect();
@@ -2873,7 +2878,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compositor_uniform_arena_reuses_one_buffer_across_submitted_frames() {
+    async fn compositor_uniform_arena_reuses_pages_across_submitted_frames() {
         let Ok(context) = crate::GpuContext::new().await else {
             eprintln!("skipping compositor uniform arena test: no GPU adapter available");
             return;
@@ -2909,13 +2914,56 @@ mod tests {
         assert_eq!(diagnostics.buffer_creations, 1);
         assert_eq!(diagnostics.uniform_writes, 2);
         assert_eq!(diagnostics.high_watermark_slots, 1);
+        assert_eq!(diagnostics.high_watermark_pages, 1);
         assert_eq!(diagnostics.frame_resets, 2);
-        assert_eq!(diagnostics.exhaustions, 0);
         assert_eq!(
             compositor.texture_binding_diagnostics().bind_group_creations,
             2
         );
         assert_eq!(compositor.texture_binding_diagnostics().cache_hits, 4);
+    }
+
+    #[tokio::test]
+    async fn compositor_uniform_arena_pages_without_a_semantic_pass_limit() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping compositor uniform paging test: no GPU adapter available");
+            return;
+        };
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1_200).expect("frame id allocator");
+        let mut table = GpuColorFrameResourceTable::new();
+        let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("compositor-uniform-arena-paging"),
+        });
+
+        for frame_seed in 0..=GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS {
+            compositor
+                .record_solid_source_pass(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    1,
+                    1,
+                    WorkingColorSpace::LinearRec709,
+                    Color {
+                        r: frame_seed as f32 / GPU_COMPOSITOR_UNIFORM_PAGE_SLOTS as f32,
+                        g: 0.25,
+                        b: 0.5,
+                        a: 1.0,
+                    },
+                )
+                .expect("record pass across a uniform page boundary");
+        }
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        let diagnostics = compositor.uniform_arena_diagnostics();
+        assert_eq!(diagnostics.buffer_creations, 2);
+        assert_eq!(diagnostics.uniform_writes, 129);
+        assert_eq!(diagnostics.high_watermark_slots, 129);
+        assert_eq!(diagnostics.high_watermark_pages, 2);
     }
 
     #[tokio::test]

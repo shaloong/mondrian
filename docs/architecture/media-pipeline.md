@@ -887,11 +887,9 @@ typed device-removed fence sentinel: the bridge clears that exact retained
 source and preserves `NativeDeviceRemoved` evidence. A wgpu device loss,
 timeout, generic backend string error, Adapter drop, or generation rotation is
 not a decoder-copy release proof and must retain the source fail-closed.
-The worker-owned context contains one continuous Playback slot, one primary
-native-capable Interactive slot for scrub and GPU-resident exact Still work,
-one bounded Interactive overflow slot for a second simultaneously retained
-native layer, and one physically separate CPU Still slot. Sharing either
-Interactive slot is an
+The worker-owned context contains one continuous Playback slot, a resource-governed
+set of native-capable Interactive slots for scrub and GPU-resident exact Still
+work, and one physically separate CPU Still slot. Sharing an Interactive slot is an
 execution-locality decision, not a semantic shortcut: every request derives its
 own seek, precision, decode-budget, approximation, and cancellation policy from
 its declared access mode. CPU still extraction cannot reconfigure the native
@@ -901,10 +899,12 @@ resource; App Frame Store clones and renderer copy-fence clones share that token
 instead of incrementing it again. The token charges both one strongly retained
 worker-family counter and the originating Session's local counter. An
 Interactive slot may seek/flush or cross between Scrub and native exact Still
-only after its local count reaches zero. The primary slot is preferred; the
-overflow slot is admitted only while the primary native output remains owned,
-and a third simultaneous Interactive native request waits at the same
-cooperatively cancellable `OutputLease` checkpoint. Playback remains a continuous pipeline
+only after its local count reaches zero. Released slots are reused first. When
+all existing outputs remain owned, the worker may add another Session only up
+to its share of the App-owned current-media resource-unit grant; further work
+waits at the same cooperatively cancellable `OutputLease` checkpoint. A policy
+shrink retires only released slots and never revokes an in-flight native frame.
+Playback remains a continuous pipeline
 and may have multiple logical outputs in flight; dropping/replacing its Session
 does not drop their family charges or retained FFmpeg surfaces. Clearing a
 context always releases its codec/demux owners promptly, while family retirement
@@ -2521,9 +2521,9 @@ opening its replacement. This avoids repeated non-interruptible
 `avcodec_open2` gaps during latest-wins seek bursts without weakening frame
 exactness or trusting canceled codec position. The App separately releases the prior generation's native source
 frame after its final GPU Viewer output is usable. Playback keeps one continuous
-decoder; scrub and GPU-resident exact Still share one output-lease-aware
-Interactive decoder rather than accumulating one surface pool per request or
-reusing a pool whose prior native output is still owned. A separate CPU Still
+decoder; scrub and GPU-resident exact Still share a resource-bounded,
+output-lease-aware Interactive Session set rather than accumulating one surface
+pool per request or reusing a pool whose prior native output is still owned. A separate CPU Still
 slot preserves CPU extraction locality without owning native GPU surfaces.
 For every production access mode, the packet source is a reusable isolated
 demux Session: the process is the recoverable format-call generation, while the

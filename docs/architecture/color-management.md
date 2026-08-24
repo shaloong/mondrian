@@ -1524,19 +1524,19 @@ its admitted subset and fail closed outside it.
   Any unavailable or hardware-only probe records
   `MonitorHdrCapabilityUnknown` / `MonitorHdrCapabilityUnsupported` blockers
   when HDR correctness cannot be confirmed.
-- **GPU compositing (bounded production subset)** — The `gpu_compositor.rs` module is wired into the
-  preview/viewer GPU path for the safe production subset: media-layer affine
+- **GPU compositing (resource-admitted production path)** — The `gpu_compositor.rs` module is wired into the
+  preview/viewer GPU path for the supported production set: media-layer affine
   transforms, procedural-solid affine transforms, every canonical BlendMode, supported
   fused working-linear media/solid effect chains, working-linear adjustment
-  layers, and at most five executed layers.
+  layers, with no semantic layer-count ceiling.
   It composites into an `Rgba32Float` working-space GPU texture, then feeds the
   same renderer-owned OCIO GPU output boundary used by the rest of preview.
   GPU effect lowering supports ColorAdjust, Vignette, and deterministic Grain
   without an encoded/RGBA8 intermediate. Adjustment plans sample the current
   accumulator, process it in the same working space, and blend the result back.
-  Unsupported layer stacks fail back to the CPU reference compositor with
+  Unsupported operations fail back to the CPU reference compositor with
   structured `GpuCompositingDiagnostics` blocker reasons (`EffectRequiresCpu`,
-  `UnsupportedTransform`, `TooManyLayers`, `GpuUnavailable`). The shared GPU
+  `UnsupportedTransform`, `GpuUnavailable`). The shared GPU
   compositor implements the CPU Float32 straight-alpha algebra for every mode;
   Dissolve carries the complete frame seed and destination pixel identity, and
   real-device parity covers threshold and non-separable channel-tie inputs.

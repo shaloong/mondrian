@@ -237,6 +237,15 @@ until the owning Preview boundary can safely release it. A stronger trim may
 separately release decoder-backed media without conflating that lifecycle
 action with Store budget configuration.
 
+The same current-media resource-unit limit governs physical Interactive decoder
+Session residency. The App partitions the family grant across the decode
+workers that actually started and publishes that per-worker capacity through
+shared worker-family resources. Workers reuse released Sessions before opening
+another; a lower decision retires only slots whose native-output leases have
+already reached zero. This keeps multilayer native decode proportional to the
+same authority that admits its Frame Store surfaces instead of hiding a fixed
+two-layer bottleneck or creating an uncharged decoder pool.
+
 Viewer GPU output residency is a separate typed grant because renderer-owned
 working/output textures are not Frame Store entries. Nominal
 below-minimum/8/16/32 GiB profiles retain at most 1/2/3/3 idle textures per

@@ -22,6 +22,7 @@ use std::ffi::{c_void, CString};
 use std::path::Path;
 use std::path::PathBuf;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1505,7 +1506,8 @@ pub enum PreviewDecodeOutcome {
 
 pub use decode_session::{
     clear_thread_local_preview_decode_session, PreviewDecodeSessionContext,
-    PreviewDecodeSessionContextBootstrap, PreviewDecodeWorkerResources,
+    PreviewDecodeSessionContextBootstrap, PreviewDecodeSessionResidencyConfig,
+    PreviewDecodeWorkerResources,
 };
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,

@@ -2279,8 +2279,8 @@ the renderer contract is covered by `from_gpu_working_frame()`.
 ### Capability Classification
 
 - **`GpuNative`** — All media sources are GPU-resident, every executed layer
-  uses a canonical BlendMode and a supported working-linear effect plan, and the
-  executed stack has ≤5 layers. Native D3D11 media enters through the bounded
+  uses a canonical BlendMode and a supported working-linear effect plan. Native
+  D3D11 media enters through the bounded
   low-copy import backend; procedural and adjustment layers require no import.
 - **`GpuWithUpload`** — Layer structure supports GPU compositing, but at least
   one layer enters from CPU memory. The preferred media path uploads decoded
@@ -2293,8 +2293,15 @@ the renderer contract is covered by `from_gpu_working_frame()`.
   - `EffectRequiresCpu` — Effect graph needs CPU execution
   - `UnsupportedTransform` — Transform cannot be represented by the GPU compositor
   - `FrameNotGpuResident` — Frame must be uploaded
-  - `TooManyLayers` — Exceeds the bounded 5-layer GPU composite stack
   - `GpuUnavailable` — No GPU device/queue
+
+Layer count is not a capability blocker. The compositor preserves authored
+order with one pass per contributing layer and two ping-pong working-linear
+accumulators. Per-pass uniforms use reusable 128-slot pages that grow only when
+the admitted frame needs another chunk and reset after ordered submission.
+Viewer active-working-set count/byte grants remain the authority for source and
+intermediate textures, so removing the old five-layer gate does not create an
+unbudgeted GPU texture path.
 
 ### GPU resource residency
 
@@ -2580,8 +2587,9 @@ and adjustment elements:
 - all executed layers may use any canonical `BlendMode`; the GPU shader shares
   the CPU Float32 straight-alpha algebra, and Dissolve consumes the complete
   frame seed plus destination pixel identity;
-- skipped leading/identity/zero-opacity adjustments do not consume capacity;
-  the remaining executed layer count must be ≤5.
+- skipped leading/identity/zero-opacity adjustments do not consume passes;
+  admitted contributing layers execute in authored order across reusable
+  uniform pages without a separate layer-count gate.
 
 If any condition is not met, the GPU-preview candidate path records
 `GpuCompositingDiagnostics { cpu_fallback_composites, first_blocker }` and

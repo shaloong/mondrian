@@ -521,6 +521,10 @@ fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner(
         shared_owner.hardware_device_context_pool().diagnostics().policy,
         decision.preview.hardware_device_contexts
     );
+    assert_eq!(
+        shared_owner.session_residency_config().max_interactive_sessions_per_worker(),
+        decision.preview.frame_store.current_media_working_set_resource_unit_limit
+    );
 }
 
 use mondrian_assets::AssetLibrary;
