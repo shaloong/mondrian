@@ -1,7 +1,7 @@
 //! Bounded asynchronous lifecycle for Viewer GPU queue submissions.
 //!
-//! The lifecycle is deliberately presentation-Adapter agnostic. It owns one
-//! submitted resource envelope from queue submission through an exact
+//! The lifecycle is deliberately presentation-Adapter agnostic. It owns a
+//! bounded pair of submitted resource envelopes from queue submission through exact
 //! completion callback, including timeout quarantine. Window and Headless
 //! Adapters may attach different physical publication artifacts while sharing
 //! the same completion, deadline, and resource-retirement semantics.
@@ -114,24 +114,29 @@ struct ViewerGpuInFlight<O> {
     quarantine: Option<ViewerGpuSubmissionQuarantineReason>,
 }
 
-/// Single-slot asynchronous Viewer GPU submission owner.
+/// Bounded asynchronous Viewer GPU submission owner.
 ///
-/// Capacity is intentionally one until the renderer exposes move-only
-/// per-frame resource slots. A quarantined slot remains occupied until its
+/// Capacity two lets an already queue-published current frame retain callback
+/// cleanup while its immediate successor enters the same GPU queue. This
+/// matches the renderer progress capacity and the current/prepared physical
+/// publication slots without permitting an unbounded queue. A quarantined slot remains occupied until its
 /// exact callback arrives, the owning Adapter/device is dropped, or the
 /// bounded [`QUARANTINE_RELEASE_GRACE`] after the completion deadline elapses.
 pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
     next_submission_id: u64,
-    in_flight: Option<ViewerGpuInFlight<O>>,
+    in_flight: Vec<ViewerGpuInFlight<O>>,
     completion_sender: mpsc::Sender<ViewerGpuCompletionNotice<C>>,
     completion_receiver: mpsc::Receiver<ViewerGpuCompletionNotice<C>>,
     orphaned_completion_count: u64,
 }
 
+/// Current frame plus one exact immediate successor.
+pub(crate) const VIEWER_GPU_SUBMISSION_CAPACITY: usize = 2;
+
 /// Bounded additional wait after quarantine for the exact completion callback
-/// before the capacity-one slot is force-released.
+/// before its bounded slot is force-released.
 ///
-/// A lost wgpu work-done callback must stall the single Viewer submission slot
+/// A lost wgpu work-done callback must stall only its exact Viewer submission slot
 /// for at most this grace; after it, the owner is retired with its quarantine
 /// reason and a late callback is counted as orphaned.
 pub(crate) const QUARANTINE_RELEASE_GRACE: std::time::Duration =
@@ -152,12 +157,12 @@ where
     O: 'static,
     C: Send + 'static,
 {
-    /// Construct an empty single-slot owner.
+    /// Construct an empty bounded owner.
     pub(crate) fn new() -> Self {
         let (completion_sender, completion_receiver) = mpsc::channel();
         Self {
             next_submission_id: 1,
-            in_flight: None,
+            in_flight: Vec::with_capacity(VIEWER_GPU_SUBMISSION_CAPACITY),
             completion_sender,
             completion_receiver,
             orphaned_completion_count: 0,
@@ -168,7 +173,7 @@ where
     pub(crate) fn reserve(
         &mut self,
     ) -> Result<ViewerGpuSubmissionReservation<'_, O, C>, ViewerGpuSubmissionAdmissionError> {
-        if self.in_flight.is_some() {
+        if self.in_flight.len() >= VIEWER_GPU_SUBMISSION_CAPACITY {
             return Err(ViewerGpuSubmissionAdmissionError::Backpressured);
         }
         let submission_id = ViewerGpuSubmissionId(self.next_submission_id);
@@ -179,29 +184,40 @@ where
         Ok(ViewerGpuSubmissionReservation { lifecycle: self, submission_id })
     }
 
-    /// Whether recording a new candidate would violate the single-slot grant.
+    /// Whether any submitted owner remains active.
     pub(crate) fn is_occupied(&self) -> bool {
-        self.in_flight.is_some()
+        !self.in_flight.is_empty()
     }
 
-    /// Exact submitted identity currently retaining the capacity-one slot.
-    pub(crate) fn current_submission_id(&self) -> Option<ViewerGpuSubmissionId> {
-        self.in_flight.as_ref().map(|in_flight| in_flight.submission_id)
+    /// Whether another exact submitted owner may be admitted.
+    pub(crate) fn is_at_capacity(&self) -> bool {
+        self.in_flight.len() >= VIEWER_GPU_SUBMISSION_CAPACITY
+    }
+
+    /// Number of exact submitted owners still retained by this lifecycle.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn active_count(&self) -> usize {
+        self.in_flight.len()
+    }
+
+    /// Whether this exact submitted identity is still retained.
+    pub(crate) fn contains(&self, submission_id: ViewerGpuSubmissionId) -> bool {
+        self.in_flight.iter().any(|in_flight| in_flight.submission_id == submission_id)
     }
 
     /// Inspect the retained owner for exact queue-ordered publication.
     pub(crate) fn owner(&self, submission_id: ViewerGpuSubmissionId) -> Option<&O> {
         self.in_flight
-            .as_ref()
-            .filter(|in_flight| in_flight.submission_id == submission_id)
+            .iter()
+            .find(|in_flight| in_flight.submission_id == submission_id)
             .map(|in_flight| &in_flight.owner)
     }
 
     /// Mutate Adapter-local evidence attached to one exact retained owner.
     pub(crate) fn owner_mut(&mut self, submission_id: ViewerGpuSubmissionId) -> Option<&mut O> {
         self.in_flight
-            .as_mut()
-            .filter(|in_flight| in_flight.submission_id == submission_id)
+            .iter_mut()
+            .find(|in_flight| in_flight.submission_id == submission_id)
             .map(|in_flight| &mut in_flight.owner)
     }
 
@@ -239,16 +255,14 @@ where
                 Ok(notice) => {
                     let exact = self
                         .in_flight
-                        .as_ref()
-                        .is_some_and(|in_flight| in_flight.submission_id == notice.submission_id);
-                    if !exact {
+                        .iter()
+                        .position(|in_flight| in_flight.submission_id == notice.submission_id);
+                    let Some(exact) = exact else {
                         self.orphaned_completion_count =
                             self.orphaned_completion_count.saturating_add(1);
                         continue;
-                    }
-                    let Some(in_flight) = self.in_flight.take() else {
-                        continue;
                     };
+                    let in_flight = self.in_flight.remove(exact);
                     let quarantine_reason = in_flight.quarantine.or_else(|| {
                         (notice.observed_at >= in_flight.completion_deadline).then_some(
                             ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded,
@@ -271,27 +285,28 @@ where
     }
 
     fn poll_deadline_state(&mut self, now: Instant) -> ViewerGpuSubmissionPoll<O, C> {
-        let Some(in_flight) = self.in_flight.as_ref() else {
+        let Some(first) = self.in_flight.first() else {
             return ViewerGpuSubmissionPoll::Idle;
         };
-        let submission_id = in_flight.submission_id;
-        let completion_deadline = in_flight.completion_deadline;
-        let quarantined = in_flight.quarantine.is_some();
-        if !quarantined
-            && now >= completion_deadline
-            && let Some(quarantine) = self
-                .begin_quarantine(ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded)
-        {
+        if let Some(index) = self.in_flight.iter().position(|in_flight| {
+            in_flight.quarantine.is_none() && now >= in_flight.completion_deadline
+        }) {
+            let submission_id = self.in_flight[index].submission_id;
+            let reason = ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded;
+            self.in_flight[index].quarantine = Some(reason.clone());
+            let quarantine = ViewerGpuSubmissionQuarantine { submission_id, reason };
             return ViewerGpuSubmissionPoll::QuarantineStarted(quarantine);
         }
-        if quarantined && now >= completion_deadline + QUARANTINE_RELEASE_GRACE {
+        if let Some(index) = self.in_flight.iter().position(|in_flight| {
+            in_flight.quarantine.is_some()
+                && now >= in_flight.completion_deadline + QUARANTINE_RELEASE_GRACE
+        }) {
             // The exact completion callback never arrived. Release the
-            // capacity-one slot so the presentation pipeline can continue;
+            // bounded slot so the presentation pipeline can continue;
             // the retired owner carries the quarantine reason for cleanup and
             // a late callback is counted as orphaned.
-            let Some(in_flight) = self.in_flight.take() else {
-                return ViewerGpuSubmissionPoll::Idle;
-            };
+            let in_flight = self.in_flight.remove(index);
+            let submission_id = in_flight.submission_id;
             let reason = in_flight
                 .quarantine
                 .unwrap_or(ViewerGpuSubmissionQuarantineReason::CompletionDeadlineExceeded);
@@ -301,7 +316,10 @@ where
                 reason,
             });
         }
-        ViewerGpuSubmissionPoll::Pending { submission_id, quarantined }
+        ViewerGpuSubmissionPoll::Pending {
+            submission_id: first.submission_id,
+            quarantined: first.quarantine.is_some(),
+        }
     }
 
     /// Complete one submission on fence-barrier authority without its callback
@@ -314,15 +332,21 @@ where
     /// fence (wgpu 30 defers callback delivery), so an absent batch must not
     /// strand the completion behind a quarantine that revokes the retained
     /// output and forces the pipeline to re-submit the same frame forever.
+    /// Complete one exact submission on its correlated fence barrier.
     #[cfg(any(test, feature = "validation"))]
-    pub(crate) fn retire_after_fence_barrier(
+    pub(crate) fn retire_submission_after_fence_barrier(
         &mut self,
+        submission_id: ViewerGpuSubmissionId,
         now: Instant,
     ) -> Option<ViewerGpuSubmissionPoll<O, C>>
     where
         C: Default,
     {
-        let in_flight = self.in_flight.take()?;
+        let index = self
+            .in_flight
+            .iter()
+            .position(|in_flight| in_flight.submission_id == submission_id)?;
+        let in_flight = self.in_flight.remove(index);
         Some(ViewerGpuSubmissionPoll::Completed(
             ViewerGpuCompletedSubmission {
                 submission_id: in_flight.submission_id,
@@ -334,22 +358,36 @@ where
         ))
     }
 
-    /// Revoke publication authority after a concrete device failure.
-    pub(crate) fn quarantine_after_device_failure(
+    /// Revoke publication authority for every owner after a concrete device
+    /// generation failure.
+    pub(crate) fn quarantine_all_after_device_failure(
         &mut self,
         reason: String,
-    ) -> Option<ViewerGpuSubmissionQuarantine> {
-        self.begin_quarantine(ViewerGpuSubmissionQuarantineReason::DevicePollFailed(
+    ) -> Vec<ViewerGpuSubmissionQuarantine> {
+        self.quarantine_all(ViewerGpuSubmissionQuarantineReason::DevicePollFailed(
             reason,
         ))
     }
 
-    /// Revoke publication authority without releasing submitted owners.
-    pub(crate) fn quarantine_after_authority_revocation(
+    /// Revoke publication authority from every submitted owner without
+    /// releasing any callback-owned resources.
+    pub(crate) fn quarantine_all_after_authority_revocation(
         &mut self,
+        reason: String,
+    ) -> Vec<ViewerGpuSubmissionQuarantine> {
+        self.quarantine_all(
+            ViewerGpuSubmissionQuarantineReason::PublicationAuthorityRevoked(reason),
+        )
+    }
+
+    /// Revoke one exact submitted owner's publication authority.
+    pub(crate) fn quarantine_submission_after_authority_revocation(
+        &mut self,
+        submission_id: ViewerGpuSubmissionId,
         reason: String,
     ) -> Option<ViewerGpuSubmissionQuarantine> {
         self.begin_quarantine(
+            submission_id,
             ViewerGpuSubmissionQuarantineReason::PublicationAuthorityRevoked(reason),
         )
     }
@@ -361,15 +399,19 @@ where
     /// wgpu device-lost terminal and independently drain any native decoder
     /// copy fences owned outside wgpu. A generic progress failure is not
     /// sufficient release evidence.
-    pub(crate) fn retire_owner_after_wgpu_device_loss(&mut self) -> Option<O> {
-        self.in_flight.take().map(|in_flight| in_flight.owner)
+    pub(crate) fn retire_owners_after_wgpu_device_loss(&mut self) -> Vec<O> {
+        self.in_flight.drain(..).map(|in_flight| in_flight.owner).collect()
     }
 
     fn begin_quarantine(
         &mut self,
+        submission_id: ViewerGpuSubmissionId,
         reason: ViewerGpuSubmissionQuarantineReason,
     ) -> Option<ViewerGpuSubmissionQuarantine> {
-        let in_flight = self.in_flight.as_mut()?;
+        let in_flight = self
+            .in_flight
+            .iter_mut()
+            .find(|in_flight| in_flight.submission_id == submission_id)?;
         if in_flight.quarantine.is_some() {
             return None;
         }
@@ -377,14 +419,31 @@ where
         Some(ViewerGpuSubmissionQuarantine { submission_id: in_flight.submission_id, reason })
     }
 
+    fn quarantine_all(
+        &mut self,
+        reason: ViewerGpuSubmissionQuarantineReason,
+    ) -> Vec<ViewerGpuSubmissionQuarantine> {
+        let mut quarantines = Vec::with_capacity(self.in_flight.len());
+        for in_flight in &mut self.in_flight {
+            if in_flight.quarantine.is_some() {
+                continue;
+            }
+            in_flight.quarantine = Some(reason.clone());
+            quarantines.push(ViewerGpuSubmissionQuarantine {
+                submission_id: in_flight.submission_id,
+                reason: reason.clone(),
+            });
+        }
+        quarantines
+    }
+
     /// Earliest useful monotonic wake for the retained submission.
     pub(crate) fn next_wake(&self) -> Option<Instant> {
-        let in_flight = self.in_flight.as_ref()?;
-        if in_flight.quarantine.is_some() {
-            None
-        } else {
-            Some(in_flight.completion_deadline)
-        }
+        self.in_flight
+            .iter()
+            .filter(|in_flight| in_flight.quarantine.is_none())
+            .map(|in_flight| in_flight.completion_deadline)
+            .min()
     }
 
     /// Number of callbacks discarded because no exact owner remained.
@@ -421,7 +480,7 @@ where
     ) -> ViewerGpuSubmissionId {
         let submission_id = self.submission_id;
         let lifecycle = self.lifecycle;
-        lifecycle.in_flight = Some(ViewerGpuInFlight {
+        lifecycle.in_flight.push(ViewerGpuInFlight {
             submission_id,
             owner,
             completion_deadline,
@@ -445,8 +504,8 @@ where
 /// Admission failure before any GPU work was recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ViewerGpuSubmissionAdmissionError {
-    /// The single renderer frame-resource slot remains owned.
-    #[error("the Viewer GPU submission slot is occupied")]
+    /// Every bounded renderer submission slot remains owned.
+    #[error("the Viewer GPU submission capacity is full")]
     Backpressured,
     /// The process-local submission identity space was exhausted.
     #[error("Viewer GPU submission identity space is exhausted")]
@@ -487,10 +546,19 @@ mod tests {
     #[test]
     fn delayed_completion_retains_the_owner_and_frees_exactly_one_slot() {
         let now = Instant::now();
-        let callback = callback_slot();
+        let first_callback = callback_slot();
+        let second_callback = callback_slot();
         let mut lifecycle = ViewerGpuSubmissionLifecycle::new();
-        let submission_id =
-            commit_test_submission(&mut lifecycle, now + Duration::from_secs(1), &callback);
+        let submission_id = commit_test_submission(
+            &mut lifecycle,
+            now + Duration::from_secs(1),
+            &first_callback,
+        );
+        let second_submission_id = commit_test_submission(
+            &mut lifecycle,
+            now + Duration::from_secs(1),
+            &second_callback,
+        );
 
         assert!(lifecycle.is_occupied());
         assert_eq!(
@@ -501,7 +569,11 @@ mod tests {
             lifecycle.reserve(),
             Err(ViewerGpuSubmissionAdmissionError::Backpressured)
         ));
-        callback.lock().expect("callback slot").take().expect("registered callback")(7);
+        first_callback
+            .lock()
+            .expect("callback slot")
+            .take()
+            .expect("registered callback")(7);
 
         let completed = match lifecycle.poll(now) {
             ViewerGpuSubmissionPoll::Completed(completed) => completed,
@@ -511,7 +583,45 @@ mod tests {
         assert_eq!(completed.owner, "retained-owner");
         assert_eq!(completed.completion, 7);
         assert_eq!(completed.quarantine_reason, None);
-        assert!(!lifecycle.is_occupied());
+        assert!(lifecycle.is_occupied());
+        assert!(lifecycle.owner(second_submission_id).is_some());
+        assert!(lifecycle.reserve().is_ok());
+    }
+
+    #[test]
+    fn generation_failure_quarantines_every_pipelined_owner() {
+        let now = Instant::now();
+        let first_callback = callback_slot();
+        let second_callback = callback_slot();
+        let mut lifecycle = ViewerGpuSubmissionLifecycle::new();
+        let first = commit_test_submission(
+            &mut lifecycle,
+            now + Duration::from_secs(1),
+            &first_callback,
+        );
+        let second = commit_test_submission(
+            &mut lifecycle,
+            now + Duration::from_secs(1),
+            &second_callback,
+        );
+
+        let quarantines = lifecycle.quarantine_all_after_device_failure("device lost".to_owned());
+
+        assert_eq!(
+            quarantines
+                .iter()
+                .map(|quarantine| quarantine.submission_id)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+        assert!(matches!(
+            lifecycle.poll(now),
+            ViewerGpuSubmissionPoll::Pending { quarantined: true, .. }
+        ));
+        assert!(matches!(
+            lifecycle.reserve(),
+            Err(ViewerGpuSubmissionAdmissionError::Backpressured)
+        ));
     }
 
     #[test]

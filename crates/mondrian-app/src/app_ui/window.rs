@@ -1300,13 +1300,13 @@ struct WindowViewerGpuGenerationRetirement {
     _renderer_device: wgpu::Device,
     _renderer_queue: wgpu::Queue,
     _deferred_cleanup: WindowViewerGpuDeferredCleanup,
-    _completed_submission: Option<
+    _completed_submissions: Vec<
         ViewerGpuCompletedSubmission<
             WindowViewerGpuSubmissionOwner,
             ViewerHeterogeneousGpuCompletedBatch,
         >,
     >,
-    _lost_submission_owner: Option<WindowViewerGpuSubmissionOwner>,
+    _lost_submission_owners: Vec<WindowViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
     native_device_removed_logged: bool,
 }
@@ -1343,26 +1343,21 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
         let native_copy_ready =
             native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
-        if self._completed_submission.is_none() && self._lost_submission_owner.is_none() {
-            match self.lifecycle.poll(Instant::now()) {
-                ViewerGpuSubmissionPoll::Completed(completed) => {
-                    self._completed_submission = Some(completed);
-                }
-                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
-                    // A lost completion callback cannot hold the single
-                    // submission slot forever; retire the owner with its
-                    // quarantine reason so the pipeline can continue.
-                    tracing::warn!(
-                        submission_id = retired.submission_id.get(),
-                        reason = ?retired.reason,
-                        "Window Viewer force-retired a quarantined GPU submission whose completion callback was lost"
-                    );
-                    self._lost_submission_owner = Some(retired.owner);
-                }
-                ViewerGpuSubmissionPoll::Idle
-                | ViewerGpuSubmissionPoll::Pending { .. }
-                | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
+        match self.lifecycle.poll(Instant::now()) {
+            ViewerGpuSubmissionPoll::Completed(completed) => {
+                self._completed_submissions.push(completed);
             }
+            ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                tracing::warn!(
+                    submission_id = retired.submission_id.get(),
+                    reason = ?retired.reason,
+                    "Window Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                );
+                self._lost_submission_owners.push(retired.owner);
+            }
+            ViewerGpuSubmissionPoll::Idle
+            | ViewerGpuSubmissionPoll::Pending { .. }
+            | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
         }
 
         // Actual wgpu loss is safe terminal evidence for wgpu work only. The
@@ -1372,7 +1367,8 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
-            self._lost_submission_owner = self.lifecycle.retire_owner_after_wgpu_device_loss();
+            self._lost_submission_owners
+                .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
         native_copy_ready && !self.lifecycle.is_occupied()
@@ -1404,8 +1400,8 @@ impl Drop for AppUiWindowSession {
             _renderer_device: self.renderer_device.clone(),
             _renderer_queue: self.renderer_queue.clone(),
             _deferred_cleanup: std::mem::take(&mut self.viewer_gpu_deferred_cleanup),
-            _completed_submission: None,
-            _lost_submission_owner: None,
+            _completed_submissions: Vec::new(),
+            _lost_submission_owners: Vec::new(),
             native_retirement_error_logged: false,
             native_device_removed_logged: false,
         };
@@ -3479,7 +3475,7 @@ fn poll_viewer_heterogeneous_completion(
                 // Callback retirement can open the next slot before this
                 // non-authoritative observation is drained. Never let the old
                 // physical identity affect a replacement lifecycle.
-                if session.viewer_gpu_submissions.current_submission_id() == Some(submission_id) {
+                if session.viewer_gpu_submissions.contains(submission_id) {
                     observation_time = observation_time.max(observed_at);
                     callback_barrier_observed = true;
                 }
@@ -3543,13 +3539,13 @@ fn poll_viewer_heterogeneous_completion(
                 "device generation terminal {failure_context} while submission {} remained active: {error}",
                 submission_id.get()
             );
-            if let Some(quarantine) = session
+            let quarantines = session
                 .viewer_gpu_submissions
-                .quarantine_after_device_failure(generation_reason)
-            {
+                .quarantine_all_after_device_failure(generation_reason);
+            if let Some(first) = quarantines.first() {
                 let fallback_reason = format!(
                     "Viewer GPU device generation failed while driving submission {}; GPU output remains disabled until the generation is rebuilt: {error}",
-                    quarantine.submission_id.get()
+                    first.submission_id.get()
                 );
                 host.record_preview_gpu_output_blocker(
                     &PreviewGpuOutputBlocker::CpuFallbackRequested {
@@ -3557,12 +3553,14 @@ fn poll_viewer_heterogeneous_completion(
                     },
                 );
                 host.request_viewer_cpu_fallback(fallback_reason);
-                begin_window_viewer_gpu_quarantine(
-                    session,
-                    host,
-                    quarantine,
-                    WindowViewerGpuDeferredCleanup::Reset,
-                );
+                for quarantine in quarantines {
+                    begin_window_viewer_gpu_quarantine(
+                        session,
+                        host,
+                        quarantine,
+                        WindowViewerGpuDeferredCleanup::Reset,
+                    );
+                }
                 unregister_program_scopes_textures(session);
                 if !retire_window_published_gpu_output(session, host) {
                     host.clear_external_viewer_frame();
@@ -3791,11 +3789,25 @@ fn prepare_viewer_gpu_preview(
         host.request_viewer_cpu_fallback(fallback_reason);
         finish_prepare!();
     }
-    if session.viewer_gpu_submissions.is_occupied() {
+    let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
+    if session.viewer_gpu_submissions.is_at_capacity() {
         session
             .viewer_gpu_output_telemetry
             .record_prepare_duration(prepare_started.elapsed());
         return;
+    }
+    let expected_prepared_output = host.exact_prepared_viewer_gpu_output_key();
+    if let Some(stale) = session
+        .viewer_gpu_presentation
+        .publications
+        .retire_prepared_unless(expected_prepared_output.as_ref())
+    {
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            stale.output_key(),
+            stale.artifact().as_str(),
+        );
+        session.frame_renderer.unregister_external_texture(stale.artifact());
+        drop(stale);
     }
     if !host.preflight_pending_viewer_gpu_presentation() {
         session
@@ -3803,14 +3815,18 @@ fn prepare_viewer_gpu_preview(
             .record_prepare_duration(prepare_started.elapsed());
         return;
     }
-    host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+    if !submission_in_flight {
+        host.apply_preview_execution_resource_decision(&mut *session.viewer_gpu_execution);
+    }
 
     // Native import copies decoder surfaces into renderer-owned textures. The
     // source must live through that GPU copy, but retaining it until the next
     // decoded frame creates a circular wait when the decoder pool is bounded.
     // Advance copy-fence retirement on every prepare tick, including Loading
     // ticks for a following seek.
-    if let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources() {
+    if !submission_in_flight
+        && let Err(error) = session.viewer_gpu_execution.retire_completed_native_import_sources()
+    {
         let fallback_reason = format!("native video source retirement failed: {error}");
         unregister_program_scopes_textures(session);
         host.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
@@ -4381,9 +4397,10 @@ fn prepare_viewer_gpu_preview(
             );
             progress_permit.commit(submission_id, submission_index);
             if let Some(quarantine) =
-                session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
-                    "submitted Viewer output lease transfer failed: {error}"
-                ))
+                session.viewer_gpu_submissions.quarantine_submission_after_authority_revocation(
+                    submission_id,
+                    format!("submitted Viewer output lease transfer failed: {error}"),
+                )
             {
                 begin_window_viewer_gpu_quarantine(
                     session,
@@ -4460,9 +4477,10 @@ fn prepare_viewer_gpu_preview(
             reason: error.clone(),
         });
         if let Some(quarantine) =
-            session.viewer_gpu_submissions.quarantine_after_authority_revocation(format!(
-                "Window texture registration failed: {error}"
-            ))
+            session.viewer_gpu_submissions.quarantine_submission_after_authority_revocation(
+                submission_id,
+                format!("Window texture registration failed: {error}"),
+            )
         {
             begin_window_viewer_gpu_quarantine(
                 session,
@@ -4483,7 +4501,7 @@ fn prepare_viewer_gpu_preview(
         });
         if let Some(quarantine) = session
             .viewer_gpu_submissions
-            .quarantine_after_authority_revocation(reason.to_owned())
+            .quarantine_submission_after_authority_revocation(submission_id, reason.to_owned())
         {
             begin_window_viewer_gpu_quarantine(
                 session,
@@ -4742,12 +4760,18 @@ fn cancel_viewer_gpu_submission(
     host: &AppUiHost,
     deferred_cleanup: WindowViewerGpuDeferredCleanup,
 ) -> bool {
-    let Some(quarantine) = session.viewer_gpu_submissions.quarantine_after_authority_revocation(
-        format!("Window Viewer cleanup requested: {deferred_cleanup:?}"),
-    ) else {
+    let quarantines =
+        session
+            .viewer_gpu_submissions
+            .quarantine_all_after_authority_revocation(format!(
+                "Window Viewer cleanup requested: {deferred_cleanup:?}"
+            ));
+    if quarantines.is_empty() {
         return false;
-    };
-    begin_window_viewer_gpu_quarantine(session, host, quarantine, deferred_cleanup);
+    }
+    for quarantine in quarantines {
+        begin_window_viewer_gpu_quarantine(session, host, quarantine, deferred_cleanup);
+    }
     true
 }
 

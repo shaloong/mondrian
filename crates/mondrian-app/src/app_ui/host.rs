@@ -362,6 +362,21 @@ impl AppUiHost {
         self.preview_service.registered_exact_current_gpu_output_key()
     }
 
+    /// Prepared GPU output identity still relevant to the current or exact
+    /// immediate-successor transport intent.
+    pub(crate) fn exact_prepared_viewer_gpu_output_key(
+        &self,
+    ) -> Option<crate::app::preview_execution::PreviewOutputKey> {
+        let state = self.app_state.borrow();
+        let sampled_at = Instant::now();
+        let intent = state.preview_execution_snapshot(sampled_at).transport().playback_intent();
+        let immediate_successor_intent = state
+            .preview_successor_execution_request(sampled_at)
+            .map(|request| request.snapshot().transport().playback_intent());
+        self.preview_service
+            .registered_relevant_prepared_gpu_output_key(intent, immediate_successor_intent)
+    }
+
     /// Clone the UI-independent watch for pollable Preview worker results.
     pub(crate) fn preview_work_watch(&self) -> PreviewWorkWatch {
         self.preview_service.work_watch()

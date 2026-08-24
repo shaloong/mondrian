@@ -51,7 +51,6 @@ use crate::app::preview_decode_residency::{
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
 #[cfg(test)]
 use crate::app::preview_execution::PreviewDecodeExecutionSummary;
-#[cfg(any(test, feature = "validation"))]
 use crate::app::preview_execution::PreviewPlaybackIntent;
 use crate::app::preview_execution::{
     PreviewCandidateDecision, PreviewExecutionCoordinator, PreviewGenerationBinding,
@@ -1595,7 +1594,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ///
     /// This is a bounded scheduling observation only. Presentation still
     /// requires a fresh current request carrying the active Frame Demand.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_prepared_successor_for_intent(
         &self,
         playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
@@ -1658,6 +1657,29 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// durable current artifact after its Frame Demand was already consumed.
     pub(crate) fn registered_exact_current_gpu_output_key(&self) -> Option<PreviewOutputKey> {
         self.execution.borrow().exact_current_output().map(|(key, _)| key.clone())
+    }
+
+    /// Prepared GPU output identity still relevant to the current transport
+    /// coordinate.
+    ///
+    /// Before a frame boundary the prepared artifact belongs to the exact
+    /// immediate successor. Immediately after that boundary it belongs to the
+    /// exact current intent until promotion runs. Any other intent has been
+    /// skipped or superseded and must not retain a physical presentation slot.
+    pub(crate) fn registered_relevant_prepared_gpu_output_key(
+        &self,
+        current_intent: PreviewPlaybackIntent,
+        immediate_successor_intent: Option<PreviewPlaybackIntent>,
+    ) -> Option<PreviewOutputKey> {
+        let execution = self.execution.borrow();
+        execution
+            .exact_prepared_successor_gpu_output_key_for_intent(current_intent)
+            .or_else(|| {
+                immediate_successor_intent.and_then(|intent| {
+                    execution.exact_prepared_successor_gpu_output_key_for_intent(intent)
+                })
+            })
+            .cloned()
     }
 
     /// Whether the retained output is the exact semantic and physical artifact.

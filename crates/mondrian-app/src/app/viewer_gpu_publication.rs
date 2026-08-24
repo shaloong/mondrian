@@ -151,6 +151,24 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
         self.prepared.take()
     }
 
+    /// Retire a prepared physical owner that is no longer backed by the
+    /// active semantic generation.
+    ///
+    /// A transport seek can rotate Preview semantics while the previously
+    /// prepared successor lease remains live in the presentation Adapter.
+    /// Keeping that stale second output blocks the capacity-one renderer from
+    /// recording the replacement current frame.
+    pub(crate) fn retire_prepared_unless(
+        &mut self,
+        expected_output_key: Option<&K>,
+    ) -> Option<ViewerGpuPhysicalPublication<K, O, L>> {
+        let stale = self
+            .prepared
+            .as_ref()
+            .is_some_and(|prepared| expected_output_key != Some(prepared.output_key()));
+        stale.then(|| self.prepared.take()).flatten()
+    }
+
     /// Visible artifact only when it has the exact semantic output identity.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn current_artifact_for_key(&self, output_key: &K) -> Option<&O> {
@@ -348,5 +366,25 @@ mod tests {
         );
         assert_eq!(drops.load(Ordering::Relaxed), 2);
         assert!(slots.current().is_none());
+    }
+
+    #[test]
+    fn stale_prepared_output_retires_when_semantic_generation_rotates() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let mut slots = ViewerGpuPublicationSlots::default();
+        publish(&mut slots, false, 7, "current", "visible", &drops);
+        publish(&mut slots, true, 8, "old-successor", "prepared", &drops);
+
+        let retired = slots.retire_prepared_unless(None);
+
+        assert_eq!(
+            retired.map(ViewerGpuPhysicalPublication::into_artifact),
+            Some("prepared")
+        );
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            slots.current_artifact_for_key(&"current".to_owned()),
+            Some(&"visible")
+        );
     }
 }

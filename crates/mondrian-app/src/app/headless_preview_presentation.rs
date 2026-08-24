@@ -159,6 +159,21 @@ pub(crate) fn present_headless_preview_candidate_at(
     if let Some(candidate) = drive_headless_gpu_submission(preview, state, gpu)? {
         return Ok(candidate);
     }
+    let sampled_at = Instant::now();
+    let current_playback_intent =
+        state.preview_execution_snapshot(sampled_at).transport().playback_intent();
+    let immediate_successor_intent = state
+        .preview_successor_execution_request(sampled_at)
+        .map(|request| request.snapshot().transport().playback_intent());
+    let expected_prepared_output = preview.registered_relevant_prepared_gpu_output_key(
+        current_playback_intent,
+        immediate_successor_intent,
+    );
+    if let Some((output_key, output)) =
+        gpu.retire_stale_prepared_physical_output(expected_prepared_output.as_ref())
+    {
+        clear_revoked_headless_gpu_output(preview, &output_key, &output);
+    }
     // The transport reached its natural end: no next frame demand will ever
     // promote a prepared successor, so release its retained capacity-one
     // physical lease. Otherwise it reports as a second live presentation
@@ -167,15 +182,6 @@ pub(crate) fn present_headless_preview_candidate_at(
     if state.playback_engine.snapshot().state == mondrian_playback::TransportState::Ended {
         gpu.clear_prepared_physical_output();
     }
-    // Reconfiguration may trim pools still referenced by the capacity-one
-    // submission owner. A pending callback is ordinary bounded pressure, not
-    // an Adapter failure. The App/Preview authorities above have retained the
-    // fresh policy; its current Viewer projection is applied on the first idle
-    // turn, before a replacement submission can be recorded.
-    if gpu.has_submission_in_flight() {
-        return Ok(HeadlessPreviewCandidate::Backpressured);
-    }
-    gpu.apply_resource_decision(&viewer_resource_decision)?;
     // A presentable publication consumes its exact Frame Demand before the
     // GPU callback and later validation probes necessarily finish. Observing
     // the same semantic + physical artifact is not another publication and
@@ -194,6 +200,22 @@ pub(crate) fn present_headless_preview_candidate_at(
         clear_mismatched_headless_gpu_output(preview, gpu, &output_key);
         gpu.clear_physical_outputs();
     }
+    let prepared_current_is_queue_ordered =
+        preview.has_prepared_successor_for_intent(current_playback_intent);
+    let submission_in_flight = gpu.has_submission_in_flight();
+    // A queue-ordered successor is already a usable physical publication even
+    // while its completion callback still owns submission cleanup. Permit its
+    // exact current promotion; otherwise one accepted successor is reported as
+    // Backpressure precisely at the frame boundary it was prepared to serve.
+    if gpu.submission_capacity_is_full() && !prepared_current_is_queue_ordered {
+        return Ok(HeadlessPreviewCandidate::Backpressured);
+    }
+    // Reconfiguration may trim pools still referenced by submitted owners.
+    // Apply fresh resource policy only on an idle turn; an
+    // in-flight exact-current promotion records no replacement work.
+    if !submission_in_flight {
+        gpu.apply_resource_decision(&viewer_resource_decision)?;
+    }
     match state
         .preflight_pending_frame_presentation(already_visible_at.unwrap_or_else(Instant::now))
     {
@@ -207,7 +229,8 @@ pub(crate) fn present_headless_preview_candidate_at(
     }
     match preview.gpu_preview_frame(state.preview_frame_execution_request(Instant::now())) {
         PreviewGpuFrameState::Ready(frame) => {
-            match state.preflight_frame_presentation(frame.presentation_ticket(), Instant::now()) {
+            let presentation_ticket = frame.presentation_ticket();
+            match state.preflight_frame_presentation(presentation_ticket, Instant::now()) {
                 FramePresentationPreflight::MaySubmit => {}
                 FramePresentationPreflight::DroppedLate(_) => {
                     return Ok(HeadlessPreviewCandidate::DroppedLate);
@@ -401,7 +424,7 @@ pub(crate) fn prepare_headless_preview_successor(
     gpu: &mut HeadlessViewerGpuAdapter,
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
 ) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
-    if gpu.has_submission_in_flight() {
+    if gpu.submission_capacity_is_full() {
         return Ok(None);
     }
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
@@ -467,10 +490,11 @@ fn drive_headless_gpu_submission(
             || "outside an active Viewer submission".to_owned(),
             |submission_id| format!("after submission attempt {}", submission_id.get()),
         );
-        let (active_submission, revoked_outputs) = gpu.enter_device_generation_retirement(format!(
-            "device generation terminal {failure_context}: {}",
-            terminal.reason
-        ));
+        let (active_submissions, revoked_outputs) =
+            gpu.enter_device_generation_retirement(format!(
+                "device generation terminal {failure_context}: {}",
+                terminal.reason
+            ));
         for (output_key, output) in revoked_outputs.iter().flatten() {
             clear_revoked_headless_gpu_output(preview, output_key, output);
         }
@@ -509,13 +533,13 @@ fn drive_headless_gpu_submission(
             HeadlessViewerGpuCompletionPoll::Idle
             | HeadlessViewerGpuCompletionPoll::Pending { .. } => {}
         }
-        if let Some(submission_id) = active_submission
-            && let Some(execution) = gpu.take_heterogeneous_terminal(submission_id)
-        {
-            observe_headless_visual_disposition(
-                state,
-                preview.fail_heterogeneous_gpu_execution(execution),
-            );
+        for submission_id in active_submissions {
+            if let Some(execution) = gpu.take_heterogeneous_terminal(submission_id) {
+                observe_headless_visual_disposition(
+                    state,
+                    preview.fail_heterogeneous_gpu_execution(execution),
+                );
+            }
         }
         return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal).into());
     }
@@ -679,6 +703,25 @@ fn drive_headless_gpu_submission(
                         && completed.frame.presentation_ticket().is_none(),
                     "prepared Headless successor retained incompatible publication authority"
                 );
+                if completed.frame.frame == state.current_frame()
+                    && state.pending_playback_frame_demand_identity().is_none()
+                    && headless_gpu_output_is_exact_current(
+                        preview,
+                        gpu,
+                        &completed.frame.output_key,
+                    )
+                {
+                    // Queue-order promotion already made this successor the
+                    // exact visible current output. Its callback retires the
+                    // submitted owner; it must not demote the consumer back to
+                    // Loading merely because the work originated off-screen.
+                    return Ok(Some(HeadlessPreviewCandidate::Ready {
+                        output: HeadlessPresentedOutput::Gpu {
+                            execution: Box::new(completed.execution),
+                        },
+                        completed_demand: None,
+                    }));
+                }
                 return Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
                     execution: Box::new(completed.execution),
                     disposition: HeadlessCompletedGpuDisposition::PreparedSuccessor,

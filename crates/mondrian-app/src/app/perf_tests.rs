@@ -415,6 +415,11 @@ struct HeadlessViewerGpuExecutionSummary {
     published_rendered_decode_execution: PreviewDecodeExecutionSummary,
     native_import_contract_pools_peak: usize,
     native_import_bridge_entries_peak: usize,
+    /// Sources retained after a completion while a later pipelined owner is
+    /// still active. This is expected bounded residency, not a leak.
+    native_import_pipelined_retained_sources_peak: usize,
+    /// Sources still retained after the exact final active submission
+    /// completed. Any non-zero value is an ownership leak.
     native_import_retained_sources_peak: usize,
     #[serde(skip)]
     native_video_gpu_timing_candidates: Vec<NativeVideoGpuTimingCandidateRecord>,
@@ -433,9 +438,15 @@ impl HeadlessViewerGpuExecutionSummary {
         self.native_import_bridge_entries_peak = self
             .native_import_bridge_entries_peak
             .max(execution.native_import_bridge_entries);
-        self.native_import_retained_sources_peak = self
-            .native_import_retained_sources_peak
-            .max(execution.native_import_retained_sources);
+        if execution.remaining_submissions_after_completion == 0 {
+            self.native_import_retained_sources_peak = self
+                .native_import_retained_sources_peak
+                .max(execution.native_import_retained_sources);
+        } else {
+            self.native_import_pipelined_retained_sources_peak = self
+                .native_import_pipelined_retained_sources_peak
+                .max(execution.native_import_retained_sources);
+        }
         if let Some(receipt) = execution.native_import_gpu_timing_receipt {
             self.native_video_gpu_timing_candidates
                 .push(NativeVideoGpuTimingCandidateRecord {
@@ -1231,6 +1242,7 @@ fn headless_gpu_summary_separates_execution_publication_and_terminal_rejection()
             native_import_contract_pools: 0,
             native_import_bridge_entries: 0,
             native_import_retained_sources: 0,
+            remaining_submissions_after_completion: 0,
         }
     };
     let native_decode = PreviewDecodeExecutionSummary {
@@ -1344,6 +1356,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
                 native_import_contract_pools: 0,
                 native_import_bridge_entries: 0,
                 native_import_retained_sources: 0,
+                remaining_submissions_after_completion: 0,
             },
             HeadlessGpuExecutionPublication::PublishedCurrent,
             Some(headless_test_demand_identity(i64::from(width))),
@@ -1638,6 +1651,40 @@ fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
 }
 
 #[test]
+fn dual_video_gate_requires_two_layers_and_real_gpu_composite() {
+    let full_extent = HeadlessViewerGpuExtent { width: 3840, height: 2160 };
+    let passing = evaluate_multilayer_playback(
+        2,
+        10,
+        20,
+        0,
+        10,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+        &full_extent,
+    );
+    assert!(passing.passed, "{:?}", passing.failures);
+
+    let passthrough = evaluate_multilayer_playback(
+        2,
+        10,
+        10,
+        10,
+        0,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+        &full_extent,
+    );
+    assert!(!passthrough.passed);
+    assert_eq!(
+        passthrough.failures,
+        vec![
+            "multilayer_media_execution_incomplete",
+            "multilayer_used_passthrough",
+            "multilayer_native_composite_incomplete",
+        ]
+    );
+}
+
+#[test]
 fn continuous_playback_window_reports_early_end_and_short_duration_without_bailing() {
     let mut playback = PlaybackEvidenceCollector::default().report();
     playback.first_epoch = Some(7);
@@ -1703,6 +1750,7 @@ struct PreviewMediaPlaybackPerfReport {
     authored_output: PreviewMediaAuthoredOutputEvidence,
     pause_seek_resume_probe: Option<PreviewPauseSeekResumeEvidence>,
     playback_resize_probe: Option<PreviewPlaybackResizeEvidence>,
+    multilayer_playback: Option<PreviewMultilayerPlaybackEvidence>,
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     /// GPU work owned by the uninterrupted playback window only.
@@ -1770,6 +1818,19 @@ struct PreviewPlaybackResizeEvidence {
     presentation_geometry_valid: bool,
     authored_output_unchanged: bool,
     readiness: PreviewReadinessCounts,
+    authored_full_gpu_extent_exact: bool,
+    passed: bool,
+    failures: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewMultilayerPlaybackEvidence {
+    expected_layers_per_frame: u32,
+    rendered_frames: usize,
+    expected_media_layer_executions: u64,
+    observed_media_layer_executions: u64,
+    gpu_passthrough_frames: u64,
+    gpu_native_composites: u64,
     authored_full_gpu_extent_exact: bool,
     passed: bool,
     failures: Vec<&'static str>,
@@ -1879,6 +1940,50 @@ fn evaluate_playback_resize(
     }
 }
 
+fn evaluate_multilayer_playback(
+    expected_layers_per_frame: u32,
+    rendered_frames: usize,
+    observed_media_layer_executions: u64,
+    gpu_passthrough_frames: u64,
+    gpu_native_composites: u64,
+    gpu_output_extents: &[HeadlessViewerGpuExtent],
+    authored_full_extent: &HeadlessViewerGpuExtent,
+) -> PreviewMultilayerPlaybackEvidence {
+    let expected_media_layer_executions =
+        (rendered_frames as u64).saturating_mul(u64::from(expected_layers_per_frame));
+    let mut failures = Vec::new();
+    if rendered_frames == 0 {
+        failures.push("multilayer_no_gpu_frames");
+    }
+    if expected_layers_per_frame < 2
+        || observed_media_layer_executions != expected_media_layer_executions
+    {
+        failures.push("multilayer_media_execution_incomplete");
+    }
+    if gpu_passthrough_frames > 0 {
+        failures.push("multilayer_used_passthrough");
+    }
+    if gpu_native_composites < rendered_frames as u64 {
+        failures.push("multilayer_native_composite_incomplete");
+    }
+    let authored_full_gpu_extent_exact = !gpu_output_extents.is_empty()
+        && gpu_output_extents.iter().all(|extent| extent == authored_full_extent);
+    if !authored_full_gpu_extent_exact {
+        failures.push("multilayer_authored_full_gpu_extent_changed");
+    }
+    PreviewMultilayerPlaybackEvidence {
+        expected_layers_per_frame,
+        rendered_frames,
+        expected_media_layer_executions,
+        observed_media_layer_executions,
+        gpu_passthrough_frames,
+        gpu_native_composites,
+        authored_full_gpu_extent_exact,
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct ContinuousPlaybackWindowEvidence {
     target_observations: usize,
@@ -1928,6 +2033,7 @@ struct PreviewMediaPlaybackProbeConfig {
     seek_probe_count: usize,
     resume_probe_frames: usize,
     resize_probe_frames: usize,
+    video_layer_count: u32,
     probe_cancellation_recovery: bool,
     native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy,
     absolute_deadline: Option<Instant>,
@@ -3463,6 +3569,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             seek_probe_count: 0,
             resume_probe_frames: 0,
             resize_probe_frames: 0,
+            video_layer_count: 1,
             probe_cancellation_recovery: false,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -3520,7 +3627,23 @@ fn preview_media_external_continuous_playback_smoke() -> anyhow::Result<()> {
         );
         return Ok(());
     };
-    run_external_continuous_playback_gate(video_path, false)
+    run_external_continuous_playback_gate(video_path, false, 1)
+}
+
+#[test]
+#[ignore = "development Source-Full dual-video playback/composite smoke; run manually"]
+fn preview_media_external_dual_video_playback_smoke() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let Some(video_path) = std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_DUAL_VIDEO_MEDIA_PATH")
+        .or_else(|| std::env::var_os("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_MEDIA_PATH"))
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!(
+            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_external_dual_video_playback\",\"skipped\":\"MONDRIAN_PREVIEW_EXTERNAL_DUAL_VIDEO_MEDIA_PATH not set\"}}"
+        );
+        return Ok(());
+    };
+    run_external_continuous_playback_gate(video_path, false, 2)
 }
 
 #[test]
@@ -4623,7 +4746,7 @@ fn run_headless_realtime_interval(
                 attempt.output_binding,
             );
         }
-        if driver.candidate_status == HeadlessGpuCandidateStatus::Ready {
+        if headless_candidate_may_prepare_successor(driver.candidate_status) {
             let successor_intent = state
                 .preview_successor_execution_request(Instant::now())
                 .map(|request| request.snapshot().transport().playback_intent());
@@ -4973,7 +5096,7 @@ fn preview_media_professional_4k_hevc_main10_hardware_playback_gate() -> anyhow:
             .context(
                 "MONDRIAN_PREVIEW_PROFESSIONAL_4K_HEVC_MAIN10_MEDIA_PATH is required; this gate never skips",
             )?;
-    run_external_continuous_playback_gate(video_path, true)
+    run_external_continuous_playback_gate(video_path, true, 1)
 }
 
 #[test]
@@ -5028,6 +5151,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             seek_probe_count: QUALIFICATION_SEEK_PROBES,
             resume_probe_frames: 12,
             resize_probe_frames: 8,
+            video_layer_count: 1,
             probe_cancellation_recovery: true,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -5213,7 +5337,12 @@ fn preview_media_external_accelerated_native_surface_endurance_probe() -> anyhow
 fn run_external_continuous_playback_gate(
     video_path: PathBuf,
     professional: bool,
+    video_layer_count: u32,
 ) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        matches!(video_layer_count, 1 | 2),
+        "external playback gate supports one or two video layers"
+    );
     anyhow::ensure!(
         video_path.exists(),
         "external playback media path does not exist: {}",
@@ -5340,11 +5469,19 @@ fn run_external_continuous_playback_gate(
     let deadline = Instant::now() + overall_timeout;
     let scenario = if professional {
         "preview_media_professional_4k_hevc_main10_hardware_playback"
+    } else if video_layer_count == 2 {
+        "preview_media_external_dual_video_playback"
     } else {
         "preview_media_external_continuous_playback"
     };
     let seek_probe_count = if professional {
         PROFESSIONAL_MIN_WARM_SEEKS.saturating_add(PROFESSIONAL_MIN_ACCURATE_SEEKS) as usize
+    } else if video_layer_count == 2 {
+        std::env::var("MONDRIAN_PREVIEW_EXTERNAL_SEEK_PROBES")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(8)
+            .min(200)
     } else {
         std::env::var("MONDRIAN_PREVIEW_EXTERNAL_SEEK_PROBES")
             .ok()
@@ -5355,7 +5492,8 @@ fn run_external_continuous_playback_gate(
     let source_frame_count = media_info
         .primary_video()
         .and_then(|video| video.total_frames)
-        .and_then(|frames| usize::try_from(frames).ok());
+        .and_then(|frames| usize::try_from(frames).ok())
+        .map(|frames| frames.saturating_sub((video_layer_count - 1) as usize));
     let resume_probe_frames = if seek_probe_count == 0 {
         0
     } else if professional {
@@ -5391,6 +5529,7 @@ fn run_external_continuous_playback_gate(
             seek_probe_count,
             resume_probe_frames,
             resize_probe_frames: if seek_probe_count == 0 { 0 } else { 8 },
+            video_layer_count,
             probe_cancellation_recovery: professional,
             native_video_gpu_timing: if professional {
                 PreviewNativeVideoGpuTimingPolicy::Strict {
@@ -5854,6 +5993,16 @@ fn run_preview_media_continuous_playback_probe(
         Some(media_info),
         config.sequence_frame_count,
     )?;
+    if config.video_layer_count > 1 {
+        let sequence_id = state
+            .active_sequence_id()
+            .context("multilayer playback probe has no active Sequence")?;
+        state.commit_sequence_edit(
+            sequence_id,
+            "配置双视频轨播放探针",
+            configure_preview_media_dual_video_layers,
+        )?;
+    }
     if config.authored_output == PreviewMediaAuthoredOutput::SourceFull {
         let sequence_id = state
             .active_sequence_id()
@@ -6267,6 +6416,23 @@ fn run_preview_media_continuous_playback_probe(
     // warm, accurate, and superseded seek samples. The continuous-window
     // snapshot remains independently embedded in `continuous_playback_window`.
     let playback_evidence = state.playback_evidence_report();
+    let multilayer_playback = (config.video_layer_count > 1).then(|| {
+        evaluate_multilayer_playback(
+            config.video_layer_count,
+            headless_gpu.rendered_frames,
+            u64::from(headless_gpu.rendered_decode_execution.media_layers),
+            headless_gpu.compositing_diagnostics.gpu_passthrough_frames,
+            headless_gpu.compositing_diagnostics.gpu_native_composites,
+            &headless_gpu.output_extents,
+            &authored_output.full_extent,
+        )
+    });
+    if let Some(multilayer) = multilayer_playback.as_ref() {
+        anyhow::ensure!(
+            multilayer.passed,
+            "multilayer playback gate failed: {multilayer:?}"
+        );
+    }
     let report = PreviewMediaPlaybackPerfReport {
         scenario: config.scenario,
         frames: config.frame_count,
@@ -6275,6 +6441,7 @@ fn run_preview_media_continuous_playback_probe(
         authored_output,
         pause_seek_resume_probe,
         playback_resize_probe,
+        multilayer_playback,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
@@ -7197,6 +7364,35 @@ fn headless_candidate_is_ready_for_sample(
         && output_binding_matches
 }
 
+fn headless_candidate_may_prepare_successor(status: HeadlessGpuCandidateStatus) -> bool {
+    matches!(
+        status,
+        HeadlessGpuCandidateStatus::Ready | HeadlessGpuCandidateStatus::QueuedReady
+    )
+}
+
+#[test]
+fn queue_published_current_frame_can_fill_the_next_gpu_submission_slot() {
+    assert!(headless_candidate_may_prepare_successor(
+        HeadlessGpuCandidateStatus::Ready
+    ));
+    assert!(headless_candidate_may_prepare_successor(
+        HeadlessGpuCandidateStatus::QueuedReady
+    ));
+    for status in [
+        HeadlessGpuCandidateStatus::Loading,
+        HeadlessGpuCandidateStatus::InFlight,
+        HeadlessGpuCandidateStatus::Backpressured,
+        HeadlessGpuCandidateStatus::DroppedLate,
+        HeadlessGpuCandidateStatus::Unavailable,
+    ] {
+        assert!(
+            !headless_candidate_may_prepare_successor(status),
+            "{status:?} must not speculate from an unpresented current frame"
+        );
+    }
+}
+
 impl HeadlessGpuCandidateIntent {
     fn from_state(state: &AppState) -> Self {
         let playback = state.playback_engine.snapshot();
@@ -7873,6 +8069,27 @@ fn execute_headless_gpu_candidate_at(
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
     already_visible_at: Option<Instant>,
 ) -> anyhow::Result<HeadlessGpuCandidateAttempt> {
+    execute_headless_gpu_candidate_after_completion_drain(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        gpu_completion_deadline,
+        already_visible_at,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_headless_gpu_candidate_after_completion_drain(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    gpu_completion_deadline: HeadlessGpuCompletionDeadline,
+    already_visible_at: Option<Instant>,
+    may_continue_after_completion: bool,
+) -> anyhow::Result<HeadlessGpuCandidateAttempt> {
     let submission_was_in_flight = gpu_adapter.has_submission_in_flight();
     let candidate = if already_visible_at.is_some() {
         present_headless_preview_candidate_at(
@@ -7922,14 +8139,18 @@ fn execute_headless_gpu_candidate_at(
                     let output_key = preview_service
                         .registered_gpu_output_key()
                         .context("current Headless GPU output omitted its Runtime binding")?;
+                    // Queue-order promotion is a completed presentation fact
+                    // even when an older submitted owner's callback still
+                    // retains cleanup authority. Keep publication evidence
+                    // independent from physical-owner retirement state.
+                    gpu_summary.record_current_output_presentation(completed_demand);
                     if gpu_adapter.has_submission_in_flight() {
                         (
                             HeadlessGpuCandidateStatus::QueuedReady,
-                            HeadlessGpuCandidateBindingUpdate::Preserve,
+                            HeadlessGpuCandidateBindingUpdate::SatisfiedIntent,
                             HeadlessGpuCandidateOutputBindingUpdate::Gpu(output_key),
                         )
                     } else {
-                        gpu_summary.record_current_output_presentation(completed_demand);
                         (
                             HeadlessGpuCandidateStatus::Ready,
                             HeadlessGpuCandidateBindingUpdate::SatisfiedIntent,
@@ -7963,6 +8184,21 @@ fn execute_headless_gpu_candidate_at(
                 ),
             };
             gpu_summary.record(*execution, publication, completed_demand);
+            if may_continue_after_completion {
+                // Window polls one completed owner and then continues the same
+                // prepare turn. Model that production ordering here: callback
+                // cleanup must not manufacture a one-frame Loading state when
+                // the exact current queue-ordered output is already visible.
+                return execute_headless_gpu_candidate_after_completion_drain(
+                    preview_service,
+                    state,
+                    gpu_adapter,
+                    gpu_summary,
+                    gpu_completion_deadline,
+                    already_visible_at,
+                    false,
+                );
+            }
             Ok(HeadlessGpuCandidateAttempt {
                 status: HeadlessGpuCandidateStatus::Loading,
                 binding: HeadlessGpuCandidateBindingUpdate::RetryCurrentIntent,
@@ -8239,6 +8475,35 @@ fn configure_preview_media_authored_output(
     settings.resolution = source_resolution;
     settings.preview.resolution_scale = 1.0;
     sequence.apply_settings(settings)
+}
+
+fn configure_preview_media_dual_video_layers(sequence: &mut Sequence) -> mondrian_core::Result<()> {
+    let first_clip = sequence
+        .video_tracks
+        .first()
+        .and_then(|track| track.clips.first())
+        .ok_or_else(|| mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "configure_preview_media_dual_video_layers".to_owned(),
+            reason: "primary video Track has no media Clip".to_owned(),
+        })?;
+    let asset_id = first_clip.media_asset_id().ok_or_else(|| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "configure_preview_media_dual_video_layers".to_owned(),
+            reason: "primary video Clip is not file-backed media".to_owned(),
+        }
+    })?;
+    let position = first_clip.position;
+    let duration = first_clip.duration;
+    let mut second_clip = Clip::new(asset_id, position, duration)?;
+    second_clip.set_source_origin(tt(1, sequence.time_base()))?;
+    let track_id = sequence.add_video_track();
+    let track = sequence.video_track_mut(track_id).ok_or_else(|| {
+        mondrian_core::MondrianError::WorkflowStepFailed {
+            step_id: "configure_preview_media_dual_video_layers".to_owned(),
+            reason: "new video Track was not retained by the Sequence".to_owned(),
+        }
+    })?;
+    track.add_clip(second_clip)
 }
 
 fn canonical_preview_probe_sequence_frame_rate(frame_rate: Rational) -> anyhow::Result<Rational> {

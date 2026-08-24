@@ -1430,9 +1430,15 @@ backpressure before the final Viewer submit, the Adapter converts its reserved
 permit into a typed renderer-cleanup barrier; the same worker drives latest
 renderer-internal queue work and wakes one retry, instead of issuing an
 unindexed Viewer completion poll on the UI/Headless thread.
-The lifecycle and renderer-resource grant remain capacity one; the two progress
-permits cover callback/worker handoff and cleanup only, not a second publishable
-frame slot.
+The lifecycle, device-progress permits, and renderer-resource grant share one
+bounded two-owner capacity: the exact current frame plus one immediate
+successor. Queue-ordered ordinary output may populate the successor physical
+slot before the older callback retires. A current-frame promotion therefore
+continues successor preparation while the older owner is still active, but a
+third submission is backpressured. Cancellation, Window cleanup, and a device
+generation terminal quarantine every active identity; cleanup remains deferred
+until each exact callback (or typed device-loss retirement proof) releases its
+owner.
 
 A unique `set_device_lost_callback` is installed immediately after
 `request_device`, before any runtime or queue consumer. It can terminalize an
@@ -1482,8 +1488,8 @@ Headless bounded-pump backlog bypasses that wait and immediately performs the
 next drain; a candidate-only retry fact is sufficient to rebuild an unchanged
 Loading intent after a completion releases capacity. The performance and
 Golden presentation callers also pass one non-renewing outer monotonic deadline
-through the Headless presentation coordinator into one capacity-one GPU
-submission lifecycle. Ordinary complete-GPU output may become usable after its
+through the Headless presentation coordinator into the same bounded two-owner
+GPU submission lifecycle. Ordinary complete-GPU output may become usable after its
 queue-ordered publication, while heterogeneous output waits for exact callback
 validation. Reaching the non-renewing lifecycle deadline is terminal for
 publication authority rather than trapping or renewing the outer timeout loop:
@@ -1638,6 +1644,18 @@ Continuous-playback decode failure extraction is scoped to PlaybackCursor plus
 global fatal scheduler/worker failures. Random-access still and scrub latency
 remain visible in the full diagnostic report but cannot fail a playback-only
 gate; their dedicated probes own those budgets.
+
+The external dual-video smoke gate authors two overlapping Source-Full video
+tracks from one real source while slipping the second source by one frame, so
+every Timeline frame requires two distinct media identities. It drives
+continuous playback, cross-region seek, pause/seek/resume, and Viewer resize
+through the production Headless coordinator. Passing requires exact Ready
+observations, two media-layer executions per rendered frame, native GPU
+compositing with no passthrough/readback/fallback, complete GPU completion and
+publication evidence, and zero native decoder sources after the final active
+submission retires. Native sources retained while the immediate successor is
+still submitted are reported separately as bounded pipeline residency rather
+than misclassified as completed-owner leaks.
 
 Source-Full real-media qualification also owns an interleaved playback/resize
 gate. It drives the production `AppUiAppRoot` and `ViewerSurface` layout through

@@ -793,6 +793,21 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
                 .is_some_and(|(prepared, _)| *prepared == intent)
     }
 
+    /// GPU output identity of the prepared successor proved for the exact
+    /// current transport intent.
+    pub(crate) fn exact_prepared_successor_gpu_output_key_for_intent(
+        &self,
+        intent: PreviewPlaybackIntent,
+    ) -> Option<&K> {
+        if !self.has_prepared_successor_for_intent(intent) {
+            return None;
+        }
+        self.prepared_successor.as_ref().and_then(|(_, prepared)| match prepared {
+            PreparedPreviewOutput::Gpu { key, .. } => Some(key),
+            PreparedPreviewOutput::Transparent => None,
+        })
+    }
+
     /// Promote only the successor proved for the exact current transport intent.
     pub(crate) fn promote_prepared_successor_for_intent(
         &mut self,
@@ -1124,6 +1139,7 @@ mod tests {
             3,
             10,
         );
+        let skipped_successor = PreviewPlaybackIntent::new(successor.epoch, 3, 11);
         coordinator.register_prepared_successor(successor, 10, "physical:successor");
 
         assert_eq!(
@@ -1131,6 +1147,14 @@ mod tests {
             Some((&9, &"physical:current"))
         );
         assert!(coordinator.has_prepared_successor_for_intent(successor));
+        assert_eq!(
+            coordinator.exact_prepared_successor_gpu_output_key_for_intent(successor),
+            Some(&10)
+        );
+        assert_eq!(
+            coordinator.exact_prepared_successor_gpu_output_key_for_intent(skipped_successor),
+            None
+        );
         assert_eq!(
             coordinator.plan_candidate(Some(&9)),
             PreviewCandidateDecision::Current

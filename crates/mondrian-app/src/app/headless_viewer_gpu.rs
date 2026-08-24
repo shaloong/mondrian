@@ -192,6 +192,11 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub native_import_bridge_entries: usize,
     /// Decoder sources still retained after observing GPU completion.
     pub native_import_retained_sources: usize,
+    /// Other submitted owners still active after this exact completion.
+    ///
+    /// Native sources retained in this state belong to later pipelined work;
+    /// only residency observed with this value at zero is an orphan/leak.
+    pub remaining_submissions_after_completion: usize,
 }
 
 /// One completed Headless Viewer candidate plus optional typed heterogeneous
@@ -265,7 +270,7 @@ pub(crate) struct HeadlessViewerGpuOutput {
 /// The exact GPU work for one Viewer frame is millisecond-scale; a bounded
 /// safety window must therefore be much shorter than any caller observation
 /// deadline. When the work-done callback is lost, this deadline starts the
-/// quarantine and the bounded release grace frees the capacity-one slot, so a
+/// quarantine and the bounded release grace frees the exact slot, so a
 /// single lost callback cannot stall the pipeline for the caller's full wait.
 pub(crate) const HEADLESS_GPU_COMPLETION_SAFETY_DEADLINE: std::time::Duration =
     std::time::Duration::from_secs(2);
@@ -429,13 +434,13 @@ struct HeadlessViewerGpuGenerationRetirement {
     _queue: wgpu::Queue,
     _timestamp_ring: Option<GpuTimestampQueryRing>,
     _physical_outputs: HeadlessViewerGpuOutputSlots,
-    _completed_submission: Option<
+    _completed_submissions: Vec<
         ViewerGpuCompletedSubmission<
             HeadlessViewerGpuSubmissionOwner,
             ViewerHeterogeneousGpuCompletedBatch,
         >,
     >,
-    _lost_submission_owner: Option<HeadlessViewerGpuSubmissionOwner>,
+    _lost_submission_owners: Vec<HeadlessViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
     native_device_removed_logged: bool,
 }
@@ -472,30 +477,29 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
         let native_copy_ready =
             native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
-        if self._completed_submission.is_none() && self._lost_submission_owner.is_none() {
-            match self.lifecycle.poll(Instant::now()) {
-                ViewerGpuSubmissionPoll::Completed(completed) => {
-                    self._completed_submission = Some(completed);
-                }
-                ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
-                    tracing::warn!(
-                        submission_id = retired.submission_id.get(),
-                        reason = ?retired.reason,
-                        "Headless Viewer force-retired a quarantined GPU submission whose completion callback was lost"
-                    );
-                    self._lost_submission_owner = Some(retired.owner);
-                }
-                ViewerGpuSubmissionPoll::Idle
-                | ViewerGpuSubmissionPoll::Pending { .. }
-                | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
+        match self.lifecycle.poll(Instant::now()) {
+            ViewerGpuSubmissionPoll::Completed(completed) => {
+                self._completed_submissions.push(completed);
             }
+            ViewerGpuSubmissionPoll::RetiredAfterQuarantine(retired) => {
+                tracing::warn!(
+                    submission_id = retired.submission_id.get(),
+                    reason = ?retired.reason,
+                    "Headless Viewer force-retired a quarantined GPU submission whose completion callback was lost"
+                );
+                self._lost_submission_owners.push(retired.owner);
+            }
+            ViewerGpuSubmissionPoll::Idle
+            | ViewerGpuSubmissionPoll::Pending { .. }
+            | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
         }
 
         if native_copy_ready
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
-            self._lost_submission_owner = self.lifecycle.retire_owner_after_wgpu_device_loss();
+            self._lost_submission_owners
+                .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
         native_copy_ready && !self.lifecycle.is_occupied()
@@ -524,8 +528,8 @@ impl Drop for HeadlessViewerGpuAdapter {
             _queue: self.queue.clone(),
             _timestamp_ring: self.timestamp_ring.take(),
             _physical_outputs: std::mem::take(&mut self.physical_outputs),
-            _completed_submission: None,
-            _lost_submission_owner: None,
+            _completed_submissions: Vec::new(),
+            _lost_submission_owners: Vec::new(),
             native_retirement_error_logged: false,
             native_device_removed_logged: false,
         };
@@ -828,7 +832,7 @@ impl HeadlessViewerGpuAdapter {
         let reservation = self.submission_lifecycle.reserve().map_err(|error| match error {
             ViewerGpuSubmissionAdmissionError::Backpressured => {
                 HeadlessViewerGpuError::Backpressure(
-                    "the single Viewer GPU submission slot is occupied".to_owned(),
+                    "the bounded Viewer GPU submission capacity is full".to_owned(),
                 )
             }
             ViewerGpuSubmissionAdmissionError::IdentityExhausted => {
@@ -858,8 +862,8 @@ impl HeadlessViewerGpuAdapter {
         if self.timestamp_ring.is_some() {
             // `GpuTimestampQueryRing::begin_frame` performs the existing
             // non-blocking telemetry poll. Reservation has not committed an
-            // in-flight Viewer owner and the prior capacity-one owner was
-            // already retired, so this cannot become a second Viewer
+            // in-flight Viewer owner beyond the bounded submission capacity,
+            // so this cannot become an unindexed Viewer
             // completion driver. Native-prefix callbacks made ready by that
             // poll must be collected before either success or error is
             // propagated.
@@ -984,6 +988,7 @@ impl HeadlessViewerGpuAdapter {
                 native_import_contract_pools,
                 native_import_bridge_entries,
                 native_import_retained_sources,
+                remaining_submissions_after_completion: 0,
             },
             frame,
             queued_publication: None,
@@ -996,7 +1001,7 @@ impl HeadlessViewerGpuAdapter {
         // The completion deadline is a frame-level safety bound, not the
         // caller's overall observation deadline. A lost work-done callback
         // must quarantine the submission within this window and force-release
-        // the capacity-one slot shortly after, so the presentation pipeline
+        // its exact bounded slot shortly after, so the presentation pipeline
         // can continue; the caller's own (much longer) deadline then observes
         // the recovery instead of racing the slot release.
         let completion_deadline =
@@ -1216,6 +1221,20 @@ impl HeadlessViewerGpuAdapter {
         self.physical_outputs.take_prepared().is_some()
     }
 
+    /// Retire a prepared physical output that is no longer proved by Preview's
+    /// active semantic generation.
+    pub(crate) fn retire_stale_prepared_physical_output(
+        &mut self,
+        expected_output_key: Option<&crate::app::preview_execution::PreviewOutputKey>,
+    ) -> Option<(
+        crate::app::preview_execution::PreviewOutputKey,
+        HeadlessViewerGpuOutput,
+    )> {
+        self.physical_outputs
+            .retire_prepared_unless(expected_output_key)
+            .map(ViewerGpuPhysicalPublication::into_key_and_artifact)
+    }
+
     /// Clear only the physical publication produced by one exact submission.
     ///
     /// A late callback or cleanup failure from an older submission must not
@@ -1245,20 +1264,22 @@ impl HeadlessViewerGpuAdapter {
         &mut self,
         reason: String,
     ) -> (
-        Option<ViewerGpuSubmissionId>,
+        Vec<ViewerGpuSubmissionId>,
         [Option<(
             crate::app::preview_execution::PreviewOutputKey,
             HeadlessViewerGpuOutput,
         )>; 2],
     ) {
-        let active_submission = self.submission_lifecycle.current_submission_id();
-        if active_submission.is_some() {
-            let _ = self.submission_lifecycle.quarantine_after_device_failure(reason);
-        }
+        let active_submissions = self
+            .submission_lifecycle
+            .quarantine_all_after_device_failure(reason)
+            .into_iter()
+            .map(|quarantine| quarantine.submission_id)
+            .collect();
         let revoked_outputs = self.physical_outputs.drain().map(|publication| {
             publication.map(ViewerGpuPhysicalPublication::into_key_and_artifact)
         });
-        (active_submission, revoked_outputs)
+        (active_submissions, revoked_outputs)
     }
 
     /// Whether the exact ordinary submission already ran queue-ordered
@@ -1330,8 +1351,9 @@ impl HeadlessViewerGpuAdapter {
         if self.submission_lifecycle.owner(submission_id).is_none() {
             return (None, None);
         }
-        let quarantine =
-            self.submission_lifecycle.quarantine_after_authority_revocation(reason.into());
+        let quarantine = self
+            .submission_lifecycle
+            .quarantine_submission_after_authority_revocation(submission_id, reason.into());
         let revoked_current_physical_output =
             self.take_physical_output_for_submission(submission_id);
         (quarantine, revoked_current_physical_output)
@@ -1351,6 +1373,11 @@ impl HeadlessViewerGpuAdapter {
     /// Whether a submitted owner still occupies the renderer frame slot.
     pub(crate) fn has_submission_in_flight(&self) -> bool {
         self.submission_lifecycle.is_occupied()
+    }
+
+    /// Whether both bounded submitted-owner slots are occupied.
+    pub(crate) fn submission_capacity_is_full(&self) -> bool {
+        self.submission_lifecycle.is_at_capacity()
     }
 
     /// Typed terminal state of this concrete device generation.
@@ -1373,7 +1400,7 @@ impl HeadlessViewerGpuAdapter {
         let mut progress_observed = false;
         let mut observation_time = now;
         let mut device_failure = None;
-        let mut callback_barrier_observed = false;
+        let mut callback_barrier = None;
         while let Some(observation) = self.device_progress.try_observe() {
             progress_observed = true;
             match observation {
@@ -1383,11 +1410,12 @@ impl HeadlessViewerGpuAdapter {
                 } => {
                     // This observation carries no completion authority. An
                     // older wait may arrive after its callback opened the next
-                    // capacity-one slot, so only let the exact active identity
+                    // bounded slots, so only let the exact active identity
                     // influence this lifecycle observation.
-                    if self.submission_lifecycle.current_submission_id() == Some(submission_id) {
+                    if self.submission_lifecycle.contains(submission_id) {
                         observation_time = observation_time.max(observed_at);
-                        callback_barrier_observed = true;
+                        callback_barrier = Some((submission_id, observed_at));
+                        break;
                     }
                 }
                 ViewerGpuDeviceProgressObservation::RendererCleanupSatisfied { .. } => {
@@ -1414,11 +1442,11 @@ impl HeadlessViewerGpuAdapter {
         if progress_observed {
             self.collect_native_import_gpu_timings_after_device_poll();
         }
-        let initial = if callback_barrier_observed {
+        let initial = if let Some((submission_id, observed_at)) = callback_barrier {
             match self.submission_lifecycle.poll(observation_time) {
                 ViewerGpuSubmissionPoll::Pending { .. } => self
                     .submission_lifecycle
-                    .retire_after_fence_barrier(observation_time)
+                    .retire_submission_after_fence_barrier(submission_id, observed_at)
                     .unwrap_or_else(|| {
                         self.submission_lifecycle.poll_deadline_only(observation_time)
                     }),
@@ -1448,8 +1476,11 @@ impl HeadlessViewerGpuAdapter {
                     headless_viewer_gpu_generation_failure_context(failed_submission_id),
                     submission_id.get()
                 );
-                if let Some(quarantine) =
-                    self.submission_lifecycle.quarantine_after_device_failure(generation_reason)
+                if let Some(quarantine) = self
+                    .submission_lifecycle
+                    .quarantine_all_after_device_failure(generation_reason)
+                    .into_iter()
+                    .next()
                 {
                     let revoked_current_physical_output =
                         self.take_physical_output_for_submission(quarantine.submission_id);
@@ -1576,6 +1607,8 @@ impl HeadlessViewerGpuAdapter {
         owner.execution.native_import_bridge_entries = native_import_bridge_entries;
         owner.execution.native_import_retained_sources =
             self.runtime.native_import_retained_source_count();
+        owner.execution.remaining_submissions_after_completion =
+            self.submission_lifecycle.active_count();
         let heterogeneous_completion = (!completion.is_empty()).then_some(completion);
         let quarantine_reason = quarantine_reason.or(retirement_reason);
         let revoked_current_physical_output = if quarantine_reason.is_some() {
