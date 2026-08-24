@@ -220,7 +220,7 @@ struct PreviewMediaPerfReport {
     cases: Vec<PerfCaseReport>,
 }
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Default)]
 struct PreviewReadinessCounts {
     ready: usize,
     loading: usize,
@@ -231,7 +231,7 @@ struct PreviewReadinessCounts {
     missed_deadline: usize,
 }
 
-#[derive(Debug, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Default, PartialEq, Eq)]
 struct HeadlessViewerGpuExtent {
     width: u32,
     height: u32,
@@ -1578,6 +1578,66 @@ fn pause_seek_resume_gate_requires_exact_forward_progress() {
 }
 
 #[test]
+fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
+    let authored_full_extent = HeadlessViewerGpuExtent { width: 3840, height: 2160 };
+    let passing = evaluate_playback_resize(
+        8,
+        8,
+        20,
+        28,
+        Some(17),
+        Some(17),
+        4,
+        true,
+        true,
+        PreviewReadinessCounts { ready: 8, ..PreviewReadinessCounts::default() },
+        &authored_full_extent,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+    );
+    assert!(passing.passed, "{:?}", passing.failures);
+
+    let unchanged_geometry = evaluate_playback_resize(
+        8,
+        8,
+        20,
+        28,
+        Some(17),
+        Some(17),
+        1,
+        true,
+        true,
+        PreviewReadinessCounts { ready: 8, ..PreviewReadinessCounts::default() },
+        &authored_full_extent,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+    );
+    assert!(!unchanged_geometry.passed);
+    assert_eq!(
+        unchanged_geometry.failures,
+        vec!["viewer_geometry_unchanged"]
+    );
+
+    let scaled_gpu_output = evaluate_playback_resize(
+        8,
+        8,
+        20,
+        28,
+        Some(17),
+        Some(17),
+        4,
+        true,
+        true,
+        PreviewReadinessCounts { ready: 8, ..PreviewReadinessCounts::default() },
+        &authored_full_extent,
+        &[HeadlessViewerGpuExtent { width: 1920, height: 1080 }],
+    );
+    assert!(!scaled_gpu_output.passed);
+    assert_eq!(
+        scaled_gpu_output.failures,
+        vec!["authored_full_gpu_extent_changed"]
+    );
+}
+
+#[test]
 fn continuous_playback_window_reports_early_end_and_short_duration_without_bailing() {
     let mut playback = PlaybackEvidenceCollector::default().report();
     playback.first_epoch = Some(7);
@@ -1642,12 +1702,15 @@ struct PreviewMediaPlaybackPerfReport {
     media_probe: PreviewPlaybackMediaProbeReport,
     authored_output: PreviewMediaAuthoredOutputEvidence,
     pause_seek_resume_probe: Option<PreviewPauseSeekResumeEvidence>,
+    playback_resize_probe: Option<PreviewPlaybackResizeEvidence>,
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     /// GPU work owned by the uninterrupted playback window only.
     headless_gpu: HeadlessViewerGpuExecutionSummary,
     /// Settled seek/cancellation/final-candidate work after the window froze.
     headless_gpu_post_window: HeadlessViewerGpuExecutionSummary,
+    /// Real GPU work performed while the production Viewer layout changes size.
+    headless_gpu_resize: HeadlessViewerGpuExecutionSummary,
     cancellation_recovery_probe: Option<PreviewCancellationRecoveryEvidence>,
     real_media_gates: Option<PreviewExternalPlaybackGateReport>,
     qualification_media_gates: Option<PreviewPlaybackQualificationGateReport>,
@@ -1695,6 +1758,23 @@ struct PreviewPauseSeekResumeEvidence {
     failures: Vec<&'static str>,
 }
 
+#[derive(Debug, Serialize)]
+struct PreviewPlaybackResizeEvidence {
+    requested_observations: usize,
+    observed_observations: usize,
+    start_frame: i64,
+    end_frame: i64,
+    first_epoch: Option<u64>,
+    last_epoch: Option<u64>,
+    unique_presentation_extents: usize,
+    presentation_geometry_valid: bool,
+    authored_output_unchanged: bool,
+    readiness: PreviewReadinessCounts,
+    authored_full_gpu_extent_exact: bool,
+    passed: bool,
+    failures: Vec<&'static str>,
+}
+
 fn evaluate_pause_seek_resume(
     requested_observations: usize,
     observed_observations: usize,
@@ -1730,6 +1810,70 @@ fn evaluate_pause_seek_resume(
         first_epoch,
         last_epoch,
         readiness,
+        passed: failures.is_empty(),
+        failures,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_playback_resize(
+    requested_observations: usize,
+    observed_observations: usize,
+    start_frame: i64,
+    end_frame: i64,
+    first_epoch: Option<u64>,
+    last_epoch: Option<u64>,
+    unique_presentation_extents: usize,
+    presentation_geometry_valid: bool,
+    authored_output_unchanged: bool,
+    readiness: PreviewReadinessCounts,
+    authored_full_extent: &HeadlessViewerGpuExtent,
+    gpu_output_extents: &[HeadlessViewerGpuExtent],
+) -> PreviewPlaybackResizeEvidence {
+    let mut failures = Vec::new();
+    if observed_observations != requested_observations {
+        failures.push("resize_observation_window_incomplete");
+    }
+    if end_frame <= start_frame {
+        failures.push("resize_no_forward_progress");
+    }
+    if first_epoch.is_none() || first_epoch != last_epoch {
+        failures.push("resize_epoch_changed");
+    }
+    if unique_presentation_extents < 2 {
+        failures.push("viewer_geometry_unchanged");
+    }
+    if !presentation_geometry_valid {
+        failures.push("viewer_geometry_invalid");
+    }
+    if !authored_output_unchanged {
+        failures.push("authored_output_changed_during_resize");
+    }
+    if readiness.ready != requested_observations
+        || readiness.loading > 0
+        || readiness.stale > 0
+        || readiness.unavailable > 0
+        || readiness.missed_deadline > 0
+    {
+        failures.push("resize_not_all_ready");
+    }
+    let authored_full_gpu_extent_exact = !gpu_output_extents.is_empty()
+        && gpu_output_extents.iter().all(|extent| extent == authored_full_extent);
+    if !authored_full_gpu_extent_exact {
+        failures.push("authored_full_gpu_extent_changed");
+    }
+    PreviewPlaybackResizeEvidence {
+        requested_observations,
+        observed_observations,
+        start_frame,
+        end_frame,
+        first_epoch,
+        last_epoch,
+        unique_presentation_extents,
+        presentation_geometry_valid,
+        authored_output_unchanged,
+        readiness,
+        authored_full_gpu_extent_exact,
         passed: failures.is_empty(),
         failures,
     }
@@ -1783,6 +1927,7 @@ struct PreviewMediaPlaybackProbeConfig {
     ready_timeout: Duration,
     seek_probe_count: usize,
     resume_probe_frames: usize,
+    resize_probe_frames: usize,
     probe_cancellation_recovery: bool,
     native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy,
     absolute_deadline: Option<Instant>,
@@ -3317,6 +3462,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             ready_timeout,
             seek_probe_count: 0,
             resume_probe_frames: 0,
+            resize_probe_frames: 0,
             probe_cancellation_recovery: false,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -4881,6 +5027,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             ready_timeout,
             seek_probe_count: QUALIFICATION_SEEK_PROBES,
             resume_probe_frames: 12,
+            resize_probe_frames: 8,
             probe_cancellation_recovery: true,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -5243,6 +5390,7 @@ fn run_external_continuous_playback_gate(
             ready_timeout,
             seek_probe_count,
             resume_probe_frames,
+            resize_probe_frames: if seek_probe_count == 0 { 0 } else { 8 },
             probe_cancellation_recovery: professional,
             native_video_gpu_timing: if professional {
                 PreviewNativeVideoGpuTimingPolicy::Strict {
@@ -5922,6 +6070,10 @@ fn run_preview_media_continuous_playback_probe(
         adapter: Some(gpu_adapter.adapter_info().clone()),
         ..HeadlessViewerGpuExecutionSummary::default()
     };
+    let mut headless_gpu_resize = HeadlessViewerGpuExecutionSummary {
+        adapter: Some(gpu_adapter.adapter_info().clone()),
+        ..HeadlessViewerGpuExecutionSummary::default()
+    };
     // The measured realtime window is complete. Move to the settled transport
     // family explicitly instead of relying on the cadence loop to land on the
     // Sequence's Ended boundary. The final candidate probe must establish a
@@ -5963,6 +6115,30 @@ fn run_preview_media_continuous_playback_probe(
                         &mut gpu_adapter,
                         &mut headless_gpu_post_window,
                         config.resume_probe_frames,
+                        config.ready_timeout,
+                    )?);
+                    Ok(())
+                },
+            )
+        })
+        .transpose()?;
+
+    let mut playback_resize_probe = None;
+    let playback_resize_case = (config.resize_probe_frames > 0)
+        .then(|| {
+            run_case(
+                "preview_media.playback_viewer_resize_readiness",
+                1,
+                u128::from(config.resize_probe_frames as u64).saturating_mul(1_000),
+                || {
+                    playback_resize_probe = Some(run_headless_playback_resize_probe(
+                        &preview_service,
+                        &mut state,
+                        &mut gpu_adapter,
+                        &mut headless_gpu_resize,
+                        config.resize_probe_frames,
+                        authored_resolution,
+                        authored_resolution_scale,
                         config.ready_timeout,
                     )?);
                     Ok(())
@@ -6024,6 +6200,7 @@ fn run_preview_media_continuous_playback_probe(
             &mut headless_gpu_preroll,
             &mut headless_gpu,
             &mut headless_gpu_post_window,
+            &mut headless_gpu_resize,
         ],
         1,
     );
@@ -6036,6 +6213,7 @@ fn run_preview_media_continuous_playback_probe(
             &headless_gpu_preroll,
             &headless_gpu,
             &headless_gpu_post_window,
+            &headless_gpu_resize,
         ],
     );
     process_memory_evidence.observe_post_stress(process_memory_probe.product_process_tree_memory());
@@ -6053,11 +6231,13 @@ fn run_preview_media_continuous_playback_probe(
     anyhow::ensure!(
         headless_gpu_preroll.native_import_retained_sources_peak == 0
             && headless_gpu.native_import_retained_sources_peak == 0
-            && headless_gpu_post_window.native_import_retained_sources_peak == 0,
-        "completed headless GPU outputs retained decoder sources after copy completion: preroll={}, playback={}, post_window={}",
+            && headless_gpu_post_window.native_import_retained_sources_peak == 0
+            && headless_gpu_resize.native_import_retained_sources_peak == 0,
+        "completed headless GPU outputs retained decoder sources after copy completion: preroll={}, playback={}, post_window={}, resize={}",
         headless_gpu_preroll.native_import_retained_sources_peak,
         headless_gpu.native_import_retained_sources_peak,
-        headless_gpu_post_window.native_import_retained_sources_peak
+        headless_gpu_post_window.native_import_retained_sources_peak,
+        headless_gpu_resize.native_import_retained_sources_peak
     );
     anyhow::ensure!(
         headless_gpu.stage_diagnostics.readback_stages == 0,
@@ -6094,10 +6274,12 @@ fn run_preview_media_continuous_playback_probe(
         media_probe,
         authored_output,
         pause_seek_resume_probe,
+        playback_resize_probe,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
         headless_gpu_post_window,
+        headless_gpu_resize,
         cancellation_recovery_probe,
         real_media_gates: None,
         qualification_media_gates: None,
@@ -6117,6 +6299,7 @@ fn run_preview_media_continuous_playback_probe(
         cases: std::iter::once(playback_case)
             .chain(seek_case)
             .chain(pause_seek_resume_case)
+            .chain(playback_resize_case)
             .chain(cancellation_recovery_case)
             .chain(std::iter::once(gpu_candidate_case))
             .collect(),
@@ -6429,6 +6612,149 @@ fn run_headless_pause_seek_resume_probe(
         "pause-seek-resume gate failed: {:?}",
         evidence.failures
     );
+    Ok(evidence)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_headless_playback_resize_probe(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    observation_count: usize,
+    authored_resolution: Resolution,
+    authored_resolution_scale: f32,
+    timeout: Duration,
+) -> anyhow::Result<PreviewPlaybackResizeEvidence> {
+    anyhow::ensure!(
+        observation_count > 0,
+        "playback-resize probe requires at least one observation"
+    );
+    anyhow::ensure!(
+        state.playback_engine.snapshot().state == mondrian_playback::TransportState::Paused,
+        "playback-resize probe must begin from Paused transport"
+    );
+
+    state.seek(0)?;
+    wait_for_headless_gpu_ready(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
+    let mut root = AppUiAppRoot::from_app_state(state);
+    TreeWalker::layout(&mut root, Rect::new(0.0, 0.0, 1280.0, 720.0));
+    state.play()?;
+    let initial = wait_for_headless_gpu_ready_observation(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        timeout,
+    )?;
+    anyhow::ensure!(
+        initial.current_gpu_ready,
+        "resized playback failed to establish an exact current presentation"
+    );
+    wait_for_headless_playback_preroll(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
+
+    // A user begins resizing an already-running Viewer, not an unobserved
+    // transport whose first current-frame binding has never entered the
+    // realtime coordinator. Warm that coordinator for one interval, then keep
+    // the same driver/bindings for every measured resize interval.
+    let mut realtime_driver = HeadlessRealtimePlaybackDriver::with_absolute_deadline(None)?;
+    match run_headless_realtime_video_interval(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        timeout,
+        &mut realtime_driver,
+    )? {
+        HeadlessRealtimeIntervalOutcome::Advanced { .. } => {}
+        HeadlessRealtimeIntervalOutcome::NaturalEnd { terminal_frame } => {
+            anyhow::bail!(
+                "resized playback reached natural end during coordinator warmup at frame {terminal_frame}"
+            );
+        }
+    }
+
+    const WINDOW_BOUNDS: [(f32, f32); 4] = [
+        (1280.0, 720.0),
+        (1600.0, 900.0),
+        (1024.0, 768.0),
+        (1920.0, 1080.0),
+    ];
+    let start_frame = state.current_frame();
+    let mut readiness = PreviewReadinessCounts::default();
+    let mut observed_observations = 0usize;
+    let mut first_epoch = None;
+    let mut last_epoch = None;
+    let mut presentation_extents = HashSet::new();
+    let mut presentation_geometry_valid = true;
+    for index in 0..observation_count {
+        let (width, height) = WINDOW_BOUNDS[index % WINDOW_BOUNDS.len()];
+        let bounds = Rect::new(0.0, 0.0, width, height);
+        root.refresh_playback_frame_from_app_state(state, None);
+        TreeWalker::layout(&mut root, bounds);
+        let geometry = crate::app_ui::shell::viewer_presentation_geometry(&root)
+            .context("resized production UI root omitted Viewer presentation geometry")?;
+        presentation_extents.insert((
+            geometry.presentation.output_width,
+            geometry.presentation.output_height,
+        ));
+        let visible_right = geometry.visible_rect.x + geometry.visible_rect.width;
+        let visible_bottom = geometry.visible_rect.y + geometry.visible_rect.height;
+        presentation_geometry_valid &= geometry.visible_rect.width > 0.0
+            && geometry.visible_rect.height > 0.0
+            && geometry.visible_rect.x >= bounds.x
+            && geometry.visible_rect.y >= bounds.y
+            && visible_right <= bounds.x + bounds.width
+            && visible_bottom <= bounds.y + bounds.height;
+
+        match run_headless_realtime_video_interval(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_summary,
+            timeout,
+            &mut realtime_driver,
+        )? {
+            HeadlessRealtimeIntervalOutcome::Advanced { epoch, sample, .. } => {
+                let epoch = epoch.get();
+                first_epoch.get_or_insert(epoch);
+                last_epoch = Some(epoch);
+                observed_observations = observed_observations.saturating_add(1);
+                record_headless_preview_readiness(&mut readiness, sample);
+            }
+            HeadlessRealtimeIntervalOutcome::NaturalEnd { terminal_frame } => {
+                anyhow::bail!(
+                    "resized playback reached natural end before completing its observation window at frame {terminal_frame}"
+                );
+            }
+        }
+    }
+    apply_headless_preview_outcome(preview_service, state);
+    let end_frame = state.current_frame();
+    state.pause()?;
+    let authored_output_unchanged = state.active_sequence().is_some_and(|sequence| {
+        sequence.settings.resolution == authored_resolution
+            && sequence.settings.preview.resolution_scale == authored_resolution_scale
+    });
+    let authored_full_extent = HeadlessViewerGpuExtent {
+        width: authored_resolution.width,
+        height: authored_resolution.height,
+    };
+    let evidence = evaluate_playback_resize(
+        observation_count,
+        observed_observations,
+        start_frame,
+        end_frame,
+        first_epoch,
+        last_epoch,
+        presentation_extents.len(),
+        presentation_geometry_valid,
+        authored_output_unchanged,
+        readiness,
+        &authored_full_extent,
+        &gpu_summary.output_extents,
+    );
+    anyhow::ensure!(evidence.passed, "playback-resize gate failed: {evidence:?}");
     Ok(evidence)
 }
 

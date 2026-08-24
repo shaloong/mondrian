@@ -1639,6 +1639,16 @@ global fatal scheduler/worker failures. Random-access still and scrub latency
 remain visible in the full diagnostic report but cannot fail a playback-only
 gate; their dedicated probes own those budgets.
 
+Source-Full real-media qualification also owns an interleaved playback/resize
+gate. It drives the production `AppUiAppRoot` and `ViewerSurface` layout through
+multiple ordinary desktop window sizes while the production Preview runtime and
+headless Viewer GPU adapter continue advancing the same transport epoch. The
+gate requires more than one resolved presentation extent, valid visible geometry,
+forward progress, exact Ready observations, unchanged authored Sequence output,
+and only the authored Full GPU extent in its resize-scoped execution summary.
+Window layout therefore remains presentation policy: it may change crop and
+presentation pixels but cannot mutate Program resolution or restart playback.
+
 Viewer models consume an explicit preview readiness state. `Ready` frames are
 current, `Loading` means the requested frame is queued/in flight, and `Stale`
 means the viewer may keep the last ready frame visible while the current frame is

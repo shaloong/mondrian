@@ -1717,7 +1717,7 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
     })
 }
 
-pub(super) fn viewer_presentation_geometry(
+pub(crate) fn viewer_presentation_geometry(
     widget: &dyn Widget,
 ) -> Option<ViewerPresentationGeometry> {
     if let Some(viewer) = widget.as_any().and_then(|any| any.downcast_ref::<ViewerSurface>()) {
