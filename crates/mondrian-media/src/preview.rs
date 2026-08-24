@@ -855,9 +855,10 @@ impl DecodedTemporalExtent {
         if successor_duration <= 0 {
             return self;
         }
-        if self.duration_pts.is_some_and(|duration| duration <= successor_duration) {
-            return self;
-        }
+        // The next decoded presentation timestamp is the authoritative
+        // exclusive boundary for the predecessor. Container/packet duration
+        // may be shorter (VFR cadence gaps) or longer (overlap); in both cases
+        // a video presentation holds the predecessor until its successor.
         Self {
             start_pts: self.start_pts,
             duration_pts: Some(successor_duration),

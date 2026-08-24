@@ -1003,8 +1003,10 @@ Exact Preview access is defined by a proven Decoded Presentation Extent, not
 by a nominal frame-rate tolerance or nearest-PTS distance. A selected frame
 covers source time only inside `[selected_pts, selected_pts +
 selected_duration_pts)`. A positive decoded-frame duration supplies a
-provisional end; when a successor PTS is observed, the earlier valid end wins,
-so overlapping duration metadata cannot claim pixels beyond the successor.
+provisional end only while no successor is known. Once a successor PTS is
+observed, that timestamp is the authoritative exclusive boundary: it truncates
+overlapping duration metadata and extends a shorter packet duration through a
+VFR cadence gap, matching continuous video presentation's predecessor hold.
 For an interior request the exact decoder keeps one-frame lookahead whenever a
 successor can still arrive; at EOF a positive duration remains sufficient.
 Without a positive duration or successor, only equality with `selected_pts` is

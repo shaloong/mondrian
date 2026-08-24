@@ -166,7 +166,13 @@ fn real_concat_duration_selects_covering_before_even_when_successor_is_nearer() 
                 Some(after),
             )
             .expect("covering temporal candidate");
-            assert_eq!(selected, (DecodedTemporalCandidate::Before, before));
+            assert_eq!(
+                selected,
+                (
+                    DecodedTemporalCandidate::Before,
+                    before.with_successor(after.start_pts),
+                )
+            );
             assert!(!temporal_selection_is_approximate(
                 requested_pts,
                 Some(selected.1)
@@ -227,6 +233,27 @@ fn successor_boundary_overrides_an_overlapping_declared_duration() {
 }
 
 #[test]
+fn successor_boundary_extends_a_short_declared_duration_across_a_vfr_hold() {
+    let before = DecodedTemporalExtent::from_duration(80, 10);
+    let after = DecodedTemporalExtent::from_duration(100, 10);
+
+    let selected = select_decoded_temporal_candidate(
+        90,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        Some(before),
+        Some(after),
+    )
+    .expect("the predecessor remains presented until the next decoded frame");
+
+    assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+    assert_eq!(selected.1.end_pts(), Some(100));
+    assert_eq!(
+        selected.1.source,
+        super::PreviewTemporalExtentSource::SuccessorBoundary
+    );
+}
+
+#[test]
 fn long_successor_proven_vfr_extent_is_not_rejected_by_nominal_distance() {
     let before = DecodedTemporalExtent::point(100);
     let after = DecodedTemporalExtent::point(1_000);
@@ -266,13 +293,14 @@ fn positive_frame_duration_is_mode_independent_without_a_successor() {
 }
 
 #[test]
-fn exact_access_rejects_a_true_gap_while_scrub_may_choose_nearest_degraded() {
+fn successor_boundary_closes_a_short_declared_vfr_gap_for_every_access_mode() {
     let before = DecodedTemporalExtent::from_duration(100, 5);
     let after = DecodedTemporalExtent::from_duration(120, 5);
     let requested_pts = 118;
 
     for access_mode in [
         PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::ScrubCursor,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
     ] {
         let selected = select_decoded_temporal_candidate(
@@ -280,25 +308,45 @@ fn exact_access_rejects_a_true_gap_while_scrub_may_choose_nearest_degraded() {
             access_mode,
             Some(before),
             Some(after),
-        );
-        assert!(
-            selected.is_none(),
-            "exact access cannot publish an uncovered frame"
-        );
+        )
+        .expect("the predecessor remains presented until the decoded successor");
+        assert_eq!(selected.0, DecodedTemporalCandidate::Before);
+        assert_eq!(selected.1.end_pts(), Some(120));
+        assert!(!temporal_selection_is_approximate(
+            requested_pts,
+            Some(selected.1)
+        ));
     }
+}
+
+#[test]
+fn exact_access_rejects_an_expired_declared_extent_without_successor_evidence() {
+    let before = DecodedTemporalExtent::from_duration(100, 5);
+    let requested_pts = 118;
 
     let scrub = select_decoded_temporal_candidate(
         requested_pts,
         PreviewDecodeAccessMode::ScrubCursor,
         Some(before),
-        Some(after),
+        None,
     )
     .expect("nearest scrub candidate");
-    assert_eq!(scrub.0, DecodedTemporalCandidate::After);
+    assert_eq!(scrub.0, DecodedTemporalCandidate::Before);
     assert!(temporal_selection_is_approximate(
         requested_pts,
         Some(scrub.1)
     ));
+
+    for access_mode in [
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeAccessMode::RandomAccessStillFrame,
+    ] {
+        assert!(
+            select_decoded_temporal_candidate(requested_pts, access_mode, Some(before), None)
+                .is_none(),
+            "exact access still requires a successor or another covering extent"
+        );
+    }
 }
 
 fn test_source_color() -> PreviewSourceColorContract {
