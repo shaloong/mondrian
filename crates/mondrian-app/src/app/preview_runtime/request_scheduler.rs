@@ -3,6 +3,7 @@
 use super::*;
 use crate::app::preview_access_mode::MediaPreviewRequestIntent;
 use crate::app::preview_timeline_execution::collect_preview_timeline_media_demands_with_programs;
+use mondrian_media::PreviewPlaybackDirection;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -524,6 +525,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let Some(prefetch_window_frames) = prefetch_window_frames else {
             return;
         };
+        let playback_direction = transport.playback_direction();
         let prefetch_slots_available = prefetch_window_frames.saturating_sub(prefetch_pressure);
         if prefetch_slots_available == 0 {
             bump(&self.metrics.prefetch_skipped_prefetch_backlog);
@@ -544,16 +546,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             proxy_demands,
             sequence,
             frame,
+            playback_direction,
             prefetch_window_frames,
-            None,
+            (playback_direction == PreviewPlaybackDirection::Reverse).then_some(0),
             Resolution { width: target_width, height: target_height },
             color_context.clone(),
             prefetch_slots_available,
         );
         let steady_window_proven_blank = steady_plan.window_proven_blank;
-        let scheduled = self.admit_future_media_prefix(steady_plan, preroll_deadline_at);
+        let scheduled =
+            self.admit_future_media_prefix(steady_plan, preroll_deadline_at, playback_direction);
         let remaining_prefetch_jobs = prefetch_slots_available.saturating_sub(scheduled);
-        if remaining_prefetch_jobs > 0 && steady_window_proven_blank {
+        if remaining_prefetch_jobs > 0
+            && steady_window_proven_blank
+            && playback_direction == PreviewPlaybackDirection::Forward
+        {
             let activation_horizon =
                 media_preview_cold_activation_lookahead_frames(sequence.settings.frame_rate);
             let after_frame = frame.saturating_add(prefetch_window_frames as i64);
@@ -579,13 +586,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         proxy_demands,
                         sequence,
                         activation_frame.saturating_sub(1),
+                        PreviewPlaybackDirection::Forward,
                         1,
                         Some(activation_frame),
                         Resolution { width: target_width, height: target_height },
                         color_context,
                         remaining_prefetch_jobs,
                     );
-                    self.admit_future_media_prefix(activation_plan, None);
+                    self.admit_future_media_prefix(
+                        activation_plan,
+                        None,
+                        PreviewPlaybackDirection::Forward,
+                    );
                 }
                 Ok(None) => {}
                 Err(error) => {
@@ -608,8 +620,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         proxy_demands: &dyn PreviewProxyDemandSink,
         sequence: &Sequence,
         current_frame: i64,
+        playback_direction: PreviewPlaybackDirection,
         max_future_frames: usize,
-        last_frame: Option<i64>,
+        terminal_frame: Option<i64>,
         target_resolution: Resolution,
         color_context: ProgramColorContext,
         max_new_jobs: usize,
@@ -624,8 +637,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut source_observations = FutureMediaSourceObservationMemo::default();
 
         for offset in 1..=max_future_frames as i64 {
-            let frame = current_frame.saturating_add(offset);
-            if last_frame.is_some_and(|last_frame| frame > last_frame) {
+            let frame = match playback_direction {
+                PreviewPlaybackDirection::Forward => current_frame.saturating_add(offset),
+                PreviewPlaybackDirection::Reverse => current_frame.saturating_sub(offset),
+            };
+            let crossed_terminal = terminal_frame.is_some_and(|terminal_frame| {
+                if playback_direction == PreviewPlaybackDirection::Forward {
+                    frame > terminal_frame
+                } else {
+                    frame < terminal_frame
+                }
+            });
+            if crossed_terminal {
                 break;
             }
             let requests = match self.cached_future_media_frame(
@@ -746,13 +769,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         target_resolution: Resolution,
         color_context: ProgramColorContext,
     ) -> Vec<MediaPreviewKey> {
+        let playback_direction = snapshot.transport().playback_direction();
         self.plan_future_media_prefix(
             snapshot,
             proxy_demands,
             sequence,
             current_frame,
+            playback_direction,
             max_future_frames,
-            None,
+            (playback_direction == PreviewPlaybackDirection::Reverse).then_some(0),
             target_resolution,
             color_context,
             max_future_frames.saturating_mul(64).max(1),
@@ -802,6 +827,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         plan: FutureMediaPrefixPlan,
         preroll_deadline_at: Option<Instant>,
+        playback_direction: PreviewPlaybackDirection,
     ) -> usize {
         let _resident_guard_count = plan.resident_guards.len();
         let mut scheduled = 0usize;
@@ -812,7 +838,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewDecodeAccessMode::PlaybackCursor,
                 preroll_deadline_at,
                 None,
-                PreviewDecodeAdaptiveHints::default(),
+                PreviewDecodeAdaptiveHints {
+                    playback_direction,
+                    ..PreviewDecodeAdaptiveHints::default()
+                },
                 request.hardware_decode_request,
                 request.hardware_decode_device_selector,
             );
@@ -838,7 +867,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         scheduled
     }
 
-    /// Maintain and inspect the bounded forward media window used by playback prefetch.
+    /// Maintain and inspect the bounded directional media window used by playback prefetch.
     ///
     /// This does not claim that a Viewer output is presented. During Priming it
     /// also admits missing work from the inspected prefix, so startup progress
@@ -862,7 +891,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let sequence = authoring.active_sequence()?;
         let current_frame = transport.current_frame().max(0);
         let end_frame = authoring.last_content_frame()?.max(0);
-        if current_frame >= end_frame {
+        let playback_direction = transport.playback_direction();
+        let at_terminal_boundary = match playback_direction {
+            PreviewPlaybackDirection::Forward => current_frame >= end_frame,
+            PreviewPlaybackDirection::Reverse => current_frame == 0,
+        };
+        if at_terminal_boundary {
             return Some(PreviewVideoPreroll {
                 ready_media_frames: 0,
                 preservable_media_frames: 0,
@@ -881,8 +915,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             proxy_demands,
             sequence,
             current_frame,
+            playback_direction,
             window,
-            Some(end_frame),
+            Some(match playback_direction {
+                PreviewPlaybackDirection::Forward => end_frame,
+                PreviewPlaybackDirection::Reverse => 0,
+            }),
             Resolution { width, height },
             color_context,
             window.saturating_sub(prefetch_pressure),
@@ -893,7 +931,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let preroll_deadline_at =
             transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline);
-        self.admit_future_media_prefix(plan, preroll_deadline_at);
+        self.admit_future_media_prefix(plan, preroll_deadline_at, playback_direction);
         Some(readiness)
     }
 

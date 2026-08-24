@@ -142,7 +142,10 @@ impl PreviewScrubAdaptationState {
         } else {
             mondrian_media::PreviewScrubAdaptiveClass::Normal
         };
-        PreviewDecodeAdaptiveHints { scrub_class }
+        PreviewDecodeAdaptiveHints {
+            scrub_class,
+            ..PreviewDecodeAdaptiveHints::default()
+        }
     }
 
     /// Observe frame-local decode latency for a completed scrub request.

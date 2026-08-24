@@ -31,8 +31,8 @@ use mondrian_playback::{
     AudioClockObservationGrade, AudioDeviceClockObservation, AudioDeviceClockState, ClockMaster,
     FrameDelivery, FrameDeliveryCandidate, FrameDeliveryKind, FrameDemandIdentity,
     FramePresentationQuality, FramePresentationTicket, MonotonicTimestamp, PlaybackEngine,
-    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackSeekKind, PreviewResolutionScale,
-    TransportState, VideoPrerollObservation,
+    PlaybackEvidenceCollector, PlaybackEvidenceReport, PlaybackRate, PlaybackSeekKind,
+    PlaybackShuttleDirection, PreviewResolutionScale, TransportState, VideoPrerollObservation,
 };
 use mondrian_timeline::clip::Clip;
 use mondrian_timeline::sequence::{

@@ -265,6 +265,30 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             action_go_to_start,
         ),
         command(
+            "transport.shuttle_reverse",
+            "反向播放 / 加速",
+            "反向播放 / 加速",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::J, Modifiers::none())),
+            action_shuttle_reverse,
+        ),
+        command(
+            "transport.shuttle_stop",
+            "停止穿梭播放",
+            "停止穿梭播放",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::K, Modifiers::none())),
+            action_shuttle_stop,
+        ),
+        command(
+            "transport.shuttle_forward",
+            "正向播放 / 加速",
+            "正向播放 / 加速",
+            AppUiCommandCategory::Transport,
+            Some(ShortcutBinding::new(KeyCode::L, Modifiers::none())),
+            action_shuttle_forward,
+        ),
+        command(
             "transport.go_to_end",
             "跳到结尾",
             "跳到结尾",
@@ -501,6 +525,15 @@ fn action_mark_out() -> Action {
 }
 fn action_go_to_start() -> Action {
     Action::GoToStart
+}
+fn action_shuttle_reverse() -> Action {
+    Action::ShuttleReverse
+}
+fn action_shuttle_stop() -> Action {
+    Action::ShuttleStop
+}
+fn action_shuttle_forward() -> Action {
+    Action::ShuttleForward
 }
 fn action_go_to_end() -> Action {
     Action::GoToEnd

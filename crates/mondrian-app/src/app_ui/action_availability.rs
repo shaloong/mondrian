@@ -67,6 +67,9 @@ pub fn app_state_action_enabled(action: &Action, state: &AppState) -> bool {
         Action::MarkInAtPlayhead
         | Action::MarkOutAtPlayhead
         | Action::TogglePlay
+        | Action::ShuttleReverse
+        | Action::ShuttleStop
+        | Action::ShuttleForward
         | Action::StepForward
         | Action::StepBack
         | Action::GoToStart

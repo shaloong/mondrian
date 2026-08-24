@@ -1253,6 +1253,145 @@ fn fractional_rates_do_not_accumulate_float_drift() {
 }
 
 #[test]
+fn editorial_shuttle_changes_direction_and_rate_without_losing_exact_phase() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(50, Rational::new(1, 25)),
+            ts(0),
+        )
+        .expect("position");
+    let reverse = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            FramePosition::new(50, Rational::new(1, 25)),
+            PlaybackShuttleDirection::Reverse,
+            ts(0),
+        )
+        .expect("reverse");
+    assert_eq!(reverse.rate, PlaybackRate::REVERSE_1X);
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("reverse priming");
+    assert_eq!(
+        engine.tick(ts(40)).expect("reverse tick").position.frame,
+        49
+    );
+
+    let faster = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Reverse,
+            ts(40),
+        )
+        .expect("faster reverse");
+    assert_eq!(faster.rate, PlaybackRate::new(-2, 1).expect("rate"));
+    engine.complete_priming(ClockMaster::Synthetic, ts(40)).expect("faster priming");
+    assert_eq!(engine.tick(ts(60)).expect("faster tick").position.frame, 48);
+
+    let forward = engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Forward,
+            ts(60),
+        )
+        .expect("direction change");
+    assert_eq!(forward.rate, PlaybackRate::FORWARD_1X);
+    engine
+        .complete_priming(ClockMaster::Synthetic, ts(60))
+        .expect("forward priming");
+    assert_eq!(
+        engine.tick(ts(100)).expect("forward tick").position.frame,
+        49
+    );
+}
+
+#[test]
+fn fractional_phase_rounding_is_direction_symmetric() {
+    let origin = MonotonicTimestamp::from_duration(Duration::ZERO);
+    let observed = MonotonicTimestamp::from_duration(Duration::from_nanos(3));
+    let anchor_phase = 1_000_i128;
+
+    let mut forward = engine();
+    forward.rate = PlaybackRate::new(1, 2).expect("forward half rate");
+    forward.reanchor_at_phase(origin, anchor_phase);
+
+    let mut reverse = engine();
+    reverse.rate = PlaybackRate::new(-1, 2).expect("reverse half rate");
+    reverse.reanchor_at_phase(origin, anchor_phase);
+
+    assert_eq!(
+        forward.synthetic_phase_ns_at(observed).expect("forward phase"),
+        1_001
+    );
+    assert_eq!(
+        reverse.synthetic_phase_ns_at(observed).expect("reverse phase"),
+        999
+    );
+}
+
+#[test]
+fn reverse_shuttle_reaches_start_with_an_untimed_boundary_frame() {
+    let mut engine = engine();
+    engine
+        .seek_timeline(
+            timeline_binding(100),
+            FramePosition::new(1, Rational::new(1, 25)),
+            ts(0),
+        )
+        .expect("position");
+    engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            FramePosition::new(1, Rational::new(1, 25)),
+            PlaybackShuttleDirection::Reverse,
+            ts(0),
+        )
+        .expect("reverse");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("priming");
+
+    let ended = engine.tick(ts(40)).expect("boundary");
+    let still = engine.frame_demand().expect("boundary still");
+    assert_eq!(ended.state, TransportState::Ended);
+    assert_eq!(ended.position.frame, 0);
+    assert_eq!(still.kind, FrameDemandKind::PersistentStill);
+    assert_eq!(still.target.frame, 0);
+}
+
+#[test]
+fn varispeed_deadlines_scale_in_runtime_and_never_admit_audio_master() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).expect("play");
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("priming");
+    engine
+        .shuttle_timeline(
+            timeline_binding(100),
+            engine.snapshot().position,
+            PlaybackShuttleDirection::Forward,
+            ts(0),
+        )
+        .expect("2x");
+    assert_eq!(
+        engine.snapshot().rate,
+        PlaybackRate::new(2, 1).expect("rate")
+    );
+    assert_eq!(
+        engine.complete_priming(ClockMaster::AudioDevice, ts(0)),
+        Err(PlaybackError::AudioClockIncompatiblePlaybackRate)
+    );
+    engine.complete_priming(ClockMaster::Synthetic, ts(0)).expect("synthetic");
+    assert_eq!(
+        engine.pending_frame_demand().and_then(|demand| demand.deadline),
+        Some(ts(10))
+    );
+
+    let observation = audio_observation(&engine, 1_000, ts(1));
+    let snapshot = engine.observe_audio_device_clock(observation).expect("muted audio evidence");
+    assert_eq!(snapshot.clock_master, Some(ClockMaster::Synthetic));
+}
+
+#[test]
 fn timeline_binding_rejects_a_negative_content_extent() {
     assert_eq!(
         PlaybackTimelineBinding::new(None, 1, Rational::new(1, 25), -1),

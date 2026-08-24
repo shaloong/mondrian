@@ -93,7 +93,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if let Some(reason) = self.failed_media_key(&key) {
             return PreviewTimelineMediaFrame::Unavailable { reason };
         }
-        let adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
+        let mut adaptive_hints = self.preview_decode_adaptive_hints(access_mode, &key);
+        adaptive_hints.playback_direction = transport.playback_direction();
         let deadline = (access_mode == PreviewDecodeAccessMode::PlaybackCursor)
             .then(|| transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline))
             .flatten();

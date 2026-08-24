@@ -371,6 +371,50 @@ impl AppState {
         Ok(())
     }
 
+    /// Apply one J/L editorial shuttle command through the Playback Session.
+    ///
+    /// Reverse and non-1x rates deliberately clear realtime PCM. This is an
+    /// explicit product policy until a qualified varispeed audio processor can
+    /// preserve pitch/phase without moving work onto the device callback.
+    pub fn shuttle(&mut self, direction: PlaybackShuttleDirection) -> mondrian_core::Result<()> {
+        let action = match direction {
+            PlaybackShuttleDirection::Reverse => "shuttle_reverse",
+            PlaybackShuttleDirection::Forward => "shuttle_forward",
+        };
+        let observed_at = Instant::now();
+        self.synchronize_playback_observation_clock(observed_at);
+        self.require_transport_sequence(action)?;
+        let playback_now = self.playback_engine.monotonic_high_water();
+        let end_frame = self.last_content_frame()?;
+        let time_base = self.playback_time_base();
+        let position = FramePosition::new(self.current_frame().max(0), time_base);
+        let binding = self
+            .playback_timeline_binding(end_frame)
+            .map_err(|error| transport_action_error(action, error))?;
+        let mut engine = self.playback_engine.clone();
+        let snapshot = engine
+            .shuttle_timeline(binding, position, direction, playback_now)
+            .map_err(|error| transport_action_error(action, error))?;
+        let audio_anchor = self.authoritative_audio_anchor(&engine, playback_now, action)?;
+        self.audio_playback
+            .validate_anchor(audio_anchor)
+            .map_err(|error| transport_action_error(action, error))?;
+        let renderer = snapshot
+            .rate
+            .supports_realtime_audio()
+            .then(|| self.audio_playback_renderer(action))
+            .transpose()?
+            .flatten();
+        self.commit_audio_playback(action, audio_anchor, renderer)?;
+        self.playback_engine = engine;
+        self.audio_idle_warmup.set_automatic_policy_enabled(false);
+        self.audio_idle_warmup.set_dispatch_enabled(false);
+        self.reanchor_playback_observation_projection(observed_at);
+        self.capture_playback_evidence();
+        self.refresh_internal_execution_resource_decision();
+        Ok(())
+    }
+
     pub fn pause(&mut self) -> mondrian_core::Result<()> {
         let observed_at = Instant::now();
         self.synchronize_playback_observation_clock(observed_at);
@@ -463,14 +507,17 @@ impl AppState {
             ));
         }
         let was_running = self.is_playing();
+        let realtime_audio = self.playback_engine.snapshot().rate.supports_realtime_audio();
         let end_frame = self.last_content_frame()?;
         let time_base = self.playback_time_base();
         let binding = self
             .playback_timeline_binding(end_frame)
             .map_err(|error| transport_action_error("seek", error))?;
         let timeline_anchor = FramePosition::new(frame, time_base);
-        let renderer =
-            was_running.then(|| self.audio_playback_renderer("seek")).transpose()?.flatten();
+        let renderer = (was_running && realtime_audio)
+            .then(|| self.audio_playback_renderer("seek"))
+            .transpose()?
+            .flatten();
         let mut engine = self.playback_engine.clone();
         engine
             .seek_timeline(binding, timeline_anchor, playback_now)
@@ -988,7 +1035,7 @@ impl AppState {
             self.playback_engine.monotonic_high_water(),
             "refresh_audio_playback",
         )?;
-        if self.is_playing() {
+        if self.is_playing() && self.playback_engine.snapshot().rate.supports_realtime_audio() {
             self.prepare_audio_playback(anchor)
         } else {
             self.commit_audio_playback("refresh_audio_playback", anchor, None)
@@ -1333,11 +1380,11 @@ impl AppState {
             return PlaybackAdvance {
                 previous_frame,
                 current_frame: target_frame,
-                frames_advanced: (target_frame - previous_frame).max(0),
+                frames_advanced: target_frame - previous_frame,
                 status: PlaybackAdvanceStatus::ReachedEnd,
             };
         }
-        if target_frame <= previous_frame {
+        if target_frame == previous_frame {
             return PlaybackAdvance {
                 previous_frame,
                 current_frame: previous_frame,
@@ -1449,7 +1496,8 @@ impl AppState {
     }
 
     fn audio_playback_mode(&self) -> AudioPlaybackMode {
-        audio_playback_mode_for_transport(self.playback_engine.snapshot().state)
+        let snapshot = self.playback_engine.snapshot();
+        audio_playback_mode_for_transport(snapshot.state, snapshot.rate)
     }
 
     /// Current authoritative Clock Master exposed to diagnostics/UI adapters.
@@ -1890,7 +1938,13 @@ impl AppState {
     }
 }
 
-fn audio_playback_mode_for_transport(state: TransportState) -> AudioPlaybackMode {
+fn audio_playback_mode_for_transport(
+    state: TransportState,
+    rate: PlaybackRate,
+) -> AudioPlaybackMode {
+    if !rate.supports_realtime_audio() {
+        return AudioPlaybackMode::Idle;
+    }
     match state {
         TransportState::Priming => AudioPlaybackMode::Preroll,
         TransportState::Playing | TransportState::Recovering => AudioPlaybackMode::Consume,
@@ -2158,6 +2212,62 @@ mod tests {
             state.audio_playback.snapshot(AudioPlaybackMode::Idle),
             audio_before
         );
+    }
+
+    #[test]
+    fn app_shuttle_uses_signed_engine_rate_and_explicitly_mutes_non_1x_audio() {
+        let mut state = state_with_sequence(20);
+        state.seek(10).expect("position");
+        state.shuttle(PlaybackShuttleDirection::Reverse).expect("reverse");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::REVERSE_1X
+        );
+        assert_eq!(
+            state
+                .preview_execution_snapshot(state.playback_observation_instant_anchor)
+                .transport()
+                .playback_direction(),
+            mondrian_media::PreviewPlaybackDirection::Reverse
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Idle);
+        assert!(!state.observe_viewer_frame_delivery(FrameDeliveryKind::Ready));
+        let demand = state
+            .playback_engine
+            .frame_demand()
+            .map(|demand| demand.identity())
+            .expect("reverse demand");
+        assert!(state.observe_video_preroll_at_wall(
+            demand,
+            0,
+            0,
+            state.playback_observation_instant_anchor,
+        ));
+
+        let reverse = state.advance_playback_clock(Duration::from_millis(40));
+        assert_eq!(reverse.status, PlaybackAdvanceStatus::Advanced);
+        assert_eq!(reverse.frames_advanced, -1);
+        assert_eq!(reverse.current_frame, 9);
+
+        state.shuttle(PlaybackShuttleDirection::Reverse).expect("faster reverse");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::new(-2, 1).expect("rate")
+        );
+        state.pause().expect("K pause");
+        state.shuttle(PlaybackShuttleDirection::Forward).expect("forward");
+        assert_eq!(
+            state.playback_engine.snapshot().rate,
+            PlaybackRate::FORWARD_1X
+        );
+        assert_eq!(
+            state
+                .preview_execution_snapshot(state.playback_observation_instant_anchor)
+                .transport()
+                .playback_direction(),
+            mondrian_media::PreviewPlaybackDirection::Forward
+        );
+        assert_eq!(state.audio_playback_mode(), AudioPlaybackMode::Preroll);
     }
 
     #[test]

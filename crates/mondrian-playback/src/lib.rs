@@ -20,6 +20,8 @@ mod runtime_clock;
 pub use runtime_clock::*;
 mod work_broker;
 pub use work_broker::*;
+mod transport_rate;
+pub use transport_rate::*;
 
 /// Monotonically increasing runtime timestamp relative to an arbitrary origin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -715,6 +717,8 @@ pub struct PlaybackSnapshot {
     pub state: TransportState,
     /// Current exact timeline position.
     pub position: FramePosition,
+    /// Exact signed Timeline phase rate retained by this Session.
+    pub rate: PlaybackRate,
     /// Current Clock Master, if a clock is running or being primed.
     pub clock_master: Option<ClockMaster>,
     /// Runtime-only Viewer resolution scale.
@@ -766,6 +770,9 @@ pub enum PlaybackError {
     /// Audio observation did not carry a usable sample rate.
     #[error("audio clock observation sample rate must be positive")]
     InvalidAudioSampleRate,
+    /// Ordinary realtime audio cannot be Clock Master for reverse or varispeed transport.
+    #[error("audio device clock is incompatible with the active playback rate")]
+    AudioClockIncompatiblePlaybackRate,
     /// Preview Adapter reported an inconsistent or unbounded lookahead window.
     #[error("video preroll must be a bounded ready prefix of the available media window")]
     InvalidVideoPrerollObservation,
@@ -796,6 +803,7 @@ pub struct PlaybackEngine {
     epoch: PlaybackEpoch,
     state: TransportState,
     position: FramePosition,
+    rate: PlaybackRate,
     end_frame: i64,
     clock_master: Option<ClockMaster>,
     clock_anchor: ClockAnchor,
@@ -845,6 +853,7 @@ impl PlaybackEngine {
             epoch: PlaybackEpoch(0),
             state: TransportState::Stopped,
             position,
+            rate: PlaybackRate::FORWARD_1X,
             end_frame: 0,
             clock_master: None,
             clock_anchor: ClockAnchor { phase_ns: 0, monotonic: MonotonicTimestamp::ZERO },
@@ -892,11 +901,72 @@ impl PlaybackEngine {
             self.position.frame = 0;
         }
         self.bump_epoch()?;
+        self.rate = PlaybackRate::FORWARD_1X;
         self.state = TransportState::Priming;
         self.clock_master = Some(ClockMaster::Synthetic);
         self.reset_runtime_policy()?;
         self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         self.reanchor(now)?;
+        Ok(self.snapshot())
+    }
+
+    /// Apply one J/L editorial shuttle transition inside the Playback Session.
+    ///
+    /// Repeating the active direction doubles the exact rate up to the bounded
+    /// editorial maximum. Changing direction, or starting from a non-running
+    /// state, begins at 1x. The transition retains exact subframe phase while
+    /// running and always primes on Synthetic Clock; only forward 1x may later
+    /// qualify an Audio Device Clock handoff.
+    pub fn shuttle_timeline(
+        &mut self,
+        binding: PlaybackTimelineBinding,
+        position: FramePosition,
+        direction: PlaybackShuttleDirection,
+        now: MonotonicTimestamp,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
+        self.commit_candidate(move |candidate| {
+            candidate.shuttle_timeline_in_place(binding, position, direction, now)
+        })
+    }
+
+    fn shuttle_timeline_in_place(
+        &mut self,
+        binding: PlaybackTimelineBinding,
+        position: FramePosition,
+        direction: PlaybackShuttleDirection,
+        now: MonotonicTimestamp,
+    ) -> Result<PlaybackSnapshot, PlaybackError> {
+        binding.validate_position(position)?;
+        let was_running = self.transport_intends_playback();
+        let phase_ns = if was_running {
+            self.clock_phase_reference_ns(now)?
+        } else {
+            timeline_position_ns_floor(position)?
+        };
+        self.accept_timestamp(now)?;
+        self.apply_timeline_binding(binding);
+        let bounded_phase_ns = phase_ns.clamp(
+            0,
+            timeline_position_ns_floor(FramePosition::new(self.end_frame, position.time_base))?,
+        );
+        self.position = FramePosition::new(
+            timeline_frame_at_ns(bounded_phase_ns, position.time_base)?.min(self.end_frame),
+            position.time_base,
+        );
+        self.rate = if was_running {
+            self.rate.next_shuttle_rate(direction)
+        } else {
+            match direction {
+                PlaybackShuttleDirection::Reverse => PlaybackRate::REVERSE_1X,
+                PlaybackShuttleDirection::Forward => PlaybackRate::FORWARD_1X,
+            }
+        };
+        self.bump_epoch()?;
+        self.state = TransportState::Priming;
+        self.clock_master = Some(ClockMaster::Synthetic);
+        self.reset_runtime_policy()?;
+        self.reanchor_at_phase(now, bounded_phase_ns);
+        self.refresh_frame_demand_with_duration(now, self.policy.priming_limit)?;
         Ok(self.snapshot())
     }
 
@@ -944,6 +1014,7 @@ impl PlaybackEngine {
             self.position.frame = 0;
         }
         self.bump_epoch()?;
+        self.rate = PlaybackRate::FORWARD_1X;
         self.state = TransportState::Priming;
         self.clock_master = Some(ClockMaster::Synthetic);
         self.reset_runtime_policy()?;
@@ -968,12 +1039,18 @@ impl PlaybackEngine {
     ) -> Result<PlaybackSnapshot, PlaybackError> {
         self.accept_timestamp(now)?;
         if self.state == TransportState::Priming {
-            if master == ClockMaster::AudioDevice && self.audio_device_anchor.is_none() {
-                return Err(PlaybackError::InvalidAudioClockPosition);
+            let priming_phase_ns = self.clock_anchor.phase_ns;
+            if master == ClockMaster::AudioDevice {
+                if !self.rate.supports_realtime_audio() {
+                    return Err(PlaybackError::AudioClockIncompatiblePlaybackRate);
+                }
+                if self.audio_device_anchor.is_none() {
+                    return Err(PlaybackError::InvalidAudioClockPosition);
+                }
             }
             self.clock_master = Some(master);
             self.state = TransportState::Playing;
-            self.reanchor(now)?;
+            self.reanchor_at_phase(now, priming_phase_ns);
             self.refresh_frame_demand(now)?;
         }
         Ok(self.snapshot())
@@ -1024,6 +1101,7 @@ impl PlaybackEngine {
         self.accept_timestamp(now)?;
         self.bump_epoch()?;
         self.position.frame = 0;
+        self.rate = PlaybackRate::FORWARD_1X;
         self.state = TransportState::Stopped;
         self.clock_master = None;
         self.reset_runtime_policy()?;
@@ -1089,7 +1167,7 @@ impl PlaybackEngine {
         {
             self.state = TransportState::Playing;
             self.clock_master = Some(ClockMaster::Synthetic);
-            self.reanchor(deadline)?;
+            self.reanchor_at_phase(deadline, self.clock_anchor.phase_ns);
         }
         self.advance_position(now)?;
         match self.state {
@@ -1158,15 +1236,8 @@ impl PlaybackEngine {
                 }
             });
         let phase_ns = self.clock_phase_reference_ns(now)?;
-        let current_frame = timeline_frame_at_ns(phase_ns, self.position.time_base)?;
-        let successor =
-            current_frame.checked_add(1).ok_or(PlaybackError::TransportArithmeticOverflow)?;
-        let next_boundary_ns =
-            timeline_frame_boundary_ns(FramePosition::new(successor, self.position.time_base))?;
-        let remaining_ns = next_boundary_ns
-            .checked_sub(phase_ns)
-            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-        let frame_boundary_wake = nonnegative_ns_duration(remaining_ns)?;
+        let remaining_phase_ns = self.phase_ns_until_next_frame_change(phase_ns)?;
+        let frame_boundary_wake = runtime_duration_for_phase_delta(remaining_phase_ns, self.rate)?;
         let clock_wake = if self.clock_master == Some(ClockMaster::AudioDevice) {
             // Callback publication can move the physical Audio Device Clock
             // earlier than its extrapolated position, so retain a bounded poll.
@@ -1303,6 +1374,10 @@ impl PlaybackEngine {
         }
         self.advance_position(observation.observed_at)?;
         self.last_audio_observation = Some(observation);
+        if !self.rate.supports_realtime_audio() {
+            self.handoff_to_synthetic(observation.observed_at)?;
+            return Ok(self.snapshot());
+        }
         if self.state == TransportState::Ended {
             self.audio_device_anchor = None;
             self.refresh_untimed_frame_demand_if_target_changed()?;
@@ -1619,6 +1694,7 @@ impl PlaybackEngine {
             epoch: self.epoch,
             state: self.state,
             position: self.position,
+            rate: self.rate,
             clock_master: self.clock_master,
             preview_scale: self.preview_scale,
             quality_revision: self.quality_revision,
@@ -1732,9 +1808,19 @@ impl PlaybackEngine {
         } else {
             self.synthetic_phase_ns_at(now)?
         };
-        let target = timeline_frame_at_ns(phase_ns, self.position.time_base)?;
+        let terminal_phase_ns = timeline_position_ns_floor(FramePosition::new(
+            self.end_frame,
+            self.position.time_base,
+        ))?;
+        let bounded_phase_ns = phase_ns.clamp(0, terminal_phase_ns);
+        let target = timeline_frame_at_ns(bounded_phase_ns, self.position.time_base)?;
         self.position.frame = target.min(self.end_frame);
-        if self.position.frame >= self.end_frame {
+        let reached_boundary = if self.rate.is_forward() {
+            phase_ns >= terminal_phase_ns
+        } else {
+            phase_ns <= 0
+        };
+        if reached_boundary {
             self.state = TransportState::Ended;
             self.clock_master = None;
         }
@@ -1748,9 +1834,12 @@ impl PlaybackEngine {
         if self.clock_master == Some(ClockMaster::Synthetic)
             && matches!(
                 self.state,
-                TransportState::Playing | TransportState::Recovering
+                TransportState::Priming | TransportState::Playing | TransportState::Recovering
             )
         {
+            if self.state == TransportState::Priming {
+                return Ok(self.clock_anchor.phase_ns);
+            }
             return self.synthetic_phase_ns_at(now);
         }
         timeline_position_ns_floor(self.position)
@@ -1810,10 +1899,48 @@ impl PlaybackEngine {
         let elapsed = now.checked_elapsed_since(self.clock_anchor.monotonic)?;
         let elapsed_ns = i128::try_from(elapsed.as_nanos())
             .map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
+        // Round elapsed phase magnitude toward zero for both directions, then
+        // apply direction. Using signed Euclidean division here would round a
+        // fractional reverse phase toward negative infinity and cross every
+        // reverse boundary up to one nanosecond earlier than its forward twin.
+        let phase_delta_magnitude_ns = elapsed_ns
+            .checked_mul(i128::from(self.rate.magnitude_numerator()))
+            .ok_or(PlaybackError::TransportArithmeticOverflow)?
+            / i128::from(self.rate.denominator());
+        let phase_delta_ns = if self.rate.is_forward() {
+            phase_delta_magnitude_ns
+        } else {
+            -phase_delta_magnitude_ns
+        };
         self.clock_anchor
             .phase_ns
-            .checked_add(elapsed_ns)
+            .checked_add(phase_delta_ns)
             .ok_or(PlaybackError::TransportArithmeticOverflow)
+    }
+
+    fn phase_ns_until_next_frame_change(&self, phase_ns: i128) -> Result<i128, PlaybackError> {
+        if self.rate.is_forward() {
+            let successor = self
+                .position
+                .frame
+                .checked_add(1)
+                .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+            let boundary_ns =
+                timeline_frame_boundary_ns(FramePosition::new(successor, self.position.time_base))?;
+            boundary_ns
+                .checked_sub(phase_ns)
+                .map(|remaining| remaining.max(0))
+                .ok_or(PlaybackError::TransportArithmeticOverflow)
+        } else {
+            let boundary_ns = timeline_position_ns_floor(FramePosition::new(
+                self.position.frame,
+                self.position.time_base,
+            ))?;
+            phase_ns
+                .checked_sub(boundary_ns)
+                .map(|remaining| remaining.max(0))
+                .ok_or(PlaybackError::TransportArithmeticOverflow)
+        }
     }
 
     fn accept_timestamp(&mut self, now: MonotonicTimestamp) -> Result<(), PlaybackError> {
@@ -1925,7 +2052,7 @@ impl PlaybackEngine {
         }
         self.state = TransportState::Playing;
         self.clock_master = Some(ClockMaster::Synthetic);
-        self.reanchor(observed_at)?;
+        self.reanchor_at_phase(observed_at, self.clock_anchor.phase_ns);
         Ok(true)
     }
 
@@ -2051,18 +2178,11 @@ impl PlaybackEngine {
         now: MonotonicTimestamp,
     ) -> Result<MonotonicTimestamp, PlaybackError> {
         let phase_ns = self.clock_phase_reference_ns(now)?;
-        let successor = self
-            .position
-            .frame
-            .checked_add(1)
-            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-        let boundary_ns =
-            timeline_frame_boundary_ns(FramePosition::new(successor, self.position.time_base))?;
-        let remaining_ns = boundary_ns
-            .checked_sub(phase_ns)
-            .ok_or(PlaybackError::TransportArithmeticOverflow)?;
-        let frame_boundary_deadline =
-            checked_timestamp_add(now, nonnegative_ns_duration(remaining_ns)?)?;
+        let remaining_phase_ns = self.phase_ns_until_next_frame_change(phase_ns)?;
+        let frame_boundary_deadline = checked_timestamp_add(
+            now,
+            runtime_duration_for_phase_delta(remaining_phase_ns, self.rate)?,
+        )?;
         let phase_deadline = self.video_presentation_phase_deadline(now, phase_ns)?;
         Ok(frame_boundary_deadline.min(phase_deadline))
     }
@@ -2099,9 +2219,12 @@ impl PlaybackEngine {
         } else {
             remaining_budget_ns
         };
-        let allowable_delay_ns = i128::try_from(allowable_delay_ns)
+        let allowable_phase_ns = i128::try_from(allowable_delay_ns)
             .map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
-        checked_timestamp_add(now, nonnegative_ns_duration(allowable_delay_ns)?)
+        checked_timestamp_add(
+            now,
+            runtime_duration_for_phase_delta(allowable_phase_ns, self.rate)?,
+        )
     }
 
     fn refresh_frame_demand_with_duration(
@@ -2173,8 +2296,9 @@ impl PlaybackEngine {
         }
         let frame_boundary_ns =
             timeline_frame_boundary_ns(FramePosition::new(1, self.position.time_base))?;
-        let half_frame_ns = frame_boundary_ns.checked_div(2).unwrap_or(i128::MAX);
-        let half_frame_ns = u64::try_from(half_frame_ns).unwrap_or(u64::MAX);
+        let half_frame_phase_ns = frame_boundary_ns.checked_div(2).unwrap_or(i128::MAX);
+        let half_frame_runtime = runtime_duration_for_phase_delta(half_frame_phase_ns, self.rate)?;
+        let half_frame_ns = u64::try_from(half_frame_runtime.as_nanos()).unwrap_or(u64::MAX);
         Ok(policy_grace_ns.min(half_frame_ns))
     }
 
@@ -2226,6 +2350,25 @@ fn nonnegative_ns_duration(nanos: i128) -> Result<Duration, PlaybackError> {
         u64::try_from(seconds).map_err(|_| PlaybackError::TransportArithmeticOverflow)?,
         u32::try_from(subsecond_nanos).map_err(|_| PlaybackError::TransportArithmeticOverflow)?,
     ))
+}
+
+fn runtime_duration_for_phase_delta(
+    phase_delta_ns: i128,
+    rate: PlaybackRate,
+) -> Result<Duration, PlaybackError> {
+    let phase_delta_ns =
+        u128::try_from(phase_delta_ns).map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
+    let numerator = phase_delta_ns
+        .checked_mul(u128::from(rate.denominator()))
+        .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+    let denominator = u128::from(rate.magnitude_numerator());
+    let runtime_ns = numerator
+        .checked_add(denominator.saturating_sub(1))
+        .ok_or(PlaybackError::TransportArithmeticOverflow)?
+        / denominator;
+    let runtime_ns =
+        i128::try_from(runtime_ns).map_err(|_| PlaybackError::TransportArithmeticOverflow)?;
+    nonnegative_ns_duration(runtime_ns)
 }
 
 fn sample_frames_ns_ceil(frames: u64, sample_rate: AudioSampleRate) -> Result<u128, PlaybackError> {

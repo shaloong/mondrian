@@ -3788,6 +3788,32 @@ fn future_media_window_reuses_sliding_semantic_and_lowered_frame_contracts() {
 }
 
 #[test]
+fn reverse_future_media_prefix_follows_transport_order_toward_sequence_start() {
+    let (mut state, _, root) = state_with_invalid_video_asset();
+    state.seek(10).expect("reverse start");
+    state
+        .shuttle(mondrian_playback::PlaybackShuttleDirection::Reverse)
+        .expect("reverse transport");
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let target_resolution = Resolution { width: 64, height: 36 };
+
+    let keys = future_media_prefix_keys_for_state(&service, &state, 10, 3, target_resolution);
+    let expected = [9, 8, 7]
+        .map(|frame| media_preview_key_for_simple_sequence_frame(&service, &state, frame))
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    assert!(
+        keys.len() >= 2,
+        "reverse prefix must include adjacent capacity"
+    );
+    assert_eq!(keys, expected[..keys.len()]);
+    service.shutdown();
+    drop(state);
+    std::fs::remove_dir_all(root).expect("remove preview test root");
+}
+
+#[test]
 fn future_media_window_revalidates_each_physical_source_once_per_planning_turn() {
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play().expect("play");

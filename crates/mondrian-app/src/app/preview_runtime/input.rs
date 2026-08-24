@@ -13,10 +13,10 @@ use mondrian_core::{
     DisplayManagementPolicy, FramePosition, ProjectColorEnvironment, ProjectSettings,
 };
 use mondrian_editor_state::AuthoringSessionId;
-use mondrian_media::ProxyConfig;
+use mondrian_media::{PreviewPlaybackDirection, ProxyConfig};
 use mondrian_playback::{
     FrameDemand, FrameDemandIdentity, FramePresentationQuality, FramePresentationTicket,
-    PlaybackEpoch, PreviewResolutionScale, TransportState,
+    PlaybackEpoch, PlaybackRate, PreviewResolutionScale, TransportState,
 };
 use mondrian_renderer::PreparedVisualAuthorSnapshotIdentity;
 use mondrian_timeline::sequence::{Sequence, SequenceCollection};
@@ -202,6 +202,7 @@ impl PreviewFrameDemandSnapshot {
 pub(crate) struct PreviewTransportSnapshot {
     state: TransportState,
     position: FramePosition,
+    rate: PlaybackRate,
     epoch: PlaybackEpoch,
     quality_revision: u64,
     runtime_scale: PreviewResolutionScale,
@@ -215,6 +216,7 @@ impl PreviewTransportSnapshot {
     pub(crate) const fn new(
         state: TransportState,
         position: FramePosition,
+        rate: PlaybackRate,
         epoch: PlaybackEpoch,
         quality_revision: u64,
         runtime_scale: PreviewResolutionScale,
@@ -224,6 +226,7 @@ impl PreviewTransportSnapshot {
         Self {
             state,
             position,
+            rate,
             epoch,
             quality_revision,
             runtime_scale,
@@ -236,6 +239,24 @@ impl PreviewTransportSnapshot {
     /// Exact current frame sampled from the Playback Engine.
     pub(crate) const fn current_frame(self) -> i64 {
         self.position.frame
+    }
+
+    /// Exact adjacent Timeline frame in the active playback direction.
+    pub(crate) const fn adjacent_playback_frame(self) -> Option<i64> {
+        if self.rate.is_forward() {
+            self.position.frame.checked_add(1)
+        } else {
+            self.position.frame.checked_sub(1)
+        }
+    }
+
+    /// Media-session traversal direction without exposing Playback rate math.
+    pub(crate) const fn playback_direction(self) -> PreviewPlaybackDirection {
+        if self.rate.is_forward() {
+            PreviewPlaybackDirection::Forward
+        } else {
+            PreviewPlaybackDirection::Reverse
+        }
     }
 
     /// Whether the Playback decoder family is authoritative.
@@ -290,7 +311,7 @@ impl PreviewTransportSnapshot {
     }
 
     fn for_successor_preparation(mut self, frame: i64) -> Option<Self> {
-        if !self.is_playing() || frame != self.position.frame.checked_add(1)? {
+        if !self.is_playing() || frame != self.adjacent_playback_frame()? {
             return None;
         }
         self.position = FramePosition::new(frame, self.position.time_base);
@@ -366,7 +387,7 @@ impl<'a> PreviewFrameExecutionRequest<'a> {
         mut snapshot: PreviewExecutionSnapshot<'a>,
         proxy_demands: &'a dyn PreviewProxyDemandSink,
     ) -> Option<Self> {
-        let successor = snapshot.transport().current_frame().checked_add(1)?;
+        let successor = snapshot.transport().adjacent_playback_frame()?;
         snapshot.transport = snapshot.transport.for_successor_preparation(successor)?;
         Some(Self { snapshot, proxy_demands })
     }

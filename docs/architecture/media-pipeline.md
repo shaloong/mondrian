@@ -952,7 +952,7 @@ indexed exact seek and codec flush; scrub follows its independently derived
 bounded low-latency policy. Neither may reuse the shared Interactive context
 until its prior native-output lease has retired. After release, access-mode
 change alone is not a terminal condition.
-The playback decode Session also owns a small forward CPU-frame ring. A hit
+The playback decode Session also owns a small CPU-frame ring. A hit
 requires containment in the entry's retained Decoded Presentation Extent and
 is reported as `PlaybackSessionRingHit`; ring lookup never derives a tolerance
 from nominal rate or frame diagnostics. Entries are not available to Scrub or
@@ -961,6 +961,17 @@ of actual CPU payload bytes, rejects a single oversize payload, and dies with
 its decoder Session. This keeps continuous playback locality inside the media
 access-mode implementation without creating a second process-wide residency
 authority.
+Playback direction arrives explicitly in `PreviewDecodeAdaptiveHints`; the
+media Session never guesses it from PTS arrival order. Because inter-frame
+codecs still decode a GOP forward, reverse Playback additionally retains the
+most recent decoded GOP tail in a private four-entry/96 MiB window. It is
+bounded by both conservative decoded-surface bytes and retained-frame count,
+uses the same exact presentation-extent selector, and dies or clears on Session
+retirement, cancellation, seek, output-contract rebind, or forward traversal.
+An adjacent reverse request may therefore materialize a retained decoded frame
+with zero packet decode and zero repeated keyframe seek. This window is an
+execution-local decoder optimization, not App Frame Store residency and not a
+second semantic frame cache.
 Forward session reuse must also preserve FFmpeg's send/receive backpressure
 contract. After every packet, the decoder drains the complete ready queue to
 `EAGAIN` before selecting or publishing. Selection therefore cannot return on a
@@ -2321,7 +2332,10 @@ owners. These are ceilings, not expected steady-state occupancy; changing any
 ceiling requires revalidating the thirty-two-frame decoder reserve instead of
 silently adding another native-frame holder.
 GPU-resident requests bypass the session-local RGBA playback ring. Native
-decoder surfaces are not inserted into any media-owned CPU cache. They may enter
+decoder surfaces are not inserted into any media-owned CPU cache. During
+reverse traversal only, up to four decoder references may be held by the
+byte-bounded GOP replay window; this ownership is released before the
+decoder/device. Native outputs may enter
 the App's playback-owned Preview Frame Store as opaque leases charged one
 decoder-resource unit each; the active product resource decision sets that
 optional budget independently of the eight-frame temporal prefetch ceiling.
@@ -2511,7 +2525,7 @@ typed canceled outcome rather than a media failure. The already-open codec and
 immutable hardware device may remain allocated, but demux/codec position is
 never considered reusable: after the operation returns, the owning worker
 flushes the codec, restores default discard policy, clears its session-local
-playback ring, clears EOF/last-PTS state, and forces the next request through
+playback ring and reverse GOP replay window, clears EOF/last-PTS state, and forces the next request through
 indexed seek. Scrub and exact-still already seek by access policy; Playback now
 does so after cancellation as an explicit discontinuity rather than continuing
 from a possibly half-submitted packet or partly drained reorder queue. Input/codec open

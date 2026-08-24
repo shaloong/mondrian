@@ -243,6 +243,12 @@ Dropdowns, context menus, popovers, and tooltips should render through overlay p
 
 Menus, shortcut preferences, command palette, and future plugins should consume `app_ui::commands` descriptors. Menus are command presentation, not business logic owners.
 
+Editorial transport commands are first-class descriptors and editor actions:
+`J` dispatches reverse shuttle, `K` dispatches stop-shuttle/Pause, and `L`
+dispatches forward shuttle. Repeated J/L rate changes are interpreted only by
+the Playback Engine; shortcut routing, command availability, Window host, and
+Headless adapters do not keep their own direction or multiplier state.
+
 The startup and editor shells share the same new-project dialog state machine.
 New-project and project-settings workflows consume one app-UI color-engine
 catalog; neither dialog owns the product list of Mondrian Standard, pinned ACES

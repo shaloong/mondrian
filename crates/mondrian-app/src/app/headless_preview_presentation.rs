@@ -438,7 +438,7 @@ pub(crate) fn prepare_headless_preview_successor(
     // with a presentation-capacity Backpressure. Do not prepare out-of-content
     // successors at all.
     let successor_frame = request.snapshot().transport().current_frame();
-    if state.last_content_frame().is_ok_and(|last| successor_frame > last) {
+    if successor_frame < 0 || state.last_content_frame().is_ok_and(|last| successor_frame > last) {
         return Ok(None);
     }
     let playback_intent = request.snapshot().transport().playback_intent();

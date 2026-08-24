@@ -1085,7 +1085,7 @@ impl AppUiHost {
             if let Err(error) = audio_result {
                 tracing::error!(%error, "audio output pump failed closed");
             }
-            (changed, advance.frames_advanced > 0)
+            (changed, advance.frames_advanced != 0)
         };
         if crossed_frame {
             self.last_playback_frame_advance_at.set(Some(observed_at));
@@ -1849,6 +1849,9 @@ fn action_prefers_transport_refresh_without_preview(action: &Action) -> bool {
         Action::Play
             | Action::Pause
             | Action::TogglePlay
+            | Action::ShuttleReverse
+            | Action::ShuttleStop
+            | Action::ShuttleForward
             | Action::Seek(_)
             | Action::StepForward
             | Action::StepBack

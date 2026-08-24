@@ -1000,6 +1000,7 @@ fn preview_decode_rgba_request_preserves_explicit_contract_fields() {
     .with_fingerprint(fingerprint)
     .with_adaptive_hints(PreviewDecodeAdaptiveHints {
         scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+        ..PreviewDecodeAdaptiveHints::default()
     });
 
     assert_eq!(request.path, path.as_path());
@@ -1175,6 +1176,7 @@ fn scrub_policy_applies_adaptive_latency_hints() {
         frame_duration_pts,
         PreviewDecodeAdaptiveHints {
             scrub_class: PreviewScrubAdaptiveClass::SlowLatency,
+            ..PreviewDecodeAdaptiveHints::default()
         },
     );
     assert_eq!(
@@ -1192,7 +1194,10 @@ fn scrub_policy_applies_adaptive_latency_hints() {
         &probe_index,
         120,
         frame_duration_pts,
-        PreviewDecodeAdaptiveHints { scrub_class: PreviewScrubAdaptiveClass::HotRegion },
+        PreviewDecodeAdaptiveHints {
+            scrub_class: PreviewScrubAdaptiveClass::HotRegion,
+            ..PreviewDecodeAdaptiveHints::default()
+        },
     );
     assert_eq!(
         hot.scrub_adaptive_class,
@@ -2716,6 +2721,50 @@ fn playback_session_reuses_decoder_across_adaptive_output_geometry() {
             },
             "output-only scale changes must not reopen the source decoder"
         );
+    }
+}
+
+#[test]
+fn reverse_playback_replays_the_bounded_decoded_gop_tail_without_reseeking() {
+    const FIXTURE: &[u8] = include_bytes!("../../../../tests/fixtures/small/h264-bframes.mp4");
+    let root = tempfile::tempdir().expect("tempdir");
+    let path = root.path().join("h264-reverse-window.mp4");
+    std::fs::write(&path, FIXTURE).expect("write synthetic H.264 fixture");
+    let mut context = PreviewDecodeSessionContext::new();
+    let fingerprint = MediaFileFingerprint::capture(&path);
+
+    for (request_index, frame_index) in [12, 11, 10].into_iter().enumerate() {
+        let request = covering_decode_request(
+            path.as_path(),
+            TimelineTime::new(frame_index, 25).expect("exact source time"),
+            PreviewDecodeAccessMode::PlaybackCursor,
+            test_source_color(),
+        )
+        .with_max_size(Some(64), Some(64))
+        .with_fingerprint(fingerprint)
+        .with_adaptive_hints(PreviewDecodeAdaptiveHints {
+            playback_direction: crate::preview::PreviewPlaybackDirection::Reverse,
+            ..PreviewDecodeAdaptiveHints::default()
+        });
+        let outcome = context
+            .decode_cancellable(request, || false)
+            .unwrap_or_else(|error| panic!("reverse frame {frame_index} must decode: {error}"));
+        let PreviewDecodeOutcome::Frame(frame) = outcome else {
+            panic!("software reverse fixture must return an RGBA frame");
+        };
+        assert_eq!(frame.diagnostics.requested_pts, Some(frame_index * 512));
+        assert_eq!(frame.diagnostics.selected_pts, Some(frame_index * 512));
+        if request_index > 0 {
+            assert!(!frame.diagnostics.seek_performed);
+            assert_eq!(
+                frame.diagnostics.decoded_frame_count, 0,
+                "adjacent reverse frames must replay the retained GOP tail"
+            );
+            assert_eq!(
+                frame.diagnostics.session_disposition,
+                PreviewDecodeSessionDisposition::Reused
+            );
+        }
     }
 }
 

@@ -42,6 +42,7 @@ mod frame_materialization;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
+mod reverse_decode_window;
 mod seek_index;
 
 pub use decode_contract::{
@@ -159,6 +160,12 @@ const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 // residency authority. A byte limit prevents eight large CPU frames from
 // bypassing the App-owned Preview Frame Store budget.
 const PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET: usize = 96 * 1024 * 1024;
+// Reverse playback must replay a forward-decoded GOP tail instead of seeking
+// to the same keyframe for every descending frame. The window shares the same
+// conservative memory envelope as the output ring and independently caps
+// retained decoder references so hardware surface pools cannot be exhausted.
+const PREVIEW_REVERSE_DECODE_WINDOW_CAPACITY: usize = 4;
+const PREVIEW_REVERSE_DECODE_WINDOW_BYTE_BUDGET: usize = 96 * 1024 * 1024;
 // Native preview frames may outlive one codec call in the bounded App
 // completion transport (8 queued plus at most 2 worker-held results), Preview
 // Frame Store (8), renderer import (4), and exact selector/transient ownership
@@ -286,6 +293,21 @@ pub enum PreviewScrubAdaptiveClass {
 pub struct PreviewDecodeAdaptiveHints {
     /// Scrub pressure selected by the app scheduler for interactive requests.
     pub scrub_class: PreviewScrubAdaptiveClass,
+    /// Ordered traversal direction for session-local playback reuse.
+    ///
+    /// This is an execution hint only: source-time selection remains exact and
+    /// independent of traversal direction.
+    pub playback_direction: PreviewPlaybackDirection,
+}
+
+/// Ordered playback traversal supplied to the media Session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PreviewPlaybackDirection {
+    /// Increasing source time.
+    #[default]
+    Forward,
+    /// Decreasing source time, enabling bounded decoded-GOP replay.
+    Reverse,
 }
 
 /// Caller preference for preview hardware decode / native frame residency.

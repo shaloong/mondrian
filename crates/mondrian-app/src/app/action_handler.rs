@@ -83,6 +83,13 @@ impl AppState {
                     self.play()
                 }
             }
+            Action::ShuttleReverse => {
+                self.shuttle(mondrian_playback::PlaybackShuttleDirection::Reverse)
+            }
+            Action::ShuttleStop => self.pause(),
+            Action::ShuttleForward => {
+                self.shuttle(mondrian_playback::PlaybackShuttleDirection::Forward)
+            }
             Action::Seek(position) => {
                 let frame = self.sequence_frame_from_action_position("seek", position)?;
                 self.seek(frame)

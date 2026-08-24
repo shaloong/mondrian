@@ -39,6 +39,7 @@ impl AppState {
         let transport = PreviewTransportSnapshot::new(
             playback.state,
             playback.position,
+            playback.rate,
             playback.epoch,
             playback.quality_revision,
             self.playback_preview_resolution_scale(),

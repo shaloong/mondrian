@@ -613,6 +613,7 @@ use hardware_decode::{
     preview_hardware_decode_get_format, preview_hardware_frame_format,
     PreviewHardwareDecodeContextState, PreviewHardwareDecodePlan,
 };
+use reverse_decode_window::ReverseDecodeWindow;
 
 struct PreviewDecodeSession {
     path: PathBuf,
@@ -640,6 +641,8 @@ struct PreviewDecodeSession {
     /// First decoded successor retained to prove the selected frame's exclusive
     /// presentation boundary and seed the next forward request.
     next_decoded_frame: Option<RetainedDecodedCandidate>,
+    /// Bounded decoded GOP tail used only for exact reverse traversal.
+    reverse_decode_window: ReverseDecodeWindow<RetainedDecodedCandidate>,
     playback_ring: PreviewPlaybackRing,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
@@ -677,6 +680,7 @@ impl Drop for PreviewDecodeSession {
         // if a future refactor accidentally changes field declaration order.
         self.last_decoded_frame = None;
         self.next_decoded_frame = None;
+        self.reverse_decode_window.clear();
         self.playback_ring.clear();
     }
 }
@@ -881,6 +885,25 @@ impl RetainedDecodedFrame {
     fn frame(&self) -> &ffmpeg::util::frame::video::Video {
         &self.0
     }
+
+    fn reserved_bytes(&self) -> usize {
+        let frame = self.frame();
+        let plane_bytes = (0..frame.planes()).fold(0usize, |total, plane| {
+            total.saturating_add(
+                frame.stride(plane).saturating_mul(frame.plane_height(plane) as usize),
+            )
+        });
+        if plane_bytes > 0 {
+            return plane_bytes;
+        }
+        // Hardware frames often expose no CPU linesize. Charge a conservative
+        // four bytes per coded pixel so the byte bound remains meaningful in
+        // addition to the independent retained-surface count.
+        (frame.width() as usize)
+            .saturating_mul(frame.height() as usize)
+            .saturating_mul(4)
+            .max(1)
+    }
 }
 
 struct RetainedDecodedCandidate {
@@ -898,6 +921,17 @@ impl RetainedDecodedCandidate {
             extent: DecodedTemporalExtent::from_decoded_frame(start_pts, frame),
             frame: RetainedDecodedFrame::retain(frame, path)?,
         })
+    }
+
+    fn try_clone(&self, path: &Path) -> Result<Self> {
+        Ok(Self {
+            extent: self.extent,
+            frame: RetainedDecodedFrame::retain(self.frame.frame(), path)?,
+        })
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.frame.reserved_bytes()
     }
 }
 
@@ -1476,6 +1510,10 @@ impl PreviewDecodeSession {
             duplicate_decoded_pts: None,
             last_decoded_frame: None,
             next_decoded_frame: None,
+            reverse_decode_window: ReverseDecodeWindow::new(
+                PREVIEW_REVERSE_DECODE_WINDOW_CAPACITY,
+                PREVIEW_REVERSE_DECODE_WINDOW_BYTE_BUDGET,
+            ),
             reached_eof: false,
             playback_ring: PreviewPlaybackRing::new(
                 PREVIEW_PLAYBACK_SESSION_RING_CAPACITY,
@@ -1529,6 +1567,7 @@ impl PreviewDecodeSession {
         self.scaler = None;
         self.scaler_source_format = None;
         self.scaler_color_contract = None;
+        self.reverse_decode_window.clear();
         self.playback_ring.clear();
     }
 
@@ -1564,6 +1603,7 @@ impl PreviewDecodeSession {
         self.last_decoded_frame = None;
         self.next_decoded_frame = None;
         self.reached_eof = false;
+        self.reverse_decode_window.clear();
         self.playback_ring.clear();
     }
 
@@ -1599,6 +1639,9 @@ impl PreviewDecodeSession {
         } else {
             ffmpeg::codec::discard::Discard::Default
         });
+        if adaptive_hints.playback_direction == PreviewPlaybackDirection::Forward {
+            self.reverse_decode_window.clear();
+        }
 
         self.interrupt_state
             .set_checkpoint(PreviewDecodeCancellationCheckpoint::CacheLookup);
@@ -1633,6 +1676,9 @@ impl PreviewDecodeSession {
         }
         let cache_lookup_us = duration_us(cache_lookup_started_at.elapsed());
 
+        let reverse_window_covers_target = adaptive_hints.playback_direction
+            == PreviewPlaybackDirection::Reverse
+            && self.reverse_window_covers_target(target_pts);
         let retained_selection_covers_target = [
             self.last_decoded_frame.as_ref(),
             self.next_decoded_frame.as_ref(),
@@ -1653,7 +1699,7 @@ impl PreviewDecodeSession {
                 })
                 .unwrap_or(false);
 
-        let seek_performed = !should_continue_forward;
+        let seek_performed = !(should_continue_forward || reverse_window_covers_target);
         let mut seek_resolution = PreviewSeekResolution::default();
         let mut seek_us = 0;
         if seek_performed {
@@ -1707,6 +1753,7 @@ impl PreviewDecodeSession {
         let mut result = self.decode_forward_until(
             decode_target_pts,
             policy,
+            adaptive_hints.playback_direction,
             &session_output_lease,
             should_cancel,
         )?;
@@ -1835,6 +1882,48 @@ impl PreviewDecodeSession {
         })
     }
 
+    fn reverse_window_covers_target(&self, target_pts: i64) -> bool {
+        let mut before = None;
+        let mut after = None;
+        for candidate in self.reverse_decode_window.values() {
+            let extent = candidate.extent;
+            if extent.start_pts <= target_pts {
+                if before.is_none_or(|current: DecodedTemporalExtent| {
+                    extent.start_pts > current.start_pts
+                }) {
+                    before = Some(extent);
+                }
+            } else if after
+                .is_none_or(|current: DecodedTemporalExtent| extent.start_pts < current.start_pts)
+            {
+                after = Some(extent);
+            }
+        }
+        select_decoded_temporal_candidate(
+            target_pts,
+            PreviewDecodeAccessMode::PlaybackCursor,
+            before,
+            after,
+        )
+        .is_some()
+    }
+
+    fn observe_decoded_candidate(
+        &mut self,
+        candidates: &mut RetainedDecodedCandidateWindow,
+        frame_pts: i64,
+        frame: &ffmpeg::util::frame::video::Video,
+        playback_direction: PreviewPlaybackDirection,
+    ) -> Result<()> {
+        candidates.observe(frame_pts, frame, self.path.as_path(), &mut self.last_pts)?;
+        if playback_direction == PreviewPlaybackDirection::Reverse {
+            let retained = RetainedDecodedCandidate::retain(frame_pts, frame, self.path.as_path())?;
+            let reserved_bytes = retained.reserved_bytes();
+            self.reverse_decode_window.insert(frame_pts, reserved_bytes, retained);
+        }
+        Ok(())
+    }
+
     fn seek_to_target(
         &mut self,
         target_pts: i64,
@@ -1949,6 +2038,7 @@ impl PreviewDecodeSession {
         self.duplicate_decoded_pts = None;
         self.last_decoded_frame = None;
         self.next_decoded_frame = None;
+        self.reverse_decode_window.clear();
         Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
@@ -1959,6 +2049,7 @@ impl PreviewDecodeSession {
         &mut self,
         target_pts: i64,
         policy: PreviewDecodeAccessPolicy,
+        playback_direction: PreviewPlaybackDirection,
         session_output_lease: &PreviewDecodeSessionOutputLease,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<PreviewDecodeForwardResult> {
@@ -1966,6 +2057,11 @@ impl PreviewDecodeSession {
         interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::Codec);
         let mut candidates = RetainedDecodedCandidateWindow::new(target_pts);
         candidates.duplicate_pts = self.duplicate_decoded_pts;
+        if playback_direction == PreviewPlaybackDirection::Reverse {
+            for retained in self.reverse_decode_window.values() {
+                candidates.seed(retained.try_clone(self.path.as_path())?);
+            }
+        }
         for retained in [
             self.last_decoded_frame.take(),
             self.next_decoded_frame.take(),
@@ -1997,6 +2093,7 @@ impl PreviewDecodeSession {
         } else {
             exact_select_distance_pts
         };
+        let source_color = self.source_color;
 
         let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
                                   scaler: &mut Option<ffmpeg::software::scaling::Context>,
@@ -2064,7 +2161,7 @@ impl PreviewDecodeSession {
                 target_width,
                 target_height,
                 path,
-                self.source_color,
+                source_color,
                 session_output_lease.clone(),
             )?;
             Ok(Some((selected_extent, frame, retained_selected_frame)))
@@ -2120,11 +2217,11 @@ impl PreviewDecodeSession {
             }
             frames_decoded += 1;
             if let Some(frame_pts) = decoded.pts {
-                candidates.observe(
+                self.observe_decoded_candidate(
+                    &mut candidates,
                     frame_pts,
                     &decoded.frame,
-                    self.path.as_path(),
-                    &mut self.last_pts,
+                    playback_direction,
                 )?;
             }
         }
@@ -2214,11 +2311,11 @@ impl PreviewDecodeSession {
                 }
                 frames_decoded += 1;
                 if let Some(frame_pts) = decoded.pts {
-                    candidates.observe(
+                    self.observe_decoded_candidate(
+                        &mut candidates,
                         frame_pts,
                         &decoded.frame,
-                        self.path.as_path(),
-                        &mut self.last_pts,
+                        playback_direction,
                     )?;
                 }
             }
@@ -2281,11 +2378,11 @@ impl PreviewDecodeSession {
                 }
                 frames_decoded += 1;
                 if let Some(frame_pts) = decoded.pts {
-                    candidates.observe(
+                    self.observe_decoded_candidate(
+                        &mut candidates,
                         frame_pts,
                         &decoded.frame,
-                        self.path.as_path(),
-                        &mut self.last_pts,
+                        playback_direction,
                     )?;
                 }
             }

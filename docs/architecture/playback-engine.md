@@ -22,12 +22,12 @@ retains independent transport authority.
 - Latest-epoch cancellation and stale-result rejection.
 - Explicit degraded and blocked outcomes; no silent proxy or color changes.
 - Headless deterministic tests using fake clocks and executors.
-- Stable reservations for rational rate and reverse direction without claiming
-  those modes are implemented.
+- Exact signed rational phase rates, editorial J/K/L shuttle semantics, and
+  direction-correct demand/deadline/prefetch behavior.
 
 ## Excluded capabilities
 
-- Reverse decode, J/K/L, variable-rate audio, optical flow, or frame blending.
+- Variable-rate/reverse audio, pitch correction, optical flow, or frame blending.
 - Automatic proxy selection or persistent project-setting mutation.
 - Cross-process playback workers.
 - A public cross-platform decoder trait before two production adapters require
@@ -163,12 +163,22 @@ still enter `Half` and `Quarter` recovery instead of remaining indefinitely at
 - `Seek { position, interaction }`
 - `Step { frames }`
 - `SetLoopRange`, `ClearLoopRange`
-- `SetRate { signed_rational }` (reserved; initially accepts only `1/1`)
+- `Shuttle { Forward | Reverse }`: a stopped/opposite-direction command starts
+  at signed 1x; repeated same-direction commands double 1/2/4/8/16/32x.
 - `SetQualityPolicy`
 - `ProjectChanged` / `TimelineRevisionChanged`
 
 Commands are synchronous state transitions. They may emit directives but must
 not decode, render, block on a device, or wait for a worker.
+
+`K` is Pause, never a synthetic zero rate. Only exact forward 1x may use Audio
+Device Clock Master or consume ordinary realtime audio; reverse and non-1x
+transport explicitly mute/idle that path and remain Synthetic-clocked. Signed
+phase multiplication rounds elapsed magnitude toward zero before applying
+direction, so fractional forward and reverse rates cross mirrored boundaries
+under one rule. A shuttle transition preserves the current subframe phase,
+rotates Epoch, primes the direction-correct current demand, and never reanchors
+through an integer-frame approximation.
 
 An App Adapter applies Sequence identity, persisted monotonic
 `SequenceRevision`, evaluation time
@@ -1158,6 +1168,13 @@ multi-frame observation and counts every skipped intermediate target. The
 Engine does not enqueue obsolete current-frame work merely to preserve a
 one-request-per-frame count.
 
+Direction is part of the sampled Preview transport input. Immediate speculative
+work and the bounded preroll/prefetch prefix both follow playback order: frame
+`n + 1` forward and `n - 1` reverse, terminating at content end or frame zero.
+Deadline duration is derived from phase distance divided by the exact rate
+magnitude. No UI or media Adapter may infer direction from request arrival or
+rebuild these calculations from floating-point seconds.
+
 Display refresh cadence is an observation, not timeline time. A 24 fps sequence
 on a 60 Hz display may present a frame more than once. A 60 fps sequence on a
 slower display necessarily records presentation drops while the Clock Master
@@ -1247,6 +1264,7 @@ callback counters remain evidence.
 Playback Evidence is event-derived and versioned. Minimum events:
 
 - session/state/epoch transition;
+- exact Playback rate transition;
 - Clock Master selection and handoff;
 - single-frame Clock Master advancement and skipped intermediate frame targets;
 - Frame Demand admitted/rejected/canceled;
@@ -1270,7 +1288,8 @@ Logging alone is not evidence.
 and headless/perf Adapters. It consumes only Engine-created
 `FrameDeliveryApplication`; callers cannot separately supply acceptance,
 snapshot, target, or timestamp. Every fallible timestamp/phase calculation is
-preflighted before collector mutation. Schema v4 retains at most 4,096 detailed
+preflighted before collector mutation. Schema v5 retains exact signed rate
+transitions and at most 4,096 detailed
 tail events and a deterministic 4,096-sample whole-run reservoir per
 latency/phase-error metric.
 Each metric separately keeps its exact population count and exact all-run
