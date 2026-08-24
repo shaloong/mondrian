@@ -1781,7 +1781,10 @@ decode capability probes.
 - worker completion after cancellation cannot publish;
 - device loss during Priming, Playing, Recovering, Paused, and shutdown;
 - GPU/import blocker remains distinct from decode lateness;
-- preview resolution recovery preserves exact color/timeline semantics.
+- preview resolution recovery preserves exact color/timeline semantics;
+- real-media pause/seek/resume runs cross-region and latest-wins seeks while
+  Paused, then requires one resumed epoch, positive forward displacement, and
+  an exact `Ready` presentation at every planned realtime observation.
 
 ### Reference-machine gates
 

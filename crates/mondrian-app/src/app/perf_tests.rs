@@ -1548,6 +1548,36 @@ fn real_media_probe_rate_maps_to_the_nearest_supported_sequence_grid() {
 }
 
 #[test]
+fn pause_seek_resume_gate_requires_exact_forward_progress() {
+    let passing = evaluate_pause_seek_resume(
+        12,
+        12,
+        100,
+        112,
+        Some(9),
+        Some(9),
+        PreviewReadinessCounts { ready: 12, ..PreviewReadinessCounts::default() },
+    );
+    assert!(passing.passed, "{:?}", passing.failures);
+
+    let stale = evaluate_pause_seek_resume(
+        12,
+        12,
+        100,
+        112,
+        Some(9),
+        Some(9),
+        PreviewReadinessCounts {
+            ready: 11,
+            stale: 1,
+            ..PreviewReadinessCounts::default()
+        },
+    );
+    assert!(!stale.passed);
+    assert_eq!(stale.failures, vec!["resume_not_all_ready"]);
+}
+
+#[test]
 fn continuous_playback_window_reports_early_end_and_short_duration_without_bailing() {
     let mut playback = PlaybackEvidenceCollector::default().report();
     playback.first_epoch = Some(7);
@@ -1611,6 +1641,7 @@ struct PreviewMediaPlaybackPerfReport {
     frame_interval_ns: u64,
     media_probe: PreviewPlaybackMediaProbeReport,
     authored_output: PreviewMediaAuthoredOutputEvidence,
+    pause_seek_resume_probe: Option<PreviewPauseSeekResumeEvidence>,
     readiness: PreviewReadinessCounts,
     headless_gpu_preroll: HeadlessViewerGpuExecutionSummary,
     /// GPU work owned by the uninterrupted playback window only.
@@ -1649,6 +1680,59 @@ struct PreviewMediaAuthoredOutputEvidence {
     resolution: Resolution,
     resolution_scale: f32,
     full_extent: HeadlessViewerGpuExtent,
+}
+
+#[derive(Debug, Serialize)]
+struct PreviewPauseSeekResumeEvidence {
+    requested_observations: usize,
+    observed_observations: usize,
+    start_frame: i64,
+    end_frame: i64,
+    first_epoch: Option<u64>,
+    last_epoch: Option<u64>,
+    readiness: PreviewReadinessCounts,
+    passed: bool,
+    failures: Vec<&'static str>,
+}
+
+fn evaluate_pause_seek_resume(
+    requested_observations: usize,
+    observed_observations: usize,
+    start_frame: i64,
+    end_frame: i64,
+    first_epoch: Option<u64>,
+    last_epoch: Option<u64>,
+    readiness: PreviewReadinessCounts,
+) -> PreviewPauseSeekResumeEvidence {
+    let mut failures = Vec::new();
+    if observed_observations != requested_observations {
+        failures.push("resume_observation_window_incomplete");
+    }
+    if end_frame <= start_frame {
+        failures.push("resume_no_forward_progress");
+    }
+    if first_epoch.is_none() || first_epoch != last_epoch {
+        failures.push("resume_epoch_changed");
+    }
+    if readiness.ready != requested_observations
+        || readiness.loading > 0
+        || readiness.stale > 0
+        || readiness.unavailable > 0
+        || readiness.missed_deadline > 0
+    {
+        failures.push("resume_not_all_ready");
+    }
+    PreviewPauseSeekResumeEvidence {
+        requested_observations,
+        observed_observations,
+        start_frame,
+        end_frame,
+        first_epoch,
+        last_epoch,
+        readiness,
+        passed: failures.is_empty(),
+        failures,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1698,6 +1782,7 @@ struct PreviewMediaPlaybackProbeConfig {
     gpu_candidate_threshold_ms: u128,
     ready_timeout: Duration,
     seek_probe_count: usize,
+    resume_probe_frames: usize,
     probe_cancellation_recovery: bool,
     native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy,
     absolute_deadline: Option<Instant>,
@@ -3231,6 +3316,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             gpu_candidate_threshold_ms,
             ready_timeout,
             seek_probe_count: 0,
+            resume_probe_frames: 0,
             probe_cancellation_recovery: false,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -4794,6 +4880,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             gpu_candidate_threshold_ms: PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
             ready_timeout,
             seek_probe_count: QUALIFICATION_SEEK_PROBES,
+            resume_probe_frames: 12,
             probe_cancellation_recovery: true,
             native_video_gpu_timing: PreviewNativeVideoGpuTimingPolicy::Disabled,
             absolute_deadline: None,
@@ -5122,6 +5209,13 @@ fn run_external_continuous_playback_gate(
         .primary_video()
         .and_then(|video| video.total_frames)
         .and_then(|frames| usize::try_from(frames).ok());
+    let resume_probe_frames = if seek_probe_count == 0 {
+        0
+    } else if professional {
+        12
+    } else {
+        env_usize_clamped("MONDRIAN_PREVIEW_EXTERNAL_RESUME_FRAMES", 12, 4, 60)
+    };
     let default_sequence_frame_count = frame_count
         .saturating_add(startup_headroom_frames(ready_timeout, frame_interval_ns))
         .min(source_frame_count.unwrap_or(usize::MAX));
@@ -5148,6 +5242,7 @@ fn run_external_continuous_playback_gate(
             gpu_candidate_threshold_ms,
             ready_timeout,
             seek_probe_count,
+            resume_probe_frames,
             probe_cancellation_recovery: professional,
             native_video_gpu_timing: if professional {
                 PreviewNativeVideoGpuTimingPolicy::Strict {
@@ -5588,6 +5683,10 @@ fn run_preview_media_continuous_playback_probe(
     media_info: Option<MediaInfo>,
     config: PreviewMediaPlaybackProbeConfig,
 ) -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
+    anyhow::ensure!(
+        config.resume_probe_frames == 0 || config.seek_probe_count > 0,
+        "pause-seek-resume observations require at least one seek probe"
+    );
     let media_info = match media_info {
         Some(media_info) => media_info,
         None => probe_media_info(video_path)
@@ -5850,6 +5949,28 @@ fn run_preview_media_continuous_playback_probe(
         })
         .transpose()?;
 
+    let mut pause_seek_resume_probe = None;
+    let pause_seek_resume_case = (config.resume_probe_frames > 0)
+        .then(|| {
+            run_case(
+                "preview_media.pause_seek_resume_readiness",
+                1,
+                u128::from(config.resume_probe_frames as u64).saturating_mul(1_000),
+                || {
+                    pause_seek_resume_probe = Some(run_headless_pause_seek_resume_probe(
+                        &preview_service,
+                        &mut state,
+                        &mut gpu_adapter,
+                        &mut headless_gpu_post_window,
+                        config.resume_probe_frames,
+                        config.ready_timeout,
+                    )?);
+                    Ok(())
+                },
+            )
+        })
+        .transpose()?;
+
     let mut cancellation_recovery_probe = None;
     let cancellation_recovery_case = config
         .probe_cancellation_recovery
@@ -5972,6 +6093,7 @@ fn run_preview_media_continuous_playback_probe(
         frame_interval_ns: config.frame_interval_ns,
         media_probe,
         authored_output,
+        pause_seek_resume_probe,
         readiness,
         headless_gpu_preroll,
         headless_gpu,
@@ -5994,6 +6116,7 @@ fn run_preview_media_continuous_playback_probe(
         native_video_gpu_timing,
         cases: std::iter::once(playback_case)
             .chain(seek_case)
+            .chain(pause_seek_resume_case)
             .chain(cancellation_recovery_case)
             .chain(std::iter::once(gpu_candidate_case))
             .collect(),
@@ -6228,6 +6351,85 @@ fn run_headless_cross_region_seeks(
     )?;
     wait_for_preview_work_quiescence(preview_service, state, timeout_per_seek)?;
     Ok(())
+}
+
+fn run_headless_pause_seek_resume_probe(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    observation_count: usize,
+    timeout: Duration,
+) -> anyhow::Result<PreviewPauseSeekResumeEvidence> {
+    anyhow::ensure!(
+        observation_count > 0,
+        "pause-seek-resume probe requires at least one observation"
+    );
+    anyhow::ensure!(
+        state.playback_engine.snapshot().state == mondrian_playback::TransportState::Paused,
+        "pause-seek-resume probe must begin from Paused transport"
+    );
+    state.play()?;
+    let initial = wait_for_headless_gpu_ready_observation(
+        preview_service,
+        state,
+        gpu_adapter,
+        gpu_summary,
+        timeout,
+    )?;
+    anyhow::ensure!(
+        initial.current_gpu_ready,
+        "resumed playback failed to establish an exact current presentation"
+    );
+    wait_for_headless_playback_preroll(preview_service, state, gpu_adapter, gpu_summary, timeout)?;
+
+    let start_frame = state.current_frame();
+    let mut readiness = PreviewReadinessCounts::default();
+    let mut observed_observations = 0usize;
+    let mut first_epoch = None;
+    let mut last_epoch = None;
+    let mut realtime_driver = HeadlessRealtimePlaybackDriver::with_absolute_deadline(None)?;
+    for _ in 0..observation_count {
+        match run_headless_realtime_video_interval(
+            preview_service,
+            state,
+            gpu_adapter,
+            gpu_summary,
+            timeout,
+            &mut realtime_driver,
+        )? {
+            HeadlessRealtimeIntervalOutcome::Advanced { epoch, sample, .. } => {
+                let epoch = epoch.get();
+                first_epoch.get_or_insert(epoch);
+                last_epoch = Some(epoch);
+                observed_observations = observed_observations.saturating_add(1);
+                record_headless_preview_readiness(&mut readiness, sample);
+            }
+            HeadlessRealtimeIntervalOutcome::NaturalEnd { terminal_frame } => {
+                anyhow::bail!(
+                    "resumed playback reached natural end before completing its observation window at frame {terminal_frame}"
+                );
+            }
+        }
+    }
+    apply_headless_preview_outcome(preview_service, state);
+    let end_frame = state.current_frame();
+    state.pause()?;
+    let evidence = evaluate_pause_seek_resume(
+        observation_count,
+        observed_observations,
+        start_frame,
+        end_frame,
+        first_epoch,
+        last_epoch,
+        readiness,
+    );
+    anyhow::ensure!(
+        evidence.passed,
+        "pause-seek-resume gate failed: {:?}",
+        evidence.failures
+    );
+    Ok(evidence)
 }
 
 fn run_headless_cancellation_recovery_probe(
