@@ -93,6 +93,24 @@ impl AudioProcessorExecutionContract {
         self.session_scratch_bytes
     }
 
+    /// Add Adapter-owned Session storage to the admitted scratch obligation.
+    ///
+    /// Process-isolated Adapters use this to account for fixed shared audio and
+    /// parameter exchange storage without exposing their transport layout to
+    /// the semantic Processor contract.
+    pub fn with_additional_session_scratch_bytes(
+        self,
+        additional_bytes: usize,
+    ) -> Result<Self, AudioProcessorHostError> {
+        let session_scratch_bytes =
+            self.session_scratch_bytes.checked_add(additional_bytes).ok_or_else(|| {
+                AudioProcessorHostError::InvalidContract(
+                    "processor Session scratch obligation overflowed".to_owned(),
+                )
+            })?;
+        Ok(Self { session_scratch_bytes, ..self })
+    }
+
     pub(crate) fn admits(self, mode: AudioProcessingMode) -> bool {
         match mode {
             AudioProcessingMode::Realtime => self.realtime_capable,
@@ -138,6 +156,20 @@ pub enum AudioProcessorHostError {
     /// An Adapter unwound across the Host boundary.
     #[error("audio processor adapter panicked during {0}")]
     AdapterPanicked(&'static str),
+    /// A supervised external Worker exceeded its admitted operation deadline.
+    #[error("isolated audio processor Worker exceeded its {operation} deadline")]
+    WorkerDeadlineExceeded {
+        /// Stable operation class whose deadline expired.
+        operation: &'static str,
+    },
+    /// A supervised external Worker crashed, disconnected, or violated protocol.
+    #[error("isolated audio processor Worker failed during {operation}: {detail}")]
+    WorkerFailed {
+        /// Stable operation class being executed.
+        operation: &'static str,
+        /// Bounded diagnostic or protocol detail.
+        detail: String,
+    },
     /// A prior failure left an exclusive instance in unknown mutable state.
     #[error("audio processor instance is poisoned and must be recreated")]
     PoisonedInstance,

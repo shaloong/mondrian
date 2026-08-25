@@ -593,6 +593,35 @@ new Session. This protects Mondrian from Rust unwind across the Host Interface,
 but it is not crash, access-violation, hang, or deadline isolation. VST3/CLAP
 remain unavailable unless a concrete out-of-process Adapter supplies those
 stronger guarantees; the built-in resolver continues to fail them closed.
+
+The `processor_isolation` deep Module now supplies that generic out-of-process
+Adapter boundary without changing the Processor Host Interface. One immutable
+Worker Spec binds the helper executable, opaque native preparation payload,
+exact Render Contract, plugin latency/tail/mode/scratch facts, auxiliary buses,
+stable Parameter-lane order, and startup/block deadlines. Preparation performs
+a real child launch and handshake; Session creation launches a fresh persistent
+child for every mutable occurrence and revalidates the same contract again.
+Built-ins remain local, while `IsolatedAudioProcessorResolver` can dispatch only
+external definitions through a concrete discovery/ABI Spec resolver.
+
+Parent and Worker map one fixed temporary backing object sized from maximum block,
+channel layout, auxiliary-bus count, and worst-case sample-accurate Parameter event
+count. The render worker copies PCM/events into that preallocated region and sends
+only a fixed 32-byte command over a private loopback control connection. It never
+creates a process, opens a file, grows a container, or writes an unbounded PCM pipe
+inside block execution. The child validates every range before exposing borrowed
+views to its native Adapter. Output PCM is copied back only after one valid success
+response; partial or failed native output is never published.
+
+The parent owns the hard operation deadline. Timeout, disconnect, malformed bounded
+protocol, Worker-reported failure, panic, abort, access violation, or contract drift
+poisons the exclusive instance, terminates and reaps its exact process, and requires
+a new Session/Worker. Worker shutdown is bounded as well. This keeps plugin execution
+off the physical audio callback: Playback consumes the existing ahead-rendered PCM
+queue, while Export uses the same Audio Program and isolated Processor semantics.
+The boundary is failure containment, not a hostile-code security sandbox; native
+VST3/CLAP discovery, ABI loading, vendor UI, and format qualification remain concrete
+Adapter responsibilities and may not be inferred from the generic Worker protocol.
 At root entry, stateful Track/Bus/Output occurrences enter immediately because
 their strips evaluate every requested block. A stateful Contribution occurrence
 remains pending until its causal execution span first intersects a request,

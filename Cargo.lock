@@ -2371,11 +2371,16 @@ dependencies = [
 name = "mondrian-audio"
 version = "0.2.0"
 dependencies = [
+ "bytemuck",
+ "memmap2",
  "mondrian-core",
  "mondrian-timeline",
  "pulp",
  "serde",
+ "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
+ "uuid",
 ]
 
 [[package]]

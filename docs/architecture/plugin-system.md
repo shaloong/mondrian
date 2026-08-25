@@ -8,6 +8,16 @@ in [Audio Pipeline](audio-pipeline.md); project files preserve their stable
 native identity, parameters, expected buses, and opaque state without persisting
 loaded binaries or runtime objects.
 
+External audio processors use `mondrian-audio`'s Isolated Audio Processor Worker
+boundary. A concrete VST3/CLAP discovery and ABI Adapter resolves an author
+definition into one opaque Worker preparation payload; it must never load the
+native module in the Mondrian process. One persistent supervised child owns each
+mutable occurrence, while the existing Processor Host continues to own PDC,
+sidechains, parameter timing, failure propagation, Playback, and Export semantics.
+The generic boundary proves crash/hang/protocol containment only. It does not by
+itself advertise that a native format, plugin, vendor UI, or security sandbox is
+available.
+
 ## Effect Plugins
 
 Plugin effects are represented as `EffectType::Plugin(String)` and registered through `EffectDefinition`.

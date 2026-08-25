@@ -19,6 +19,7 @@ mod meter;
 mod plan;
 mod processor;
 mod processor_host;
+mod processor_isolation;
 mod processor_parameters;
 mod render;
 mod runtime;
@@ -39,6 +40,7 @@ pub use meter::{
 };
 pub use plan::*;
 pub use processor::*;
+pub use processor_isolation::*;
 pub use render::{
     render_audio, AudioContinuityEpoch, AudioExecutionError, AudioPcmSource, AudioRenderCapacity,
     AudioRenderRequest, AudioRenderSession, AudioStateEntry,
