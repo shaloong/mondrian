@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 const FFPROBE_DEADLINE: Duration = Duration::from_secs(30);
 const FFPROBE_REPORT_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const FFPROBE_FRAME_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+const FFPROBE_KEYFRAME_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const FFPROBE_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 
 /// Exact stream and duration contract that a finished export must prove.
@@ -72,6 +73,8 @@ pub struct ExpectedVideoConstraints {
     pub fps_den: Option<i64>,
     /// Encoded signal fields that must match the finished video stream.
     pub signal: Option<ExpectedVideoSignalConstraints>,
+    /// Exact admitted picture structure to verify on the finished stream.
+    pub coding: Option<crate::video_encoding::ResolvedVideoCodingStructure>,
 }
 
 /// Codec/profile identities supported by the production export Adapter.
@@ -335,6 +338,17 @@ struct FfprobeFrame {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeKeyframeReport {
+    #[serde(default)]
+    frames: Vec<FfprobeKeyframe>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct FfprobeKeyframe {
+    best_effort_timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
 struct FfprobeStream {
     codec_type: Option<String>,
     codec_name: Option<String>,
@@ -455,6 +469,12 @@ pub fn validate_export_output_cancellable(
 
     let report = ffprobe_report(output_path, cancellation)?;
     validate_report(&report, expectations)?;
+
+    if let ExpectedStream::Required(expected_video) = &expectations.video
+        && let Some(coding) = expected_video.coding
+    {
+        validate_finished_video_coding(output_path, &report, expected_video, coding, cancellation)?;
+    }
 
     // Every deliverable with a video stream must prove its first frame is
     // decodable, not only HDR variants. Previously an SDR export with a
@@ -588,6 +608,158 @@ fn ffprobe_first_video_frame_side_data(
         .next()
         .map(|frame| frame.side_data_list)
         .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
+}
+
+fn validate_finished_video_coding(
+    path: &Path,
+    report: &FfprobeReport,
+    expected: &ExpectedVideoConstraints,
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), String> {
+    let max_interval_frames = match coding {
+        crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+            keyframe_interval_frames,
+            ..
+        }
+        | crate::video_encoding::ResolvedVideoCodingStructure::Av1RandomAccess {
+            keyframe_interval_frames,
+            ..
+        } => keyframe_interval_frames,
+        crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly => return Ok(()),
+    };
+    let stream = report
+        .streams
+        .iter()
+        .find(|stream| stream.codec_type.as_deref() == Some("video"))
+        .ok_or_else(|| "导出 GOP 校验缺少视频流".to_owned())?;
+    let (time_base_num, time_base_den) = stream
+        .time_base
+        .as_deref()
+        .and_then(parse_ratio_i64)
+        .ok_or_else(|| "导出 GOP 校验缺少有效视频 time_base".to_owned())?;
+    let fps_num = expected.fps_num.ok_or_else(|| "导出 GOP 校验缺少帧率分子".to_owned())?;
+    let fps_den = expected.fps_den.ok_or_else(|| "导出 GOP 校验缺少帧率分母".to_owned())?;
+
+    let mut command = mondrian_media::ffprobe_command();
+    command
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-skip_frame")
+        .arg("nokey")
+        .arg("-show_frames")
+        .arg("-show_entries")
+        .arg("frame=best_effort_timestamp")
+        .arg("-print_format")
+        .arg("json")
+        .arg(path);
+    let output = run_bounded_ffprobe(
+        &mut command,
+        FFPROBE_KEYFRAME_STDOUT_LIMIT,
+        cancellation,
+        "keyframe report",
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffprobe GOP 校验失败（{}）: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let keyframes = serde_json::from_slice::<FfprobeKeyframeReport>(&output.stdout)
+        .map_err(|error| format!("解析 ffprobe GOP 结果失败: {error}"))?;
+    validate_keyframe_timestamps(
+        &keyframes.frames,
+        stream.start_pts,
+        stream.duration_ts,
+        time_base_num,
+        time_base_den,
+        fps_num,
+        fps_den,
+        max_interval_frames,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_keyframe_timestamps(
+    frames: &[FfprobeKeyframe],
+    start_pts: Option<i64>,
+    duration_ts: Option<i64>,
+    time_base_num: i64,
+    time_base_den: i64,
+    fps_num: i64,
+    fps_den: i64,
+    max_interval_frames: u32,
+) -> Result<(), String> {
+    if time_base_num <= 0 || time_base_den <= 0 || fps_num <= 0 || fps_den <= 0 {
+        return Err("导出 GOP 校验合同包含无效 time_base/帧率".to_owned());
+    }
+    let timestamps = frames
+        .iter()
+        .map(|frame| {
+            frame
+                .best_effort_timestamp
+                .ok_or_else(|| "导出关键帧缺少 best_effort_timestamp".to_owned())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let first = timestamps
+        .first()
+        .copied()
+        .ok_or_else(|| "导出视频没有可证明的关键帧".to_owned())?;
+    if let Some(start_pts) = start_pts
+        && first != start_pts
+    {
+        return Err(format!(
+            "导出视频首帧不是随机访问点：start_pts={start_pts}, first_key={first}"
+        ));
+    }
+    for pair in timestamps.windows(2) {
+        validate_keyframe_gap(
+            pair[1] - pair[0],
+            time_base_num,
+            time_base_den,
+            fps_num,
+            fps_den,
+            max_interval_frames,
+        )?;
+    }
+    if let (Some(start_pts), Some(duration_ts), Some(last)) =
+        (start_pts, duration_ts, timestamps.last().copied())
+    {
+        validate_keyframe_gap(
+            start_pts.saturating_add(duration_ts).saturating_sub(last),
+            time_base_num,
+            time_base_den,
+            fps_num,
+            fps_den,
+            max_interval_frames,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_keyframe_gap(
+    gap_pts: i64,
+    time_base_num: i64,
+    time_base_den: i64,
+    fps_num: i64,
+    fps_den: i64,
+    max_interval_frames: u32,
+) -> Result<(), String> {
+    if gap_pts < 0 {
+        return Err("导出关键帧时间戳发生倒退".to_owned());
+    }
+    let actual = i128::from(gap_pts) * i128::from(time_base_num) * i128::from(fps_num);
+    let admitted =
+        i128::from(max_interval_frames) * i128::from(time_base_den) * i128::from(fps_den);
+    if actual > admitted {
+        return Err(format!(
+            "导出 GOP 超过准入上限：gap_pts={gap_pts}, max_interval_frames={max_interval_frames}"
+        ));
+    }
+    Ok(())
 }
 
 fn run_bounded_ffprobe(
@@ -1444,6 +1616,7 @@ mod tests {
                 fps_num: Some(25),
                 fps_den: Some(1),
                 signal: None,
+                coding: None,
             }),
             audio: base_audio_expectation(),
             expected_duration_secs: Some(10.0),
@@ -1468,6 +1641,31 @@ mod tests {
         };
 
         assert!(validate_report(&report, &expected).is_ok());
+    }
+
+    #[test]
+    fn keyframe_validation_uses_exact_stream_time_base() {
+        let frames = [0, 25_600, 51_200]
+            .into_iter()
+            .map(|timestamp| FfprobeKeyframe { best_effort_timestamp: Some(timestamp) })
+            .collect::<Vec<_>>();
+
+        validate_keyframe_timestamps(&frames, Some(0), Some(64_000), 1, 12_800, 25, 1, 50)
+            .expect("two-second GOP and shorter tail");
+    }
+
+    #[test]
+    fn keyframe_validation_rejects_encoder_ignored_interval() {
+        let frames = [0, 38_400]
+            .into_iter()
+            .map(|timestamp| FfprobeKeyframe { best_effort_timestamp: Some(timestamp) })
+            .collect::<Vec<_>>();
+
+        let error =
+            validate_keyframe_timestamps(&frames, Some(0), Some(51_200), 1, 12_800, 25, 1, 50)
+                .expect_err("three-second gap exceeds admitted two-second GOP");
+
+        assert!(error.contains("GOP 超过准入上限"));
     }
 
     #[test]
@@ -1849,12 +2047,14 @@ mod tests {
                 "format=rgba,scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt709",
                 "-c:v",
                 "libx264",
+                "-r",
+                "25",
                 "-pix_fmt",
                 "yuv420p",
                 "-color_range",
                 "tv",
                 "-x264-params",
-                "colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709",
+                "keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0:colorprim=bt709:transfer=iec61966-2-1:colormatrix=bt709",
             ])
             .arg(&path)
             .status()
@@ -1865,6 +2065,16 @@ mod tests {
             video: ExpectedStream::Required(ExpectedVideoConstraints {
                 width: Some(16),
                 height: Some(16),
+                fps_num: Some(25),
+                fps_den: Some(1),
+                coding: Some(
+                    crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+                        keyframe_interval_frames: 50,
+                        max_b_frames: 3,
+                        closed_gop: true,
+                        scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+                    },
+                ),
                 signal: Some(ExpectedVideoSignalConstraints {
                     pixel_format: Some("yuv420p".to_owned()),
                     color_range: Some("tv".to_owned()),

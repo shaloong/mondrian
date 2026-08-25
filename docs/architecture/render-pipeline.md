@@ -1372,6 +1372,13 @@ consumed by Headless acceptance. Encoder success without it is an export
 failure; the queue may publish `Completed` only after validation and atomic
 final publication.
 
+For admitted long-GOP H.264/HEVC and AV1 output, validation also asks ffprobe
+for keyframes only. It proves that the first stream timestamp is a random
+access point and that every adjacent and final-tail GOP stays within the
+resolved maximum interval. Comparisons combine stream time base and output
+frame rate in checked-width integer arithmetic; floating seconds cannot hide
+an encoder that ignored its GOP request.
+
 The encoder and validation CLI processes use
 `mondrian-media::SupervisedChild` as one lifecycle boundary. Encoder stderr is
 drained from spawn, not after raw-frame stdin has filled; frame allocations move
@@ -1380,8 +1387,8 @@ retains cancellation authority during rendering, video decode, audio source
 reads, pipe writes, encoder wait, and FFprobe validation. A canceled pipe write
 kills and reaps the encoder rather than waiting for FFmpeg to consume another
 frame. FFprobe uses a 30-second monotonic per-invocation deadline, strict
-bounded stdout (16 MiB for stream reports and 4 MiB for first-frame HDR
-evidence), and a 64 KiB stderr tail. Cancellation, deadline, output-limit, and
+bounded stdout (16 MiB for stream/keyframe reports and 4 MiB for first-frame
+HDR evidence), and a 64 KiB stderr tail. Cancellation, deadline, output-limit, and
 I/O stages remain distinguishable in the resulting failure instead of being
 collapsed into an exit-code string.
 

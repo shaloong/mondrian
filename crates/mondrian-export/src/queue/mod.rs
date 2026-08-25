@@ -2113,6 +2113,7 @@ fn execute_timeline_export(
                 fps_num: Some(range.fps_num),
                 fps_den: Some(range.fps_den),
                 signal: Some(expected_video_signal),
+                coding: Some(delivery.video_coding),
             }),
             audio: expected_audio
                 .map(ExpectedStream::Required)
