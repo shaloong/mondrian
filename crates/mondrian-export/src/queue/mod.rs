@@ -5,7 +5,7 @@ use crate::delivery::{ffmpeg_audio_channel_layout, ResolvedExportDeliveryContrac
 use crate::preset::TimelineExportRange;
 use crate::preset::{
     AudioCodecConfig, Container, ExportAlphaMode, ExportConfig, ExportOutputPolicy,
-    ResolvedTimelineExportRange, TimelineExportSnapshot, VideoCodecConfig,
+    TimelineExportSnapshot, VideoCodecConfig,
 };
 use crate::validator::{
     delivery_bit_depth_value, expected_audio_constraints, expected_video_encoding,
@@ -24,8 +24,9 @@ use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
     AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
-    AudioSourceComponentId, ExecutionCancellationToken, Resolution, ResolvedPictureGeometry,
-    SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
+    AudioSourceComponentId, ExecutionCancellationToken, FrameRounding, Resolution,
+    ResolvedPictureGeometry, SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace,
+    WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
@@ -1929,24 +1930,42 @@ impl ExportExecutor for FfmpegExportExecutor {
 
 #[derive(Debug, Clone, Copy)]
 struct TimelineRenderRange {
-    start_frame: i64,
+    source_start: TimelineTime,
     total_frames: u64,
     fps_num: i64,
     fps_den: i64,
+    sequence_frame_rate: Rational,
+    frame_sampling: crate::preset::ExportFrameSampling,
 }
 
 impl TimelineRenderRange {
-    fn resolved(self) -> ResolvedTimelineExportRange {
-        ResolvedTimelineExportRange {
-            start_frame: self.start_frame,
-            total_frames: self.total_frames,
-            fps_num: self.fps_num,
-            fps_den: self.fps_den,
-        }
+    fn time_range(self) -> Result<TimelineTimeRange, String> {
+        let frame_count = i64::try_from(self.total_frames)
+            .map_err(|_| "export frame count exceeds signed time capacity".to_owned())?;
+        let duration = TimelineTime::from_frame_position(FramePosition::new(
+            frame_count,
+            Rational::new(self.fps_den, self.fps_num),
+        ))
+        .map_err(|error| error.to_string())?;
+        TimelineTimeRange::new(self.source_start, duration).map_err(|error| error.to_string())
     }
 
-    fn time_range(self) -> Result<TimelineTimeRange, String> {
-        self.resolved().time_range().map_err(|error| error.to_string())
+    fn evaluation_frame(self, output_index: u64) -> Result<i64, String> {
+        let output_index = i64::try_from(output_index)
+            .map_err(|_| "export frame index exceeds signed time capacity".to_owned())?;
+        let offset = TimelineTime::from_frame_position(FramePosition::new(
+            output_index,
+            Rational::new(self.fps_den, self.fps_num),
+        ))
+        .map_err(|error| error.to_string())?;
+        let sample_time =
+            self.source_start.checked_add(offset).map_err(|error| error.to_string())?;
+        match self.frame_sampling {
+            crate::preset::ExportFrameSampling::FrameHold => sample_time
+                .to_frame_position(self.sequence_frame_rate, FrameRounding::Floor)
+                .map(|position| position.frame)
+                .map_err(|error| error.to_string()),
+        }
     }
 }
 
@@ -1995,13 +2014,6 @@ fn execute_timeline_export(
         if let Err(reason) = validate_snapshot_media_revisions(timeline) {
             return JobExecutionResult::Failed(reason);
         }
-        let range = match compute_timeline_render_range(timeline) {
-            Ok(range) => range,
-            Err(error) => return JobExecutionResult::Failed(error),
-        };
-        if range.total_frames == 0 {
-            return JobExecutionResult::Failed("时间线导出范围为空".to_string());
-        }
         let delivery = match crate::delivery::resolve_export_delivery(
             &job.config.preset,
             &timeline.sequence.settings,
@@ -2010,6 +2022,13 @@ fn execute_timeline_export(
             Ok(delivery) => delivery,
             Err(error) => return JobExecutionResult::Failed(error.to_string()),
         };
+        let range = match compute_timeline_render_range_for_delivery(timeline, &delivery) {
+            Ok(range) => range,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        if range.total_frames == 0 {
+            return JobExecutionResult::Failed("时间线导出范围为空".to_string());
+        }
 
         let Some(prepared_visual) =
             timeline.prepared_execution().map(|execution| execution.visual())
@@ -2581,18 +2600,10 @@ fn timeline_audio_sample_range(
     if range.total_frames == 0 || sample_rate == 0 {
         return Ok((0, 0));
     }
-    let time_base = Rational::new(range.fps_den, range.fps_num);
     let rate = AudioSampleRate::new(sample_rate).map_err(|error| error.to_string())?;
-    let start_time =
-        TimelineTime::from_frame_position(FramePosition::new(range.start_frame, time_base))
-            .map_err(|error| error.to_string())?;
-    let frame_count =
-        i64::try_from(range.total_frames).map_err(|_| "导出音频帧范围超出支持范围".to_owned())?;
-    let end_time = TimelineTime::from_frame_position(FramePosition::new(
-        range.start_frame.saturating_add(frame_count),
-        time_base,
-    ))
-    .map_err(|error| error.to_string())?;
+    let time_range = range.time_range()?;
+    let start_time = time_range.start;
+    let end_time = time_range.end().map_err(|error| error.to_string())?;
     let start =
         AudioSamplePosition::from_timeline_time(start_time, rate, AudioSampleRounding::Nearest)
             .map_err(|error| error.to_string())?;
@@ -2710,16 +2721,7 @@ fn preflight_timeline_visual_range_once(
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return Err(JobExecutionResult::Cancelled);
         }
-        let index = i64::try_from(index).map_err(|_| {
-            JobExecutionResult::Failed(
-                "export visual preflight frame range exceeds signed coordinate capacity".to_owned(),
-            )
-        })?;
-        let timeline_frame = range.start_frame.checked_add(index).ok_or_else(|| {
-            JobExecutionResult::Failed(
-                "export visual preflight frame coordinate overflowed signed capacity".to_owned(),
-            )
-        })?;
+        let timeline_frame = range.evaluation_frame(index).map_err(JobExecutionResult::Failed)?;
         let closure = prepare_export_visual_frame_closure(
             timeline,
             visual_session,
@@ -2838,7 +2840,10 @@ fn render_timeline_frames_with_sink(
             return JobExecutionResult::Cancelled;
         }
 
-        let timeline_frame = range.start_frame + index as i64;
+        let timeline_frame = match range.evaluation_frame(index) {
+            Ok(frame) => frame,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
         let mut frame_color_counts = InputColorResolutionSourceCounts::default();
         let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
         let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
@@ -3281,19 +3286,22 @@ impl ExportVisualRenderSession {
         if self.reference_visual_programs.is_none() {
             return Ok(());
         }
-        let total_frames = i64::try_from(range.total_frames)
-            .map_err(|_| "reference visual range exceeds signed frame capacity".to_owned())?;
+        let start_frame = range
+            .source_start
+            .to_frame_position(range.sequence_frame_rate, FrameRounding::Floor)
+            .map_err(|error| error.to_string())?
+            .frame;
         let end_frame_exclusive = range
-            .start_frame
-            .checked_add(total_frames)
-            .ok_or_else(|| "reference visual range end exceeds signed frame capacity".to_owned())?;
+            .time_range()?
+            .end()
+            .map_err(|error| error.to_string())?
+            .to_frame_position(range.sequence_frame_rate, FrameRounding::Ceil)
+            .map_err(|error| error.to_string())?
+            .frame;
         let dependencies = crate::prepare_timeline_export_dependencies(
             root,
             sequences,
-            TimelineExportRange::WorkArea {
-                start_frame: range.start_frame,
-                end_frame_exclusive,
-            },
+            TimelineExportRange::WorkArea { start_frame, end_frame_exclusive },
             false,
         )
         .map_err(|error| error.to_string())?;
@@ -5319,15 +5327,49 @@ fn decode_video_layer_scaled(
     }))
 }
 
+#[cfg(test)]
 fn compute_timeline_render_range(
     timeline: &TimelineExportSnapshot,
 ) -> Result<TimelineRenderRange, String> {
+    compute_timeline_render_range_with_cadence(
+        timeline,
+        timeline.sequence.settings.frame_rate,
+        crate::preset::ExportFrameSampling::FrameHold,
+    )
+}
+
+fn compute_timeline_render_range_for_delivery(
+    timeline: &TimelineExportSnapshot,
+    delivery: &ResolvedExportDeliveryContract,
+) -> Result<TimelineRenderRange, String> {
+    compute_timeline_render_range_with_cadence(
+        timeline,
+        delivery.frame_rate,
+        delivery.frame_sampling,
+    )
+}
+
+fn compute_timeline_render_range_with_cadence(
+    timeline: &TimelineExportSnapshot,
+    output_frame_rate: Rational,
+    frame_sampling: crate::preset::ExportFrameSampling,
+) -> Result<TimelineRenderRange, String> {
     let resolved = timeline.range.resolve(&timeline.sequence).map_err(|error| error.to_string())?;
+    let selected_time = resolved.time_range().map_err(|error| error.to_string())?;
+    let output_frame_count = selected_time
+        .duration
+        .to_frame_position(output_frame_rate, FrameRounding::Ceil)
+        .map_err(|error| error.to_string())?
+        .frame;
+    let total_frames = u64::try_from(output_frame_count.max(1))
+        .map_err(|_| "export frame count exceeds unsigned capacity".to_owned())?;
     Ok(TimelineRenderRange {
-        start_frame: resolved.start_frame,
-        total_frames: resolved.total_frames,
-        fps_num: resolved.fps_num,
-        fps_den: resolved.fps_den,
+        source_start: selected_time.start,
+        total_frames,
+        fps_num: output_frame_rate.num,
+        fps_den: output_frame_rate.den,
+        sequence_frame_rate: timeline.sequence.settings.frame_rate,
+        frame_sampling,
     })
 }
 
@@ -6313,6 +6355,8 @@ mod tests {
     ) -> ResolvedExportDeliveryContract {
         ResolvedExportDeliveryContract {
             resolution: crate::preset::Resolution { width: 1_920, height: 1_080 },
+            frame_rate: Rational::FPS_25,
+            frame_sampling: crate::preset::ExportFrameSampling::FrameHold,
             sample_aspect_ratio: mondrian_core::SampleAspectRatio::SQUARE,
             field_order: mondrian_core::timeline_data::FieldOrder::Progressive,
             bit_depth,
@@ -8791,7 +8835,7 @@ mod tests {
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
-        assert_eq!(range.start_frame, 40);
+        assert_eq!(range.evaluation_frame(0), Ok(40));
         assert_eq!(range.total_frames, 60);
     }
 
@@ -8814,8 +8858,79 @@ mod tests {
         };
 
         let range = compute_timeline_render_range(&timeline).expect("valid render range");
-        assert_eq!(range.start_frame, 0);
+        assert_eq!(range.evaluation_frame(0), Ok(0));
         assert_eq!(range.total_frames, 200);
+    }
+
+    #[test]
+    fn timeline_render_range_converts_cadence_without_duration_drift() {
+        let mut seq = Sequence::new("cadence-conversion");
+        seq.settings.frame_rate = Rational::FPS_24;
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(24, tb)).expect("one second clip");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+        let timeline = TimelineExportSnapshot {
+            sequence: seq,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::EntireSequence,
+        };
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
+        delivery.frame_rate = Rational::FPS_30;
+
+        let range = compute_timeline_render_range_for_delivery(&timeline, &delivery)
+            .expect("exact cadence conversion");
+
+        assert_eq!(range.total_frames, 30);
+        assert_eq!(range.evaluation_frame(0), Ok(0));
+        assert_eq!(range.evaluation_frame(1), Ok(0));
+        assert_eq!(range.evaluation_frame(2), Ok(1));
+        assert_eq!(range.evaluation_frame(29), Ok(23));
+        assert_eq!(
+            range.time_range().expect("exact range").duration,
+            tt(24, tb)
+        );
+    }
+
+    #[test]
+    fn timeline_render_range_preserves_marked_source_offset_across_cadences() {
+        let mut seq = Sequence::new("offset-cadence-conversion");
+        seq.settings.frame_rate = Rational::FPS_25;
+        let tb = seq.time_base();
+        let clip = Clip::new(AssetId::new(), tt(0, tb), tt(200, tb)).expect("valid clip");
+        seq.video_tracks[0].add_clip(clip).expect("add clip");
+        seq.in_point = Some(tt(40, tb));
+        seq.out_point = Some(tt(99, tb));
+        let timeline = TimelineExportSnapshot {
+            sequence: seq,
+            sequences: Vec::new(),
+            media: HashMap::new(),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::SequenceInOut,
+        };
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Eight,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv420,
+            "yuv420p",
+        );
+        delivery.frame_rate = Rational::FPS_30;
+
+        let range = compute_timeline_render_range_for_delivery(&timeline, &delivery)
+            .expect("offset cadence conversion");
+
+        assert_eq!(range.total_frames, 72);
+        assert_eq!(range.evaluation_frame(0), Ok(40));
+        assert_eq!(range.evaluation_frame(1), Ok(40));
+        assert_eq!(range.evaluation_frame(71), Ok(99));
     }
 
     #[test]
@@ -9897,10 +10012,12 @@ mod tests {
     #[test]
     fn timeline_audio_sample_range_matches_frame_duration() {
         let range = TimelineRenderRange {
-            start_frame: 0,
+            source_start: TimelineTime::ZERO,
             total_frames: 50,
             fps_num: 25,
             fps_den: 1,
+            sequence_frame_rate: Rational::FPS_25,
+            frame_sampling: crate::preset::ExportFrameSampling::FrameHold,
         };
         assert_eq!(timeline_audio_sample_range(range, 48_000), Ok((0, 96_000)));
     }

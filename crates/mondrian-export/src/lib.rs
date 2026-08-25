@@ -19,9 +19,9 @@ pub use delivery::{
     ResolvedExportDeliveryContract,
 };
 pub use preset::{
-    BuiltinExportPreset, ExportConfig, ExportMediaDependency, ExportOutputPolicy, ExportPreset,
-    ResolvedTimelineExportRange, TimelineExportRange, TimelineExportRangeError,
-    TimelineExportSnapshot,
+    BuiltinExportPreset, ExportConfig, ExportFrameSampling, ExportMediaDependency,
+    ExportOutputPolicy, ExportPreset, ResolvedTimelineExportRange, TimelineExportRange,
+    TimelineExportRangeError, TimelineExportSnapshot,
 };
 pub use queue::{
     expected_export_video_signal, ExportAdmissionError, ExportArtifactPublicationEvidence,

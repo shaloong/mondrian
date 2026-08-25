@@ -67,6 +67,15 @@ pub enum ExportChromaSampling {
     Rgb,
 }
 
+/// Temporal sampling used when delivery cadence differs from the Sequence grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportFrameSampling {
+    /// Hold the covering Sequence frame for each output-frame start time.
+    #[default]
+    FrameHold,
+}
+
 /// Concrete encoded video signal choices independent from creative color intent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportVideoSignal {
@@ -273,6 +282,12 @@ pub struct ExportPreset {
     pub video: VideoCodecConfig,
     pub audio: AudioCodecConfig,
     pub resolution: Option<Resolution>,
+    /// Encoded constant frame rate, inherited from the Sequence or explicitly overridden.
+    #[serde(default)]
+    pub frame_rate: ExportParameter<Rational>,
+    /// Explicit temporal sampling policy for cadence conversion.
+    #[serde(default)]
+    pub frame_sampling: ExportFrameSampling,
     /// Encoded signal representation. Creative output color remains Sequence-owned.
     #[serde(default)]
     pub video_signal: ExportVideoSignal,
@@ -296,6 +311,8 @@ impl ExportPreset {
             },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
             resolution: Some(Resolution { width: 1920, height: 1080 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -317,6 +334,8 @@ impl ExportPreset {
             },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
             resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Ten,
                 VideoRange::Legal,
@@ -337,6 +356,8 @@ impl ExportPreset {
             },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
             resolution: Some(Resolution { width: 1080, height: 1920 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -357,6 +378,8 @@ impl ExportPreset {
             },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
             resolution: Some(Resolution { width: 1280, height: 720 }),
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -375,6 +398,8 @@ impl ExportPreset {
             video: VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
             audio: AudioCodecConfig::Pcm { bit_depth: 24 },
             resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Twelve,
                 VideoRange::Full,

@@ -7,8 +7,8 @@
 
 use crate::preset::{
     AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportChromaSampling,
-    ExportColorTarget, ExportPreset, HevcProfile, ProResProfile, Resolution, VideoCodecConfig,
-    VideoRateControl,
+    ExportColorTarget, ExportFrameSampling, ExportPreset, HevcProfile, ProResProfile, Resolution,
+    VideoCodecConfig, VideoRateControl,
 };
 use mondrian_core::{
     AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
@@ -22,6 +22,8 @@ use mondrian_timeline::sequence::{
 pub enum ExportDeliveryIssueCode {
     /// Output dimensions cannot be represented by the selected signal format.
     InvalidResolution,
+    /// Output cadence is not one of the exact supported constant frame rates.
+    InvalidFrameRate,
     /// Rate-control values are outside the verified encoder domain.
     InvalidRateControl,
     /// The selected container cannot carry the selected essence.
@@ -83,6 +85,10 @@ pub struct ResolvedExportColorTarget {
 pub struct ResolvedExportDeliveryContract {
     /// Exact encoded raster size; execution must not normalize it.
     pub resolution: Resolution,
+    /// Exact constant encoded frame rate.
+    pub frame_rate: mondrian_core::Rational,
+    /// Temporal resampling policy applied from the Sequence grid.
+    pub frame_sampling: ExportFrameSampling,
     /// Exact encoded sample aspect ratio inherited from Sequence Program Output.
     pub sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     /// Exact encoded scan order. Current delivery admission is progressive-only.
@@ -125,6 +131,13 @@ pub fn resolve_export_delivery(
         width: settings.resolution.width,
         height: settings.resolution.height,
     });
+    let frame_rate = preset.frame_rate.resolve(settings.frame_rate);
+    if !mondrian_core::Rational::SEQUENCE_FRAME_RATES.contains(&frame_rate) {
+        return Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::InvalidFrameRate,
+            format!("不支持的恒定导出帧率: {frame_rate}"),
+        ));
+    }
 
     validate_alpha(preset)?;
     let pixel_format =
@@ -142,6 +155,8 @@ pub fn resolve_export_delivery(
 
     Ok(ResolvedExportDeliveryContract {
         resolution,
+        frame_rate,
+        frame_sampling: preset.frame_sampling,
         sample_aspect_ratio: settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
             ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleColorOutput,
@@ -691,6 +706,8 @@ mod tests {
             },
             audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
             resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: crate::preset::ExportColorTarget::FollowSequence,
@@ -701,6 +718,38 @@ mod tests {
                 .expect("sequence defaults should resolve to a concrete contract");
         assert_eq!(contract.bit_depth, DeliveryBitDepth::Eight);
         assert_eq!(contract.video_range, VideoRange::Full);
+        assert_eq!(contract.frame_rate, settings.frame_rate);
+        assert_eq!(contract.frame_sampling, ExportFrameSampling::FrameHold);
+    }
+
+    #[test]
+    fn explicit_output_frame_rate_is_resolved_before_execution() {
+        let mut preset = ExportPreset::h264_aac_sdr_1080p();
+        preset.frame_rate = ExportParameter::Explicit(mondrian_core::Rational::FPS_2997);
+
+        let contract = resolve_export_delivery(
+            &preset,
+            &SequenceSettings::default(),
+            &ProjectColorEnvironment::default(),
+        )
+        .expect("supported exact cadence should resolve");
+
+        assert_eq!(contract.frame_rate, mondrian_core::Rational::FPS_2997);
+    }
+
+    #[test]
+    fn unsupported_output_frame_rate_fails_closed() {
+        let mut preset = ExportPreset::h264_aac_sdr_1080p();
+        preset.frame_rate = ExportParameter::Explicit(mondrian_core::Rational::new(48, 1));
+
+        let error = resolve_export_delivery(
+            &preset,
+            &SequenceSettings::default(),
+            &ProjectColorEnvironment::default(),
+        )
+        .expect_err("unsupported cadence must not reach the encoder");
+
+        assert_eq!(error.code, ExportDeliveryIssueCode::InvalidFrameRate);
     }
 
     #[test]

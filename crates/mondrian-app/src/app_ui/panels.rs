@@ -16,7 +16,7 @@ use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
     AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
 };
-use mondrian_core::display_labels::color_space_label;
+use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
@@ -4497,6 +4497,27 @@ fn export_resolution_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .collect()
 }
 
+fn export_frame_rate_label(frame_rate: ExportParameter<Rational>) -> String {
+    match frame_rate {
+        ExportParameter::FollowSequence => "跟随序列".to_owned(),
+        ExportParameter::Explicit(frame_rate) => frame_rate_label(frame_rate),
+    }
+}
+
+fn export_frame_rate_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    std::iter::once(ExportParameter::FollowSequence)
+        .chain(Rational::SEQUENCE_FRAME_RATES.into_iter().map(ExportParameter::Explicit))
+        .map(|frame_rate| {
+            let mut updated = preset.clone();
+            updated.frame_rate = frame_rate;
+            MenuItem::new(
+                export_frame_rate_label(frame_rate),
+                export_preset_update_action(updated),
+            )
+        })
+        .collect()
+}
+
 fn export_bit_depth_label(bit_depth: ExportParameter<DeliveryBitDepth>) -> &'static str {
     match bit_depth {
         ExportParameter::FollowSequence => "跟随序列",
@@ -4781,6 +4802,11 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_resolution_items(&model.preset),
     )
     .with_max_visible_items(5);
+    let frame_rate_dropdown = Dropdown::new(
+        export_frame_rate_label(model.preset.frame_rate),
+        export_frame_rate_items(&model.preset),
+    )
+    .with_max_visible_items(8);
     let bit_depth_dropdown = Dropdown::new(
         export_bit_depth_label(model.preset.video_signal.bit_depth),
         export_bit_depth_items(&model.preset),
@@ -4904,7 +4930,8 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let mut format_section = PropertySection::new("格式")
         .with_row(PropertyRow::new("容器", Box::new(container_dropdown)))
         .with_row(PropertyRow::new("视频编码", Box::new(video_codec_dropdown)))
-        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)));
+        .with_row(PropertyRow::new("画幅", Box::new(resolution_dropdown)))
+        .with_row(PropertyRow::new("帧率", Box::new(frame_rate_dropdown)));
     if let Some(resolution) = model.preset.resolution {
         let width_preset = model.preset.clone();
         let width_input = NumberInput::new(

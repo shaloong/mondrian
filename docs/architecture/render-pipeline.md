@@ -1326,6 +1326,20 @@ OCIO export view/display-view transform, the export health report must fail
 with a structured output-transform issue instead of relying on the color-space
 pipeline's `tone_map` flag. That flag is not a substitute for an OCIO view
 transform.
+
+Export cadence is likewise a resolved delivery property rather than an
+incidental Sequence or FFmpeg default. `ExportPreset` either follows the
+Sequence rational frame rate or selects one exact supported constant rate;
+delivery admission resolves it before work begins and rejects unsupported
+rates. The selected Timeline interval remains an exact `TimelineTimeRange`.
+Only the per-output-frame evaluation seam converts its rational timestamp onto
+the Sequence grid, currently by an explicit predecessor-frame hold policy.
+Consequently 24000/1001, 25, 30000/1001, and 30 fps conversions do not
+accumulate floating-point drift, marked source offsets remain intact, and
+audio sample coverage is derived from exact output duration rather than a
+rounded source-frame count. Encoder input cadence and post-encode ffprobe
+expectations consume the same resolved numerator and denominator.
+
 After encoding, `mondrian-export` runs ffprobe through one typed
 `ExportValidationExpectations` contract. Stream presence is a closed
 `Required(exact constraints) / Forbidden` algebra rather than independent
