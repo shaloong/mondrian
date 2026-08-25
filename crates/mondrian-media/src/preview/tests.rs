@@ -40,6 +40,7 @@ use crate::decoder::{
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     HwAccelBackend,
 };
+use crate::DecodedRgbaEncoding;
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
 use mondrian_core::{
@@ -1685,6 +1686,7 @@ fn swscale_expands_bt709_limited_range_to_full_rgba() {
     let path = Path::new("limited-rec709.mov");
     let mut scaler = preview_create_rgba_scaler(
         ffmpeg::util::format::pixel::Pixel::YUV420P,
+        ffmpeg::util::format::pixel::Pixel::RGBA,
         4,
         4,
         4,
@@ -2260,6 +2262,51 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
         plan.native_decode_fallback,
         Some(PreviewNativeDecodeFallback::SoftwareFrame)
     );
+}
+
+#[test]
+fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
+    let mut decoded =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA64LE, 2, 1);
+    decoded.set_color_space(ffmpeg::util::color::Space::RGB);
+    decoded.set_color_range(ffmpeg::util::color::Range::JPEG);
+    let samples = [1_u16, 2, 3, u16::MAX, 257, 513, 1025, u16::MAX];
+    for (target, sample) in decoded.data_mut(0).chunks_exact_mut(2).zip(samples) {
+        target.copy_from_slice(&sample.to_le_bytes());
+    }
+
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("synthetic-rgba64"),
+        test_source_color(),
+    )
+    .expect("high-bit software frame materializes as encoded float");
+
+    let PreviewDecodedFramePayload::CpuFloat(frame) = payload else {
+        panic!("high-bit software frames must not quantize through RGBA8");
+    };
+    assert_eq!(
+        frame.color_contract.encoding,
+        DecodedRgbaEncoding::SourceEncodedRgb
+    );
+    assert_eq!(frame.diagnostics.decoded_video_sampling.bit_depth, 16);
+    assert!((frame.rgba()[0] - 1.0 / 65_535.0).abs() < 1.0e-7);
+    assert!((frame.rgba()[4] - 257.0 / 65_535.0).abs() < 1.0e-7);
+    assert_eq!(frame.rgba()[3], 1.0);
+    assert_eq!(frame.rgba()[7], 1.0);
 }
 
 #[test]

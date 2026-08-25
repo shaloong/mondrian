@@ -555,6 +555,88 @@ impl RenderCpuColorExecutionSession {
 pub struct CpuColorTransformExecutor;
 
 impl CpuColorTransformExecutor {
+    /// Apply a source/import transform from transfer-encoded float samples.
+    pub fn input_encoded_float_to_working(
+        frame: &CpuEncodedFloatColorFrame,
+        transform: &RenderInputTransform,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let mut session = RenderCpuColorExecutionSession::new(0);
+        Self::input_encoded_float_to_working_with_session(frame, transform, &mut session)
+    }
+
+    /// Apply an encoded-float input transform through an explicit execution Session.
+    pub fn input_encoded_float_to_working_with_session(
+        frame: &CpuEncodedFloatColorFrame,
+        transform: &RenderInputTransform,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<RenderInputTransformResult, RenderColorTransformError> {
+        let descriptor = frame.descriptor();
+        if descriptor.domain != ColorFrameDomain::Source {
+            return Err(RenderColorTransformError::UnsupportedInputDomain {
+                domain: descriptor.domain,
+            });
+        }
+        require_straight_compatible_color_alpha(descriptor)?;
+        let output_descriptor = ColorFrameDescriptor {
+            width: descriptor.width,
+            height: descriptor.height,
+            color_space: transform.working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Cpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        if descriptor.encoding != ColorFrameEncoding::EncodedFloat {
+            return Err(RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
+                descriptor,
+                output_descriptor,
+                "encoded-float source must have EncodedFloat encoding",
+            ));
+        }
+        let source = descriptor.color_space.color().ok_or_else(|| {
+            RenderColorTransformError::execution_failed(
+                RenderColorTransformDirection::InputToWorking,
+                descriptor,
+                output_descriptor,
+                "encoded-float input is missing an encoded color-space identity",
+            )
+        })?;
+
+        let mut pixels = frame.rgba_f32().data.clone();
+        session
+            .convert_identity_float_for_renderer(
+                &transform.engine,
+                pixels.as_flattened_mut(),
+                OcioColorSpaceIdentity::Color(source),
+                OcioColorSpaceIdentity::Working(transform.working_color_space),
+            )
+            .map_err(|reason| {
+                RenderColorTransformError::execution_failed(
+                    RenderColorTransformDirection::InputToWorking,
+                    descriptor,
+                    output_descriptor,
+                    reason,
+                )
+            })?;
+
+        let frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: descriptor.width,
+            height: descriptor.height,
+            data: pixels,
+            color_space: transform.working_color_space,
+        });
+        let diagnostics = RenderColorTransformDiagnostics {
+            backend: transform.backend,
+            direction: RenderColorTransformDirection::InputToWorking,
+            input: descriptor,
+            output: output_descriptor,
+            pixel_count: descriptor.width as usize * descriptor.height as usize,
+            used_rgba8_boundary: false,
+        };
+        Ok(RenderInputTransformResult { frame, diagnostics })
+    }
+
     /// Apply a source/import transform from a linear float source and return
     /// frame plus execution diagnostics. This bypasses the RGBA8 quantization
     /// path entirely.
@@ -2075,6 +2157,32 @@ mod tests {
             ColorFrameSpace::Working(WorkingColorSpace::LinearRec2020)
         );
         assert_ne!(result.frame.rgba_f32().data[0], [0.5, 0.25, 0.125, 1.0]);
+    }
+
+    #[test]
+    fn encoded_float_input_transform_preserves_sub_rgba8_values() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let sub_eight_bit = 1.0 / 65_535.0;
+        let source = CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+            1,
+            1,
+            ColorSpace::Rec709,
+            vec![sub_eight_bit, 0.5, 1.0, 1.0],
+        );
+        let transform = RenderInputTransform::to_working(
+            WorkingColorSpace::LinearRec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+
+        let result = CpuColorTransformExecutor::input_encoded_float_to_working(&source, &transform)
+            .expect("encoded float input transform");
+
+        assert_eq!(result.frame.descriptor().domain, ColorFrameDomain::Working);
+        assert!(!result.diagnostics.used_rgba8_boundary);
+        assert!(result.frame.rgba_f32().data[0][0] > 0.0);
+        assert!(result.frame.rgba_f32().data[0][0] < 1.0 / 255.0);
+        assert_eq!(result.frame.rgba_f32().data[0][3], 1.0);
     }
 
     #[test]

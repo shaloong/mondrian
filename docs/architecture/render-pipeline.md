@@ -1106,9 +1106,12 @@ remain blockers rather than color-conversion requests. GPU graph lowering also
 remains blocked until the GPU scheduler materializes the same OCIO edges.
 
 Encoded decoded media enters the graph as a typed source/import RGBA8 boundary
-(`CpuEncodedColorFrame::source_rgba8`). Scene-linear planar-f32 decoder output
-enters as `LinearFloatSource`, so app preview, thumbnails, and export bypass
-RGBA8 quantization while preserving the external source color identity.
+(`CpuEncodedColorFrame::source_rgba8`) or, for high-bit CPU decode, an
+`EncodedFloat` boundary (`CpuEncodedFloatColorFrame`). Scene-linear planar-f32
+decoder output enters as `LinearFloatSource`. App preview and thumbnails route
+all three through the same source-stage planner; encoded float executes the
+source transfer/primaries transform while linear float retains its scene-linear
+identity. Neither float route is relabeled as the other or quantized to RGBA8.
 Synthetic float data and effect graph intermediates use the same typed float
 entry point.
 Preview and export decode keys retain `DecodedVideoRangeContract`, not only an
@@ -1395,8 +1398,10 @@ focused unit tests.
 GPU input transforms have their own renderer contract instead of piggybacking
 on final-output plans. `RenderGpuInputStageResourcePlan` accepts a decoded
 `CpuSourceColorFrame` in the `Source` domain. Encoded RGBA8 uploads as
-`Rgba8Unorm`; scene-linear f32 uploads as `Rgba32Float` without quantization or
-an intermediate CPU OCIO transform. It then records the OCIO GPU input
+`Rgba8Unorm`; source-encoded and scene-linear f32 upload as `Rgba32Float`
+without quantization or an intermediate CPU OCIO transform. The encoded-float
+ownership conversion reuses the decoded allocation rather than copying a 4K
+frame. It then records the OCIO GPU input
 transform and produces a GPU-resident linear
 working frame in a renderer-selected `Rgba32Float` texture. The working format
 is not a caller option. It rejects CPU-only plans, plans with native GPU

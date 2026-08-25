@@ -8,13 +8,14 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
-    DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome, PreviewDecodeRequest,
-    PreviewDecodeSessionContext, PreviewSourceColorContract,
+    DecodedRgbaEncoding, DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
+    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
 };
 use mondrian_renderer::{
-    execute_cpu_input_stage_float_with_session, execute_cpu_input_stage_with_session,
-    execute_cpu_output_boundary_rgba8_with_session, CpuEncodedColorFrame, LinearFloatSource,
-    RenderCpuColorExecutionSession, RenderInputTransform, RenderOutputColorBoundary,
+    execute_cpu_input_stage_with_session, execute_cpu_output_boundary_rgba8_with_session,
+    execute_cpu_source_input_stage_with_session, CpuEncodedColorFrame, CpuEncodedFloatColorFrame,
+    CpuSourceColorFrame, LinearFloatSource, RenderCpuColorExecutionSession, RenderInputTransform,
+    RenderOutputColorBoundary,
 };
 use mondrian_timeline::sequence::{ProgramColorContext, ResolvedInputColor};
 use serde::Serialize;
@@ -203,10 +204,12 @@ pub(super) fn decode_thumbnail(
             Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
                 let width = frame.width;
                 let height = frame.height;
+                let encoding = frame.color_contract.encoding;
                 let rgba = color_manage_float_with_session(
                     width,
                     height,
                     frame.into_data(),
+                    encoding,
                     &job.key.color,
                     color_session,
                 )?;
@@ -285,13 +288,27 @@ fn color_manage_float_with_session(
     width: u32,
     height: u32,
     rgba: Vec<f32>,
+    encoding: DecodedRgbaEncoding,
     color: &ThumbnailColorContract,
     color_session: &mut RenderCpuColorExecutionSession,
 ) -> Result<Vec<u8>, ThumbnailFailure> {
-    let source = LinearFloatSource::new(width, height, color.source_color_space, rgba);
+    let source =
+        match encoding {
+            DecodedRgbaEncoding::SourceEncodedRgb => {
+                CpuSourceColorFrame::from(CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                    width,
+                    height,
+                    color.source_color_space,
+                    rgba,
+                ))
+            }
+            DecodedRgbaEncoding::SourceLinearRgb => CpuSourceColorFrame::from(
+                LinearFloatSource::new(width, height, color.source_color_space, rgba),
+            ),
+        };
     let input =
         RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());
-    let working = execute_cpu_input_stage_float_with_session(&source, &input, color_session)
+    let working = execute_cpu_source_input_stage_with_session(&source, &input, color_session)
         .map_err(|error| {
             failure(
                 ThumbnailFailureReason::InputTransformFailed,

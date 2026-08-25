@@ -610,8 +610,8 @@ fn select_interactive_session_slot(
 }
 
 use hardware_decode::{
-    preview_hardware_decode_get_format, preview_hardware_frame_format,
-    PreviewHardwareDecodeContextState, PreviewHardwareDecodePlan,
+    preview_hardware_decode_get_format, PreviewHardwareDecodeContextState,
+    PreviewHardwareDecodePlan,
 };
 use reverse_decode_window::ReverseDecodeWindow;
 
@@ -646,7 +646,10 @@ struct PreviewDecodeSession {
     playback_ring: PreviewPlaybackRing,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
-    scaler_source_format: Option<ffmpeg::util::format::pixel::Pixel>,
+    scaler_format_contract: Option<(
+        ffmpeg::util::format::pixel::Pixel,
+        ffmpeg::util::format::pixel::Pixel,
+    )>,
     /// Last color contract applied to the retained scaler. Per-frame
     /// reconfiguration is skipped while the contract is unchanged, which is
     /// the ordinary case inside one session.
@@ -1223,6 +1226,7 @@ fn configure_preview_hardware_decode_context(
 
 pub(super) fn preview_create_rgba_scaler(
     source_format: ffmpeg::util::format::pixel::Pixel,
+    destination_format: ffmpeg::util::format::pixel::Pixel,
     source_width: u32,
     source_height: u32,
     target_width: u32,
@@ -1233,7 +1237,7 @@ pub(super) fn preview_create_rgba_scaler(
         source_format,
         source_width,
         source_height,
-        ffmpeg::util::format::pixel::Pixel::RGBA,
+        destination_format,
         target_width,
         target_height,
         ffmpeg::software::scaling::flag::Flags::FAST_BILINEAR,
@@ -1454,24 +1458,12 @@ impl PreviewDecodeSession {
         let (target_width, target_height) =
             fit_target_size(decoder.width(), decoder.height(), max_width, max_height);
 
-        let defer_or_bypass_rgba_scaler = source_color.color_space.is_scene_linear()
-            || (hardware_decode_context_state.is_some()
-                && preview_hardware_frame_format(decoder.format()));
-        let (scaler, scaler_source_format) = if defer_or_bypass_rgba_scaler {
-            (None, None)
-        } else {
-            (
-                Some(preview_create_rgba_scaler(
-                    decoder.format(),
-                    decoder.width(),
-                    decoder.height(),
-                    target_width,
-                    target_height,
-                    path,
-                )?),
-                Some(decoder.format()),
-            )
-        };
+        // The materializer selects RGBA8 or RGBA64LE from the actual decoded
+        // frame sampling. Defer construction so hardware-transfer formats and
+        // decoder format changes cannot reuse a scaler with the wrong output
+        // precision contract.
+        let scaler = None;
+        let scaler_format_contract = None;
 
         let frame_duration_pts = estimate_frame_duration_pts(stream_tb, stream_rate).max(1);
 
@@ -1490,7 +1482,7 @@ impl PreviewDecodeSession {
             interrupt_state,
             decoder,
             scaler,
-            scaler_source_format,
+            scaler_format_contract,
             scaler_color_contract: None,
             stream_index,
             stream_tb,
@@ -1565,7 +1557,7 @@ impl PreviewDecodeSession {
         self.target_width = target_width;
         self.target_height = target_height;
         self.scaler = None;
-        self.scaler_source_format = None;
+        self.scaler_format_contract = None;
         self.scaler_color_contract = None;
         self.reverse_decode_window.clear();
         self.playback_ring.clear();
@@ -2097,9 +2089,10 @@ impl PreviewDecodeSession {
 
         let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
                                   scaler: &mut Option<ffmpeg::software::scaling::Context>,
-                                  scaler_source_format: &mut Option<
+                                  scaler_format_contract: &mut Option<(
             ffmpeg::util::format::pixel::Pixel,
-        >,
+            ffmpeg::util::format::pixel::Pixel,
+        )>,
                                   scaler_color_contract: &mut Option<DecodedRgbaFrameContract>,
                                   target_width: u32,
                                   target_height: u32,
@@ -2156,7 +2149,7 @@ impl PreviewDecodeSession {
                 selected_frame,
                 hardware_decode_plan,
                 scaler,
-                scaler_source_format,
+                scaler_format_contract,
                 scaler_color_contract,
                 target_width,
                 target_height,
@@ -2176,7 +2169,7 @@ impl PreviewDecodeSession {
             let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
                 &mut self.hardware_decode_plan,
                 &mut self.scaler,
-                &mut self.scaler_source_format,
+                &mut self.scaler_format_contract,
                 &mut self.scaler_color_contract,
                 self.target_width,
                 self.target_height,
@@ -2235,7 +2228,7 @@ impl PreviewDecodeSession {
         if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
             &mut self.hardware_decode_plan,
             &mut self.scaler,
-            &mut self.scaler_source_format,
+            &mut self.scaler_format_contract,
             &mut self.scaler_color_contract,
             self.target_width,
             self.target_height,
@@ -2325,7 +2318,7 @@ impl PreviewDecodeSession {
             if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
                 &mut self.hardware_decode_plan,
                 &mut self.scaler,
-                &mut self.scaler_source_format,
+                &mut self.scaler_format_contract,
                 &mut self.scaler_color_contract,
                 self.target_width,
                 self.target_height,
@@ -2395,7 +2388,7 @@ impl PreviewDecodeSession {
         if let Some((selected_extent, frame, retained_selected_frame)) = choose_and_convert(
             &mut self.hardware_decode_plan,
             &mut self.scaler,
-            &mut self.scaler_source_format,
+            &mut self.scaler_format_contract,
             &mut self.scaler_color_contract,
             self.target_width,
             self.target_height,

@@ -1202,6 +1202,7 @@ pub struct GpuColorFrameUploadPlan {
 enum GpuColorFrameUploadPayload {
     Bytes(Arc<Vec<u8>>),
     Float32(Arc<Vec<f32>>),
+    EncodedRgba32(Arc<EncodedRgbaF32Frame>),
     WorkingRgba32(Arc<WorkingRgbaF32Frame>),
     AlphaMaskRgba32(Arc<Vec<[f32; 4]>>),
 }
@@ -1211,6 +1212,7 @@ impl GpuColorFrameUploadPayload {
         match self {
             Self::Bytes(bytes) => bytes.as_slice(),
             Self::Float32(samples) => bytemuck::cast_slice(samples.as_slice()),
+            Self::EncodedRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::WorkingRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::AlphaMaskRgba32(samples) => bytemuck::cast_slice(samples.as_slice()),
         }
@@ -1280,6 +1282,27 @@ impl GpuColorFrameUploadPlan {
         Self::new(
             handle,
             GpuColorFrameUploadPayload::Bytes(frame.rgba_shared()),
+        )
+    }
+
+    /// Build an upload plan for a CPU encoded floating-point source frame.
+    pub fn from_cpu_encoded_float_frame(
+        id: GpuColorFrameId,
+        frame: &CpuEncodedFloatColorFrame,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        let descriptor = frame.descriptor().with_residency(ColorFrameResidency::Gpu);
+        validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            label,
+        )
+        .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::EncodedRgba32(frame.rgba_f32_shared()),
         )
     }
 
@@ -2723,6 +2746,28 @@ impl CpuEncodedFloatColorFrame {
         Self { descriptor, frame: Arc::new(frame) }
     }
 
+    /// Create a source/import encoded-float frame from interleaved RGBA samples.
+    pub fn source_flat_rgba_f32(
+        width: u32,
+        height: u32,
+        color_space: ColorSpace,
+        data: Vec<f32>,
+    ) -> Self {
+        assert_eq!(
+            data.len(),
+            width as usize * height as usize * 4,
+            "encoded source data length must be width * height * 4"
+        );
+        // `[f32; 4]` has the same alignment as `f32`; the validated component
+        // count makes this an allocation-preserving ownership cast rather than
+        // a second full-frame copy at the 4K software-decode boundary.
+        let data = bytemuck::allocation::cast_vec(data);
+        Self::new(
+            EncodedRgbaF32Frame { width, height, data, color_space },
+            ColorFrameDomain::Source,
+        )
+    }
+
     /// Return the frame metadata contract.
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         self.descriptor
@@ -2731,6 +2776,11 @@ impl CpuEncodedFloatColorFrame {
     /// Borrow the underlying encoded floating-point samples.
     pub fn rgba_f32(&self) -> &EncodedRgbaF32Frame {
         self.frame.as_ref()
+    }
+
+    /// Clone the shared immutable encoded floating-point frame backing this wrapper.
+    pub fn rgba_f32_shared(&self) -> Arc<EncodedRgbaF32Frame> {
+        Arc::clone(&self.frame)
     }
 
     /// Consume this wrapper and return the encoded floating-point samples.
@@ -2934,6 +2984,8 @@ impl LinearFloatSource {
 pub enum CpuSourceColorFrame {
     /// Transfer-encoded 8-bit RGBA samples.
     EncodedRgba8(CpuEncodedColorFrame),
+    /// Transfer-encoded floating-point RGBA samples.
+    EncodedFloat(CpuEncodedFloatColorFrame),
     /// Scene-linear floating-point RGBA samples.
     LinearFloat(LinearFloatSource),
 }
@@ -2958,6 +3010,7 @@ impl CpuSourceColorFrame {
     pub fn descriptor(&self) -> ColorFrameDescriptor {
         match self {
             Self::EncodedRgba8(frame) => frame.descriptor(),
+            Self::EncodedFloat(frame) => frame.descriptor(),
             Self::LinearFloat(frame) => frame.descriptor(),
         }
     }
@@ -2966,6 +3019,9 @@ impl CpuSourceColorFrame {
     pub fn retained_bytes(&self) -> usize {
         match self {
             Self::EncodedRgba8(frame) => frame.rgba().len(),
+            Self::EncodedFloat(frame) => {
+                frame.rgba_f32().data.len().saturating_mul(std::mem::size_of::<[f32; 4]>())
+            }
             Self::LinearFloat(frame) => {
                 frame.data().len().saturating_mul(std::mem::size_of::<f32>())
             }
@@ -3000,6 +3056,19 @@ impl CpuSourceColorFrame {
                 let frame = CpuEncodedColorFrame { descriptor, rgba: Arc::new(rgba) };
                 Ok(Self::EncodedRgba8(frame))
             }
+            (Self::EncodedFloat(frame), interpretation) => {
+                let mut descriptor = frame.descriptor;
+                descriptor.alpha = match interpretation {
+                    AlphaInterpretation::Ignore => ColorFrameAlpha::Opaque,
+                    AlphaInterpretation::Straight | AlphaInterpretation::Premultiplied => {
+                        ColorFrameAlpha::StraightCoverage
+                    }
+                };
+                let mut rgba = frame.into_rgba_f32();
+                normalize_rgba_f32_alpha(rgba.data.as_flattened_mut(), interpretation)?;
+                let frame = CpuEncodedFloatColorFrame { descriptor, frame: Arc::new(rgba) };
+                Ok(Self::EncodedFloat(frame))
+            }
             (Self::LinearFloat(frame), interpretation) => {
                 let mut descriptor = frame.descriptor;
                 descriptor.alpha = match interpretation {
@@ -3019,6 +3088,7 @@ impl CpuSourceColorFrame {
     fn set_alpha_contract(&mut self, alpha: ColorFrameAlpha) {
         match self {
             Self::EncodedRgba8(frame) => frame.descriptor.alpha = alpha,
+            Self::EncodedFloat(frame) => frame.descriptor.alpha = alpha,
             Self::LinearFloat(frame) => frame.descriptor.alpha = alpha,
         }
     }
@@ -3077,6 +3147,12 @@ fn normalize_rgba_f32_alpha(
 impl From<CpuEncodedColorFrame> for CpuSourceColorFrame {
     fn from(frame: CpuEncodedColorFrame) -> Self {
         Self::EncodedRgba8(frame)
+    }
+}
+
+impl From<CpuEncodedFloatColorFrame> for CpuSourceColorFrame {
+    fn from(frame: CpuEncodedFloatColorFrame) -> Self {
+        Self::EncodedFloat(frame)
     }
 }
 
@@ -4443,6 +4519,38 @@ mod tests {
             panic!("linear source upload must retain f32 payload");
         };
         assert!(Arc::ptr_eq(payload, &samples));
+    }
+
+    #[test]
+    fn encoded_float_source_upload_preserves_source_encoding_and_precision() {
+        let frame = CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+            1,
+            1,
+            ColorSpace::Rec709,
+            vec![1.0 / 65_535.0, 0.5, 1.0, 1.0],
+        );
+
+        let plan = GpuColorFrameUploadPlan::from_cpu_encoded_float_frame(
+            GpuColorFrameId::from_raw(203),
+            &frame,
+            "encoded-float-source-upload",
+        )
+        .expect("encoded float upload plan");
+
+        assert_eq!(plan.texture_format, GpuColorFrameTextureFormat::Rgba32Float);
+        assert_eq!(
+            plan.handle.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(plan.handle.descriptor().domain, ColorFrameDomain::Source);
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(plan.bytes())[0],
+            1.0 / 65_535.0
+        );
+        let GpuColorFrameUploadPayload::EncodedRgba32(payload) = &plan.payload else {
+            panic!("encoded float upload must retain the shared typed payload");
+        };
+        assert!(Arc::ptr_eq(payload, &frame.frame));
     }
 
     #[test]

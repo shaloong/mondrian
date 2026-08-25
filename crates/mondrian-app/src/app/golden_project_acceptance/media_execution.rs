@@ -115,6 +115,9 @@ pub(super) fn source_rgba(
     let source = frame.gpu_source().context("decoded media did not retain a CPU source frame")?;
     match source.source.as_ref() {
         CpuSourceColorFrame::EncodedRgba8(frame) => Ok(frame.rgba().to_vec()),
+        CpuSourceColorFrame::EncodedFloat(_) => {
+            bail!("8-bit color fixture unexpectedly decoded as encoded float")
+        }
         CpuSourceColorFrame::LinearFloat(_) => bail!("color fixture unexpectedly decoded as float"),
     }
 }

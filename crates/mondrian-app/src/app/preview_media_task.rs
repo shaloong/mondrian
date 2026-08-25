@@ -14,17 +14,17 @@ use std::time::{Duration, Instant};
 
 use mondrian_core::MondrianError;
 use mondrian_media::{
-    decode_preview_frame_cancellable, DecodedGpuFrameHandleKind, DecodedRgbaFrameContract,
-    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelDeviceSelector,
-    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
-    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeKey, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
-    PreviewHardwareDecodeRequest,
+    decode_preview_frame_cancellable, DecodedGpuFrameHandleKind, DecodedRgbaEncoding,
+    DecodedRgbaFrameContract, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
+    PreviewDecodeCancellation, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
+    PreviewDecodeKey, PreviewDecodeOutcome, PreviewDecodeRequest, PreviewDecodeSessionContext,
+    PreviewDecodeSessionContextBootstrap, PreviewHardwareDecodeRequest,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
-    CpuEncodedColorFrame, CpuSourceColorFrame, LinearFloatSource, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, RenderInputTransform,
+    CpuEncodedColorFrame, CpuEncodedFloatColorFrame, CpuSourceColorFrame, LinearFloatSource,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderInputTransform,
 };
 
 use super::preview_access_mode::{
@@ -1087,7 +1087,7 @@ fn decode_media_preview_inner(
             let height = frame.height;
             let frame_identity = media_preview_frame_identity(
                 &job.key,
-                MediaPreviewDecodedFrameEvidence::CpuLinearRgbaF32 {
+                MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
                     width,
                     height,
                     color_contract: frame.color_contract,
@@ -1097,15 +1097,25 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let source = LinearFloatSource::new_shared(
-                width,
-                height,
-                job.key.decode.source_color().color_space,
-                frame.into_shared_data(),
-            );
-            let source = match CpuSourceColorFrame::from(source)
-                .normalize_alpha(job.key.alpha_interpretation)
-            {
+            let source = match frame.color_contract.encoding {
+                DecodedRgbaEncoding::SourceEncodedRgb => {
+                    CpuSourceColorFrame::from(CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                        width,
+                        height,
+                        frame.color_contract.source.color_space,
+                        frame.into_data(),
+                    ))
+                }
+                DecodedRgbaEncoding::SourceLinearRgb => {
+                    CpuSourceColorFrame::from(LinearFloatSource::new_shared(
+                        width,
+                        height,
+                        frame.color_contract.source.color_space,
+                        frame.into_shared_data(),
+                    ))
+                }
+            };
+            let source = match source.normalize_alpha(job.key.alpha_interpretation) {
                 Ok(source) => source,
                 Err(error) => {
                     return media_preview_alpha_failure(
@@ -1420,7 +1430,7 @@ enum MediaPreviewDecodedFrameEvidence {
         sampling: DecodedVideoSampling,
         execution: PreviewDecodeExecutionPath,
     },
-    CpuLinearRgbaF32 {
+    CpuRgbaF32 {
         width: u32,
         height: u32,
         color_contract: DecodedRgbaFrameContract,

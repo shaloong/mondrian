@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use mondrian_core::{Resolution, SourceSampleTarget, SourceSamplingBoundary, TimelineTime};
 
 use super::{MediaFileFingerprint, PreviewHardwareDecodeRequest, PreviewSourceColorContract};
-use crate::info::{PixelFormat, VideoStreamInfo};
+use crate::info::{PixelFormat, VideoCodec, VideoCodecProfile, VideoStreamInfo};
 use crate::proxy::{
     ProxyArtifactManifest, ProxyEncodingProfile, PROXY_MANIFEST_VERSION,
     PROXY_PRIMARY_VIDEO_STREAM_INDEX,
@@ -97,7 +97,7 @@ impl PreviewDecodeSource {
             fingerprint,
             stream.index,
             alpha_presence,
-            native_surface_hint_from_pixel_format(sampling.pixel_format),
+            native_surface_hint_from_stream(stream, sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
         )
     }
@@ -593,8 +593,62 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Yuv444p
         | PixelFormat::Yuv422p10le
         | PixelFormat::Yuv444p10le
+        | PixelFormat::Yuv420p12le
+        | PixelFormat::Yuv422p12le
+        | PixelFormat::Yuv444p12le
+        | PixelFormat::Yuv420p16le
+        | PixelFormat::Yuv422p16le
+        | PixelFormat::Yuv444p16le
+        | PixelFormat::Gbrp10le
+        | PixelFormat::Gbrp12le
+        | PixelFormat::Gbrp16le
+        | PixelFormat::Gbrap10le
+        | PixelFormat::Gbrap12le
+        | PixelFormat::Gbrap16le
         | PixelFormat::Rgb24
-        | PixelFormat::Rgba => None,
+        | PixelFormat::Rgba
+        | PixelFormat::Rgba64le
+        | PixelFormat::P012
+        | PixelFormat::P016 => None,
+    }
+}
+
+fn native_surface_hint_from_stream(
+    stream: &VideoStreamInfo,
+    pixel_format: PixelFormat,
+) -> Option<PreviewNativeSurfaceHint> {
+    let surface = native_surface_hint_from_pixel_format(pixel_format)?;
+    match surface {
+        PreviewNativeSurfaceHint::Nv12 => match &stream.codec {
+            VideoCodec::H264 => (!matches!(
+                stream.codec_profile,
+                VideoCodecProfile::H264High10
+                    | VideoCodecProfile::H264High10Intra
+                    | VideoCodecProfile::H264High422
+                    | VideoCodecProfile::H264High422Intra
+                    | VideoCodecProfile::H264High444
+                    | VideoCodecProfile::H264High444Predictive
+                    | VideoCodecProfile::H264High444Intra
+                    | VideoCodecProfile::H264Cavlc444
+            ))
+            .then_some(surface),
+            VideoCodec::H265 | VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
+        PreviewNativeSurfaceHint::P010 => match &stream.codec {
+            VideoCodec::H265
+                if matches!(
+                    stream.codec_profile,
+                    VideoCodecProfile::HevcMain10
+                        | VideoCodecProfile::HevcRangeExtensions
+                        | VideoCodecProfile::Unknown
+                ) =>
+            {
+                Some(surface)
+            }
+            VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
     }
 }
 
@@ -700,6 +754,45 @@ mod tests {
             Some(PreviewNativeSurfaceHint::P010)
         );
         assert_eq!(source.alpha_presence(), PreviewDecodeAlphaPresence::Opaque);
+    }
+
+    #[test]
+    fn native_surface_hint_rejects_codec_profile_false_positives() {
+        let mut h264_high10 = video_stream(3, PixelFormat::Yuv420p10le, true);
+        h264_high10.codec = VideoCodec::H264;
+        h264_high10.codec_profile = VideoCodecProfile::H264High10;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/h264-high10.mp4"),
+            exact_fingerprint(14),
+            &h264_high10,
+        )
+        .expect("H.264 High10 remains a valid CPU-decodable source");
+        assert_eq!(source.native_surface_hint(), None);
+
+        let mut hevc_main10 = video_stream(4, PixelFormat::Yuv420p10le, true);
+        hevc_main10.codec = VideoCodec::H265;
+        hevc_main10.codec_profile = VideoCodecProfile::HevcMain10;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/hevc-main10.mp4"),
+            exact_fingerprint(15),
+            &hevc_main10,
+        )
+        .expect("HEVC Main10 remains eligible for P010 admission");
+        assert_eq!(
+            source.native_surface_hint(),
+            Some(PreviewNativeSurfaceHint::P010)
+        );
+
+        let mut prores = video_stream(5, PixelFormat::Yuv420p, true);
+        prores.codec = VideoCodec::ProRes(mondrian_core::ProResVariant::Proxy);
+        prores.codec_profile = VideoCodecProfile::Unknown;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/prores-proxy.mov"),
+            exact_fingerprint(16),
+            &prores,
+        )
+        .expect("ProRes remains a valid CPU-decodable source");
+        assert_eq!(source.native_surface_hint(), None);
     }
 
     #[test]

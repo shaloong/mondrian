@@ -3,21 +3,22 @@ use crate::ocio_gpu::{
 };
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, CpuSourceColorFrame,
-    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId,
-    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameReadback,
-    GpuColorFrameReadbackError, GpuColorFrameReadbackPlan, GpuColorFrameResource,
-    GpuColorFrameResourceTable, GpuColorFrameResourceTableError, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadError, GpuColorFrameUploadPlan, GpuColorFrameUploader,
-    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
-    GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest, GpuCompositingDiagnostics,
-    GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource, OcioGpuShaderCache,
-    OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError, OcioGpuWgpuBackendObjectRuntime,
-    OcioGpuWgpuBackendObjectRuntimeDiagnostics, OcioGpuWgpuBackendPrepError,
-    OcioGpuWgpuBackendPrepRuntime, OcioGpuWgpuBackendPrepRuntimeDiagnostics,
-    OcioGpuWgpuBindGroupLayoutDescriptorPlan, OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat,
-    OcioGpuWgpuOcioBindGroup, OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
+    CpuColorTransformExecutor, CpuEncodedColorFrame, CpuEncodedFloatColorFrame,
+    CpuSourceColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
+    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocationError,
+    GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
+    GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
+    GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
+    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolDiagnostics, GpuCompositeError,
+    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRecord, GpuCompositeRequest,
+    GpuCompositingDiagnostics, GpuFrameCompositor, GpuSolidSourceRecord, LinearFloatSource,
+    OcioGpuShaderCache, OcioGpuShaderCacheDiagnostics, OcioGpuWgpuBackendObjectError,
+    OcioGpuWgpuBackendObjectRuntime, OcioGpuWgpuBackendObjectRuntimeDiagnostics,
+    OcioGpuWgpuBackendPrepError, OcioGpuWgpuBackendPrepRuntime,
+    OcioGpuWgpuBackendPrepRuntimeDiagnostics, OcioGpuWgpuBindGroupLayoutDescriptorPlan,
+    OcioGpuWgpuBlocker, OcioGpuWgpuColorTargetFormat, OcioGpuWgpuOcioBindGroup,
+    OcioGpuWgpuPreparedWrapperInputLayout, OcioGpuWgpuRenderPassError,
     OcioGpuWgpuRenderPassNodePlan, OcioGpuWgpuRenderPipeline, OcioGpuWgpuWrapperBindingPlan,
     RenderColorTransform, RenderColorTransformError, RenderColorTransformGpuOptions,
     RenderColorTransformGpuPlan, RenderColorTransformGpuPlanner,
@@ -3151,6 +3152,13 @@ impl RenderGpuInputStageResourcePlan {
                     "color-stage-source-rgba8-input",
                 )
             }
+            CpuSourceColorFrame::EncodedFloat(frame) => {
+                GpuColorFrameUploadPlan::from_cpu_encoded_float_frame(
+                    ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
+                    frame,
+                    "color-stage-source-encoded-rgba32float-input",
+                )
+            }
             CpuSourceColorFrame::LinearFloat(frame) => {
                 GpuColorFrameUploadPlan::from_linear_float_source(
                     ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
@@ -3865,6 +3873,32 @@ pub enum RenderGpuColorPassExecutionError {
 }
 
 impl CpuRenderColorStageExecutor {
+    /// Execute an encoded-float source/import -> working-space stage plan.
+    pub fn input_encoded_float_to_working_with_session(
+        frame: &CpuEncodedFloatColorFrame,
+        plan: &RenderColorStagePlan,
+        session: &mut crate::RenderCpuColorExecutionSession,
+    ) -> Result<RenderColorStageExecution<RenderInputTransformResult>, RenderColorTransformError>
+    {
+        let [stage] = plan.stages.as_slice() else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution requires exactly one CPU stage",
+            });
+        };
+        let RenderColorStage::CpuInputTransform { input, output, transform } = stage else {
+            return Err(RenderColorTransformError::UnsupportedStagePlan {
+                reason: "input stage execution only supports CPU input transforms",
+            });
+        };
+        validate_descriptor(*input, frame.descriptor())?;
+        let result = CpuColorTransformExecutor::input_encoded_float_to_working_with_session(
+            frame, transform, session,
+        )?;
+        validate_descriptor(*output, result.frame.descriptor())?;
+        validate_descriptor(plan.final_descriptor, result.frame.descriptor())?;
+        Ok(RenderColorStageExecution { result, stage_diagnostics: plan.diagnostics() })
+    }
+
     /// Execute a CPU source/import -> working-space stage plan.
     pub fn input_to_working(
         frame: &CpuEncodedColorFrame,
@@ -4075,6 +4109,13 @@ pub fn execute_cpu_source_input_stage_with_session(
     match frame {
         CpuSourceColorFrame::EncodedRgba8(frame) => {
             execute_cpu_input_stage_with_session(frame, transform, session)
+        }
+        CpuSourceColorFrame::EncodedFloat(frame) => {
+            let mut planner = RenderColorStagePlanner::cpu_only();
+            let plan = planner.plan_input_to_working(frame.descriptor(), transform)?;
+            CpuRenderColorStageExecutor::input_encoded_float_to_working_with_session(
+                frame, &plan, session,
+            )
         }
         CpuSourceColorFrame::LinearFloat(frame) => {
             execute_cpu_input_stage_float_with_session(frame, transform, session)

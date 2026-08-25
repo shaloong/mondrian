@@ -1161,9 +1161,10 @@ proxy only to build a cache key.
 When a cached media frame enters a CPU preview fallback, its source/import ->
 working-space transform may be lazily materialized once and reused by clones of
 that same media-frame cache entry. Encoded RGBA8 decode retains a
-`CpuEncodedColorFrame` for the GPU input-transform path. Scene-linear RGBA-f32
-decode instead retains a shared `LinearFloatSource`; the Viewer uploads it
-directly to `Rgba32Float` and executes the OCIO input stage on the GPU. Both
+`CpuEncodedColorFrame` for the GPU input-transform path. High-bit encoded-float
+decode retains `CpuEncodedFloatColorFrame`, while scene-linear RGBA-f32 retains
+a shared `LinearFloatSource`; the Viewer uploads either float contract directly
+to `Rgba32Float` and executes the matching OCIO input stage on the GPU. All
 variants use the same typed source cache, and only materialize a CPU working
 frame when software composition or GPU failure requires it. The lazy CPU
 working frame is only a fallback
@@ -1195,6 +1196,11 @@ diagnostics continue to
 report native import as unavailable until the platform resource-sharing,
 synchronization, adoption, sampling, and input-transform bridge is connected.
 Device feature enablement alone must never promote hardware decode admission.
+The physical `PreviewDecodeSource` has already filtered its native surface hint
+through codec/profile/sampling evidence. App then intersects that hint with the
+active Renderer device's handle, NV12/P010, import-mode, and decoder-device
+selector observation. A preferred request may fall back once inside the
+media-owned Session; a required-residency request remains fail-closed.
 During playback startup, the Preview Adapter schedules future media payloads
 under the active priming deadline and recursively checks the next timeline
 frame, including nested sequences. The Host forwards ready/available media

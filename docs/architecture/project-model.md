@@ -481,6 +481,11 @@ or internally inconsistent evidence fails closed before Preview decode or
 proxy generation until a fresh probe can prove a supported sampling contract.
 This avoids silently reducing unknown precision or possible Alpha without
 changing the persistence schema.
+The stable `PixelFormat` contract represents common planar YUV/GBR/GBRA and
+packed/two-plane 10/12/16-bit little-endian formats explicitly. Its bit depth,
+RGB/YCbCr family, and Alpha facts are canonical probe values; execution adapters
+may derive a hardware packing candidate from them but cannot rewrite the stored
+sampling identity to match device capabilities.
 
 The current `MediaFileFingerprint` is one internally consistent open-file
 revision observation: length, second/nanosecond modification time, filesystem

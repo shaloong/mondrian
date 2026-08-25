@@ -40,8 +40,27 @@ pub(super) fn decoded_video_sampling_from_frame_and_surface(
         },
         range: decoded_video_range_from_ffmpeg(frame.color_range()),
         chroma_location: decoded_chroma_location_from_ffmpeg(frame.chroma_location()),
-        bit_depth: surface_format.fixed_bit_depth().unwrap_or(0),
+        bit_depth: decoded_bit_depth_from_pixel(frame.format())
+            .or_else(|| surface_format.fixed_bit_depth())
+            .unwrap_or(0),
     }
+}
+
+fn decoded_bit_depth_from_pixel(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<u8> {
+    let descriptor = pixel.descriptor()?;
+    let component_count = usize::from(descriptor.nb_components()).min(4);
+    if component_count == 0 {
+        return None;
+    }
+    // SAFETY: FFmpeg owns this static descriptor and `component_count` is
+    // bounded to the four entries in AVPixFmtDescriptor::comp.
+    let depth = unsafe {
+        (&(*descriptor.as_ptr()).comp)[..component_count]
+            .iter()
+            .map(|component| component.depth)
+            .max()
+    }?;
+    u8::try_from(depth).ok().filter(|depth| *depth > 0)
 }
 
 fn decoded_chroma_location_from_ffmpeg(

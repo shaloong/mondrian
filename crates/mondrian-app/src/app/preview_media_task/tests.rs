@@ -132,7 +132,7 @@ fn decoded_media_frame_identity_tracks_actual_selected_output_evidence() {
     let approximate = media_preview_frame_identity(&key, test_decoded_frame_evidence(Some(18_000)));
     let different_payload_kind = media_preview_frame_identity(
         &key,
-        MediaPreviewDecodedFrameEvidence::CpuLinearRgbaF32 {
+        MediaPreviewDecodedFrameEvidence::CpuRgbaF32 {
             width: 320,
             height: 180,
             color_contract: DecodedRgbaFrameContract {

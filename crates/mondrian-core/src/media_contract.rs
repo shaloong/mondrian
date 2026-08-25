@@ -339,7 +339,7 @@ pub enum AudioCodec {
 }
 
 /// Encoded pixel format identified by a media probe.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PixelFormat {
     /// Planar YUV 4:2:0, 8-bit.
     Yuv420p,
@@ -353,14 +353,44 @@ pub enum PixelFormat {
     Yuv422p10le,
     /// Planar YUV 4:4:4, 10-bit little-endian.
     Yuv444p10le,
+    /// Planar YUV 4:2:0, 12-bit little-endian.
+    Yuv420p12le,
+    /// Planar YUV 4:2:2, 12-bit little-endian.
+    Yuv422p12le,
+    /// Planar YUV 4:4:4, 12-bit little-endian.
+    Yuv444p12le,
+    /// Planar YUV 4:2:0, 16-bit little-endian.
+    Yuv420p16le,
+    /// Planar YUV 4:2:2, 16-bit little-endian.
+    Yuv422p16le,
+    /// Planar YUV 4:4:4, 16-bit little-endian.
+    Yuv444p16le,
+    /// Planar GBR, 10-bit little-endian.
+    Gbrp10le,
+    /// Planar GBR, 12-bit little-endian.
+    Gbrp12le,
+    /// Planar GBR, 16-bit little-endian.
+    Gbrp16le,
+    /// Planar GBRA, 10-bit little-endian.
+    Gbrap10le,
+    /// Planar GBRA, 12-bit little-endian.
+    Gbrap12le,
+    /// Planar GBRA, 16-bit little-endian.
+    Gbrap16le,
     /// Packed RGB24.
     Rgb24,
     /// Packed RGBA8.
     Rgba,
+    /// Packed RGBA16 little-endian.
+    Rgba64le,
     /// Two-plane 8-bit NV12.
     Nv12,
     /// Two-plane 10-bit P010.
     P010,
+    /// Two-plane 12-bit P012.
+    P012,
+    /// Two-plane 16-bit P016.
+    P016,
 }
 
 impl PixelFormat {
@@ -368,18 +398,46 @@ impl PixelFormat {
     pub const fn bit_depth(self) -> u8 {
         match self {
             Self::Yuv420p10le | Self::Yuv422p10le | Self::Yuv444p10le | Self::P010 => 10,
+            Self::Gbrp10le | Self::Gbrap10le => 10,
+            Self::Yuv420p12le
+            | Self::Yuv422p12le
+            | Self::Yuv444p12le
+            | Self::Gbrp12le
+            | Self::Gbrap12le
+            | Self::P012 => 12,
+            Self::Yuv420p16le
+            | Self::Yuv422p16le
+            | Self::Yuv444p16le
+            | Self::Gbrp16le
+            | Self::Gbrap16le
+            | Self::Rgba64le
+            | Self::P016 => 16,
             _ => 8,
         }
     }
 
     /// Whether the encoded format carries Alpha.
     pub const fn has_alpha(self) -> bool {
-        matches!(self, Self::Rgba)
+        matches!(
+            self,
+            Self::Rgba | Self::Rgba64le | Self::Gbrap10le | Self::Gbrap12le | Self::Gbrap16le
+        )
     }
 
     /// Whether samples are already encoded as RGB rather than YCbCr.
     pub const fn is_rgb(self) -> bool {
-        matches!(self, Self::Rgb24 | Self::Rgba)
+        matches!(
+            self,
+            Self::Rgb24
+                | Self::Rgba
+                | Self::Rgba64le
+                | Self::Gbrp10le
+                | Self::Gbrp12le
+                | Self::Gbrp16le
+                | Self::Gbrap10le
+                | Self::Gbrap12le
+                | Self::Gbrap16le
+        )
     }
 }
 
@@ -389,7 +447,7 @@ impl PixelFormat {
 /// serialized shape remains stable when an Adapter cannot map a decoder pixel
 /// format. Consumers must use [`VideoStreamInfo::proven_sampling`] instead of
 /// interpreting those fallback fields directly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ProvenVideoSampling {
     /// Exact encoded pixel format.
     pub pixel_format: PixelFormat,

@@ -440,6 +440,15 @@ Before `sws_scale`, media configures `sws_setColorspaceDetails` with the exact
 matrix, input range, and full-range RGBA output. FFmpeg/swscale defaults are not
 part of Mondrian's color contract.
 
+CPU materialization selects its output precision from the actual decoded-frame
+pixel descriptor, not a short surface-format allow-list. Eight-bit encoded
+sources use RGBA8. Encoded 10/12/16-bit YUV or RGB sources scale to RGBA64LE and
+are normalized into a typed source-encoded f32 payload before OCIO, so software
+fallback cannot silently quantize a high-bit source. Scene-linear planar-f32
+remains a distinct direct float path. `DecodedVideoSampling.bit_depth` is also
+derived from FFmpeg component descriptors; explicit native NV12/P010 surface
+contracts remain the fallback authority for opaque hardware formats.
+
 These contracts are media-layer interfaces. The current in-process adapter can
 share the same CPU RGBA FFmpeg implementation while diagnostics and app
 scheduling distinguish the requested access mode. Future hardware-resident
@@ -720,6 +729,12 @@ then calls `PreviewDecodeSource::from_proxy_artifact`; it never copies the
 original probe's stream or sampling fields into the proxy key. A proxy must
 therefore never inherit the original container's absolute stream index or
 pixel-format hint merely because both represent the same Asset.
+Original-source native hints intersect probe-proven pixel sampling with the
+codec/profile family: H.264 High10/4:2:2/4:4:4 and software-oriented codecs do
+not advertise NV12/P010 merely because a pixel format could be packed that way.
+HEVC Main10, AV1, and VP9 may retain a P010 candidate; the FFmpeg device-backed
+decoder open and the retained frame contract provide the later execution proof.
+This hint is conservative admission only, never device capability evidence.
 The manifest's source-referred color space and encoded range must also equal
 the exact Clip-occurrence source-color contract before the proxy is selectable.
 If author interpretation makes them incompatible, Preview records
