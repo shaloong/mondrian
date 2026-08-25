@@ -108,6 +108,27 @@ impl Transform2D {
         Self { properties }
     }
 
+    /// Whether this transform is provably the static identity operation.
+    ///
+    /// This is intentionally stricter than evaluating a few sample times:
+    /// any authored keyframe rejects identity reuse even when its current
+    /// value happens to equal the default. Execution optimizations can
+    /// therefore rely on this evidence without sampling an animation curve.
+    pub fn is_static_identity(&self) -> bool {
+        let expected = [
+            (Self::POSITION_PATH, PropertyValue::Vec2(Vec2::ZERO)),
+            (Self::SCALE_PATH, PropertyValue::Vec2(Vec2::ONE)),
+            (Self::ROTATION_PATH, PropertyValue::Float(0.0)),
+            (Self::ANCHOR_POINT_PATH, PropertyValue::Vec2(Vec2::ZERO)),
+            (Self::OPACITY_PATH, PropertyValue::Float(1.0)),
+        ];
+        expected.into_iter().all(|(path, expected)| {
+            self.properties.property(path).is_some_and(|property| {
+                !property.is_animated() && property.static_value() == &expected
+            })
+        })
+    }
+
     /// 求值为 3x3 仿射变换矩阵
     ///
     /// T(position) · R(rotation) · S(scale) · T(-anchor)

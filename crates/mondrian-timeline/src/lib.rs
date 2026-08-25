@@ -114,4 +114,5 @@ pub use video_transition::{
 pub use visual_schedule::{
     PreparedVisualSchedule, PreparedVisualScheduleDiagnostics,
     PreparedVisualScheduleQueryDiagnostics, PreparedVisualScheduleRangeClip,
+    PreparedVisualSourceIdentity,
 };

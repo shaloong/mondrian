@@ -8157,6 +8157,8 @@ fn export_test_media_dependencies(
                 mondrian_export::preset::ExportMediaDependency {
                     source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
                     path,
+                    source_container: String::new(),
+                    source_video_stream: None,
                     video_stream_index: Some(0),
                     picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
                     source_resolution: Some(Resolution { width: 1, height: 1 }),

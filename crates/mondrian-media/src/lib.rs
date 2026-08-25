@@ -18,6 +18,7 @@ mod ffmpeg_tools;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
+mod packet_identity;
 pub mod preview;
 mod process_supervisor;
 pub mod proxy;
@@ -73,6 +74,10 @@ pub use media_probe_process::{
     IsolatedMediaProbeSnapshot, MEDIA_PROBE_WORKER_ARGUMENT,
 };
 pub use multilevel_cache::{CacheTier, MultiLevelCache, ResolvedMediaPath};
+pub use packet_identity::{
+    capture_video_packet_identity, capture_video_packet_identity_cancellable, VideoPacketIdentity,
+    VideoPacketIdentityError,
+};
 pub use preview::{
     clear_thread_local_preview_decode_session, decode_preview_frame_cancellable,
     preview_decode_backend, preview_decode_cpu_budget, run_preview_demux_worker,

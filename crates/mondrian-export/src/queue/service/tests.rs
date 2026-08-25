@@ -195,6 +195,7 @@ fn dummy_config(output_path: impl Into<PathBuf>) -> ExportConfig {
         }),
         output_path: output_path.into(),
         output_policy: ExportOutputPolicy::CreateNew,
+        smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
     }
 }
 

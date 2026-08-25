@@ -6,7 +6,9 @@ use mondrian_core::{
     AudioSourceComponentId, FramePosition, FrameRounding, Rational, TimelineTime,
     TimelineTimeError, TimelineTimeRange,
 };
-use mondrian_media::{AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic};
+use mondrian_media::{
+    AudioSourceSelection, MediaFileFingerprint, VideoColorDiagnostic, VideoStreamInfo,
+};
 use mondrian_timeline::sequence::{DeliveryBitDepth, Sequence, VideoRange};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -654,6 +656,21 @@ pub struct ExportConfig {
     /// Final namespace policy frozen with this job at queue admission.
     #[serde(default)]
     pub output_policy: ExportOutputPolicy,
+    /// Conservative encoded-essence reuse policy frozen with this job.
+    #[serde(default)]
+    pub smart_render: ExportSmartRenderPolicy,
+}
+
+/// Whether Export may reuse independently validated source video essence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportSmartRenderPolicy {
+    /// Never bypass Timeline pixel rendering and video encoding.
+    Disabled,
+    /// Reuse source video only when every author, delivery, physical packet,
+    /// and post-output invariant is proven; otherwise render normally.
+    #[default]
+    Automatic,
 }
 
 /// Namespace policy for the final export deliverable.
@@ -912,6 +929,15 @@ pub struct ExportMediaDependency {
     pub path: PathBuf,
     /// Exact source revision that the export is allowed to publish from.
     pub source_fingerprint: MediaFileFingerprint,
+    /// Decoder/container family frozen by the admitted media probe.
+    #[serde(default)]
+    pub source_container: String,
+    /// Complete selected video-stream probe contract.
+    ///
+    /// This is required for encoded-essence reuse. Ordinary decode remains
+    /// compatible with dependencies captured before this evidence existed.
+    #[serde(default)]
+    pub source_video_stream: Option<VideoStreamInfo>,
     /// Exact physical video stream selected by the admitted media probe.
     ///
     /// Audio-only dependencies retain `None`. Every picture render plan

@@ -779,6 +779,21 @@ pub struct ExportJobDiagnostics {
     pub visual: ExportJobVisualDiagnostics,
     /// Standards loudness/true-peak observation of the rendered Program audio.
     pub audio: Option<AudioLoudnessReport>,
+    /// Independently verified encoded-essence reuse, when Smart Render won.
+    pub smart_render: Option<ExportSmartRenderEvidence>,
+}
+
+/// Bounded proof that Smart Render reused the exact admitted source video.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportSmartRenderEvidence {
+    /// Sole source Asset whose encoded video packets were reused.
+    pub source_asset_id: AssetId,
+    /// Ordered packet count matched before and after remux.
+    pub packet_count: u64,
+    /// Encoded payload bytes matched before and after remux.
+    pub payload_bytes: u64,
+    /// Whether the independently captured packet digests were identical.
+    pub packet_identity_verified: bool,
 }
 
 impl ExportJobDiagnostics {
@@ -2575,6 +2590,30 @@ fn execute_timeline_export(
                 );
             }
         };
+        match try_execute_smart_render(
+            job,
+            timeline,
+            &delivery,
+            range,
+            &audio_input,
+            &validation_contract,
+            output_path,
+            cancel,
+            execution_gate,
+            report,
+        ) {
+            Ok(Some(evidence)) => {
+                report_diagnostics(ExportJobDiagnostics {
+                    audio: audio_analysis,
+                    smart_render: Some(evidence),
+                    ..ExportJobDiagnostics::default()
+                });
+                *validation_contract_out = Some(validation_contract);
+                return JobExecutionResult::ReversibleWorkCompleted;
+            }
+            Ok(None) => {}
+            Err(outcome) => return outcome,
+        }
         let resolved_video_encoder = match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { video, .. } => {
                 let adapter = visual_session.active_adapter_identity();
@@ -2790,6 +2829,198 @@ fn execute_timeline_export(
         let _ = std::fs::remove_file(path);
     }
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_execute_smart_render(
+    job: &RenderJob,
+    timeline: &TimelineExportSnapshot,
+    delivery: &ResolvedExportDeliveryContract,
+    range: TimelineRenderRange,
+    audio_input: &TimelineAudioInput,
+    validation_contract: &ProducedArtifactValidation,
+    output_path: &Path,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+) -> Result<Option<ExportSmartRenderEvidence>, JobExecutionResult> {
+    let selected_range = range.time_range().map_err(JobExecutionResult::Failed)?;
+    let plan = match crate::smart_render::qualify_smart_render(
+        &job.config,
+        timeline,
+        delivery,
+        selected_range,
+        range.total_frames,
+    ) {
+        Ok(plan) => plan,
+        Err(blocker) => {
+            tracing::debug!(
+                ?blocker,
+                "Smart Render eligibility rejected; using pixel render"
+            );
+            return Ok(None);
+        }
+    };
+    let ResolvedExportArtifactEncoding::MediaFile { container, audio, .. } = &delivery.artifact
+    else {
+        return Ok(None);
+    };
+    let ProducedArtifactValidation::MediaFile(expectations) = validation_contract else {
+        return Ok(None);
+    };
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+        return Err(JobExecutionResult::Cancelled);
+    }
+    let source_packets = match mondrian_media::capture_video_packet_identity_cancellable(
+        &plan.path,
+        Some(plan.video_stream_index),
+        cancel,
+    ) {
+        Ok(identity) if identity.first_packet_is_key => identity,
+        Ok(_) => {
+            tracing::debug!(
+                asset_id = %plan.asset_id,
+                "Smart Render source does not begin on an independently decodable packet"
+            );
+            return Ok(None);
+        }
+        Err(mondrian_media::VideoPacketIdentityError::Canceled) => {
+            return Err(JobExecutionResult::Cancelled);
+        }
+        Err(error) => {
+            tracing::debug!(%error, "Smart Render source packet identity unavailable");
+            return Ok(None);
+        }
+    };
+    if MediaFileFingerprint::capture(&plan.path) != plan.source_fingerprint {
+        return Ok(None);
+    }
+
+    let mut command = mondrian_media::ffmpeg_command();
+    command
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(&plan.path);
+    match audio_input {
+        TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
+            let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
+                return Ok(None);
+            };
+            command
+                .arg("-f")
+                .arg("f32le")
+                .arg("-ar")
+                .arg(sample_rate.to_string())
+                .arg("-channel_layout")
+                .arg(layout)
+                .arg("-ac")
+                .arg(channel_layout.channel_count().to_string())
+                .arg("-i")
+                .arg(path);
+        }
+        TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
+            let Some(layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
+                return Ok(None);
+            };
+            command.arg("-f").arg("lavfi").arg("-i").arg(format!(
+                "anullsrc=channel_layout={layout}:sample_rate={sample_rate}"
+            ));
+        }
+        TimelineAudioInput::Disabled => {}
+    }
+    command
+        .arg("-map")
+        .arg(format!("0:{}", plan.video_stream_index))
+        .arg("-c:v")
+        .arg("copy");
+    match audio_input {
+        TimelineAudioInput::PcmFile { .. } | TimelineAudioInput::Silent { .. } => {
+            command.arg("-map").arg("1:a:0").arg("-shortest");
+            apply_audio_codec_args(&mut command, audio);
+        }
+        TimelineAudioInput::Disabled => {
+            command.arg("-an");
+        }
+    }
+    command.arg("-f").arg(container_format(container)).arg(output_path);
+
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
+        return Err(JobExecutionResult::Cancelled);
+    }
+    report(ExportProgress::encoding(0.90));
+    let output = mondrian_media::run_supervised_command(
+        &mut command,
+        None,
+        SupervisedProcessPolicy {
+            stdout: SupervisedStreamCapture::Drain,
+            stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
+            ..SupervisedProcessPolicy::default()
+        },
+        cancel,
+    );
+    let output = match output {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            tracing::debug!(
+                status = %output.status,
+                stderr = %String::from_utf8_lossy(&output.stderr),
+                "Smart Render remux failed; using pixel render"
+            );
+            return Ok(None);
+        }
+        Err(_) if cancel.is_canceled() => return Err(JobExecutionResult::Cancelled),
+        Err(error) => {
+            tracing::debug!(%error, "Smart Render remux supervision failed");
+            return Ok(None);
+        }
+    };
+    drop(output);
+    let copied_packets = match mondrian_media::capture_video_packet_identity_cancellable(
+        output_path,
+        None,
+        cancel,
+    ) {
+        Ok(identity) => identity,
+        Err(mondrian_media::VideoPacketIdentityError::Canceled) => {
+            return Err(JobExecutionResult::Cancelled);
+        }
+        Err(error) => {
+            tracing::debug!(%error, "Smart Render output packet identity unavailable");
+            return Ok(None);
+        }
+    };
+    if source_packets.packet_count != copied_packets.packet_count
+        || source_packets.payload_bytes != copied_packets.payload_bytes
+        || source_packets.payload_digest != copied_packets.payload_digest
+    {
+        tracing::debug!(
+            source_packets = source_packets.packet_count,
+            output_packets = copied_packets.packet_count,
+            "Smart Render packet identity changed during remux"
+        );
+        return Ok(None);
+    }
+    match validate_export_output_cancellable(output_path, expectations, cancel) {
+        Ok(_) => {}
+        Err(_) if cancel.is_canceled() => return Err(JobExecutionResult::Cancelled),
+        Err(error) => {
+            tracing::debug!(%error, "Smart Render output contract validation failed");
+            return Ok(None);
+        }
+    }
+    if let Err(reason) = validate_snapshot_media_revisions(timeline) {
+        tracing::debug!(%reason, "Smart Render source revision changed before completion");
+        return Ok(None);
+    }
+    Ok(Some(ExportSmartRenderEvidence {
+        source_asset_id: plan.asset_id,
+        packet_count: source_packets.packet_count,
+        payload_bytes: source_packets.payload_bytes,
+        packet_identity_verified: true,
+    }))
 }
 
 fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Result<(), String> {
@@ -6924,6 +7155,7 @@ mod tests {
             timeline: Box::new(timeline),
             output_path: PathBuf::from(output_name),
             output_policy: ExportOutputPolicy::CreateNew,
+            smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
         }
     }
 
@@ -7058,6 +7290,147 @@ mod tests {
         assert_eq!(analysis.integrated_lufs, None);
         assert_eq!(analysis.true_peak_dbtp, None);
         assert!(analysis.sample_frames > 0);
+    }
+
+    #[test]
+    fn ffmpeg_executor_smart_renders_full_identity_video_with_packet_proof() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping Smart Render integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary Smart Render parent");
+        let source = directory.path().join("source.mp4");
+        let output = directory.path().join("smart-rendered.mp4");
+        let mut make_source = mondrian_media::ffmpeg_command();
+        let generated = make_source
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("testsrc2=size=32x32:rate=25:duration=1")
+            .arg("-an")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-profile:v")
+            .arg("high")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-x264-params")
+            .arg("keyint=50:min-keyint=50:bframes=3:scenecut=0:open-gop=0")
+            .arg("-color_range")
+            .arg("tv")
+            .arg("-color_primaries")
+            .arg("bt709")
+            .arg("-color_trc")
+            .arg("bt709")
+            .arg("-colorspace")
+            .arg("bt709")
+            .arg(&source)
+            .output()
+            .expect("run Smart Render source encoder");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let probe = mondrian_media::probe_media_info(&source).expect("probe Smart Render source");
+        let stream = probe.primary_video().expect("source video stream").clone();
+        assert_eq!(stream.total_frames, Some(25));
+        let source_duration = stream.duration.expect("source stream duration");
+        let duration_nanos = i64::try_from(source_duration.as_nanos()).expect("short duration");
+        let source_range = TimelineTimeRange::new(
+            TimelineTime::ZERO,
+            TimelineTime::new(duration_nanos, 1_000_000_000).expect("exact duration"),
+        )
+        .expect("source range");
+        assert_eq!(
+            source_range.duration,
+            TimelineTime::new(1, 1).expect("one second")
+        );
+
+        let asset_id = AssetId::new();
+        let mut sequence = Sequence::new("Smart Render identity");
+        sequence.settings.resolution = Resolution { width: 32, height: 32 };
+        sequence.settings.frame_rate = Rational::FPS_25;
+        sequence.settings.color.input.auto_tone_map_media = false;
+        sequence.in_point = Some(TimelineTime::ZERO);
+        sequence.out_point = Some(TimelineTime::new(24, 25).expect("last source frame"));
+        sequence.video_tracks[0]
+            .add_clip(
+                Clip::new(asset_id, TimelineTime::ZERO, source_range.duration)
+                    .expect("identity source Clip"),
+            )
+            .expect("add identity source Clip");
+        let fingerprint = MediaFileFingerprint::capture(&source);
+        assert!(fingerprint.authorizes_reuse());
+        let dependency = crate::preset::ExportMediaDependency {
+            path: source.clone(),
+            source_fingerprint: fingerprint,
+            source_container: probe.container.clone(),
+            source_video_stream: Some(stream.clone()),
+            video_stream_index: Some(stream.index),
+            picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::TimelineRange(
+                source_range,
+            )),
+            source_resolution: Some(Resolution { width: stream.width, height: stream.height }),
+            picture: Some(stream.picture),
+            audio_components: HashMap::new(),
+            interpretation: AssetMediaInterpretation::default(),
+            color_diagnostic: Some(mondrian_media::VideoColorDiagnostic::from_stream(&stream)),
+        };
+        let mut timeline = TimelineExportSnapshot {
+            sequence,
+            sequences: Vec::new(),
+            media: HashMap::from([(asset_id, dependency)]),
+            color_environment: mondrian_core::ProjectColorEnvironment::default(),
+            prepared_execution: None,
+            range: TimelineExportRange::SequenceInOut,
+        };
+        refresh_test_execution_snapshot(&mut timeline, true);
+        let mut preset = crate::preset::ExportPreset::h264_aac_sdr_1080p();
+        preset.resolution = None;
+        preset.color_target = crate::preset::ExportColorTarget::Colorimetric(ColorSpace::Rec709);
+        let job = RenderJob::new(ExportConfig {
+            preset,
+            timeline: Box::new(timeline),
+            output_path: output.clone(),
+            output_policy: ExportOutputPolicy::CreateNew,
+            smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
+        });
+        let mut latest_diagnostics = None;
+        let result = FfmpegExportExecutor.execute(
+            &job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |diagnostics| latest_diagnostics = Some(diagnostics),
+        );
+
+        assert!(
+            matches!(result, JobExecutionResult::Published(_)),
+            "{result:?}"
+        );
+        let evidence = latest_diagnostics
+            .and_then(|diagnostics| diagnostics.smart_render)
+            .expect("Smart Render evidence");
+        assert_eq!(evidence.source_asset_id, asset_id);
+        assert!(evidence.packet_identity_verified);
+        assert!(evidence.packet_count > 0);
+        assert!(evidence.payload_bytes > 0);
+        let source_identity =
+            mondrian_media::capture_video_packet_identity(&source, Some(stream.index))
+                .expect("source packet identity");
+        let output_identity = mondrian_media::capture_video_packet_identity(&output, None)
+            .expect("output packet identity");
+        assert_eq!(source_identity.packet_count, output_identity.packet_count);
+        assert_eq!(source_identity.payload_bytes, output_identity.payload_bytes);
+        assert_eq!(
+            source_identity.payload_digest,
+            output_identity.payload_digest
+        );
     }
 
     fn test_delivery_contract(
@@ -7262,6 +7635,8 @@ mod tests {
         crate::preset::ExportMediaDependency {
             source_fingerprint: MediaFileFingerprint::capture(path.as_path()),
             path,
+            source_container: String::new(),
+            source_video_stream: None,
             video_stream_index: Some(0),
             picture_source_extent: Some(mondrian_timeline::PictureSourceExtent::Still),
             source_resolution: Some(Resolution { width: 1, height: 1 }),

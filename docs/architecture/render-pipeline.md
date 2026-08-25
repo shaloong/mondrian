@@ -1660,6 +1660,34 @@ Those latter outcomes fail the job with typed artifact evidence; none is
 collapsed into an ordinary encode failure or inferred by checking whether a
 path exists.
 
+### Conservative Smart Render
+
+`ExportSmartRenderPolicy::Automatic` is the App default, but it authorizes no
+semantic shortcut by itself. The frozen root `PreparedVisualProgram` must first
+return one `PreparedVisualSourceIdentity` for the complete selected interval.
+The corresponding `ExportMediaDependency` carries the admitted container plus
+the complete selected `VideoStreamInfo`; capture validates that this probe
+agrees with the parallel stream index, raster, picture, and color evidence.
+The Export Smart Render Module then requires the selected source range to equal
+the complete time-varying source extent and exact frame count, and requires
+codec/profile, raster, CFR cadence, SAR/scan/orientation, bit depth, chroma,
+Alpha, range, and resolved input/output color identity to match the
+`ResolvedExportDeliveryContract`. Input or output tone mapping, authored/static
+HDR metadata, incomplete probe facts, and non-identity color Views reject the
+optimization.
+
+The current executor remuxes only that complete video stream; it never uses
+`-ss`/`-t` to claim arbitrary GOP-aligned trimming. Program audio remains on the
+ordinary frozen Audio Program path and is encoded/muxed beside the copied
+video. Before the result can leave reversible execution, Media must prove
+ordered packet-payload identity and the existing output validator must still
+prove codec/profile, GOP/B-frame/closed-GOP policy, encoded signal, audio, and
+duration. Source revision is checked again before publication. Any eligibility,
+packet, remux, or validation failure falls back to the complete pixel
+render/video-encode path; cancellation remains cancellation. Successful jobs
+publish bounded `ExportSmartRenderEvidence` with source Asset, packet count,
+payload bytes, and packet-identity status.
+
 The optional `validation` build feature exposes a read-only semantic trace over
 the exact `PreparedVisualFrameClosure` already produced by each consumer. The
 trace normalizes scheduler generation while retaining the immutable Program

@@ -1371,3 +1371,14 @@ Preview and Export consume that closure. Their Modules retain media adaptation,
 pixel materialization/compositing, and consumer-specific scheduling, but may
 only resolve the closure's typed child bindings; they cannot own another nested
 Timeline walker or reinterpret recursion.
+
+`PreparedVisualSchedule::source_identity(...)` is the sole range-level author
+proof used by Smart Render. Behind that small Interface it checks the complete
+half-open interval against visible/unmuted Track activity, enabled Clip and
+Transition intervals, effective Blend state, static Track/Clip Opacity and
+Transform, source-time scale, placement interpretation, and enabled
+Effect/Mask state. It returns only one Asset plus one exact 1x source range.
+Gaps, overlaps, generated/nested content, Transition endpoints, animation,
+retime, or processing produce no candidate. Export therefore consumes a deep
+prepared-Timeline fact instead of rescanning Tracks and Clips or maintaining a
+second list of passthrough rules.

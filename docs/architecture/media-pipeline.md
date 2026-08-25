@@ -3069,6 +3069,24 @@ than serde-defaulted compatibility values, so stale reports fail visibly.
 per-stream diagnostics into one report surface.
 Clip-level `MediaInterpretation` can override color space, frame rate, pixel aspect ratio, field order, and alpha interpretation.
 
+### Encoded packet identity
+
+`capture_video_packet_identity_cancellable(...)` is the Media-owned physical
+evidence Interface for conservative Smart Render. It opens one stable file
+revision, selects one exact absolute video stream, and hashes every ordered
+packet as a length-framed SHA-256 sequence while counting packets and payload
+bytes. Complete NTFS/ReFS or supported Unix object/change evidence is required
+before opening and must remain identical after demux; cancellation is observed
+between packets. The first-packet key flag is retained as a necessary full
+stream sanity fact, never as proof that an arbitrary trimmed GOP is closed.
+
+After remux, Export invokes the same Interface on the produced primary video
+stream and requires identical packet count, payload bytes, and digest. This
+proves encoded essence reuse independently from FFmpeg exit status or container
+metadata validation. Media does not decide Timeline eligibility, codec
+compatibility, color identity, or publication; those remain in their owning
+Modules.
+
 Asset library records store persistent user intent separately as
 `AssetMediaInterpretation`. Imported media defaults to `Auto` for both color
 identity and encoded signal range. Color Auto means "resolve from current

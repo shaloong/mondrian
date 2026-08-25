@@ -15,7 +15,7 @@ use mondrian_core::timeline_data::{
     TimelineClipEndpointContext, TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision, TimelineTime,
+    AssetId, ClipId, MondrianError, Rational, Result, SequenceId, SequenceRevision, TimelineTime,
     TimelineTimeRange, VideoTransitionId, WorkingColorSpace,
 };
 use std::collections::HashMap;
@@ -91,6 +91,19 @@ pub struct PreparedVisualScheduleRangeClip {
     pub first_clip_time: TimelineTime,
     /// Last Clip-local time conservatively reachable in the requested window.
     pub last_clip_time: TimelineTime,
+}
+
+/// Proven direct source interval for one otherwise identity visual range.
+///
+/// This is author-semantic evidence only. A delivery Adapter must still prove
+/// physical source revision, codec, packet, raster, cadence, signal, and color
+/// compatibility before reusing encoded essence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreparedVisualSourceIdentity {
+    /// Sole file-backed media identity covering the requested range.
+    pub asset_id: AssetId,
+    /// Exact half-open source-local interval selected by the 1x placement.
+    pub source_range: TimelineTimeRange,
 }
 
 impl PreparedVisualScheduleQueryDiagnostics {
@@ -426,6 +439,77 @@ impl PreparedVisualSchedule {
             }
         }
         Ok(result)
+    }
+
+    /// Prove that one half-open visual range is a direct source identity.
+    ///
+    /// The proof fails closed for gaps, overlaps, Transitions, generated or
+    /// nested content, retiming, interpretation overrides, non-identity
+    /// Transform/Opacity/Blend state, and enabled Effects or Masks. Disabled
+    /// author state is ignored exactly as it is by ordinary visual execution.
+    pub fn source_identity(
+        &self,
+        range: TimelineTimeRange,
+    ) -> Result<Option<PreparedVisualSourceIdentity>> {
+        if range.is_empty() {
+            return Ok(None);
+        }
+        let range_end = range.end()?;
+        let mut selected: Option<(&PreparedVisualTrack, usize)> = None;
+
+        for track in self
+            .tracks
+            .iter()
+            .filter(|track| track.track.is_visible && !track.track.is_muted)
+        {
+            if track.transitions.iter().any(|transition| {
+                transition.sequence_range.start < range_end
+                    && transition.sequence_range.end().is_ok_and(|end| end > range.start)
+            }) {
+                return Ok(None);
+            }
+            for (clip_index, clip) in track.track.clips.iter().enumerate() {
+                if clip.is_disabled {
+                    continue;
+                }
+                let clip_end = clip.end_position()?;
+                if clip.position >= range_end || clip_end <= range.start {
+                    continue;
+                }
+                if selected.replace((track, clip_index)).is_some() {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let Some((track, clip_index)) = selected else {
+            return Ok(None);
+        };
+        let clip = &track.track.clips[clip_index];
+        if clip.position > range.start || clip.end_position()? < range_end {
+            return Ok(None);
+        }
+        let ClipContent::Media { asset_id, interpretation } = &clip.content else {
+            return Ok(None);
+        };
+        if interpretation != &Default::default()
+            || clip.source_time_scale() != mondrian_core::TimeScale::ONE
+            || !clip.transform.is_static_identity()
+            || clip.blend_mode.unwrap_or(track.track.blend_mode) != mondrian_core::BlendMode::Normal
+            || track.track.blend_mode != mondrian_core::BlendMode::Normal
+            || track.track.opacity.is_animated()
+            || track.track.opacity.static_value()
+                != &mondrian_core::automation::PropertyValue::Float(1.0)
+            || track.clip_effects[clip_index].iter().any(|effect| effect.is_enabled)
+            || track.clip_masks[clip_index].iter().any(|mask| mask.enabled)
+        {
+            return Ok(None);
+        }
+        let source_start = clip.timeline_to_source_time(range.start)?;
+        Ok(Some(PreparedVisualSourceIdentity {
+            asset_id: *asset_id,
+            source_range: TimelineTimeRange::new(source_start, range.duration)?,
+        }))
     }
 }
 
@@ -1685,6 +1769,114 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(track_indices, [0, 2]);
+    }
+
+    fn source_identity_sequence() -> (Sequence, AssetId) {
+        let mut sequence = Sequence::new("source identity");
+        sequence.video_tracks.clear();
+        let asset_id = AssetId::new();
+        let mut track = Track::new_video("V1");
+        track
+            .add_clip(Clip::new(asset_id, tt(10), tt(100)).expect("media Clip"))
+            .expect("add media Clip");
+        sequence.video_tracks.push(track);
+        (sequence, asset_id)
+    }
+
+    #[test]
+    fn source_identity_proves_one_continuous_unprocessed_media_range() {
+        let (mut sequence, asset_id) = source_identity_sequence();
+        let mut disabled = EffectNode::new(EffectType::GaussianBlur);
+        disabled.is_enabled = false;
+        sequence.video_tracks[0].clips[0].effects.push(disabled);
+        let schedule = PreparedVisualSchedule::compile(&sequence).expect("prepare schedule");
+
+        assert_eq!(
+            schedule
+                .source_identity(TimelineTimeRange::new(tt(20), tt(40)).expect("range"))
+                .expect("identity query"),
+            Some(PreparedVisualSourceIdentity {
+                asset_id,
+                source_range: TimelineTimeRange::new(tt(10), tt(40)).expect("source range"),
+            })
+        );
+    }
+
+    #[test]
+    fn source_identity_rejects_gaps_overlaps_and_processing() {
+        let (sequence, _) = source_identity_sequence();
+        let range = TimelineTimeRange::new(tt(20), tt(40)).expect("range");
+
+        let mut gap = sequence.clone();
+        gap.video_tracks[0].clips[0].duration = tt(25);
+        assert_eq!(
+            PreparedVisualSchedule::compile(&gap)
+                .expect("gap schedule")
+                .source_identity(range)
+                .expect("gap query"),
+            None
+        );
+
+        let mut overlap = sequence.clone();
+        overlap.video_tracks[0]
+            .add_clip(Clip::new(AssetId::new(), tt(30), tt(5)).expect("overlap Clip"))
+            .expect("add overlap");
+        assert_eq!(
+            PreparedVisualSchedule::compile(&overlap)
+                .expect("overlap schedule")
+                .source_identity(range)
+                .expect("overlap query"),
+            None
+        );
+
+        let mut processed = sequence;
+        processed.video_tracks[0].clips[0]
+            .effects
+            .push(EffectNode::new(EffectType::GaussianBlur));
+        assert_eq!(
+            PreparedVisualSchedule::compile(&processed)
+                .expect("processed schedule")
+                .source_identity(range)
+                .expect("processed query"),
+            None
+        );
+    }
+
+    #[test]
+    fn source_identity_rejects_retime_and_transform_animation() {
+        let (sequence, _) = source_identity_sequence();
+        let range = TimelineTimeRange::new(tt(20), tt(40)).expect("range");
+
+        let mut retimed = sequence.clone();
+        retimed.video_tracks[0].clips[0]
+            .set_constant_source_time_map(
+                TimelineTime::ZERO,
+                TimeScale::new(2, 1).expect("double speed"),
+            )
+            .expect("retime");
+        assert_eq!(
+            PreparedVisualSchedule::compile(&retimed)
+                .expect("retimed schedule")
+                .source_identity(range)
+                .expect("retimed query"),
+            None
+        );
+
+        let mut animated = sequence;
+        animated.video_tracks[0].clips[0]
+            .transform
+            .apply_property_mutation(mondrian_core::automation::PropertyMutation::SetKeyframe {
+                path: Transform2D::POSITION_PATH.to_owned(),
+                keyframe: fixed_keyframe(90_000, 0, PropertyValue::Vec2(Vec2::ZERO)),
+            })
+            .expect("identity-valued keyframe");
+        assert_eq!(
+            PreparedVisualSchedule::compile(&animated)
+                .expect("animated schedule")
+                .source_identity(range)
+                .expect("animated query"),
+            None
+        );
     }
 
     #[test]

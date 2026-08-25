@@ -226,6 +226,7 @@ impl AppState {
             timeline: Box::new(timeline),
             output_path: request.output_path,
             output_policy: request.output_policy,
+            smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
@@ -398,6 +399,8 @@ fn resolve_export_media_dependencies(
             ExportMediaDependency {
                 path,
                 source_fingerprint,
+                source_container: media_probe.container.clone(),
+                source_video_stream: primary_video.cloned(),
                 video_stream_index: primary_video.map(|video| video.index),
                 picture_source_extent: primary_video.and_then(|video| {
                     export_picture_source_extent(&asset.kind, video.duration, video.total_frames)

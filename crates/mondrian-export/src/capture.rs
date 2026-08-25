@@ -423,6 +423,14 @@ pub enum TimelineExportDependencyError {
     /// Snapshot media payload is not the exact selected Asset/Component closure.
     #[error("frozen export media closure evidence mismatch")]
     MediaClosureEvidenceMismatch,
+    /// A complete source-video probe disagrees with parallel execution facts.
+    #[error("frozen export source-video evidence mismatch for Asset {asset_id}: {detail}")]
+    SourceVideoEvidenceMismatch {
+        /// File-backed media identity with contradictory evidence.
+        asset_id: AssetId,
+        /// Exact violated invariant.
+        detail: String,
+    },
     /// Frozen title-font bindings are not the exact selected query closure.
     #[error("frozen Basic Title font closure evidence mismatch")]
     TitleFontClosureEvidenceMismatch,
@@ -871,6 +879,21 @@ pub fn validate_timeline_export_execution_snapshot_with_audio_selection(
         if dependency.audio_components.len() != components.len() {
             return Err(TimelineExportDependencyError::MediaClosureEvidenceMismatch);
         }
+        if let Some(stream) = &dependency.source_video_stream {
+            let expected_resolution =
+                mondrian_core::Resolution { width: stream.width, height: stream.height };
+            if dependency.video_stream_index != Some(stream.index)
+                || dependency.source_resolution != Some(expected_resolution)
+                || dependency.picture != Some(stream.picture)
+                || dependency.color_diagnostic.as_ref()
+                    != Some(&mondrian_media::VideoColorDiagnostic::from_stream(stream))
+            {
+                return Err(TimelineExportDependencyError::SourceVideoEvidenceMismatch {
+                    asset_id: *asset_id,
+                    detail: "stream index, raster, picture interpretation, or color diagnostic diverged from the selected probe stream".to_owned(),
+                });
+            }
+        }
     }
     for (owner_id, transition_ids) in visual.transition_ids() {
         let owner = if *owner_id == root.id {
@@ -1225,6 +1248,8 @@ mod tests {
                         path.as_path(),
                     ),
                     path,
+                    source_container: String::new(),
+                    source_video_stream: None,
                     video_stream_index: Some(0),
                     picture_source_extent: Some(picture_source_extent),
                     source_resolution: Some(mondrian_core::Resolution {
