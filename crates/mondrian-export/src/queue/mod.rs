@@ -458,6 +458,21 @@ impl ExportGpuExecutionRuntime {
         }
     }
 
+    fn active_adapter_identity(
+        &mut self,
+    ) -> Option<crate::hardware_encoding::ActiveGraphicsAdapterIdentity> {
+        self.ensure_ready().ok()?;
+        match &self.state {
+            ExportGpuExecutionRuntimeState::Ready { backend, .. } => Some(
+                crate::hardware_encoding::ActiveGraphicsAdapterIdentity::from(
+                    &backend.context.adapter.get_info(),
+                ),
+            ),
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => None,
+        }
+    }
+
     fn execute(
         &mut self,
         frame: &CpuColorFrame,
@@ -2282,6 +2297,28 @@ fn execute_timeline_export(
                 })
             }
         };
+        let resolved_video_encoder = match &delivery.artifact {
+            ResolvedExportArtifactEncoding::MediaFile { video, .. } => {
+                let adapter = visual_session.active_adapter_identity();
+                match crate::hardware_encoding::resolve_video_encoder(
+                    video,
+                    delivery.pixel_format,
+                    adapter.as_ref(),
+                    timeline
+                        .sequence
+                        .settings
+                        .delivery
+                        .static_hdr_metadata_policy
+                        .writes_authored_metadata(),
+                    cancel,
+                ) {
+                    Ok(encoder) => Some(encoder),
+                    Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+                    Err(error) => return JobExecutionResult::Failed(error),
+                }
+            }
+            ResolvedExportArtifactEncoding::ImageSequence { .. } => None,
+        };
         let mut cmd = mondrian_media::ffmpeg_command();
         let frame_contract = export_frame_contract(delivery.bit_depth);
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
@@ -2348,11 +2385,17 @@ fn execute_timeline_export(
 
         match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
-                apply_video_codec_args(&mut cmd, video, delivery.video_coding);
+                let Some(encoder) = resolved_video_encoder else {
+                    return JobExecutionResult::Failed(
+                        "media-file export has no resolved video encoder".to_owned(),
+                    );
+                };
+                apply_video_codec_args(&mut cmd, video, delivery.video_coding, encoder);
                 apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
                 if let Err(err) = apply_encoder_signal_params(
                     &mut cmd,
                     video,
+                    encoder,
                     &timeline.sequence.settings,
                     &delivery,
                 ) {
@@ -3332,6 +3375,12 @@ impl ExportVisualRenderSession {
             effect_execution_generation,
             route_contracts_sealed: false,
         })
+    }
+
+    fn active_adapter_identity(
+        &mut self,
+    ) -> Option<crate::hardware_encoding::ActiveGraphicsAdapterIdentity> {
+        self.gpu_output.active_adapter_identity()
     }
 
     #[cfg(test)]
@@ -6561,6 +6610,33 @@ mod tests {
                 crate::preset::ImageSequenceFormat::Png8,
             ))
             .is_file());
+    }
+
+    #[test]
+    fn ffmpeg_executor_publishes_probe_qualified_h264_media() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping H.264 integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary export parent");
+        let output = directory.path().join("qualified.mp4");
+        let mut config = dummy_config(&output.to_string_lossy());
+        config.preset.resolution = Some(crate::preset::Resolution { width: 256, height: 256 });
+        refresh_test_execution_snapshot(&mut config.timeline, true);
+        let job = RenderJob::new(config);
+        let result = FfmpegExportExecutor.execute(
+            &job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |_| {},
+        );
+
+        assert!(
+            matches!(result, JobExecutionResult::Published(_)),
+            "{result:?}"
+        );
+        assert!(output.is_file());
     }
 
     fn test_delivery_contract(
@@ -10308,6 +10384,7 @@ mod tests {
                 closed_gop: true,
                 scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
             },
+            crate::hardware_encoding::ResolvedVideoEncoder::Libx264,
         );
         let h264_args = h264
             .get_args()
@@ -10334,6 +10411,7 @@ mod tests {
                 closed_gop: true,
                 scene_cut: crate::video_encoding::VideoSceneCutPolicy::Adaptive,
             },
+            crate::hardware_encoding::ResolvedVideoEncoder::Libx265,
         );
         let hevc_args = hevc
             .get_args()
@@ -10416,6 +10494,7 @@ mod tests {
                 profile: crate::preset::HevcProfile::Main10,
                 rate_control: VideoRateControl::constant_quality(20),
             },
+            crate::hardware_encoding::ResolvedVideoEncoder::Libx265,
             &settings,
             &delivery,
         )
@@ -10441,6 +10520,7 @@ mod tests {
                 profile: crate::preset::H264Profile::High,
                 rate_control: VideoRateControl::constant_quality(20),
             },
+            crate::hardware_encoding::ResolvedVideoEncoder::Libx264,
             &settings,
             &delivery,
         )

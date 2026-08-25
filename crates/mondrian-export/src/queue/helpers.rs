@@ -5,101 +5,9 @@ pub(crate) fn apply_video_codec_args(
     cmd: &mut Command,
     codec: &VideoCodecConfig,
     coding: crate::video_encoding::ResolvedVideoCodingStructure,
+    encoder: crate::hardware_encoding::ResolvedVideoEncoder,
 ) {
-    match codec {
-        VideoCodecConfig::H264 { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libx264")
-                .arg("-preset")
-                .arg("medium")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::H264Profile::High => "high",
-                });
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::Hevc { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libx265")
-                .arg("-preset")
-                .arg("medium")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::HevcProfile::Main => "main",
-                    crate::preset::HevcProfile::Main10 => "main10",
-                });
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::Av1 { profile, rate_control } => {
-            cmd.arg("-c:v")
-                .arg("libaom-av1")
-                .arg("-profile:v")
-                .arg(match profile {
-                    crate::preset::Av1Profile::Main => "0",
-                })
-                .arg("-b:v")
-                .arg("0");
-            apply_video_rate_control_args(cmd, *rate_control);
-        }
-        VideoCodecConfig::ProRes { profile } => {
-            cmd.arg("-c:v")
-                .arg("prores_ks")
-                .arg("-profile:v")
-                .arg(prores_profile_variant(*profile));
-        }
-        VideoCodecConfig::Gif { .. } => {
-            cmd.arg("-c:v").arg("gif");
-        }
-    }
-    apply_video_coding_structure_args(cmd, coding);
-}
-
-fn apply_video_coding_structure_args(
-    cmd: &mut Command,
-    coding: crate::video_encoding::ResolvedVideoCodingStructure,
-) {
-    use crate::video_encoding::ResolvedVideoCodingStructure;
-
-    match coding {
-        ResolvedVideoCodingStructure::H26xLongGop {
-            keyframe_interval_frames,
-            max_b_frames,
-            closed_gop,
-            scene_cut: _,
-        } => {
-            cmd.arg("-g")
-                .arg(keyframe_interval_frames.to_string())
-                .arg("-keyint_min")
-                .arg(keyframe_interval_frames.to_string())
-                .arg("-bf")
-                .arg(max_b_frames.to_string())
-                .arg("-flags")
-                .arg(if closed_gop { "+cgop" } else { "-cgop" });
-        }
-        ResolvedVideoCodingStructure::Av1RandomAccess {
-            keyframe_interval_frames,
-            lookahead_frames,
-        } => {
-            cmd.arg("-g")
-                .arg(keyframe_interval_frames.to_string())
-                .arg("-lag-in-frames")
-                .arg(lookahead_frames.to_string());
-        }
-        ResolvedVideoCodingStructure::IntraOnly => {}
-    }
-}
-
-fn apply_video_rate_control_args(cmd: &mut Command, rate_control: crate::preset::VideoRateControl) {
-    cmd.arg("-crf").arg(rate_control.crf.to_string());
-    if let (Some(max_bitrate), Some(buffer_size)) = (
-        rate_control.max_bitrate_kbps,
-        rate_control.buffer_size_kbits,
-    ) {
-        cmd.arg("-maxrate")
-            .arg(format!("{max_bitrate}k"))
-            .arg("-bufsize")
-            .arg(format!("{buffer_size}k"));
-    }
+    crate::hardware_encoding::apply_video_encoder_args(cmd, codec, coding, encoder);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,17 +197,22 @@ pub(crate) fn apply_export_video_signal_args(
 pub(crate) fn apply_encoder_signal_params(
     cmd: &mut Command,
     codec: &VideoCodecConfig,
+    encoder: crate::hardware_encoding::ResolvedVideoEncoder,
     settings: &SequenceSettings,
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<(), String> {
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
     match codec {
-        VideoCodecConfig::H264 { .. } => {
+        VideoCodecConfig::H264 { .. }
+            if encoder == crate::hardware_encoding::ResolvedVideoEncoder::Libx264 =>
+        {
             let mut params = h26x_coding_params(delivery.video_coding)?;
             append_encoder_vui_params(&mut params, contract);
             cmd.arg("-x264-params").arg(params.join(":"));
         }
-        VideoCodecConfig::Hevc { .. } => {
+        VideoCodecConfig::Hevc { .. }
+            if encoder == crate::hardware_encoding::ResolvedVideoEncoder::Libx265 =>
+        {
             let mut params = h26x_coding_params(delivery.video_coding)?;
             append_encoder_vui_params(&mut params, contract);
             if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
@@ -307,7 +220,9 @@ pub(crate) fn apply_encoder_signal_params(
             }
             cmd.arg("-x265-params").arg(params.join(":"));
         }
-        VideoCodecConfig::Av1 { .. }
+        VideoCodecConfig::H264 { .. }
+        | VideoCodecConfig::Hevc { .. }
+        | VideoCodecConfig::Av1 { .. }
         | VideoCodecConfig::ProRes { .. }
         | VideoCodecConfig::Gif { .. } => {}
     }

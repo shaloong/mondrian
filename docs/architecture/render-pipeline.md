@@ -229,6 +229,20 @@ audio by construction. It uses the same immutable Timeline snapshot, visual
 preflight, frame sampling, working compositor, and output color boundary as a
 media file; only the encoder transport and artifact validator differ.
 
+For H.264 and HEVC media files, `hardware_encoding` owns encoder admission and
+argument lowering. FFmpeg registry presence is not capability evidence: the
+candidate must match the active Export renderer Adapter vendor and complete a
+bounded real one-frame encode using the exact codec profile and delivery pixel
+format. Qualified NVIDIA, Intel, and AMD adapters may select NVENC, QSV, or AMF;
+probe failure, cancellation-safe timeout, an unsupported vendor, or unavailable
+GPU context selects the explicit libx264/libx265 fallback before Timeline frame
+streaming begins. Authored static HDR metadata remains on libx265 until another
+backend has an exact metadata lowering. The current FFmpeg rawvideo pipe is a
+CPU boundary and therefore records one CPU-to-encoder upload per frame; hardware
+selection is acceleration evidence, never a zero-copy claim. The existing
+post-encode probe remains authoritative for codec/profile, signal, cadence, and
+GOP compliance regardless of the selected backend.
+
 Image-sequence execution writes numbered frames below one Storage-owned sibling
 directory. After FFmpeg exits, Export independently decodes every frame,
 requires the exact contiguous namespace and raster/alpha contract, hashes each
