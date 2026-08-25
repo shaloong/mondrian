@@ -712,7 +712,6 @@ mod tests {
                 crate::CustomOcioProjectIdentity::from_pinned_parts(
                     crate::OcioConfigSource::Environment,
                     "0".repeat(64),
-                    "test-config".to_owned(),
                     "1".repeat(64),
                     "Linear Rec.2020".to_owned(),
                     vec![crate::CustomOcioOutputIdentity::from_pinned_parts(

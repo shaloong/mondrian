@@ -1985,7 +1985,6 @@ mod tests {
                 mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
                     mondrian_core::OcioConfigSource::Environment,
                     "0".repeat(64),
-                    "test-config".to_owned(),
                     "0".repeat(64),
                     working_space.to_owned(),
                     vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(

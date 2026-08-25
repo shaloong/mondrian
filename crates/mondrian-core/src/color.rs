@@ -1456,7 +1456,6 @@ mod tests {
             identity: Box::new(crate::types::CustomOcioProjectIdentity::from_resolved(
                 crate::types::OcioConfigSource::Path { path: missing_path },
                 "0".repeat(64),
-                "missing-config".to_owned(),
                 "0".repeat(64),
                 crate::ocio::ocio_working_color_space_name(WorkingColorSpace::LinearRec709)
                     .to_owned(),

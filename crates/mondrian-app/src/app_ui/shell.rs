@@ -3171,7 +3171,7 @@ mod tests {
         assert_eq!(output.view(), "ACES 2.0 - SDR 100 nits (Rec.709)");
         assert!(!output.display_color_space().is_empty());
         assert!(!identity.config_sha256().is_empty());
-        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(!identity.dependency_manifest_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
     }
 
@@ -3267,7 +3267,7 @@ mod tests {
             .expect("pinned Custom OCIO identity");
         assert_eq!(identity.working_space(), "Linear Rec.2020");
         assert!(!identity.config_sha256().is_empty());
-        assert!(!identity.processor_graph_sha256().is_empty());
+        assert!(!identity.dependency_manifest_sha256().is_empty());
         assert!(dialog.error_text().is_empty());
     }
 

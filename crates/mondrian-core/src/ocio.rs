@@ -63,6 +63,12 @@ struct OcioGlobalState {
     source: Option<OcioConfigSource>,
     /// Full Custom project identity last validated against the loaded config.
     validated_custom_identity: Option<CustomOcioProjectIdentity>,
+    /// OCIO's opaque cache identity for the currently validated Custom config.
+    ///
+    /// This is runtime diagnostic/cache evidence only. It must never become
+    /// persisted author identity because OCIO may change it between engine
+    /// builds without changing the authored config or dependency resources.
+    validated_custom_runtime_cache_id: Option<String>,
     /// Monotonically increasing generation counter. Incremented on every
     /// config load. Callers can use this to detect config changes for cache
     /// invalidation without holding the lock.
@@ -73,6 +79,7 @@ static OCIO_STATE: std::sync::Mutex<OcioGlobalState> = std::sync::Mutex::new(Oci
     path: None,
     source: None,
     validated_custom_identity: None,
+    validated_custom_runtime_cache_id: None,
     generation: 0,
 });
 
@@ -106,6 +113,7 @@ impl OcioGlobalState {
         self.path = Some(path);
         self.source = Some(source);
         self.validated_custom_identity = None;
+        self.validated_custom_runtime_cache_id = None;
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
@@ -1967,7 +1975,7 @@ fn custom_ocio_roles(config: &Config) -> Result<Vec<CustomOcioRoleIdentity>, Str
     Ok(roles)
 }
 
-fn custom_ocio_processor_graph_sha256(
+fn custom_ocio_dependency_manifest_sha256(
     config: &Config,
     working_space: &str,
     outputs: &[CustomOcioOutputIdentity],
@@ -1976,26 +1984,31 @@ fn custom_ocio_processor_graph_sha256(
         .filter_map(|index| config.color_space_name_by_index(index))
         .collect::<Vec<_>>();
     color_spaces.sort();
+    let context = config
+        .current_context()
+        .ok_or_else(|| "Custom OCIO config has no current context".to_owned())?;
 
     let mut digest = Sha256::new();
-    digest.update(b"mondrian-custom-ocio-processor-graph-v2\0");
+    digest.update(b"mondrian-custom-ocio-dependency-manifest-v1\0");
     update_fingerprint_field(&mut digest, "working-space", working_space);
     for color_space in color_spaces {
         if color_space == working_space {
             continue;
         }
         if let Ok(processor) = config.processor(&color_space, working_space) {
-            update_custom_processor_fingerprint(
+            update_custom_processor_dependency_manifest(
                 &mut digest,
                 &format!("colorspace:{color_space}->{working_space}"),
                 processor,
+                &context,
             )?;
         }
         if let Ok(processor) = config.processor(working_space, &color_space) {
-            update_custom_processor_fingerprint(
+            update_custom_processor_dependency_manifest(
                 &mut digest,
                 &format!("colorspace:{working_space}->{color_space}"),
                 processor,
+                &context,
             )?;
         }
     }
@@ -2024,7 +2037,7 @@ fn custom_ocio_processor_graph_sha256(
                     output.view()
                 )
             })?;
-        update_custom_processor_fingerprint(
+        update_custom_processor_dependency_manifest(
             &mut digest,
             &format!(
                 "display:{working_space}->{}/{}",
@@ -2032,21 +2045,64 @@ fn custom_ocio_processor_graph_sha256(
                 output.view()
             ),
             display_processor,
+            &context,
         )?;
     }
     Ok(finish_sha256_hex(digest))
 }
 
-fn update_custom_processor_fingerprint(
+fn update_custom_processor_dependency_manifest(
     digest: &mut Sha256,
     label: &str,
     processor: ocio_rs::Processor,
+    context: &ocio_rs::Context,
 ) -> Result<(), String> {
     update_fingerprint_field(digest, "processor", label);
-    let cache_id = processor
-        .cache_id()
-        .ok_or_else(|| format!("Custom OCIO processor '{label}' has no cache-id"))?;
-    update_fingerprint_field(digest, "processor-cache-id", &cache_id);
+    let metadata = processor
+        .try_processor_metadata()
+        .map_err(|error| format!("Custom OCIO processor '{label}' metadata failed: {error}"))?;
+    let mut resource_digests = Vec::with_capacity(metadata.num_files().max(0) as usize);
+    for index in 0..metadata.num_files() {
+        let reference = metadata.file(index).ok_or_else(|| {
+            format!("Custom OCIO processor '{label}' has no file metadata at index {index}")
+        })?;
+        let resolved = context
+            .try_resolve_file_location(&reference)
+            .map_err(|error| {
+                format!(
+                    "Custom OCIO processor '{label}' could not resolve dependency '{reference}': {error}"
+                )
+            })?
+            .ok_or_else(|| {
+                format!(
+                    "Custom OCIO processor '{label}' dependency '{reference}' could not be resolved"
+                )
+            })?;
+        let bytes = std::fs::read(&resolved).map_err(|error| {
+            format!(
+                "Custom OCIO processor '{label}' dependency '{reference}' at '{resolved}' could not be read: {error}"
+            )
+        })?;
+        resource_digests.push(sha256_hex(&bytes));
+    }
+    resource_digests.sort();
+    resource_digests.dedup();
+    for resource_digest in resource_digests {
+        update_fingerprint_field(digest, "dependency-sha256", &resource_digest);
+    }
+
+    let mut looks = (0..metadata.num_looks())
+        .map(|index| {
+            metadata.look(index).ok_or_else(|| {
+                format!("Custom OCIO processor '{label}' has no look metadata at index {index}")
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    looks.sort();
+    looks.dedup();
+    for look in looks {
+        update_fingerprint_field(digest, "look", &look);
+    }
     Ok(())
 }
 
@@ -2218,7 +2274,7 @@ fn validate_custom_ocio_display_view(
 fn validate_custom_ocio_identity(
     identity: &CustomOcioProjectIdentity,
     config: &Config,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if !identity.dynamic_properties().is_empty() {
         return Err(format!(
             "Custom OCIO project contains {} dynamic-property override(s), but this build does not support applying project-level dynamic properties",
@@ -2234,21 +2290,16 @@ fn validate_custom_ocio_identity(
             identity.source()
         ));
     }
-    let actual_cache_id = resolved_config_cache_id(config)?;
-    if actual_cache_id != identity.resolved_cache_id() {
+    let actual_dependency_manifest_sha256 = custom_ocio_dependency_manifest_sha256(
+        config,
+        identity.working_space(),
+        identity.outputs(),
+    )?;
+    if actual_dependency_manifest_sha256 != identity.dependency_manifest_sha256() {
         return Err(format!(
-            "Custom OCIO resolved config graph changed: expected cache-id '{}', got '{}'",
-            identity.resolved_cache_id(),
-            actual_cache_id
-        ));
-    }
-    let actual_processor_graph_sha256 =
-        custom_ocio_processor_graph_sha256(config, identity.working_space(), identity.outputs())?;
-    if actual_processor_graph_sha256 != identity.processor_graph_sha256() {
-        return Err(format!(
-            "Custom OCIO executable processor graph or dependency resources changed: expected SHA-256 '{}', got '{}'",
-            identity.processor_graph_sha256(),
-            actual_processor_graph_sha256
+            "Custom OCIO dependency resources changed: expected manifest SHA-256 '{}', got '{}'",
+            identity.dependency_manifest_sha256(),
+            actual_dependency_manifest_sha256
         ));
     }
     if config.color_space(identity.working_space()).is_none() {
@@ -2281,7 +2332,7 @@ fn validate_custom_ocio_identity(
             actual_roles
         ));
     }
-    Ok(())
+    resolved_config_cache_id(config)
 }
 
 fn ensure_custom_ocio_identity_loaded_locked(
@@ -2332,11 +2383,11 @@ fn ensure_custom_ocio_identity_loaded_locked(
 
     let config = ocio_rs::current_config()
         .ok_or_else(|| "Custom OCIO source has no current config".to_owned())?;
-    validate_custom_ocio_identity(identity, &config)?;
-    OCIO_STATE
-        .lock()
-        .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
-        .validated_custom_identity = Some(identity.clone());
+    let runtime_cache_id = validate_custom_ocio_identity(identity, &config)?;
+    let mut state =
+        OCIO_STATE.lock().map_err(|_| "OCIO global state lock is poisoned".to_owned())?;
+    state.validated_custom_identity = Some(identity.clone());
+    state.validated_custom_runtime_cache_id = Some(runtime_cache_id);
     Ok(())
 }
 
@@ -2462,14 +2513,14 @@ fn pin_custom_ocio_project_for_output_selections(
         let identity = CustomOcioProjectIdentity::from_resolved(
             source.clone(),
             primary_config_sha256(&source, config)?,
-            resolved_config_cache_id(config)?,
-            custom_ocio_processor_graph_sha256(config, &working_space, &outputs)?,
+            custom_ocio_dependency_manifest_sha256(config, &working_space, &outputs)?,
             working_space,
             outputs,
             custom_ocio_roles(config)?,
         );
         if let Ok(mut state) = OCIO_STATE.lock() {
             state.validated_custom_identity = Some(identity.clone());
+            state.validated_custom_runtime_cache_id = resolved_config_cache_id(config).ok();
         }
         Ok(ColorEngine::CustomOcio { identity: Box::new(identity) })
     })
@@ -4665,6 +4716,11 @@ mod tests {
         )
         .expect("pin real Custom OCIO config");
         let serialized = serde_json::to_string(&engine).expect("serialize pinned Custom OCIO");
+        assert!(serialized.contains("dependency_manifest_sha256"));
+        assert!(
+            !serialized.contains("cache_id"),
+            "engine-build-local cache IDs must not enter project identity"
+        );
         let reopened: ColorEngine =
             serde_json::from_str(&serialized).expect("reopen pinned Custom OCIO");
 
@@ -4678,7 +4734,20 @@ mod tests {
                 "ACES 2.0 - SDR 100 nits (Rec.709)".to_owned()
             )
         );
+        if let Ok(mut state) = OCIO_STATE.lock() {
+            state.validated_custom_runtime_cache_id =
+                Some("simulated-different-ocio-engine-build".to_owned());
+        }
         reopened.ensure_loaded().expect("unchanged config identity");
+        assert_ne!(
+            OCIO_STATE
+                .lock()
+                .expect("OCIO state")
+                .validated_custom_runtime_cache_id
+                .as_deref(),
+            Some("simulated-different-ocio-engine-build"),
+            "reopen must replace foreign runtime evidence without changing author identity"
+        );
 
         let mut changed = mondrian_default_ocio_config_text().to_owned();
         changed.push_str("\n# external edit after project save\n");

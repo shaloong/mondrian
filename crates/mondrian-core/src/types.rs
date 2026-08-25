@@ -818,14 +818,14 @@ impl CustomOcioDynamicPropertyIdentity {
 /// The source locator is intentionally insufficient by itself: a path or
 /// environment variable may later resolve to different config text or LUT
 /// resources. `config_sha256` identifies the primary config content,
-/// `resolved_cache_id` identifies the parsed OCIO graph, and
-/// `processor_graph_sha256` covers the executable routes and their resources.
+/// while `dependency_manifest_sha256` covers the content of every external
+/// resource reachable from the pinned executable routes. OCIO engine cache IDs
+/// are deliberately runtime evidence and never persisted author identity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct CustomOcioProjectIdentity {
     source: OcioConfigSource,
     config_sha256: String,
-    resolved_cache_id: String,
-    processor_graph_sha256: String,
+    dependency_manifest_sha256: String,
     working_space: String,
     outputs: Vec<CustomOcioOutputIdentity>,
     roles: Vec<CustomOcioRoleIdentity>,
@@ -837,8 +837,7 @@ pub struct CustomOcioProjectIdentity {
 struct SerializedCustomOcioProjectIdentity {
     source: OcioConfigSource,
     config_sha256: String,
-    resolved_cache_id: String,
-    processor_graph_sha256: String,
+    dependency_manifest_sha256: String,
     working_space: String,
     outputs: Vec<CustomOcioOutputIdentity>,
     roles: Vec<CustomOcioRoleIdentity>,
@@ -854,8 +853,7 @@ impl<'de> Deserialize<'de> for CustomOcioProjectIdentity {
         Self::from_pinned_parts(
             serialized.source,
             serialized.config_sha256,
-            serialized.resolved_cache_id,
-            serialized.processor_graph_sha256,
+            serialized.dependency_manifest_sha256,
             serialized.working_space,
             serialized.outputs,
             serialized.roles,
@@ -869,8 +867,7 @@ impl CustomOcioProjectIdentity {
     pub(crate) fn from_resolved(
         source: OcioConfigSource,
         config_sha256: String,
-        resolved_cache_id: String,
-        processor_graph_sha256: String,
+        dependency_manifest_sha256: String,
         working_space: String,
         outputs: Vec<CustomOcioOutputIdentity>,
         roles: Vec<CustomOcioRoleIdentity>,
@@ -878,8 +875,7 @@ impl CustomOcioProjectIdentity {
         Self {
             source,
             config_sha256,
-            resolved_cache_id,
-            processor_graph_sha256,
+            dependency_manifest_sha256,
             working_space,
             outputs,
             roles,
@@ -896,8 +892,7 @@ impl CustomOcioProjectIdentity {
     pub fn from_pinned_parts(
         source: OcioConfigSource,
         config_sha256: String,
-        resolved_cache_id: String,
-        processor_graph_sha256: String,
+        dependency_manifest_sha256: String,
         working_space: String,
         mut outputs: Vec<CustomOcioOutputIdentity>,
         mut roles: Vec<CustomOcioRoleIdentity>,
@@ -910,20 +905,16 @@ impl CustomOcioProjectIdentity {
         {
             return Err("Custom OCIO config SHA-256 must contain exactly 64 hex digits".to_owned());
         }
-        if processor_graph_sha256.len() != 64
-            || !processor_graph_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        if dependency_manifest_sha256.len() != 64
+            || !dependency_manifest_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(
-                "Custom OCIO processor-graph SHA-256 must contain exactly 64 hex digits".to_owned(),
+                "Custom OCIO dependency-manifest SHA-256 must contain exactly 64 hex digits"
+                    .to_owned(),
             );
         }
-        for (field, value) in [
-            ("resolved cache-id", resolved_cache_id.as_str()),
-            ("working space", working_space.as_str()),
-        ] {
-            if value.trim().is_empty() {
-                return Err(format!("Custom OCIO {field} must not be blank"));
-            }
+        if working_space.trim().is_empty() {
+            return Err("Custom OCIO working space must not be blank".to_owned());
         }
         if outputs.is_empty() {
             return Err("Custom OCIO project must pin at least one output binding".to_owned());
@@ -974,8 +965,7 @@ impl CustomOcioProjectIdentity {
         Ok(Self {
             source,
             config_sha256: config_sha256.to_ascii_lowercase(),
-            resolved_cache_id,
-            processor_graph_sha256: processor_graph_sha256.to_ascii_lowercase(),
+            dependency_manifest_sha256: dependency_manifest_sha256.to_ascii_lowercase(),
             working_space,
             outputs,
             roles,
@@ -993,14 +983,9 @@ impl CustomOcioProjectIdentity {
         &self.config_sha256
     }
 
-    /// OCIO cache identity of the parsed config graph.
-    pub fn resolved_cache_id(&self) -> &str {
-        &self.resolved_cache_id
-    }
-
-    /// SHA-256 over all working-space routes and selected output processors.
-    pub fn processor_graph_sha256(&self) -> &str {
-        &self.processor_graph_sha256
+    /// SHA-256 over external resources reachable from every pinned route.
+    pub fn dependency_manifest_sha256(&self) -> &str {
+        &self.dependency_manifest_sha256
     }
 
     /// Exact scene-linear working color-space name.
@@ -1341,7 +1326,6 @@ mod tests {
             identity: Box::new(CustomOcioProjectIdentity::from_resolved(
                 OcioConfigSource::Builtin { name: "aces_1.2".into() },
                 "a".repeat(64),
-                "resolved-config-cache-id".to_owned(),
                 "b".repeat(64),
                 "ACEScg".to_owned(),
                 vec![CustomOcioOutputIdentity::from_resolved(
@@ -1362,7 +1346,8 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize ColorEngine::CustomOcio");
         assert_eq!(back, engine);
         assert!(json.contains("\"config_sha256\""));
-        assert!(json.contains("\"resolved_cache_id\""));
+        assert!(json.contains("\"dependency_manifest_sha256\""));
+        assert!(!json.contains("cache_id"));
         assert!(json.contains("\"outputs\""));
         assert!(json.contains("\"display_color_space\":\"Utility - sRGB - Texture\""));
         assert!(json.contains("\"dynamic_properties\":[]"));
@@ -1372,7 +1357,7 @@ mod tests {
         incomplete_custom["identity"]
             .as_object_mut()
             .expect("Custom OCIO identity object")
-            .remove("resolved_cache_id");
+            .remove("dependency_manifest_sha256");
         assert!(serde_json::from_value::<ColorEngine>(incomplete_custom).is_err());
 
         let mut duplicate_output: serde_json::Value =
@@ -1534,8 +1519,7 @@ impl crate::AuthoringFootprint for CustomOcioProjectIdentity {
         let Self {
             source,
             config_sha256,
-            resolved_cache_id,
-            processor_graph_sha256,
+            dependency_manifest_sha256,
             working_space,
             outputs,
             roles,
@@ -1543,8 +1527,7 @@ impl crate::AuthoringFootprint for CustomOcioProjectIdentity {
         } = self;
         collector.collect(source)?;
         collector.collect(config_sha256)?;
-        collector.collect(resolved_cache_id)?;
-        collector.collect(processor_graph_sha256)?;
+        collector.collect(dependency_manifest_sha256)?;
         collector.collect(working_space)?;
         collector.collect(outputs)?;
         collector.collect(roles)?;

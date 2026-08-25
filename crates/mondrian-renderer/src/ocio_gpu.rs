@@ -7525,7 +7525,6 @@ mod tests {
                 mondrian_core::CustomOcioProjectIdentity::from_pinned_parts(
                     source,
                     "0".repeat(64),
-                    "test-resolved-config".to_owned(),
                     "0".repeat(64),
                     "Linear Rec.2020".to_owned(),
                     vec![mondrian_core::CustomOcioOutputIdentity::from_pinned_parts(

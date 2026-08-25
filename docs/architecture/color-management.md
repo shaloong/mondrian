@@ -233,10 +233,11 @@ intent and the production `RenderOutputColorBoundary::from_intent` path before
 comparing GPU output with the stock-OCIO CPU result.
 
 Custom OCIO is persisted as a complete `CustomOcioProjectIdentity`, not a bare
-locator. It requires the source, primary config SHA-256, parsed OCIO cache-id,
-a SHA-256 over every executable colorspace-to/from-working route plus the
-selected output processors, the exact working space, and a sorted non-empty set
-of `CustomOcioOutputIdentity` bindings. Each binding contains one standardized
+locator. It requires the source, primary config SHA-256, a versioned dependency
+manifest SHA-256 over every external resource reachable through each executable
+colorspace-to/from-working route and selected output processor, the exact
+working space, and a sorted non-empty set of `CustomOcioOutputIdentity`
+bindings. Each binding contains one standardized
 Mondrian `ColorSpace`, exact display/view, the resolved OCIO display color-space
 endpoint (including resolution of `<USE_DISPLAY_NAME>`), and effective look
 expression. The same target cannot appear twice and one display/view cannot
@@ -246,17 +247,16 @@ overrides and reject non-empty override lists until typed execution exists.
 Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
 and external LUT changes fail closed during deserialization or config validation.
 
-> **Identity stability rule (corrected at M1):** a persisted package identity
+> **Identity stability rule (completed for Standard and Custom at M2):** a persisted identity
 > may cover only contractual bytes — config text, assembly manifest, and
 > embedded resources. Engine-derived processor cache IDs are build-local
 > execution facts and must never enter a persisted identity; the Mondrian
-> Standard V2/V3 digests were re-based onto contractual bytes for exactly this
-> reason. The Custom OCIO route/output fingerprint still includes processor
-> cache IDs and therefore cannot yet roundtrip one Custom-OCIO project across
-> different engine builds; re-basing that fingerprint onto contractual content
-> is M2 color work (tracked in the ROADMAP color matrix), and until then a
-> Custom-OCIO project reopened on a different build fails closed at identity
-> validation rather than silently reinterpreting its color science.
+> Standard package digests and the Custom OCIO dependency manifest both follow
+> this rule. OCIO config and processor cache IDs remain runtime-only cache and
+> diagnostic evidence. Reopening unchanged contractual config/resource bytes
+> on another OCIO engine build refreshes that evidence; altered config, LUT,
+> role, working-space, display/view, endpoint, or look contracts still fail
+> closed.
 
 When the UI selects only a Custom `.ocio` file,
 `ProjectColorEnvironment::custom_ocio` validates the complete set of Sequence
@@ -310,9 +310,11 @@ the complete `ColorEngine`, config revision, encoded/working endpoint
 identities, and display/view when applicable. Immutable embedded and built-in
 packages use their pinned engine identity as the stable revision, so switching
 Standard -> ACES -> Standard inside one owner does not discard a warm Standard
-Processor. A validated Custom engine already contains its config, resource,
-cache-id, and processor-graph digests, so a changed mutable source creates a
-different `ColorEngine` identity rather than mutating a cache entry. A warm hit
+Processor. A validated Custom engine already contains its config and
+dependency-manifest digests, so a changed mutable source creates a different
+`ColorEngine` identity rather than mutating a cache entry. OCIO's opaque config
+and processor cache IDs remain inside runtime evidence and baked processor
+bundles. A warm hit
 is looked up before process-global config selection and performs no config
 switch, file I/O, or Processor construction.
 
