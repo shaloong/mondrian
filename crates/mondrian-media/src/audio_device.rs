@@ -2,6 +2,8 @@
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use mondrian_core::AudioChannelLayout;
+#[cfg(target_os = "windows")]
+use mondrian_core::AudioChannelPosition;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
 
@@ -187,7 +189,7 @@ impl RealtimeAudioSampleFormat {
     }
 }
 
-/// Why CPAL's channel-count-only contract is sufficient for one target layout.
+/// Proof that gives one physical channel extent its exact signal semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RealtimeAudioChannelSemantics {
     /// A one-channel device uses Mondrian's versioned layout-independent Mono convention.
@@ -196,6 +198,9 @@ pub enum RealtimeAudioChannelSemantics {
     StereoConvention,
     /// The target is explicitly ordinal and claims no speaker positions.
     OrdinalDiscrete,
+    /// Windows WASAPI initialized the stream with the exact mask derived from
+    /// the contract's named [`AudioChannelLayout`].
+    WindowsWasapiSpeakerMask,
 }
 
 /// Buffer extent advertised by the selected CPAL configuration range.
@@ -229,7 +234,7 @@ pub struct RealtimeAudioOutputContract {
     pub channel_layout: AudioChannelLayout,
     /// Concrete callback scalar representation.
     pub sample_format: RealtimeAudioSampleFormat,
-    /// Proof used to interpret CPAL's channel-count-only candidate.
+    /// Proof used to interpret the selected physical stream's channels.
     pub channel_semantics: RealtimeAudioChannelSemantics,
     /// Supported buffer range behind the selected default-buffer stream.
     pub supported_buffer_size: RealtimeAudioSupportedBufferSize,
@@ -362,10 +367,21 @@ struct SelectedAudioOutputCandidate {
     contract: RealtimeAudioOutputContract,
 }
 
+pub(crate) enum PreparedRealtimeAudioOutputBackend {
+    Cpal {
+        device: cpal::Device,
+        config: cpal::StreamConfig,
+        sample_format: cpal::SampleFormat,
+    },
+    #[cfg(target_os = "windows")]
+    WindowsWasapiNamed {
+        endpoint_id: String,
+        channel_mask: u32,
+    },
+}
+
 pub(crate) struct PreparedRealtimeAudioOutputDevice {
-    pub(crate) device: cpal::Device,
-    pub(crate) config: cpal::StreamConfig,
-    pub(crate) sample_format: cpal::SampleFormat,
+    pub(crate) backend: PreparedRealtimeAudioOutputBackend,
     pub(crate) evidence: RealtimeAudioOutputDeviceEvidence,
 }
 
@@ -466,28 +482,26 @@ pub(crate) fn prepare_realtime_audio_output(
         }
     };
     let was_system_default = default.as_ref().is_some_and(|default| default == &device);
-    let device_id = device
-        .id()
-        .map_err(|error| {
-            RealtimeAudioOutputOpenFailure::before_selection(
-                RealtimeAudioOutputOpenFailureCode::DeviceIdentityUnavailable,
-                sample_rate,
-                channel_layout,
-                RealtimeAudioCandidateCounts::default(),
-                error.to_string(),
-            )
-        })
-        .and_then(|id| {
-            RealtimeAudioOutputDeviceId::from_cpal(id).map_err(|error| {
-                RealtimeAudioOutputOpenFailure::before_selection(
-                    RealtimeAudioOutputOpenFailureCode::DeviceIdentityUnavailable,
-                    sample_rate,
-                    channel_layout,
-                    RealtimeAudioCandidateCounts::default(),
-                    error.to_string(),
-                )
-            })
-        })?;
+    let cpal_device_id = device.id().map_err(|error| {
+        RealtimeAudioOutputOpenFailure::before_selection(
+            RealtimeAudioOutputOpenFailureCode::DeviceIdentityUnavailable,
+            sample_rate,
+            channel_layout,
+            RealtimeAudioCandidateCounts::default(),
+            error.to_string(),
+        )
+    })?;
+    #[cfg(target_os = "windows")]
+    let backend_device_id = cpal_device_id.id().to_owned();
+    let device_id = RealtimeAudioOutputDeviceId::from_cpal(cpal_device_id).map_err(|error| {
+        RealtimeAudioOutputOpenFailure::before_selection(
+            RealtimeAudioOutputOpenFailureCode::DeviceIdentityUnavailable,
+            sample_rate,
+            channel_layout,
+            RealtimeAudioCandidateCounts::default(),
+            error.to_string(),
+        )
+    })?;
     let (device_name, device_name_error) = match device.description() {
         Ok(description) => (Some(description.name().to_owned()), None),
         Err(error) => (None, Some(error.to_string())),
@@ -514,7 +528,18 @@ pub(crate) fn prepare_realtime_audio_output(
             supported_buffer_size: supported_buffer_size(*range.buffer_size()),
         })
         .collect::<Vec<_>>();
-    let selected = select_audio_output_candidate(sample_rate, channel_layout, &candidates)?;
+    let channel_semantics =
+        prove_channel_semantics(channel_layout, host.id()).map_err(|detail| {
+            RealtimeAudioOutputOpenFailure::before_selection(
+                RealtimeAudioOutputOpenFailureCode::ChannelSemanticsUnproven,
+                sample_rate,
+                channel_layout,
+                RealtimeAudioCandidateCounts::default(),
+                detail,
+            )
+        })?;
+    let selected =
+        select_audio_output_candidate(sample_rate, channel_layout, channel_semantics, &candidates)?;
     let range = ranges.get(selected.index).ok_or_else(|| {
         RealtimeAudioOutputOpenFailure::before_selection(
             RealtimeAudioOutputOpenFailureCode::ConfigurationEnumerationFailed,
@@ -533,10 +558,31 @@ pub(crate) fn prepare_realtime_audio_output(
             "selected CPAL range no longer contains the requested sample rate",
         )
     })?;
+    let backend = match channel_semantics {
+        #[cfg(target_os = "windows")]
+        RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask => {
+            let channel_mask = windows_speaker_mask(channel_layout).ok_or_else(|| {
+                RealtimeAudioOutputOpenFailure::before_selection(
+                    RealtimeAudioOutputOpenFailureCode::ChannelSemanticsUnproven,
+                    sample_rate,
+                    channel_layout,
+                    selected.contract.candidates,
+                    "the proven Windows speaker mask disappeared before stream preparation",
+                )
+            })?;
+            PreparedRealtimeAudioOutputBackend::WindowsWasapiNamed {
+                endpoint_id: backend_device_id,
+                channel_mask,
+            }
+        }
+        _ => PreparedRealtimeAudioOutputBackend::Cpal {
+            device,
+            config: supported.config(),
+            sample_format: supported.sample_format(),
+        },
+    };
     Ok(PreparedRealtimeAudioOutputDevice {
-        device,
-        config: supported.config(),
-        sample_format: supported.sample_format(),
+        backend,
         evidence: RealtimeAudioOutputDeviceEvidence {
             host_name,
             device_id,
@@ -552,21 +598,13 @@ pub(crate) fn prepare_realtime_audio_output(
 fn select_audio_output_candidate(
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
+    channel_semantics: RealtimeAudioChannelSemantics,
     candidates: &[AudioOutputCandidate],
 ) -> Result<SelectedAudioOutputCandidate, RealtimeAudioOutputOpenFailure> {
     let mut counts = RealtimeAudioCandidateCounts {
         enumerated: bounded_count(candidates.len()),
         ..RealtimeAudioCandidateCounts::default()
     };
-    let semantics = prove_channel_semantics(channel_layout).map_err(|detail| {
-        RealtimeAudioOutputOpenFailure::before_selection(
-            RealtimeAudioOutputOpenFailureCode::ChannelSemanticsUnproven,
-            sample_rate,
-            channel_layout,
-            counts,
-            detail,
-        )
-    })?;
     let requested_channels = u16::from(channel_layout.channel_count_u8());
     let mut executable = Vec::new();
     for candidate in candidates {
@@ -581,6 +619,13 @@ fn select_audio_output_candidate(
         let Some(sample_format) = candidate.sample_format else {
             continue;
         };
+        if matches!(
+            channel_semantics,
+            RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask
+        ) && sample_format != RealtimeAudioSampleFormat::F32
+        {
+            continue;
+        }
         counts.executable = counts.executable.saturating_add(1);
         executable.push((*candidate, sample_format));
     }
@@ -620,7 +665,7 @@ fn select_audio_output_candidate(
             sample_rate,
             channel_layout,
             sample_format,
-            channel_semantics: semantics,
+            channel_semantics,
             supported_buffer_size: candidate.supported_buffer_size,
             candidates: counts,
         },
@@ -629,14 +674,77 @@ fn select_audio_output_candidate(
 
 fn prove_channel_semantics(
     channel_layout: AudioChannelLayout,
+    host_id: cpal::HostId,
 ) -> Result<RealtimeAudioChannelSemantics, &'static str> {
     match channel_layout {
         AudioChannelLayout::Mono => Ok(RealtimeAudioChannelSemantics::MonoConvention),
         AudioChannelLayout::Stereo => Ok(RealtimeAudioChannelSemantics::StereoConvention),
         AudioChannelLayout::Discrete(_) => Ok(RealtimeAudioChannelSemantics::OrdinalDiscrete),
-        AudioChannelLayout::Speakers(_) => Err(
-            "CPAL reports only channel count; this named speaker layout needs a platform Adapter that proves channel positions",
-        ),
+        AudioChannelLayout::Speakers(_) => named_speaker_semantics(channel_layout, host_id),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn named_speaker_semantics(
+    channel_layout: AudioChannelLayout,
+    host_id: cpal::HostId,
+) -> Result<RealtimeAudioChannelSemantics, &'static str> {
+    if host_id != cpal::HostId::Wasapi {
+        return Err("named speaker output requires the Windows WASAPI Adapter");
+    }
+    if windows_speaker_mask(channel_layout).is_none() {
+        return Err(
+            "the named layout contains positions that WAVEFORMATEXTENSIBLE cannot represent",
+        );
+    }
+    Ok(RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn named_speaker_semantics(
+    _channel_layout: AudioChannelLayout,
+    _host_id: cpal::HostId,
+) -> Result<RealtimeAudioChannelSemantics, &'static str> {
+    Err(
+        "CPAL reports only channel count; this named speaker layout needs a platform Adapter that proves channel positions",
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_speaker_mask(channel_layout: AudioChannelLayout) -> Option<u32> {
+    let speakers = channel_layout.speaker_set()?;
+    speakers.positions().try_fold(0_u32, |mask, position| {
+        windows_speaker_position_bit(position).map(|bit| mask | bit)
+    })
+}
+
+#[cfg(target_os = "windows")]
+const fn windows_speaker_position_bit(position: AudioChannelPosition) -> Option<u32> {
+    match position {
+        AudioChannelPosition::FrontLeft => Some(1 << 0),
+        AudioChannelPosition::FrontRight => Some(1 << 1),
+        AudioChannelPosition::FrontCenter => Some(1 << 2),
+        AudioChannelPosition::LowFrequencyEffects => Some(1 << 3),
+        AudioChannelPosition::BackLeft => Some(1 << 4),
+        AudioChannelPosition::BackRight => Some(1 << 5),
+        AudioChannelPosition::FrontLeftOfCenter => Some(1 << 6),
+        AudioChannelPosition::FrontRightOfCenter => Some(1 << 7),
+        AudioChannelPosition::BackCenter => Some(1 << 8),
+        AudioChannelPosition::SideLeft => Some(1 << 9),
+        AudioChannelPosition::SideRight => Some(1 << 10),
+        AudioChannelPosition::TopCenter => Some(1 << 11),
+        AudioChannelPosition::TopFrontLeft => Some(1 << 12),
+        AudioChannelPosition::TopFrontCenter => Some(1 << 13),
+        AudioChannelPosition::TopFrontRight => Some(1 << 14),
+        AudioChannelPosition::TopBackLeft => Some(1 << 15),
+        AudioChannelPosition::TopBackCenter => Some(1 << 16),
+        AudioChannelPosition::TopBackRight => Some(1 << 17),
+        AudioChannelPosition::Mono
+        | AudioChannelPosition::WideLeft
+        | AudioChannelPosition::WideRight
+        | AudioChannelPosition::TopSideLeft
+        | AudioChannelPosition::TopSideRight
+        | AudioChannelPosition::LowFrequencyEffects2 => None,
     }
 }
 
@@ -730,9 +838,13 @@ mod tests {
             candidate(1, 1, 48_000, 48_000, Some(RealtimeAudioSampleFormat::F32)),
             candidate(2, 2, 48_000, 96_000, Some(RealtimeAudioSampleFormat::F32)),
         ];
-        let selected =
-            select_audio_output_candidate(48_000, AudioChannelLayout::Stereo, &candidates)
-                .expect("exact stereo candidate");
+        let selected = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Stereo,
+            RealtimeAudioChannelSemantics::StereoConvention,
+            &candidates,
+        )
+        .expect("exact stereo candidate");
         assert_eq!(selected.index, 2);
         assert_eq!(
             selected.contract.sample_format,
@@ -758,9 +870,13 @@ mod tests {
             48_000,
             Some(RealtimeAudioSampleFormat::F32),
         )];
-        let error =
-            select_audio_output_candidate(48_000, AudioChannelLayout::Stereo, &wrong_channels)
-                .expect_err("channel count must fail");
+        let error = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Stereo,
+            RealtimeAudioChannelSemantics::StereoConvention,
+            &wrong_channels,
+        )
+        .expect_err("channel count must fail");
         assert_eq!(
             error.code,
             RealtimeAudioOutputOpenFailureCode::ChannelCountUnsupported
@@ -773,25 +889,35 @@ mod tests {
             44_100,
             Some(RealtimeAudioSampleFormat::F32),
         )];
-        let error = select_audio_output_candidate(48_000, AudioChannelLayout::Stereo, &wrong_rate)
-            .expect_err("sample rate must fail");
+        let error = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Stereo,
+            RealtimeAudioChannelSemantics::StereoConvention,
+            &wrong_rate,
+        )
+        .expect_err("sample rate must fail");
         assert_eq!(
             error.code,
             RealtimeAudioOutputOpenFailureCode::SampleRateUnsupported
         );
 
         let unknown_format = [candidate(0, 2, 48_000, 48_000, None)];
-        let error =
-            select_audio_output_candidate(48_000, AudioChannelLayout::Stereo, &unknown_format)
-                .expect_err("sample format must fail");
+        let error = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Stereo,
+            RealtimeAudioChannelSemantics::StereoConvention,
+            &unknown_format,
+        )
+        .expect_err("sample format must fail");
         assert_eq!(
             error.code,
             RealtimeAudioOutputOpenFailureCode::SampleFormatUnsupported
         );
     }
 
+    #[cfg(target_os = "windows")]
     #[test]
-    fn named_surround_is_rejected_when_only_channel_count_is_known() {
+    fn named_surround_requires_explicit_semantics_and_float_execution() {
         let candidates = [candidate(
             0,
             6,
@@ -799,13 +925,58 @@ mod tests {
             48_000,
             Some(RealtimeAudioSampleFormat::F32),
         )];
-        let error =
-            select_audio_output_candidate(48_000, AudioChannelLayout::Surround51Side, &candidates)
-                .expect_err("CPAL cannot prove speaker positions");
+        let semantics = RealtimeAudioChannelSemantics::WindowsWasapiSpeakerMask;
+        let selected = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Surround51Side,
+            semantics,
+            &candidates,
+        )
+        .expect("exact named output candidate");
+        assert_eq!(selected.contract.channel_semantics, semantics);
+
+        let integer_only = [candidate(
+            0,
+            6,
+            48_000,
+            48_000,
+            Some(RealtimeAudioSampleFormat::I32),
+        )];
+        let error = select_audio_output_candidate(
+            48_000,
+            AudioChannelLayout::Surround51Side,
+            semantics,
+            &integer_only,
+        )
+        .expect_err("the exact-mask Adapter executes only f32");
         assert_eq!(
             error.code,
-            RealtimeAudioOutputOpenFailureCode::ChannelSemanticsUnproven
+            RealtimeAudioOutputOpenFailureCode::SampleFormatUnsupported
         );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_masks_preserve_canonical_named_speaker_order() {
+        assert_eq!(windows_speaker_mask(AudioChannelLayout::Stereo), Some(0x3));
+        assert_eq!(
+            windows_speaker_mask(AudioChannelLayout::Surround51Side),
+            Some(0x60f)
+        );
+        assert_eq!(
+            windows_speaker_mask(AudioChannelLayout::Surround51Back),
+            Some(0x3f)
+        );
+        assert_eq!(
+            windows_speaker_mask(AudioChannelLayout::Surround71),
+            Some(0x63f)
+        );
+        let unsupported = AudioChannelLayout::speakers([
+            AudioChannelPosition::FrontLeft,
+            AudioChannelPosition::WideLeft,
+        ])
+        .expect("valid core speaker layout");
+        assert_eq!(windows_speaker_mask(unsupported), None);
     }
 
     #[test]
@@ -818,8 +989,13 @@ mod tests {
             48_000,
             Some(RealtimeAudioSampleFormat::I32),
         )];
-        let selected = select_audio_output_candidate(48_000, layout, &candidates)
-            .expect("ordinal device contract");
+        let selected = select_audio_output_candidate(
+            48_000,
+            layout,
+            RealtimeAudioChannelSemantics::OrdinalDiscrete,
+            &candidates,
+        )
+        .expect("ordinal device contract");
         assert_eq!(
             selected.contract.channel_semantics,
             RealtimeAudioChannelSemantics::OrdinalDiscrete

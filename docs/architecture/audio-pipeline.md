@@ -971,9 +971,9 @@ Adapter before production support can claim a hard termination deadline.
 
 Audio Playback, not the audio compiler, owns device lifecycle, render
 generations, bounded in-flight work, watermarks, preroll, callback consumption,
-underrun recovery, and device-clock evidence. The CPAL callback touches only a
-fixed-capacity queue and atomics; it does not allocate, decode, compile, log,
-inspect the Timeline, or lock a Session.
+underrun recovery, and device-clock evidence. Every physical-output callback
+touches only a fixed-capacity queue and atomics; it does not allocate, decode,
+compile, log, inspect the Timeline, or lock a Session.
 
 `audio_device` is the sole Realtime Audio Output Negotiation Module. Runtime
 selection is an app preference, never Project or Sequence authoring. It is
@@ -990,12 +990,24 @@ formats. The callback Adapter supports every scalar format represented by the
 current CPAL Interface and clamps only at this physical sink conversion; common
 float Program execution remains unclipped upstream.
 
-CPAL exposes channel count but no portable speaker-position evidence. The
-Module therefore admits versioned Mono and Stereo device conventions plus
-explicit ordinal Discrete layouts. A named 5.1/7.1/custom speaker layout is
-rejected even when the count matches until a platform Adapter proves the
-positions and order. Success publishes one `RealtimeAudioOutputContract` with
-semantic layout, exact rate, scalar format, buffer-range evidence, and counts
+CPAL exposes channel count but no portable speaker-position evidence, and its
+WASAPI `WAVEFORMATEXTENSIBLE` lowering deliberately uses `DIRECTOUT` (zero
+speaker mask). The portable path therefore admits versioned Mono and Stereo
+device conventions plus explicit ordinal Discrete layouts. Windows named
+layouts whose positions fit the normative 18-bit Windows speaker set use a
+separate Media-owned WASAPI Adapter. It reopens the exact CPAL endpoint identity,
+requires an F32 exact channel/rate candidate, derives the mask from the canonical
+`AudioChannelLayout` order, and initializes an event-driven shared-mode stream
+with that exact `WAVEFORMATEXTENSIBLE` mask. Only successful initialization is
+position/order evidence; matching channel count is not. The render worker joins
+the `Pro Audio` MMCSS class and reuses the same bounded queue, activation
+revision, underrun accounting, and playback-delay telemetry as CPAL. Unsupported
+positions such as Wide, TopSide, and LFE2 fail closed instead of being projected
+onto reserved Windows bits. Non-Windows named multichannel remains rejected
+until an equivalent platform Adapter exists.
+
+Success publishes one `RealtimeAudioOutputContract` with semantic layout, exact
+rate, scalar format, buffer-range evidence, channel-semantics proof, and counts
 for enumerated/channel/rate/executable candidates. Low-frequency device
 evidence also retains CPAL host, stable device identity, resolved selection,
 whether it was the system default, optional device name, and any nonfatal name
@@ -1007,7 +1019,7 @@ Contract, and backend detail. `AppState` composes physical evidence with
 target match, so diagnostics cannot join facts from different device states.
 
 Physical discovery is a separate low-frequency Window Adapter. It performs no
-CPAL call on the UI thread or realtime callback, owns at most one bounded
+CPAL/platform call on the UI thread or realtime callback, owns at most one bounded
 one-shot attempt, and publishes an immutable catalog snapshot. Preferences may
 select a catalog identity or request rediscovery. The device worker observes
 the latest selection outside the callback. A selection change retires the old
@@ -1028,7 +1040,7 @@ diagnostics. The device lifecycle worker has separate start-failure evidence
 from an ordinary `OpenFailed` device attempt. Both render and device workers
 retain owned `JoinHandle`s. Shutdown first cancels current work, closes and
 wakes admission, then joins each worker; a device `Lost` event is emitted only
-after the concrete CPAL stream has been destroyed. An unexpectedly finished
+after the concrete physical stream has been destroyed. An unexpectedly finished
 render worker or disconnected completion channel transitions once to
 `ExecutionUnavailable`, cancels and clears outstanding work, and admits no
 phantom in-flight requests. Concrete stream-generation identities are issued
@@ -1063,7 +1075,7 @@ report callback activity but cannot consume queued PCM or advance media time,
 and an active-counter overflow marks the stream failed without wrapping.
 
 Device retirement follows destroy-then-observe ordering. The device worker
-requests deactivation, drops the concrete CPAL stream, captures one final frozen
+requests deactivation, drops the concrete physical stream, captures one final frozen
 snapshot through a read-only observer, and only then publishes typed `Lost`
 evidence. `AudioPlayback` pairs that loss with the exact last media
 `AudioSamplePosition` for the matching stream generation and retains a fixed-size

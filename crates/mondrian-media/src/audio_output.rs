@@ -52,7 +52,7 @@ pub enum RealtimeAudioOutputEvent {
 /// Why one concrete stream was retired before the lifecycle worker reopened it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RealtimeAudioOutputLossReason {
-    /// CPAL reported an asynchronous stream/backend failure.
+    /// The concrete physical stream reported an asynchronous backend failure.
     BackendFailure,
     /// A validation-only exact-generation recycle was accepted.
     ControlledRecycle,
@@ -107,10 +107,10 @@ pub(crate) enum RealtimeAudioOutputRecycleError {
 
 /// Deep Module owning background open, failure detection, and bounded reopen.
 ///
-/// CPAL streams are deliberately `!Send`; the device thread therefore retains
-/// concrete stream ownership for its entire lifetime and publishes only a
-/// sendable lock-free control/observation handle. The caller never blocks on
-/// device discovery, stream creation, failure polling, or retry delay.
+/// The device thread retains concrete CPAL/WASAPI stream ownership for its
+/// entire lifetime and publishes only a sendable lock-free control/observation
+/// handle. The caller never blocks on device discovery, stream creation,
+/// failure polling, or retry delay.
 pub struct RealtimeAudioOutputManager {
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
