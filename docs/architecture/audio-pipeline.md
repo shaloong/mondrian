@@ -245,6 +245,7 @@ The Sequence `AudioProgram` owns:
 - zero or more `AudioMixBus` values;
 - one or more stable `AudioProgramOutput` values;
 - explicit `AudioRoute` values;
+- explicit `AudioProcessorSidechainRoute` values;
 - all `AudioProcessingScope` values;
 - explicit `AudioTransition` values.
 
@@ -307,11 +308,16 @@ disabled-edge-inclusive Bus reachability once. Mixer/patchbay Adapters may use
 its constant-time addition query to omit impossible choices, but may not own a
 parallel cycle algorithm or treat the projection as transaction authority.
 
-This minimal edge contract already covers dry paths, pre/post-fader auxiliary
-sends, submixes, stems, and multiple parallel paths. Sidechain inputs are not
-ordinary summing destinations: they require a typed processor-input endpoint
-and processor bus negotiation, and must not be simulated by weakening Route
-destination types.
+This main-edge contract covers dry paths, pre/post-fader sends, submixes,
+stems, and multiple parallel paths. A sidechain is a separate typed edge from
+one Track/Bus strip port to `(AudioProcessorInstanceId, bus_key)`. It retains
+the same enabled/static/Sequence-time gain controls and strong Route identity,
+but can never become a Bus or Output summing destination. Complete author
+validation resolves the target processor (including shared Scope occurrences)
+and rejects instantaneous cycles across both edge families, even while an edge
+is disabled. Routing edits, Bus disconnection, Track removal, structural Scope
+compaction, automation, and Sequence identity forking preserve or remove every
+strong reference atomically.
 
 Disabled Clip or disabled Component Edit is absent from compilation. Persistent
 Track mute gates `PostMute` while preserving pre-mute taps. Solo is not stored
@@ -489,6 +495,9 @@ Preparation now lowers the semantic graph into one dense execution schedule:
 - constant Scope/edit/fader fast paths that do not erase Processor boundaries;
 - constant Route-level fast paths plus prepared Route automation spans and one
   Session-preallocated interleaved gain lane;
+- processor auxiliary-bus declarations negotiated against the exact Render
+  Contract, per-occurrence sidechain bindings, source-port snapshots, and
+  bounded gain/PDC scratch;
 - one explicitly selected scalar-reference or runtime-vectorized CPU kernel.
 - one resolved native source layout and canonical prepared channel mixer per
   Contribution, with coefficient count and maximum native channel width in the
@@ -566,6 +575,14 @@ Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
 it neither reconstructs processor batches nor reaches into a processor's
 mutable state. A failed entry consumes and poisons its new epoch before any
 instance resets, so partial multi-processor reset can never resume old history.
+Each realized Factory publishes an immutable auxiliary-input contract alongside
+its latency/tail contract. Preparation rejects duplicate/invalid keys, layout
+drift, an authored key absent from the realized definition, a dependency cycle,
+or a detector path that cannot be aligned to the processor main-input signal
+time. Unconnected declared buses are explicit silence; multiple Routes to one
+bus sum through preallocated gain/PDC storage. The callback exposes a combined
+disjoint main/auxiliary borrow, so a processor can modify main PCM while reading
+its detector without copying, allocating, locking, or performing a map lookup.
 Every untrusted Resolver, Factory, and Processor trait call is also an unwind
 boundary. A panic during resolution, contract query, instance creation, state
 entry, or block processing becomes a typed `AdapterPanicked` failure. State
@@ -1218,6 +1235,12 @@ The automated suite must prove:
   plan preparation;
 - a custom stateful non-zero-latency factory drives Host instantiation, PDC,
   continuity entry, realtime-mode admission, and partition-invariant PCM;
+- a typed sidechain whose detector Track has no main Route remains reachable,
+  negotiates its stable auxiliary bus, copies no callback PCM, produces the
+  detector waveform exactly, and rejects an undeclared realized bus key;
+- main and sidechain dependencies share deterministic topological ordering and
+  disabled-edge-inclusive cycle validation; Sequence duplication rekeys the
+  complete Route-to-Processor strong reference;
 - built-in Sample Delay validates exact integer authoring, keeps audible delay
   outside PDC, resets on seek entry, remains partition invariant, and fails plan
   preparation when its exact Session storage exceeds the Render Contract;
@@ -1275,8 +1298,9 @@ The automated suite must prove:
 Remaining product work and sequencing live in [ROADMAP](../ROADMAP.md), not in
 this architecture contract. Professional support cannot be claimed until the
 versioned acceptance plan covers layout/device/encoder negotiation, isolated
-plugin-host lifecycle and failure containment, sidechains and standards-based
-metering, authoring UI/Undo/reopen, reference PCM and export parity, persistent
+plugin-host lifecycle and failure containment, sidechain product interaction
+and reference-machine qualification, standards-based metering, authoring
+UI/Undo/reopen, reference PCM and export parity, persistent
 decoder locality/cancellation, and reference-machine realtime load, drift, and
 memory evidence.
 

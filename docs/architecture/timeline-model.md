@@ -580,11 +580,20 @@ Bus and Route collections are likewise not public mutation surfaces.
 `AudioRoutingEditRequest` is the sole authoring Interface for Bus lifecycle,
 typed Route endpoints, enabled state, static send level, and stable
 Route identity. Principal paths and parallel sends are the same `AudioRoute`
-type. Bus deletion names its strong-reference disposition explicitly; a
+type. Processor sidechains remain a distinct
+`AudioProcessorSidechainRoute`: the source is the same stable Track/Bus port,
+but the destination is one strong Processor Instance identity plus a bounded
+definition-owned auxiliary bus key, never a main summing endpoint. The Routing
+Interface creates, rewires, enables, gains, and removes these edges; their
+Sequence-time gain curves use the same `AudioAutomationTarget::RouteGain`
+authority. Bus deletion names its strong-reference disposition explicitly; a
 disconnecting delete removes the Bus and every incident Route in one candidate,
 while reject-if-connected preserves all state. Track locks protect every Route
 sourced from that Track, including a Route removed indirectly by Bus deletion.
-Full candidate validation remains the authority for cross-Bus cycle detection.
+Sidechain targets are strong references, and Sequence duplication rekeys both
+their Route and Processor identities. Full candidate validation remains the
+authority for instantaneous cycles across main and sidechain dependencies,
+including disabled edges.
 For bulk product menus, `inspect_audio_route_candidates` validates existing
 addresses once and returns a snapshot-local reachability inspection. It applies
 Track locks and treats enabled and disabled Routes as structural edges, so

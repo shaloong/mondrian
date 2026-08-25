@@ -448,6 +448,10 @@ _Avoid_: Generic property node, universal untyped ID, generated Clip DSP operato
 A persistent typed connection between stable signal endpoints in one Audio Program.
 _Avoid_: Node-name connection, array-index connection, hidden fallback route
 
+**Audio Processor Sidechain Route**:
+A persistent typed auxiliary connection from one exact Track/Bus strip port to one stable Audio Processor Instance and definition-owned bus key. It participates in complete routing reachability and cycle validation but never sums into a Routing Node main input. Preparation must negotiate the key/layout against the realized processor contract and align the detector signal to the processor's main-input signal time.
+_Avoid_: Soloing a Track to manufacture a stem, mixing detector PCM into the main Bus, plugin array-index bus address, unvalidated string lookup, callback allocation
+
 **Audio Processor Instance**:
 A persistent built-in or external audio effect instance identified by a stable definition. Each parameter captures the shared Parameter Schema plus one exact-time curve whose default is the unkeyed value, so unavailable external processors preserve editable author intent without a second static-value truth.
 _Avoid_: Video EffectNode, plugin file path, registry index, opaque JSON effect

@@ -1851,6 +1851,8 @@ impl Sequence {
     fn fork_audio_identities_for_sequence_duplicate(&mut self) {
         use crate::audio::{AudioRouteDestination, AudioRouteSource, ProgramOutputMainSource};
 
+        let old_processor_ids = audio_processor_ids(&self.audio_program);
+
         let role_ids = self
             .audio_roles
             .iter()
@@ -1914,8 +1916,13 @@ impl Sequence {
         for channel in self.audio_program.track_channels.values_mut() {
             rekey_audio_channel_strip(&mut channel.strip);
         }
+        let processor_ids = old_processor_ids
+            .into_iter()
+            .zip(audio_processor_ids(&self.audio_program))
+            .collect::<HashMap<_, _>>();
         for route in &mut self.audio_program.routes {
             route.id = AudioRouteId::new();
+            rekey_optional_exact_curve(&mut route.gain_automation);
             if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
                 *bus_id = bus_ids[bus_id];
             }
@@ -1924,6 +1931,14 @@ impl Sequence {
                 AudioRouteDestination::Output(output_id) => {
                     *output_id = output_ids[output_id];
                 }
+            }
+        }
+        for route in &mut self.audio_program.sidechain_routes {
+            route.id = AudioRouteId::new();
+            route.processor_id = processor_ids[&route.processor_id];
+            rekey_optional_exact_curve(&mut route.gain_automation);
+            if let AudioRouteSource::Bus { bus_id, .. } = &mut route.source {
+                *bus_id = bus_ids[bus_id];
             }
         }
         for transition in &mut self.audio_program.transitions {
@@ -1982,6 +1997,11 @@ impl Sequence {
             .map(|(track_id, channel)| (track_ids[&track_id], channel))
             .collect();
         for route in &mut self.audio_program.routes {
+            if let AudioRouteSource::Track { track_id, .. } = &mut route.source {
+                *track_id = track_ids[track_id];
+            }
+        }
+        for route in &mut self.audio_program.sidechain_routes {
             if let AudioRouteSource::Track { track_id, .. } = &mut route.source {
                 *track_id = track_ids[track_id];
             }
@@ -2606,6 +2626,33 @@ fn rekey_audio_channel_strip(strip: &mut crate::audio::AudioChannelStrip) {
     }
 }
 
+fn audio_processor_ids(program: &crate::audio::AudioProgram) -> Vec<AudioProcessorInstanceId> {
+    program
+        .processing_scopes
+        .iter()
+        .map(|scope| &scope.processors)
+        .chain(
+            program
+                .track_channels
+                .values()
+                .flat_map(|channel| [&channel.strip.pre_fader, &channel.strip.post_fader]),
+        )
+        .chain(
+            program
+                .buses
+                .iter()
+                .flat_map(|bus| [&bus.strip.pre_fader, &bus.strip.post_fader]),
+        )
+        .chain(
+            program
+                .outputs
+                .iter()
+                .flat_map(|output| [&output.strip.pre_fader, &output.strip.post_fader]),
+        )
+        .flat_map(|rack| rack.processors.iter().map(|processor| processor.id))
+        .collect()
+}
+
 fn rekey_optional_exact_curve(curve: &mut Option<mondrian_core::ExactAutomationCurve>) {
     if let Some(curve) = curve {
         rekey_exact_curve(curve);
@@ -3039,8 +3086,9 @@ mod tests {
     use super::*;
     use crate::audio::{
         AudioChannelStrip, AudioComponentChannelMapping, AudioComponentEdit, AudioMixBus,
-        AudioProcessingScope, AudioProcessorDefinitionRef, AudioProcessorInstance, AudioRole,
-        AudioTransition, AudioTransitionCurve, BUILTIN_GAIN_DEFINITION_ID,
+        AudioProcessingScope, AudioProcessorDefinitionRef, AudioProcessorInstance,
+        AudioProcessorSidechainRoute, AudioRole, AudioRouteSource, AudioTransition,
+        AudioTransitionCurve, BUILTIN_GAIN_DEFINITION_ID,
     };
     use crate::clip::Clip;
     use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
@@ -3645,6 +3693,19 @@ mod tests {
         );
         let original_transition_id = transition.id;
         sequence.video_transitions.push(transition);
+        let processor = AudioProcessorInstance::built_in(BUILTIN_GAIN_DEFINITION_ID, 1);
+        let original_processor_id = processor.id;
+        sequence.audio_program.outputs[0].strip.pre_fader.processors.push(processor);
+        let sidechain = AudioProcessorSidechainRoute::new(
+            AudioRouteSource::Track {
+                track_id: sequence.audio_tracks[0].id,
+                port: crate::audio::AudioChannelStripOutputPort::PostMute,
+            },
+            original_processor_id,
+            "detector",
+        );
+        let original_sidechain_id = sidechain.id;
+        sequence.audio_program.sidechain_routes.push(sidechain);
 
         sequence.fork_author_identities_for_sequence_duplicate();
 
@@ -3663,6 +3724,20 @@ mod tests {
         assert_ne!(sequence.video_transitions[0].id, original_transition_id);
         assert_eq!(sequence.video_transitions[0].left, duplicated_left.id);
         assert_eq!(sequence.video_transitions[0].right, duplicated_right.id);
+        let duplicated_sidechain = &sequence.audio_program.sidechain_routes[0];
+        assert_ne!(duplicated_sidechain.id, original_sidechain_id);
+        assert_ne!(duplicated_sidechain.processor_id, original_processor_id);
+        assert_eq!(
+            duplicated_sidechain.processor_id,
+            sequence.audio_program.outputs[0].strip.pre_fader.processors[0].id
+        );
+        assert_eq!(
+            duplicated_sidechain.source,
+            AudioRouteSource::Track {
+                track_id: sequence.audio_tracks[0].id,
+                port: crate::audio::AudioChannelStripOutputPort::PostMute,
+            }
+        );
         sequence.validate_author_identities().expect("forked author graph");
         sequence
             .audio_program

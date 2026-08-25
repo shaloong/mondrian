@@ -1,15 +1,20 @@
 //! Plan-time processor resolution and Session-owned callback dispatch.
 
 use crate::processor_parameters::{prepare_parameter_event_batch, ProcessorParameterEventScratch};
-use crate::schedule::{PreparedAudioSchedule, PreparedProcessor, PreparedRack};
+use crate::schedule::{
+    PreparedAudioSchedule, PreparedProcessor, PreparedProcessorAuxiliaryBus, PreparedRack,
+    PreparedSidechainBinding,
+};
 #[cfg(test)]
 use crate::AudioParameterEvent;
+use crate::{delay::FixedDelayLine, dsp};
 use crate::{
     AudioExecutionError, AudioKernelBackend, AudioProcessor, AudioProcessorAudioIo,
-    AudioProcessorExecutionContract, AudioProcessorFactory, AudioProcessorHostError,
-    AudioProcessorInputBus, AudioProcessorOccurrence, AudioProcessorOccurrenceOwner,
-    AudioProcessorPrepareRequest, AudioProcessorProcessContext, AudioProcessorResolver,
-    AudioRenderContract, AudioRenderRequest, AudioStateEntry, BuiltInAudioProcessorResolver,
+    AudioProcessorAuxiliaryInputContract, AudioProcessorExecutionContract, AudioProcessorFactory,
+    AudioProcessorHostError, AudioProcessorInputBus, AudioProcessorMainAndInputBuses,
+    AudioProcessorOccurrence, AudioProcessorOccurrenceOwner, AudioProcessorPrepareRequest,
+    AudioProcessorProcessContext, AudioProcessorResolver, AudioRenderContract, AudioRenderRequest,
+    AudioStateEntry, BuiltInAudioProcessorResolver,
 };
 #[cfg(test)]
 use mondrian_core::ParameterId;
@@ -21,6 +26,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub(crate) struct PreparedProcessorFactoryBinding {
     contract: AudioProcessorExecutionContract,
+    auxiliary_inputs: AudioProcessorAuxiliaryInputContract,
     factory: Arc<dyn AudioProcessorFactory>,
 }
 
@@ -29,20 +35,29 @@ impl PreparedProcessorFactoryBinding {
         resolver: &dyn AudioProcessorResolver,
         request: AudioProcessorPrepareRequest<'_>,
     ) -> Result<Self, AudioProcessorHostError> {
-        let mode = request.render_contract().processing_mode;
+        let render_contract = request.render_contract();
+        let mode = render_contract.processing_mode;
         let factory = isolate_adapter_call("resolution", || resolver.prepare(request))?;
         let contract =
             isolate_adapter_value("execution-contract query", || factory.execution_contract())?;
+        let auxiliary_inputs = isolate_adapter_value("auxiliary-input contract query", || {
+            factory.auxiliary_input_contract()
+        })?;
+        auxiliary_inputs.validate(render_contract.channel_layout)?;
         if !contract.admits(mode) {
             return Err(AudioProcessorHostError::InvalidContract(format!(
                 "processor does not admit {mode:?} execution"
             )));
         }
-        Ok(Self { contract, factory })
+        Ok(Self { contract, auxiliary_inputs, factory })
     }
 
     pub(crate) const fn contract(&self) -> AudioProcessorExecutionContract {
         self.contract
+    }
+
+    pub(crate) fn auxiliary_inputs(&self) -> &AudioProcessorAuxiliaryInputContract {
+        &self.auxiliary_inputs
     }
 
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
@@ -55,6 +70,16 @@ impl PreparedProcessorFactoryBinding {
                     .to_owned(),
             ));
         }
+        let current_auxiliary_inputs =
+            isolate_adapter_value("auxiliary-input contract revalidation", || {
+                self.factory.auxiliary_input_contract()
+            })?;
+        if current_auxiliary_inputs != self.auxiliary_inputs {
+            return Err(AudioProcessorHostError::InvalidContract(
+                "prepared factory changed its auxiliary-input contract before Session creation"
+                    .to_owned(),
+            ));
+        }
         isolate_adapter_call("instance creation", || self.factory.create())
     }
 }
@@ -64,6 +89,7 @@ impl fmt::Debug for PreparedProcessorFactoryBinding {
         formatter
             .debug_struct("PreparedProcessorFactoryBinding")
             .field("contract", &self.contract)
+            .field("auxiliary_inputs", &self.auxiliary_inputs)
             .finish_non_exhaustive()
     }
 }
@@ -72,6 +98,8 @@ struct MainBusAudioIo<'a> {
     channel_layout: AudioChannelLayout,
     frames: usize,
     pcm: &'a mut [f32],
+    auxiliary_buses: &'a [PreparedProcessorAuxiliaryBus],
+    auxiliary_pcm: &'a [f32],
 }
 
 impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
@@ -87,8 +115,39 @@ impl AudioProcessorAudioIo for MainBusAudioIo<'_> {
         self.pcm
     }
 
-    fn auxiliary_input(&self, _bus_key: &str) -> Option<AudioProcessorInputBus<'_>> {
-        None
+    fn auxiliary_input(&self, bus_key: &str) -> Option<AudioProcessorInputBus<'_>> {
+        let samples = self.frames.checked_mul(self.channel_layout.channel_count())?;
+        let bus_index = self.auxiliary_buses.iter().position(|bus| bus.bus_key == bus_key)?;
+        let start = bus_index.checked_mul(samples)?;
+        let end = start.checked_add(samples)?;
+        Some(AudioProcessorInputBus {
+            bus_key: &self.auxiliary_buses[bus_index].bus_key,
+            channel_layout: self.channel_layout,
+            frames: self.frames,
+            interleaved: self.auxiliary_pcm.get(start..end)?,
+        })
+    }
+
+    fn main_and_auxiliary_input(
+        &mut self,
+        bus_key: &str,
+    ) -> Option<AudioProcessorMainAndInputBuses<'_>> {
+        let samples = self.frames.checked_mul(self.channel_layout.channel_count())?;
+        let bus_index = self.auxiliary_buses.iter().position(|bus| bus.bus_key == bus_key)?;
+        let start = bus_index.checked_mul(samples)?;
+        let end = start.checked_add(samples)?;
+        let auxiliary = AudioProcessorInputBus {
+            bus_key: &self.auxiliary_buses[bus_index].bus_key,
+            channel_layout: self.channel_layout,
+            frames: self.frames,
+            interleaved: self.auxiliary_pcm.get(start..end)?,
+        };
+        Some(AudioProcessorMainAndInputBuses {
+            main_layout: self.channel_layout,
+            frames: self.frames,
+            main_interleaved: self.pcm,
+            auxiliary,
+        })
     }
 }
 
@@ -119,6 +178,9 @@ pub(crate) struct PreparedProcessorHost {
     maximum_parameter_lanes: usize,
     parameter_event_capacity: usize,
     session_scratch_bytes: usize,
+    auxiliary_pcm: Vec<f32>,
+    sidechain_frame_db: Vec<f64>,
+    sidechain_gains: Vec<f32>,
 }
 
 impl PreparedProcessorHost {
@@ -168,6 +230,16 @@ impl PreparedProcessorHost {
                 })
             })
             .collect::<Result<Vec<_>, AudioExecutionError>>()?;
+        let maximum_auxiliary_buses = schedule
+            .processors
+            .iter()
+            .map(|processor| processor.auxiliary_buses.len())
+            .max()
+            .unwrap_or(0);
+        let block_samples = render_contract
+            .max_block_frames
+            .checked_mul(render_contract.channel_count())
+            .ok_or(AudioExecutionError::BufferTooLarge)?;
         Ok(Self {
             instances,
             parameter_events: ProcessorParameterEventScratch::new(
@@ -178,6 +250,14 @@ impl PreparedProcessorHost {
             maximum_parameter_lanes,
             parameter_event_capacity,
             session_scratch_bytes,
+            auxiliary_pcm: vec![
+                0.0;
+                maximum_auxiliary_buses
+                    .checked_mul(block_samples)
+                    .ok_or(AudioExecutionError::BufferTooLarge)?
+            ],
+            sidechain_frame_db: vec![0.0; render_contract.max_block_frames],
+            sidechain_gains: vec![0.0; block_samples],
         })
     }
 
@@ -243,11 +323,15 @@ impl PreparedProcessorHost {
         &mut self,
         rack: &PreparedRack,
         processors: &[PreparedProcessor],
+        processor_auxiliary_buses: &[PreparedProcessorAuxiliaryBus],
+        sidechain_bindings: &[PreparedSidechainBinding],
         request: AudioRenderRequest,
         sample_rate: AudioSampleRate,
         channel_layout: AudioChannelLayout,
         backend: AudioKernelBackend,
         pcm: &mut [f32],
+        sidechain_source_buffers: &[Vec<f32>],
+        sidechain_delay_lines: &mut [FixedDelayLine],
     ) -> Result<(), AudioExecutionError> {
         let expected_samples = request
             .frames
@@ -262,6 +346,9 @@ impl PreparedProcessorHost {
         }
         let instances = &mut self.instances;
         let parameter_events = &mut self.parameter_events;
+        let auxiliary_pcm = &mut self.auxiliary_pcm;
+        let sidechain_frame_db = &mut self.sidechain_frame_db;
+        let sidechain_gains = &mut self.sidechain_gains;
         for processor_index in rack.processors.clone() {
             let processor = processors
                 .get(processor_index)
@@ -323,7 +410,31 @@ impl PreparedProcessorHost {
                 self.render_contract.processing_mode,
                 backend,
             );
-            let mut audio = MainBusAudioIo { channel_layout, frames: request.frames, pcm };
+            let auxiliary_buses = prepare_processor_auxiliary_buses(
+                processor,
+                processor_auxiliary_buses,
+                sidechain_bindings,
+                sidechain_source_buffers,
+                sidechain_delay_lines,
+                signal_request,
+                sample_rate,
+                expected_samples,
+                channel_layout.channel_count(),
+                auxiliary_pcm,
+                sidechain_frame_db,
+                sidechain_gains,
+            )?;
+            let auxiliary_samples = auxiliary_buses
+                .len()
+                .checked_mul(expected_samples)
+                .ok_or(AudioExecutionError::BufferTooLarge)?;
+            let mut audio = MainBusAudioIo {
+                channel_layout,
+                frames: request.frames,
+                pcm,
+                auxiliary_buses,
+                auxiliary_pcm: &auxiliary_pcm[..auxiliary_samples],
+            };
             if let Err(error) = isolate_adapter_call("block processing", || {
                 instance.processor.process(context, &mut audio, batch)
             }) {
@@ -382,6 +493,75 @@ impl PreparedProcessorHost {
             })
             .collect()
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_processor_auxiliary_buses<'a>(
+    processor: &PreparedProcessor,
+    processor_auxiliary_buses: &'a [PreparedProcessorAuxiliaryBus],
+    sidechain_bindings: &[PreparedSidechainBinding],
+    sidechain_source_buffers: &[Vec<f32>],
+    sidechain_delay_lines: &mut [FixedDelayLine],
+    signal_request: AudioRenderRequest,
+    sample_rate: AudioSampleRate,
+    samples: usize,
+    channels: usize,
+    auxiliary_pcm: &mut [f32],
+    sidechain_frame_db: &mut [f64],
+    sidechain_gains: &mut [f32],
+) -> Result<&'a [PreparedProcessorAuxiliaryBus], AudioExecutionError> {
+    let buses = processor_auxiliary_buses
+        .get(processor.auxiliary_buses.clone())
+        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+    let required_samples =
+        buses.len().checked_mul(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
+    let auxiliary_pcm = auxiliary_pcm
+        .get_mut(..required_samples)
+        .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+    auxiliary_pcm.fill(0.0);
+    for (bus_index, bus) in buses.iter().enumerate() {
+        let start = bus_index.checked_mul(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
+        let end = start.checked_add(samples).ok_or(AudioExecutionError::BufferTooLarge)?;
+        let destination = &mut auxiliary_pcm[start..end];
+        for binding_index in bus.bindings.clone() {
+            let binding = sidechain_bindings
+                .get(binding_index)
+                .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            let source = sidechain_source_buffers
+                .get(binding.source_buffer_slot)
+                .and_then(|source| source.get(..samples))
+                .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            let delay_line = sidechain_delay_lines
+                .get_mut(binding_index)
+                .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+            if let Some(curve) = &binding.gain_automation {
+                let frame_db = sidechain_frame_db
+                    .get_mut(..signal_request.frames)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                let mut cursor = curve.initial_cursor(signal_request.start_sample);
+                for (frame, value) in frame_db.iter_mut().enumerate() {
+                    let sample = signal_request
+                        .start_sample
+                        .checked_add(
+                            i64::try_from(frame)
+                                .map_err(|_| AudioExecutionError::BufferTooLarge)?,
+                        )
+                        .ok_or(AudioExecutionError::BufferTooLarge)?;
+                    *value = curve.evaluate_sample(sample, sample_rate, &mut cursor)?;
+                }
+                let gains = sidechain_gains
+                    .get_mut(..samples)
+                    .ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                dsp::expand_frame_db_to_interleaved_gains(frame_db, channels, gains);
+                delay_line.add_interleaved_with_gains(source, destination, gains)?;
+            } else {
+                let gain =
+                    binding.constant_gain.ok_or(AudioExecutionError::InvalidPreparedSchedule)?;
+                delay_line.add_interleaved_constant(source, destination, gain)?;
+            }
+        }
+    }
+    Ok(buses)
 }
 
 fn isolate_adapter_call<T>(

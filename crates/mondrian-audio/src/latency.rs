@@ -16,7 +16,7 @@ pub(crate) struct PreparedNodeLatency {
 }
 
 impl PreparedNodeLatency {
-    fn port(self, port: AudioChannelStripOutputPort) -> usize {
+    pub(crate) fn port(self, port: AudioChannelStripOutputPort) -> usize {
         match port {
             AudioChannelStripOutputPort::PreFader => self.pre_fader_frames,
             AudioChannelStripOutputPort::PostFaderPreMute
