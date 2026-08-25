@@ -2439,6 +2439,7 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "image",
  "mondrian-audio",
  "mondrian-core",
  "mondrian-effects",

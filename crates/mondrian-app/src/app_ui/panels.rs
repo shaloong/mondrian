@@ -4350,6 +4350,9 @@ fn export_container_label(container: &Container) -> &'static str {
 }
 
 fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
+    if preset.media_file().is_none() {
+        return Vec::new();
+    }
     [
         Container::Mp4,
         Container::Mov,
@@ -4362,7 +4365,9 @@ fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .map(|container| {
         let label = export_container_label(&container);
         let mut updated = preset.clone();
-        updated.container = container;
+        if let Some(media) = updated.media_file_mut() {
+            media.container = container;
+        }
         MenuItem::new(label, export_preset_update_action(updated))
     })
     .collect()
@@ -4394,10 +4399,13 @@ fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateContr
 }
 
 fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
-    let rate_control = export_video_rate_control(&preset.video)
+    let Some(media) = preset.media_file() else {
+        return Vec::new();
+    };
+    let rate_control = export_video_rate_control(&media.video)
         .map(|(rate_control, _)| rate_control)
         .unwrap_or_else(|| VideoRateControl::constant_quality(20));
-    let (gif_colors, gif_dither) = match preset.video {
+    let (gif_colors, gif_dither) = match media.video {
         VideoCodecConfig::Gif { colors, dither } => (colors, dither),
         _ => (256, true),
     };
@@ -4419,7 +4427,7 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         .map(|video| {
             let label = export_video_codec_label(&video);
             let mut updated = preset.clone();
-            updated.video_coding = match video {
+            let video_coding = match video {
                 VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. } => {
                     VideoCodingStructure::h26x_delivery()
                 }
@@ -4428,7 +4436,10 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
                     VideoCodingStructure::IntraOnly
                 }
             };
-            updated.video = video;
+            if let Some(media) = updated.media_file_mut() {
+                media.video_coding = video_coding;
+                media.video = video;
+            }
             MenuItem::new(label, export_preset_update_action(updated))
         })
         .collect()
@@ -4444,15 +4455,18 @@ fn export_audio_codec_label(audio: &AudioCodecConfig) -> &'static str {
 }
 
 fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
-    let aac_bitrate = match preset.audio {
+    let Some(media) = preset.media_file() else {
+        return Vec::new();
+    };
+    let aac_bitrate = match media.audio {
         AudioCodecConfig::Aac { bitrate_kbps } => bitrate_kbps,
         _ => 192,
     };
-    let pcm_bit_depth = match preset.audio {
+    let pcm_bit_depth = match media.audio {
         AudioCodecConfig::Pcm { bit_depth } => bit_depth,
         _ => 24,
     };
-    let mp3_bitrate = match preset.audio {
+    let mp3_bitrate = match media.audio {
         AudioCodecConfig::Mp3 { bitrate_kbps } => bitrate_kbps,
         _ => 192,
     };
@@ -4466,7 +4480,9 @@ fn export_audio_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
     .map(|audio| {
         let label = export_audio_codec_label(&audio);
         let mut updated = preset.clone();
-        updated.audio = audio;
+        if let Some(media) = updated.media_file_mut() {
+            media.audio = audio;
+        }
         MenuItem::new(label, export_preset_update_action(updated))
     })
     .collect()
@@ -4767,7 +4783,10 @@ fn export_with_rate_control(
     mut preset: ExportPreset,
     rate_control: VideoRateControl,
 ) -> ExportPreset {
-    match &mut preset.video {
+    let Some(media) = preset.media_file_mut() else {
+        return preset;
+    };
+    match &mut media.video {
         VideoCodecConfig::H264 { rate_control: current, .. }
         | VideoCodecConfig::Hevc { rate_control: current, .. }
         | VideoCodecConfig::Av1 { rate_control: current, .. } => *current = rate_control,
@@ -4797,16 +4816,23 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         })
         .collect::<Vec<_>>();
     let preset_dropdown = Dropdown::new(preset_label, preset_items).with_max_visible_items(6);
+    let media = model.preset.media_file();
     let container_dropdown = Dropdown::new(
-        export_container_label(&model.preset.container),
+        media
+            .map(|media| export_container_label(&media.container))
+            .unwrap_or("图像序列目录"),
         export_container_items(&model.preset),
     )
-    .with_max_visible_items(6);
+    .with_max_visible_items(6)
+    .enabled(media.is_some());
     let video_codec_dropdown = Dropdown::new(
-        export_video_codec_label(&model.preset.video),
+        media
+            .map(|media| export_video_codec_label(&media.video))
+            .unwrap_or("PNG（无损）"),
         export_video_codec_items(&model.preset),
     )
-    .with_max_visible_items(8);
+    .with_max_visible_items(8)
+    .enabled(media.is_some());
     let resolution_dropdown = Dropdown::new(
         export_resolution_label(model.preset.resolution),
         export_resolution_items(&model.preset),
@@ -4855,10 +4881,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     )
     .with_max_visible_items(2);
     let audio_codec_dropdown = Dropdown::new(
-        export_audio_codec_label(&model.preset.audio),
+        media
+            .map(|media| export_audio_codec_label(&media.audio))
+            .unwrap_or("无音频（图像序列）"),
         export_audio_codec_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some());
 
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
@@ -4992,7 +5021,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         ));
 
     let mut encoding_section = PropertySection::new("编码参数");
-    if let Some((rate_control, max_crf)) = export_video_rate_control(&model.preset.video) {
+    if let Some((rate_control, max_crf)) =
+        media.and_then(|media| export_video_rate_control(&media.video))
+    {
         let crf_preset = model.preset.clone();
         let crf_input = NumberInput::new(rate_control.crf as f64, 0.0, max_crf as f64)
             .with_step(1.0)
@@ -5038,21 +5069,23 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
             ))
             .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
 
-        match model.preset.video_coding {
-            VideoCodingStructure::H26xLongGop {
+        match media.map(|media| media.video_coding) {
+            Some(VideoCodingStructure::H26xLongGop {
                 keyframe_interval_seconds,
                 max_b_frames,
                 closed_gop,
                 scene_cut,
-            } => {
+            }) => {
                 let keyframe_preset = model.preset.clone();
                 let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
                     .with_step(1.0)
                     .on_change(move |seconds| {
                         let mut updated = keyframe_preset.clone();
-                        if let VideoCodingStructure::H26xLongGop {
-                            keyframe_interval_seconds, ..
-                        } = &mut updated.video_coding
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop {
+                                keyframe_interval_seconds,
+                                ..
+                            } = &mut media.video_coding
                         {
                             *keyframe_interval_seconds = seconds.round() as u16;
                         }
@@ -5063,8 +5096,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     .with_step(1.0)
                     .on_change(move |frames| {
                         let mut updated = b_frame_preset.clone();
-                        if let VideoCodingStructure::H26xLongGop { max_b_frames, .. } =
-                            &mut updated.video_coding
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop { max_b_frames, .. } =
+                                &mut media.video_coding
                         {
                             *max_b_frames = frames.round() as u8;
                         }
@@ -5074,8 +5108,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 let closed_checkbox =
                     Checkbox::new("封闭 GOP", closed_gop).on_change(move |enabled| {
                         let mut updated = closed_preset.clone();
-                        if let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
-                            &mut updated.video_coding
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
+                                &mut media.video_coding
                         {
                             *closed_gop = enabled;
                         }
@@ -5088,8 +5123,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 )
                 .on_change(move |enabled| {
                     let mut updated = scene_cut_preset.clone();
-                    if let VideoCodingStructure::H26xLongGop { scene_cut, .. } =
-                        &mut updated.video_coding
+                    if let Some(media) = updated.media_file_mut()
+                        && let VideoCodingStructure::H26xLongGop { scene_cut, .. } =
+                            &mut media.video_coding
                     {
                         *scene_cut = if enabled {
                             VideoSceneCutPolicy::Adaptive
@@ -5108,19 +5144,20 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     .with_row(PropertyRow::new("GOP", Box::new(closed_checkbox)))
                     .with_row(PropertyRow::new("场景切换", Box::new(scene_cut_checkbox)));
             }
-            VideoCodingStructure::Av1RandomAccess {
+            Some(VideoCodingStructure::Av1RandomAccess {
                 keyframe_interval_seconds,
                 lookahead_frames,
-            } => {
+            }) => {
                 let keyframe_preset = model.preset.clone();
                 let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
                     .with_step(1.0)
                     .on_change(move |seconds| {
                         let mut updated = keyframe_preset.clone();
-                        if let VideoCodingStructure::Av1RandomAccess {
-                            keyframe_interval_seconds,
-                            ..
-                        } = &mut updated.video_coding
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::Av1RandomAccess {
+                                keyframe_interval_seconds,
+                                ..
+                            } = &mut media.video_coding
                         {
                             *keyframe_interval_seconds = seconds.round() as u16;
                         }
@@ -5131,8 +5168,10 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     .with_step(1.0)
                     .on_change(move |frames| {
                         let mut updated = lookahead_preset.clone();
-                        if let VideoCodingStructure::Av1RandomAccess { lookahead_frames, .. } =
-                            &mut updated.video_coding
+                        if let Some(media) = updated.media_file_mut()
+                            && let VideoCodingStructure::Av1RandomAccess {
+                                lookahead_frames, ..
+                            } = &mut media.video_coding
                         {
                             *lookahead_frames = frames.round() as u16;
                         }
@@ -5145,16 +5184,20 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                     ))
                     .with_row(PropertyRow::new("Lookahead 帧", Box::new(lookahead_input)));
             }
-            VideoCodingStructure::IntraOnly => {}
+            Some(VideoCodingStructure::IntraOnly) | None => {}
         }
-    } else if let VideoCodecConfig::Gif { colors, dither } = model.preset.video {
+    } else if let Some(VideoCodecConfig::Gif { colors, dither }) =
+        media.map(|media| media.video.clone())
+    {
         let colors_preset = model.preset.clone();
         let colors_input =
             NumberInput::new(colors as f64, 2.0, 256.0)
                 .with_step(1.0)
                 .on_change(move |colors| {
                     let mut updated = colors_preset.clone();
-                    if let VideoCodecConfig::Gif { colors: current, .. } = &mut updated.video {
+                    if let Some(media) = updated.media_file_mut()
+                        && let VideoCodecConfig::Gif { colors: current, .. } = &mut media.video
+                    {
                         *current = colors.round() as u16;
                     }
                     export_preset_update_action(updated)
@@ -5162,7 +5205,9 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         let dither_preset = model.preset.clone();
         let dither_checkbox = Checkbox::new("允许调色板抖动", dither).on_change(move |enabled| {
             let mut updated = dither_preset.clone();
-            if let VideoCodecConfig::Gif { dither, .. } = &mut updated.video {
+            if let Some(media) = updated.media_file_mut()
+                && let VideoCodecConfig::Gif { dither, .. } = &mut media.video
+            {
                 *dither = enabled;
             }
             export_preset_update_action(updated)
@@ -5179,32 +5224,37 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
 
     let mut audio_section = PropertySection::new("音频")
         .with_row(PropertyRow::new("编码", Box::new(audio_codec_dropdown)));
-    match model.preset.audio {
-        AudioCodecConfig::Disabled => {}
-        AudioCodecConfig::Aac { bitrate_kbps } | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+    match media.map(|media| media.audio.clone()) {
+        None | Some(AudioCodecConfig::Disabled) => {}
+        Some(AudioCodecConfig::Aac { bitrate_kbps })
+        | Some(AudioCodecConfig::Mp3 { bitrate_kbps }) => {
             let bitrate_preset = model.preset.clone();
             let bitrate_input = NumberInput::new(bitrate_kbps as f64, 1.0, 1_536.0)
                 .with_step(8.0)
                 .on_change(move |bitrate| {
                     let mut updated = bitrate_preset.clone();
-                    match &mut updated.audio {
-                        AudioCodecConfig::Aac { bitrate_kbps }
-                        | AudioCodecConfig::Mp3 { bitrate_kbps } => {
-                            *bitrate_kbps = bitrate.round() as u32;
+                    if let Some(media) = updated.media_file_mut() {
+                        match &mut media.audio {
+                            AudioCodecConfig::Aac { bitrate_kbps }
+                            | AudioCodecConfig::Mp3 { bitrate_kbps } => {
+                                *bitrate_kbps = bitrate.round() as u32;
+                            }
+                            AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
                         }
-                        AudioCodecConfig::Disabled | AudioCodecConfig::Pcm { .. } => {}
                     }
                     export_preset_update_action(updated)
                 });
             audio_section =
                 audio_section.with_row(PropertyRow::new("码率 kbps", Box::new(bitrate_input)));
         }
-        AudioCodecConfig::Pcm { bit_depth } => {
+        Some(AudioCodecConfig::Pcm { bit_depth }) => {
             let items = [16u8, 24, 32]
                 .into_iter()
                 .map(|candidate| {
                     let mut updated = model.preset.clone();
-                    updated.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
+                    if let Some(media) = updated.media_file_mut() {
+                        media.audio = AudioCodecConfig::Pcm { bit_depth: candidate };
+                    }
                     MenuItem::new(
                         format!("{candidate}-bit integer"),
                         export_preset_update_action(updated),
@@ -5447,7 +5497,15 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         .as_ref()
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
         .unwrap_or_else(|| "Follow sequence".to_owned());
-    let bitrate = match &preset.video {
+    let Some(media) = preset.media_file() else {
+        return format!(
+            "{resolution} / PNG 无损序列 / sRGB / {} / {} / .{} 目录",
+            export_alpha_mode_label(preset.alpha_mode),
+            export_frame_rate_label(preset.frame_rate),
+            export_preset_extension(preset)
+        );
+    };
+    let bitrate = match &media.video {
         VideoCodecConfig::H264 { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Hevc { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Av1 { rate_control, .. } => export_rate_control_label(*rate_control),
@@ -5459,7 +5517,7 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
             )
         }
     };
-    let audio = match preset.audio {
+    let audio = match media.audio {
         AudioCodecConfig::Disabled => "无音频".to_owned(),
         AudioCodecConfig::Aac { bitrate_kbps } => format!("AAC {bitrate_kbps} kbps"),
         AudioCodecConfig::Pcm { bit_depth } => format!("PCM {bit_depth}-bit"),
@@ -5467,7 +5525,7 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
     };
     format!(
         "{resolution} / {} / {bitrate} / {} / {} / {} / {} / {} / {audio} / .{}",
-        export_video_codec_label(&preset.video),
+        export_video_codec_label(&media.video),
         export_color_target_label(preset.color_target),
         export_bit_depth_label(preset.video_signal.bit_depth),
         export_video_range_label(preset.video_signal.range),

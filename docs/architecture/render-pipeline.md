@@ -220,6 +220,23 @@ expensive consumer. A blocker outside the reachable closure cannot reject the
 job; the same blocker fails closed when an exported frame can actually reach
 it.
 
+Export presets describe one `ExportArtifactEncoding`; container/video/audio
+fields do not coexist beside it as a second authority. A media-file artifact
+resolves typed mux, video, audio, picture-structure, signal, and color
+contracts and is independently probed before file publication. A PNG image
+sequence resolves an intra-only 8-bit Full RGB/RGBA sRGB contract and disables
+audio by construction. It uses the same immutable Timeline snapshot, visual
+preflight, frame sampling, working compositor, and output color boundary as a
+media file; only the encoder transport and artifact validator differ.
+
+Image-sequence execution writes numbered frames below one Storage-owned sibling
+directory. After FFmpeg exits, Export independently decodes every frame,
+requires the exact contiguous namespace and raster/alpha contract, hashes each
+payload, and durably writes a versioned manifest. Storage then synchronizes and
+publishes the complete populated directory with create-new semantics. The final
+route therefore never exposes a partial sequence, cancellation cannot authorize
+publication, and an existing directory wins without recursive replacement.
+
 Preview performs that same dynamic evaluation before its canonical
 media-demand collector can publish a decode request and before a
 generated-source Adapter runs. The renderer prepares an immutable

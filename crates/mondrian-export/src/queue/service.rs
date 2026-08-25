@@ -853,7 +853,11 @@ impl RenderQueue {
 
     /// Admit a heavy immutable submission or return a structured rejection.
     pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
-        let include_audio = !matches!(job.config.preset.audio, AudioCodecConfig::Disabled);
+        let include_audio = job
+            .config
+            .preset
+            .media_file()
+            .is_some_and(|media| !matches!(media.audio, AudioCodecConfig::Disabled));
         let resource_policy = self.inner.state.lock().resource_policy;
         if job.config.timeline.prepared_execution().is_none() {
             let prepared = match prepare_timeline_export_dependencies(

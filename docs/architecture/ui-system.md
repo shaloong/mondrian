@@ -1,5 +1,13 @@
 # UI System
 
+The Export panel edits the same typed `ExportPreset` consumed by queue
+admission. Artifact-family-specific controls are projected from
+`ExportArtifactEncoding`: media-file presets expose container/video/audio and
+coding controls, while image-sequence presets present a directory deliverable
+and cannot manufacture media-file fields. Built-in preset selection replaces
+the complete editable draft and rewrites only an output suffix that still
+follows the previous built-in artifact.
+
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
 Color-space selectors expose Rec.601 PAL and Rec.601 NTSC as distinct encoded

@@ -313,6 +313,19 @@ pub struct OwnedPublicationFile {
     retain_source_on_failure: bool,
 }
 
+/// Identity-bound populated directory staged beside one immutable target.
+///
+/// Callers may create files only below [`Self::path`], then publish the whole
+/// validated tree with create-new namespace semantics. The target name never
+/// exposes a partial tree.
+pub struct OwnedPublicationDirectory {
+    path: PathBuf,
+    target: PathBuf,
+    identity: ObjectIdentity,
+    owns_path: bool,
+    retain_source_on_failure: bool,
+}
+
 /// Identity-bound reservation temporarily released to an external writer.
 ///
 /// The writer receives only the unique path. Reclaiming reopens that path
@@ -537,6 +550,274 @@ impl Drop for OwnedPublicationFile {
         }
         self.cleanup_if_still_owned();
     }
+}
+
+impl OwnedPublicationDirectory {
+    /// Create a unique direct sibling staging directory for `target`.
+    pub fn create_sibling(target: &Path, purpose: &str) -> anyhow::Result<Self> {
+        let target = absolute_publication_target(target)?;
+        validate_existing_parent(&target)?;
+        for _ in 0..16 {
+            let path = temporary_sibling_path(&target, purpose);
+            match fs::create_dir(&path) {
+                Ok(()) => {
+                    let identity = identity_for_path(&path, ObjectKind::Directory)?;
+                    return Ok(Self {
+                        path,
+                        target,
+                        identity,
+                        owns_path: true,
+                        retain_source_on_failure: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        anyhow::bail!(
+            "failed to allocate a unique sibling temporary directory for {}",
+            target.display()
+        )
+    }
+
+    /// Absolute staging directory path.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Preserve the validated staging tree after a pre-namespace failure.
+    pub fn preserve_source_on_before_namespace_failure(mut self) -> Self {
+        self.retain_source_on_failure = true;
+        self
+    }
+
+    /// Durably publish the complete tree without replacing an existing target.
+    pub fn publish_create_new(
+        mut self,
+    ) -> Result<DirectoryPublicationEvidence, DirectoryPublicationFailure> {
+        self.revalidate_namespace().map_err(|error| {
+            DirectoryPublicationFailure::BeforeNamespace(
+                error.context("failed to revalidate populated-directory staging identity"),
+            )
+        })?;
+        validate_absent_target(&self.target)?;
+        sync_directory_tree(&self.path).map_err(|error| match error {
+            DirectoryPublicationFailure::BeforeNamespace(error) => {
+                DirectoryPublicationFailure::BeforeNamespace(
+                    error.context("failed to synchronize populated-directory staging tree"),
+                )
+            }
+            other => other,
+        })?;
+        let operation_error = publish_directory_create_new(&self.path, &self.target).err();
+        let source_state = identity_for_path(&self.path, ObjectKind::Directory);
+        let target_state = identity_for_path(&self.target, ObjectKind::Directory);
+        let source_absent = source_state
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<std::io::Error>())
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        if target_state.as_ref().ok() == Some(&self.identity) && source_absent {
+            self.owns_path = false;
+            return match sync_parent_directory(&self.target) {
+                Ok(()) if operation_error.is_none() => {
+                    Ok(DirectoryPublicationEvidence { path: self.target.clone() })
+                }
+                Ok(()) => Err(DirectoryPublicationFailure::DurabilityUnconfirmed {
+                    path: self.target.clone(),
+                    source: operation_error.unwrap_or_else(|| {
+                        std::io::Error::other("directory publication reported an unknown failure")
+                    }),
+                }),
+                Err(source) => Err(DirectoryPublicationFailure::DurabilityUnconfirmed {
+                    path: self.target.clone(),
+                    source,
+                }),
+            };
+        }
+        if let Some(error) = operation_error
+            && source_state.as_ref().ok() == Some(&self.identity)
+            && target_state.as_ref().ok() != Some(&self.identity)
+        {
+            return Err(DirectoryPublicationFailure::BeforeNamespace(error.into()));
+        }
+        self.owns_path = false;
+        Err(DirectoryPublicationFailure::NamespaceIndeterminate {
+            intended_path: self.target.clone(),
+            retained_staging_path: (source_state.as_ref().ok() == Some(&self.identity))
+                .then(|| self.path.clone()),
+            source: std::io::Error::other(format!(
+                "directory publication postcondition mismatch; source={source_state:?}, target={target_state:?}"
+            )),
+        })
+    }
+
+    fn revalidate_namespace(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            identity_for_path(&self.path, ObjectKind::Directory)? == self.identity,
+            "publication staging path no longer names its owned directory: {}",
+            self.path.display()
+        );
+        Ok(())
+    }
+
+    fn cleanup_if_still_owned(&mut self) {
+        if !self.owns_path
+            || identity_for_path(&self.path, ObjectKind::Directory).ok() != Some(self.identity)
+        {
+            return;
+        }
+        if fs::remove_dir_all(&self.path).is_ok() {
+            self.owns_path = false;
+        }
+    }
+}
+
+impl Drop for OwnedPublicationDirectory {
+    fn drop(&mut self) {
+        if !self.retain_source_on_failure {
+            self.cleanup_if_still_owned();
+        }
+    }
+}
+
+fn validate_absent_target(target: &Path) -> Result<(), DirectoryPublicationFailure> {
+    match fs::symlink_metadata(target) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(DirectoryPublicationFailure::BeforeNamespace(error.into())),
+        Ok(_) => Err(DirectoryPublicationFailure::BeforeNamespace(
+            std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!(
+                    "directory publication target already exists: {}",
+                    target.display()
+                ),
+            )
+            .into(),
+        )),
+    }
+}
+
+fn sync_directory_tree(directory: &Path) -> Result<(), DirectoryPublicationFailure> {
+    let entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            return Err(DirectoryPublicationFailure::BeforeNamespace(
+                anyhow::anyhow!(
+                    "publication directory contains a symbolic link: {}",
+                    path.display()
+                ),
+            ));
+        }
+        if file_type.is_dir() {
+            sync_directory_tree(&path)?;
+        } else if file_type.is_file() {
+            sync_publication_file(&path)?;
+        } else {
+            return Err(DirectoryPublicationFailure::BeforeNamespace(
+                anyhow::anyhow!(
+                    "publication directory contains an unsupported object: {}",
+                    path.display()
+                ),
+            ));
+        }
+    }
+    sync_publication_staging_directory(directory)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn sync_publication_file(path: &Path) -> std::io::Result<()> {
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_SHARE_DELETE: u32 = 0x0000_0004;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(path)?;
+    file.sync_all()
+}
+
+#[cfg(not(windows))]
+fn sync_publication_file(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
+}
+
+#[cfg(unix)]
+fn sync_publication_staging_directory(directory: &Path) -> std::io::Result<()> {
+    sync_directory(directory)
+}
+
+#[cfg(not(unix))]
+fn sync_publication_staging_directory(_directory: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn publish_directory_create_new(source: &Path, target: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
+    let source = windows_extended_path_wide(source)?;
+    let target = windows_extended_path_wide(target)?;
+    for attempt in 0..=50 {
+        // SAFETY: both buffers are live and NUL-terminated for the call.
+        if unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) } != 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if attempt == 50 || !matches!(error.raw_os_error(), Some(5 | 32)) {
+            return Err(error);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    Err(std::io::Error::other(
+        "directory publication retry loop exhausted",
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn publish_directory_create_new(source: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let source = std::ffi::CString::new(source.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "source path contains NUL")
+    })?;
+    let target = std::ffi::CString::new(target.as_os_str().as_bytes()).map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "target path contains NUL")
+    })?;
+    // SAFETY: both C strings are live and NUL-terminated for the syscall.
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            libc::AT_FDCWD,
+            source.as_ptr(),
+            libc::AT_FDCWD,
+            target.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn publish_directory_create_new(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic create-new populated-directory publication is unsupported on this Unix platform",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn publish_directory_create_new(_source: &Path, _target: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "atomic populated-directory publication is unsupported on this platform",
+    ))
 }
 
 impl ExternalPublicationReservation {
@@ -1564,6 +1845,51 @@ mod tests {
         let evidence = staging.publish(FilePublicationMode::ReplaceExisting).expect("replace");
         assert_eq!(evidence.published_path(), target);
         assert_eq!(fs::read(&target).expect("target"), b"new");
+    }
+
+    #[cfg(any(windows, target_os = "linux", target_os = "android"))]
+    #[test]
+    fn populated_directory_is_published_as_one_create_new_namespace() {
+        let root = unique_root("populated-directory-publish");
+        let target = root.join("frames");
+        let staging =
+            OwnedPublicationDirectory::create_sibling(&target, "sequence").expect("staging");
+        fs::write(staging.path().join("frame-000001.png"), b"frame-one").expect("write frame");
+        fs::write(staging.path().join("manifest.json"), b"{}").expect("write manifest");
+
+        let evidence = staging.publish_create_new().expect("publish directory");
+
+        assert_eq!(evidence.path(), target);
+        assert_eq!(
+            fs::read(target.join("frame-000001.png")).expect("published frame"),
+            b"frame-one"
+        );
+        assert_eq!(
+            fs::read(target.join("manifest.json")).expect("published manifest"),
+            b"{}"
+        );
+    }
+
+    #[test]
+    fn populated_directory_collision_preserves_existing_target() {
+        let root = unique_root("populated-directory-collision");
+        let target = root.join("frames");
+        fs::create_dir(&target).expect("foreign target");
+        fs::write(target.join("foreign.txt"), b"foreign").expect("foreign bytes");
+        let staging =
+            OwnedPublicationDirectory::create_sibling(&target, "sequence").expect("staging");
+        fs::write(staging.path().join("frame-000001.png"), b"owned").expect("owned frame");
+
+        let error = staging.publish_create_new().expect_err("collision");
+
+        assert!(matches!(
+            error,
+            DirectoryPublicationFailure::BeforeNamespace(_)
+        ));
+        assert_eq!(
+            fs::read(target.join("foreign.txt")).expect("foreign survives"),
+            b"foreign"
+        );
     }
 
     #[test]

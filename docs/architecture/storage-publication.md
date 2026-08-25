@@ -51,6 +51,17 @@ owner manifest before payload admission, and recovery children exist only
 under a live Project Runtime Lease. The shared primitive never adopts an
 arbitrary external directory as owned state.
 
+`OwnedPublicationDirectory` is the populated-tree counterpart to
+`OwnedPublicationFile`. It allocates and records one unique sibling directory,
+allows a domain to populate and validate only below that identity-bound root,
+recursively rejects symbolic links and unsupported objects, synchronizes every
+regular file and directory, and then publishes the complete tree with
+create-new semantics. The final route is absent until one namespace operation
+makes the complete tree visible. Recursive replacement is deliberately not a
+Storage primitive: a caller that needs version replacement must publish a new
+immutable generation and switch a small manifest/pointer through the atomic-file
+Seam.
+
 `ensure_durable_directory_chain` accepts one caller-selected, already-existing
 absolute anchor and one strict absolute descendant. It publishes each missing
 suffix node through the same direct-child seam. It never walks or flushes

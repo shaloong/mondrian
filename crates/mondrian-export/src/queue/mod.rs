@@ -1,6 +1,11 @@
 //! 后台渲染队列
 
-use crate::delivery::{ffmpeg_audio_channel_layout, ResolvedExportDeliveryContract};
+use crate::delivery::{
+    ffmpeg_audio_channel_layout, ResolvedExportArtifactEncoding, ResolvedExportDeliveryContract,
+};
+use crate::image_sequence::{
+    ffmpeg_frame_pattern, validate_and_write_manifest, ImageSequenceValidationContract,
+};
 #[cfg(test)]
 use crate::preset::TimelineExportRange;
 use crate::preset::{
@@ -72,7 +77,8 @@ use mondrian_renderer::{
 #[cfg(test)]
 use mondrian_renderer::{PreparedVisualProgramCache, PreparedVisualProgramCacheConfig};
 use mondrian_storage::{
-    FilePublicationEvidence, FilePublicationFailure, FilePublicationMode, OwnedPublicationFile,
+    DirectoryPublicationEvidence, DirectoryPublicationFailure, FilePublicationEvidence,
+    FilePublicationFailure, FilePublicationMode, OwnedPublicationDirectory, OwnedPublicationFile,
 };
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, InputColorResolutionSourceCounts, ProgramColorContext, ResolvedInputColor,
@@ -1746,6 +1752,10 @@ impl DurableExportPublication {
         }
     }
 
+    fn from_directory_storage(evidence: DirectoryPublicationEvidence) -> Self {
+        Self { output_path: evidence.path().to_path_buf() }
+    }
+
     #[cfg(test)]
     fn synthetic(output_path: &Path) -> Self {
         Self {
@@ -1803,6 +1813,37 @@ impl ExportPublicationFailure {
             },
         }
     }
+
+    fn from_directory_storage(
+        failure: DirectoryPublicationFailure,
+        output_path: &Path,
+        retained_partial_path: Option<PathBuf>,
+    ) -> Self {
+        match failure {
+            DirectoryPublicationFailure::BeforeNamespace(error) => Self::BeforeNamespace {
+                output_path: output_path.to_path_buf(),
+                retained_partial_path,
+                detail: format!("{error:#}"),
+            },
+            DirectoryPublicationFailure::DurabilityUnconfirmed { path, source } => {
+                Self::DurabilityUnconfirmed { output_path: path, detail: source.to_string() }
+            }
+            DirectoryPublicationFailure::NamespaceIndeterminate {
+                intended_path,
+                retained_staging_path,
+                source,
+            } => Self::NamespaceIndeterminate {
+                output_path: intended_path,
+                retained_partial_path: retained_staging_path.or(retained_partial_path),
+                detail: source.to_string(),
+            },
+        }
+    }
+}
+
+enum ProducedArtifactValidation {
+    MediaFile(Box<ExportValidationExpectations>),
+    ImageSequence(ImageSequenceValidationContract),
 }
 
 #[derive(Debug)]
@@ -1858,6 +1899,16 @@ impl ExportExecutor for FfmpegExportExecutor {
         report(ExportProgress::preparing(0.01));
 
         let final_output = job.config.output_path.as_path();
+        if job.config.preset.image_sequence_format().is_some() {
+            return execute_image_sequence_export(
+                job,
+                final_output,
+                cancel,
+                execution_gate,
+                report,
+                report_diagnostics,
+            );
+        }
         let staging = match OwnedPublicationFile::create_sibling(
             final_output,
             &format!("export-{}", job.id()),
@@ -1872,12 +1923,12 @@ impl ExportExecutor for FfmpegExportExecutor {
         };
         let partial_output = staging.path().to_path_buf();
         let reservation = staging.release_for_external_writer();
-        let mut validation_expectations = None;
+        let mut validation_contract = None;
         let outcome = execute_timeline_export(
             job,
             &job.config.timeline,
             partial_output.as_path(),
-            &mut validation_expectations,
+            &mut validation_contract,
             cancel,
             execution_gate,
             report,
@@ -1898,9 +1949,12 @@ impl ExportExecutor for FfmpegExportExecutor {
                 ));
             }
         };
-        let Some(validation_expectations) = validation_expectations else {
+        let Some(ProducedArtifactValidation::MediaFile(validation_expectations)) =
+            validation_contract
+        else {
             return JobExecutionResult::Failed(
-                "encoded export completed without a validation contract".to_owned(),
+                "encoded media export completed without its media-file validation contract"
+                    .to_owned(),
             );
         };
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
@@ -1924,6 +1978,90 @@ impl ExportExecutor for FfmpegExportExecutor {
         match finalize_export_output(staging, final_output, job.config.output_policy) {
             Ok(evidence) => JobExecutionResult::Published(evidence),
             Err(failure) => JobExecutionResult::PublicationFailed(failure),
+        }
+    }
+}
+
+fn execute_image_sequence_export(
+    job: &RenderJob,
+    final_output: &Path,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+) -> JobExecutionResult {
+    if job.config.output_policy != ExportOutputPolicy::CreateNew {
+        return JobExecutionResult::Failed(
+            "图像序列当前仅支持 CreateNew 发布；不会递归替换已有目录".to_owned(),
+        );
+    }
+    let staging = match OwnedPublicationDirectory::create_sibling(
+        final_output,
+        &format!("export-{}", job.id()),
+    ) {
+        Ok(staging) => staging,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "failed to reserve an exact sibling image-sequence directory for {}: {error:#}",
+                final_output.display()
+            ));
+        }
+    };
+    let partial_output = staging.path().to_path_buf();
+    let Some(format) = job.config.preset.image_sequence_format() else {
+        return JobExecutionResult::Failed(
+            "image-sequence execution selected a non-sequence preset".to_owned(),
+        );
+    };
+    let output_pattern = ffmpeg_frame_pattern(staging.path(), format);
+    let mut validation_contract = None;
+    let outcome = execute_timeline_export(
+        job,
+        &job.config.timeline,
+        &output_pattern,
+        &mut validation_contract,
+        cancel,
+        execution_gate,
+        report,
+        report_diagnostics,
+    );
+    if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
+        return outcome;
+    }
+    let Some(ProducedArtifactValidation::ImageSequence(validation_contract)) = validation_contract
+    else {
+        return JobExecutionResult::Failed(
+            "image-sequence export completed without its validation contract".to_owned(),
+        );
+    };
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::validating(0.99));
+    if let Err(error) = validate_and_write_manifest(staging.path(), validation_contract, cancel) {
+        return if cancel.is_canceled() {
+            JobExecutionResult::Cancelled
+        } else {
+            JobExecutionResult::Failed(format!("图像序列校验失败: {error}"))
+        };
+    }
+    if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+        return JobExecutionResult::Failed(reason);
+    }
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::publishing(0.995));
+    match staging.preserve_source_on_before_namespace_failure().publish_create_new() {
+        Ok(evidence) => JobExecutionResult::Published(
+            DurableExportPublication::from_directory_storage(evidence),
+        ),
+        Err(failure) => {
+            JobExecutionResult::PublicationFailed(ExportPublicationFailure::from_directory_storage(
+                failure,
+                final_output,
+                Some(partial_output),
+            ))
         }
     }
 }
@@ -1998,7 +2136,7 @@ fn execute_timeline_export(
     job: &RenderJob,
     timeline: &TimelineExportSnapshot,
     output_path: &Path,
-    validation_expectations_out: &mut Option<ExportValidationExpectations>,
+    validation_contract_out: &mut Option<ProducedArtifactValidation>,
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
@@ -2069,8 +2207,18 @@ fn execute_timeline_export(
             return JobExecutionResult::Failed(error);
         }
 
-        let audio_input =
-            prepare_timeline_audio_input(job, timeline, range, cancel, execution_gate, report);
+        let audio_codec = match &delivery.artifact {
+            ResolvedExportArtifactEncoding::MediaFile { audio, .. } => audio,
+            ResolvedExportArtifactEncoding::ImageSequence { .. } => &AudioCodecConfig::Disabled,
+        };
+        let audio_input = prepare_timeline_audio_input(
+            audio_codec,
+            timeline,
+            range,
+            cancel,
+            execution_gate,
+            report,
+        );
         let audio_input = match audio_input {
             Ok(input) => input,
             Err(outcome) => return outcome,
@@ -2085,42 +2233,54 @@ fn execute_timeline_export(
                 Ok(signal) => signal,
                 Err(error) => return JobExecutionResult::Failed(error),
             };
-        let expected_audio = match &audio_input {
-            TimelineAudioInput::Disabled => None,
-            TimelineAudioInput::PcmFile { sample_rate, channel_layout, .. }
-            | TimelineAudioInput::Silent { sample_rate, channel_layout } => {
-                match expected_audio_constraints(
-                    &job.config.preset.audio,
-                    *sample_rate,
-                    *channel_layout,
-                ) {
-                    Some(expected) => Some(expected),
-                    None => {
-                        return JobExecutionResult::Failed(
-                            "已启用的音频输出没有可证明的编码合同".to_string(),
-                        );
+        let validation_contract = match &delivery.artifact {
+            ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
+                let expected_audio = match &audio_input {
+                    TimelineAudioInput::Disabled => None,
+                    TimelineAudioInput::PcmFile { sample_rate, channel_layout, .. }
+                    | TimelineAudioInput::Silent { sample_rate, channel_layout } => {
+                        match expected_audio_constraints(audio, *sample_rate, *channel_layout) {
+                            Some(expected) => Some(expected),
+                            None => {
+                                return JobExecutionResult::Failed(
+                                    "已启用的音频输出没有可证明的编码合同".to_string(),
+                                );
+                            }
+                        }
                     }
-                }
+                };
+                ProducedArtifactValidation::MediaFile(Box::new(ExportValidationExpectations {
+                    container: *container,
+                    video: ExpectedStream::Required(ExpectedVideoConstraints {
+                        encoding: Some(expected_video_encoding(video)),
+                        bit_depth: Some(delivery_bit_depth_value(delivery.bit_depth)),
+                        width: Some(width),
+                        height: Some(height),
+                        fps_num: Some(range.fps_num),
+                        fps_den: Some(range.fps_den),
+                        signal: Some(expected_video_signal),
+                        coding: Some(delivery.video_coding),
+                    }),
+                    audio: expected_audio
+                        .map(ExpectedStream::Required)
+                        .unwrap_or(ExpectedStream::Forbidden),
+                    expected_duration_secs: Some(
+                        range.total_frames as f64 * range.fps_den as f64
+                            / range.fps_num.max(1) as f64,
+                    ),
+                }))
             }
-        };
-        let validation_expectations = ExportValidationExpectations {
-            container: job.config.preset.container,
-            video: ExpectedStream::Required(ExpectedVideoConstraints {
-                encoding: Some(expected_video_encoding(&job.config.preset.video)),
-                bit_depth: Some(delivery_bit_depth_value(delivery.bit_depth)),
-                width: Some(width),
-                height: Some(height),
-                fps_num: Some(range.fps_num),
-                fps_den: Some(range.fps_den),
-                signal: Some(expected_video_signal),
-                coding: Some(delivery.video_coding),
-            }),
-            audio: expected_audio
-                .map(ExpectedStream::Required)
-                .unwrap_or(ExpectedStream::Forbidden),
-            expected_duration_secs: Some(
-                range.total_frames as f64 * range.fps_den as f64 / range.fps_num.max(1) as f64,
-            ),
+            ResolvedExportArtifactEncoding::ImageSequence { format } => {
+                ProducedArtifactValidation::ImageSequence(ImageSequenceValidationContract {
+                    format: *format,
+                    frame_count: range.total_frames,
+                    width,
+                    height,
+                    frame_rate: delivery.frame_rate,
+                    color_space: delivery.color_target.color_space,
+                    alpha_mode: job.config.preset.alpha_mode,
+                })
+            }
         };
         let mut cmd = mondrian_media::ffmpeg_command();
         let frame_contract = export_frame_contract(delivery.bit_depth);
@@ -2186,22 +2346,40 @@ fn execute_timeline_export(
             }
         }
 
-        apply_video_codec_args(&mut cmd, &job.config.preset.video, delivery.video_coding);
-        apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
-        if let Err(err) = apply_encoder_signal_params(
-            &mut cmd,
-            &job.config.preset.video,
-            &timeline.sequence.settings,
-            &delivery,
-        ) {
-            return JobExecutionResult::Failed(err);
+        match &delivery.artifact {
+            ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
+                apply_video_codec_args(&mut cmd, video, delivery.video_coding);
+                apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
+                if let Err(err) = apply_encoder_signal_params(
+                    &mut cmd,
+                    video,
+                    &timeline.sequence.settings,
+                    &delivery,
+                ) {
+                    return JobExecutionResult::Failed(err);
+                }
+                if !matches!(&audio_input, TimelineAudioInput::Disabled) {
+                    apply_audio_codec_args(&mut cmd, audio);
+                }
+                cmd.arg("-f").arg(container_format(container)).arg(output_path);
+            }
+            ResolvedExportArtifactEncoding::ImageSequence {
+                format: crate::preset::ImageSequenceFormat::Png8,
+            } => {
+                apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
+                cmd.arg("-c:v")
+                    .arg("png")
+                    .arg("-compression_level")
+                    .arg("6")
+                    .arg("-start_number")
+                    .arg("0")
+                    .arg("-frames:v")
+                    .arg(range.total_frames.to_string())
+                    .arg("-f")
+                    .arg("image2")
+                    .arg(output_path);
+            }
         }
-        if !matches!(&audio_input, TimelineAudioInput::Disabled) {
-            apply_audio_codec_args(&mut cmd, &job.config.preset.audio);
-        }
-        cmd.arg("-f")
-            .arg(container_format(&job.config.preset.container))
-            .arg(output_path);
 
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return JobExecutionResult::Cancelled;
@@ -2257,7 +2435,7 @@ fn execute_timeline_export(
         report(ExportProgress::encoding(0.98));
         match child.finish(cancel) {
             Ok(output) if output.status.success() => {
-                *validation_expectations_out = Some(validation_expectations);
+                *validation_contract_out = Some(validation_contract);
                 JobExecutionResult::ReversibleWorkCompleted
             }
             Ok(output) => {
@@ -2338,7 +2516,7 @@ fn finalize_export_output(
 }
 
 fn prepare_timeline_audio_input(
-    job: &RenderJob,
+    audio_codec: &AudioCodecConfig,
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     cancel: &ExecutionCancellationToken,
@@ -2348,7 +2526,7 @@ fn prepare_timeline_audio_input(
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
         return Err(JobExecutionResult::Cancelled);
     }
-    if matches!(job.config.preset.audio, AudioCodecConfig::Disabled) {
+    if matches!(audio_codec, AudioCodecConfig::Disabled) {
         return Ok(TimelineAudioInput::Disabled);
     }
 
@@ -6348,6 +6526,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ffmpeg_executor_publishes_png_sequence_only_after_manifest_validation() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping PNG sequence integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary export parent");
+        let output = directory.path().join("sequence.pngseq");
+        let mut config = dummy_config(&output.to_string_lossy());
+        config.preset = crate::preset::ExportPreset::png_sequence();
+        config.preset.resolution = Some(crate::preset::Resolution { width: 16, height: 16 });
+        refresh_test_execution_snapshot(&mut config.timeline, false);
+        let job = RenderJob::new(config);
+        let result = FfmpegExportExecutor.execute(
+            &job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |_| {},
+        );
+
+        assert!(matches!(result, JobExecutionResult::Published(_)));
+        assert!(output.join(crate::image_sequence::MANIFEST_FILE_NAME).is_file());
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(output.join(crate::image_sequence::MANIFEST_FILE_NAME))
+                .expect("read published manifest"),
+        )
+        .expect("parse published manifest");
+        assert_eq!(manifest["frame_count"], 1);
+        assert!(output
+            .join(crate::image_sequence::frame_file_name(
+                0,
+                crate::preset::ImageSequenceFormat::Png8,
+            ))
+            .is_file());
+    }
+
     fn test_delivery_contract(
         bit_depth: DeliveryBitDepth,
         video_range: VideoRange,
@@ -6355,6 +6570,14 @@ mod tests {
         pixel_format: &'static str,
     ) -> ResolvedExportDeliveryContract {
         ResolvedExportDeliveryContract {
+            artifact: ResolvedExportArtifactEncoding::MediaFile {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: crate::preset::H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(18),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            },
             resolution: crate::preset::Resolution { width: 1_920, height: 1_080 },
             frame_rate: Rational::FPS_25,
             frame_sampling: crate::preset::ExportFrameSampling::FrameHold,
@@ -8561,10 +8784,10 @@ mod tests {
     fn export_color_validation_binds_prores_profile_to_real_sample_depth() {
         let timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         let mut config = dummy_config("prores.mov");
-        config.preset.container = Container::Mov;
-
-        config.preset.video = VideoCodecConfig::ProRes { profile: ProResProfile::Hq };
-        config.preset.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
+        let media = config.preset.media_file_mut().expect("media preset");
+        media.container = Container::Mov;
+        media.video = VideoCodecConfig::ProRes { profile: ProResProfile::Hq };
+        media.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
         config.preset.video_signal = ExportVideoSignal {
             bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Twelve),
             range: ExportParameter::Explicit(VideoRange::Full),
@@ -8574,7 +8797,7 @@ mod tests {
             .expect_err("ProRes HQ is a 10-bit profile");
         assert!(err.contains("profile"));
 
-        config.preset.video =
+        config.preset.media_file_mut().expect("media preset").video =
             VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq };
         config.preset.video_signal = ExportVideoSignal {
             bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
@@ -8674,8 +8897,9 @@ mod tests {
             ),
         ] {
             let mut config = dummy_config("hdr-unsupported-metadata.mov");
-            config.preset.container = container;
-            config.preset.video_coding = match codec {
+            let media = config.preset.media_file_mut().expect("media preset");
+            media.container = container;
+            media.video_coding = match codec {
                 VideoCodecConfig::Av1 { .. } => {
                     crate::video_encoding::VideoCodingStructure::av1_delivery()
                 }
@@ -8684,7 +8908,7 @@ mod tests {
                 }
                 _ => unreachable!("test matrix contains only AV1 and ProRes"),
             };
-            config.preset.video = codec;
+            media.video = codec;
             config.preset.video_signal = ExportVideoSignal {
                 bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
                 range: ExportParameter::Explicit(VideoRange::Legal),
@@ -8818,10 +9042,11 @@ mod tests {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
         timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         let mut config = dummy_config("untagged.gif");
-        config.preset.container = Container::Gif;
-        config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
-        config.preset.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
-        config.preset.audio = AudioCodecConfig::Disabled;
+        let media = config.preset.media_file_mut().expect("media preset");
+        media.container = Container::Gif;
+        media.video = VideoCodecConfig::Gif { colors: 256, dither: true };
+        media.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
+        media.audio = AudioCodecConfig::Disabled;
         config.preset.video_signal = ExportVideoSignal {
             bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Eight),
             range: ExportParameter::Explicit(VideoRange::Full),

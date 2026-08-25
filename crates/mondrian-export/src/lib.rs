@@ -4,6 +4,7 @@
 
 pub mod capture;
 pub mod delivery;
+mod image_sequence;
 pub mod preset;
 pub mod queue;
 pub mod validator;

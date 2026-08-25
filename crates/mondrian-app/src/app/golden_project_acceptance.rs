@@ -455,7 +455,10 @@ fn assert_export_contract(
         .context("resolve expected encoded video signal")?;
     let expected = &export.expected_delivery;
 
-    let container = match preset.container {
+    let media = preset
+        .media_file()
+        .context("golden acceptance currently requires a media-file preset")?;
+    let container = match media.container {
         Container::Mp4 => "mp4",
         Container::Mov => "mov",
         Container::Mkv => "mkv",
@@ -463,7 +466,7 @@ fn assert_export_contract(
         Container::Mxf => "mxf",
         Container::Webm => "webm",
     };
-    let (video_codec, video_profile) = match preset.video {
+    let (video_codec, video_profile) = match media.video {
         VideoCodecConfig::H264 { profile: H264Profile::High, .. } => ("h264", "high"),
         VideoCodecConfig::Hevc { profile: HevcProfile::Main, .. } => ("hevc", "main"),
         VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. } => ("hevc", "main10"),
@@ -490,7 +493,7 @@ fn assert_export_contract(
         ExportAlphaMode::FlattenBlack => "flatten_black",
         ExportAlphaMode::Preserve => "preserve",
     };
-    let (audio_codec, audio_bitrate_kbps) = match preset.audio {
+    let (audio_codec, audio_bitrate_kbps) = match media.audio {
         AudioCodecConfig::Aac { bitrate_kbps } => ("aac", bitrate_kbps),
         AudioCodecConfig::Mp3 { bitrate_kbps } => ("mp3", bitrate_kbps),
         AudioCodecConfig::Pcm { .. } => ("pcm", 0),

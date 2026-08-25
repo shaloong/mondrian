@@ -6,9 +6,9 @@
 //! Timeline Export Snapshot before admitting work.
 
 use crate::preset::{
-    AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportChromaSampling,
-    ExportColorTarget, ExportFrameSampling, ExportPreset, HevcProfile, ProResProfile, Resolution,
-    VideoCodecConfig, VideoRateControl,
+    AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportArtifactEncoding,
+    ExportChromaSampling, ExportColorTarget, ExportFrameSampling, ExportPreset, HevcProfile,
+    ImageSequenceFormat, ProResProfile, Resolution, VideoCodecConfig, VideoRateControl,
 };
 use mondrian_core::{
     AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
@@ -80,9 +80,30 @@ pub struct ResolvedExportColorTarget {
     pub output_transform: OutputTransformIntent,
 }
 
+/// Concrete physical artifact admitted for one export execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedExportArtifactEncoding {
+    /// One encoded and muxed media file.
+    MediaFile {
+        /// Exact mux/container family.
+        container: Container,
+        /// Exact video encoder contract.
+        video: VideoCodecConfig,
+        /// Exact audio encoder contract.
+        audio: AudioCodecConfig,
+    },
+    /// One atomically published directory of numbered still frames.
+    ImageSequence {
+        /// Exact still-image representation for every frame.
+        format: ImageSequenceFormat,
+    },
+}
+
 /// Fully explicit export target admitted before rendering begins.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedExportDeliveryContract {
+    /// Exact physical artifact family consumed by execution.
+    pub artifact: ResolvedExportArtifactEncoding,
     /// Exact encoded raster size; execution must not normalize it.
     pub resolution: Resolution,
     /// Exact constant encoded frame rate.
@@ -121,10 +142,22 @@ pub fn resolve_export_delivery(
             format!("Sequence Program Output 无效: {error}"),
         )
     })?;
-    validate_rate_control(&preset.video)?;
-    validate_audio_parameters(&preset.audio)?;
-    validate_audio_layout(&preset.audio, settings.audio_channel_layout)?;
-    validate_container(&preset.container, &preset.video, &preset.audio)?;
+    let artifact = match &preset.artifact {
+        ExportArtifactEncoding::MediaFile(media) => {
+            validate_rate_control(&media.video)?;
+            validate_audio_parameters(&media.audio)?;
+            validate_audio_layout(&media.audio, settings.audio_channel_layout)?;
+            validate_container(&media.container, &media.video, &media.audio)?;
+            ResolvedExportArtifactEncoding::MediaFile {
+                container: media.container,
+                video: media.video.clone(),
+                audio: media.audio.clone(),
+            }
+        }
+        ExportArtifactEncoding::ImageSequence { format } => {
+            ResolvedExportArtifactEncoding::ImageSequence { format: *format }
+        }
+    };
 
     let bit_depth = preset.video_signal.bit_depth.resolve(settings.delivery.bit_depth);
     let video_range = preset.video_signal.range.resolve(settings.delivery.video_range);
@@ -140,18 +173,34 @@ pub fn resolve_export_delivery(
             format!("不支持的恒定导出帧率: {frame_rate}"),
         ));
     }
-    let video_coding = crate::video_encoding::resolve_video_coding_structure(
-        &preset.video,
-        preset.video_coding,
-        frame_rate,
-    )
-    .map_err(|detail| {
-        ExportDeliveryError::new(ExportDeliveryIssueCode::InvalidCodecParameter, detail)
-    })?;
+    let video_coding = match &preset.artifact {
+        ExportArtifactEncoding::MediaFile(media) => {
+            crate::video_encoding::resolve_video_coding_structure(
+                &media.video,
+                media.video_coding,
+                frame_rate,
+            )
+            .map_err(|detail| {
+                ExportDeliveryError::new(ExportDeliveryIssueCode::InvalidCodecParameter, detail)
+            })?
+        }
+        ExportArtifactEncoding::ImageSequence { .. } => {
+            crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
+        }
+    };
 
     validate_alpha(preset)?;
-    let pixel_format =
-        resolve_pixel_format(&preset.video, preset.alpha_mode, bit_depth, chroma_sampling)?;
+    let pixel_format = match &preset.artifact {
+        ExportArtifactEncoding::MediaFile(media) => {
+            resolve_pixel_format(&media.video, preset.alpha_mode, bit_depth, chroma_sampling)?
+        }
+        ExportArtifactEncoding::ImageSequence { format } => resolve_image_sequence_pixel_format(
+            *format,
+            preset.alpha_mode,
+            bit_depth,
+            chroma_sampling,
+        )?,
+    };
     validate_dimensions(resolution, chroma_sampling)?;
     let color_target = resolve_export_color_target(preset, settings, color_environment)?;
     validate_color_output(
@@ -164,6 +213,7 @@ pub fn resolve_export_delivery(
     )?;
 
     Ok(ResolvedExportDeliveryContract {
+        artifact,
         resolution,
         frame_rate,
         frame_sampling: preset.frame_sampling,
@@ -495,6 +545,32 @@ fn resolve_pixel_format(
     Ok(pixel_format)
 }
 
+fn resolve_image_sequence_pixel_format(
+    format: ImageSequenceFormat,
+    alpha_mode: ExportAlphaMode,
+    bit_depth: DeliveryBitDepth,
+    chroma: ExportChromaSampling,
+) -> Result<&'static str, ExportDeliveryError> {
+    match (format, alpha_mode, bit_depth, chroma) {
+        (
+            ImageSequenceFormat::Png8,
+            ExportAlphaMode::Preserve,
+            DeliveryBitDepth::Eight,
+            ExportChromaSampling::Rgb,
+        ) => Ok("rgba"),
+        (
+            ImageSequenceFormat::Png8,
+            ExportAlphaMode::FlattenBlack,
+            DeliveryBitDepth::Eight,
+            ExportChromaSampling::Rgb,
+        ) => Ok("rgb24"),
+        _ => Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleVideoSignal,
+            "PNG 图像序列仅支持 8-bit Full RGB，可选择保留或压平 Alpha",
+        )),
+    }
+}
+
 fn validate_dimensions(
     resolution: Resolution,
     chroma: ExportChromaSampling,
@@ -535,15 +611,19 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
     if preset.alpha_mode == ExportAlphaMode::FlattenBlack {
         return Ok(());
     }
-    if matches!(
-        (&preset.container, &preset.video),
-        (Container::Mov, VideoCodecConfig::ProRes { profile }) if profile.is_4444()
-    ) {
+    let supported = match &preset.artifact {
+        ExportArtifactEncoding::MediaFile(media) => matches!(
+            (&media.container, &media.video),
+            (Container::Mov, VideoCodecConfig::ProRes { profile }) if profile.is_4444()
+        ),
+        ExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 } => true,
+    };
+    if supported {
         return Ok(());
     }
     Err(ExportDeliveryError::new(
         ExportDeliveryIssueCode::UnsupportedAlpha,
-        "保留 Alpha 当前仅支持 MOV + ProRes 4444/4444 XQ",
+        "保留 Alpha 当前仅支持 MOV + ProRes 4444/4444 XQ 或 PNG 图像序列",
     ))
 }
 
@@ -569,11 +649,11 @@ fn validate_color_output(
             ));
         }
         if !matches!(
-            (&preset.container, &preset.video),
-            (
+            preset.media_file().map(|media| (&media.container, &media.video)),
+            Some((
                 Container::Mov | Container::Mxf,
                 VideoCodecConfig::ProRes { .. }
-            )
+            ))
         ) {
             return Err(ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleColorOutput,
@@ -588,13 +668,19 @@ fn validate_color_output(
             "PQ/HLG HDR 输出不能使用 8-bit 编码",
         ));
     }
-    if matches!(preset.video, VideoCodecConfig::H264 { .. }) && output.is_hdr() {
+    if preset
+        .media_file()
+        .is_some_and(|media| matches!(media.video, VideoCodecConfig::H264 { .. }))
+        && output.is_hdr()
+    {
         return Err(ExportDeliveryError::new(
             ExportDeliveryIssueCode::IncompatibleColorOutput,
             "当前 H.264 High 8-bit 合同仅支持 SDR；HDR 请使用 HEVC Main10",
         ));
     }
-    if matches!(preset.video, VideoCodecConfig::Gif { .. })
+    if preset
+        .media_file()
+        .is_some_and(|media| matches!(media.video, VideoCodecConfig::Gif { .. }))
         && (output != ColorSpace::Srgb
             || bit_depth != DeliveryBitDepth::Eight
             || video_range != VideoRange::Full)
@@ -605,6 +691,17 @@ fn validate_color_output(
         ));
     }
 
+    if preset.image_sequence_format().is_some()
+        && (output != ColorSpace::Srgb
+            || bit_depth != DeliveryBitDepth::Eight
+            || video_range != VideoRange::Full)
+    {
+        return Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleColorOutput,
+            "PNG 图像序列当前仅允许显式 sRGB / 8-bit / Full 输出",
+        ));
+    }
+
     if write_static_hdr {
         if !output.is_hdr() {
             return Err(ExportDeliveryError::new(
@@ -612,10 +709,12 @@ fn validate_color_output(
                 "只有 HDR 输出色彩空间可以写入静态 HDR metadata",
             ));
         }
-        if !matches!(
-            preset.video,
-            VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. }
-        ) {
+        if !preset.media_file().is_some_and(|media| {
+            matches!(
+                media.video,
+                VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. }
+            )
+        }) {
             return Err(ExportDeliveryError::new(
                 ExportDeliveryIssueCode::UnsupportedHdrMetadata,
                 "静态 HDR metadata 当前仅由 HEVC Main10/libx265 后端写入",
@@ -671,7 +770,9 @@ fn validate_color_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::preset::{ExportParameter, ExportVideoSignal, H264Profile, VideoRateControl};
+    use crate::preset::{
+        EncodedMediaOutput, ExportParameter, ExportVideoSignal, H264Profile, VideoRateControl,
+    };
 
     #[test]
     fn h264_sdr_preset_resolves_without_using_ten_bit_sequence_default() {
@@ -704,22 +805,45 @@ mod tests {
     }
 
     #[test]
+    fn png_sequence_resolves_to_intra_rgba_without_audio_or_container() {
+        let contract = resolve_export_delivery(
+            &ExportPreset::png_sequence(),
+            &SequenceSettings::default(),
+            &ProjectColorEnvironment::default(),
+        )
+        .expect("typed PNG sequence should resolve");
+
+        assert!(matches!(
+            contract.artifact,
+            ResolvedExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 }
+        ));
+        assert_eq!(contract.pixel_format, "rgba");
+        assert_eq!(
+            contract.video_coding,
+            crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
+        );
+        assert_eq!(contract.color_target.color_space, ColorSpace::Srgb);
+    }
+
+    #[test]
     fn follow_sequence_values_are_resolved_before_execution() {
         let mut settings = SequenceSettings::default();
         settings.delivery.bit_depth = DeliveryBitDepth::Eight;
         settings.delivery.video_range = VideoRange::Full;
         let preset = ExportPreset {
             name: "follow".to_owned(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constant_quality(18),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(18),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+                video_coding: crate::video_encoding::VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: crate::video_encoding::VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: crate::preset::ExportColorTarget::FollowSequence,
@@ -775,7 +899,8 @@ mod tests {
         resolve_export_delivery(&preset, &settings, &environment)
             .expect("AAC admits an explicit 7.1 lowering");
 
-        preset.audio = AudioCodecConfig::Mp3 { bitrate_kbps: 192 };
+        preset.media_file_mut().expect("media preset").audio =
+            AudioCodecConfig::Mp3 { bitrate_kbps: 192 };
         let error = resolve_export_delivery(&preset, &settings, &environment)
             .expect_err("MP3 must not accept 7.1 by channel count");
         assert_eq!(error.code, ExportDeliveryIssueCode::UnsupportedAudioLayout);
@@ -786,7 +911,8 @@ mod tests {
             mondrian_core::AudioChannelPosition::TopCenter,
         ])
         .expect("custom speaker layout");
-        preset.audio = AudioCodecConfig::Aac { bitrate_kbps: 192 };
+        preset.media_file_mut().expect("media preset").audio =
+            AudioCodecConfig::Aac { bitrate_kbps: 192 };
         let error = resolve_export_delivery(&preset, &settings, &environment)
             .expect_err("custom order needs an explicit encoding Adapter");
         assert_eq!(error.code, ExportDeliveryIssueCode::UnsupportedAudioLayout);
@@ -835,7 +961,7 @@ mod tests {
     #[test]
     fn rate_control_requires_a_complete_vbv_pair() {
         let mut preset = ExportPreset::h264_aac_sdr_1080p();
-        preset.video = VideoCodecConfig::H264 {
+        preset.media_file_mut().expect("media preset").video = VideoCodecConfig::H264 {
             profile: H264Profile::High,
             rate_control: VideoRateControl {
                 crf: 18,

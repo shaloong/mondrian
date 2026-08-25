@@ -248,6 +248,40 @@ pub enum AudioCodecConfig {
     Mp3 { bitrate_kbps: u32 },
 }
 
+/// One encoded media-file output contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncodedMediaOutput {
+    /// Mux/container family.
+    pub container: Container,
+    /// Encoded video essence.
+    pub video: VideoCodecConfig,
+    /// Encoded audio essence.
+    pub audio: AudioCodecConfig,
+    /// Codec-family picture structure.
+    pub video_coding: VideoCodingStructure,
+}
+
+/// Still-image representation shared by every frame in an image sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSequenceFormat {
+    /// Lossless 8-bit RGBA PNG.
+    Png8,
+}
+
+/// Physical artifact family produced by one preset.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ExportArtifactEncoding {
+    /// One validated encoded media file.
+    MediaFile(EncodedMediaOutput),
+    /// One validated directory containing numbered frames and a manifest.
+    ImageSequence {
+        /// Exact still-image representation for every frame.
+        format: ImageSequenceFormat,
+    },
+}
+
 /// How timeline coverage is delivered by an export preset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -280,9 +314,8 @@ pub enum ExportColorTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExportPreset {
     pub name: String,
-    pub container: Container,
-    pub video: VideoCodecConfig,
-    pub audio: AudioCodecConfig,
+    /// Physical encoded artifact and its family-specific settings.
+    pub artifact: ExportArtifactEncoding,
     pub resolution: Option<Resolution>,
     /// Encoded constant frame rate, inherited from the Sequence or explicitly overridden.
     #[serde(default)]
@@ -290,9 +323,6 @@ pub struct ExportPreset {
     /// Explicit temporal sampling policy for cadence conversion.
     #[serde(default)]
     pub frame_sampling: ExportFrameSampling,
-    /// Explicit codec-family picture structure; encoder defaults are never delivery authority.
-    #[serde(default)]
-    pub video_coding: VideoCodingStructure,
     /// Encoded signal representation. Creative output color remains Sequence-owned.
     #[serde(default)]
     pub video_signal: ExportVideoSignal,
@@ -305,20 +335,46 @@ pub struct ExportPreset {
 }
 
 impl ExportPreset {
+    /// Return the encoded-media contract when this preset publishes one file.
+    pub const fn media_file(&self) -> Option<&EncodedMediaOutput> {
+        match &self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => Some(media),
+            ExportArtifactEncoding::ImageSequence { .. } => None,
+        }
+    }
+
+    /// Mutably borrow the encoded-media contract when this preset publishes one file.
+    pub fn media_file_mut(&mut self) -> Option<&mut EncodedMediaOutput> {
+        match &mut self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => Some(media),
+            ExportArtifactEncoding::ImageSequence { .. } => None,
+        }
+    }
+
+    /// Return the still-image format when this preset publishes a frame sequence.
+    pub const fn image_sequence_format(&self) -> Option<ImageSequenceFormat> {
+        match self.artifact {
+            ExportArtifactEncoding::MediaFile(_) => None,
+            ExportArtifactEncoding::ImageSequence { format } => Some(format),
+        }
+    }
+
     /// Broadly compatible Rec.709 H.264/AAC MP4 delivery.
     pub fn h264_aac_sdr_1080p() -> Self {
         Self {
             name: "H.264/AAC SDR 1080p".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1920, height: 1080 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -333,16 +389,18 @@ impl ExportPreset {
     pub fn hevc_main10_aac() -> Self {
         Self {
             name: "HEVC Main10/AAC".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::Hevc {
-                profile: HevcProfile::Main10,
-                rate_control: VideoRateControl::constant_quality(20),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::Hevc {
+                    profile: HevcProfile::Main10,
+                    rate_control: VideoRateControl::constant_quality(20),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 192 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Ten,
                 VideoRange::Legal,
@@ -356,16 +414,18 @@ impl ExportPreset {
     pub fn tiktok_vertical() -> Self {
         Self {
             name: "TikTok 1080×1920".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constrained_quality(20, 6_000, 12_000),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constrained_quality(20, 6_000, 12_000),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1080, height: 1920 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -379,16 +439,18 @@ impl ExportPreset {
     pub fn proxy_720p() -> Self {
         Self {
             name: "Proxy 720p".into(),
-            container: Container::Mp4,
-            video: VideoCodecConfig::H264 {
-                profile: H264Profile::High,
-                rate_control: VideoRateControl::constant_quality(23),
-            },
-            audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mp4,
+                video: VideoCodecConfig::H264 {
+                    profile: H264Profile::High,
+                    rate_control: VideoRateControl::constant_quality(23),
+                },
+                audio: AudioCodecConfig::Aac { bitrate_kbps: 128 },
+                video_coding: VideoCodingStructure::h26x_delivery(),
+            }),
             resolution: Some(Resolution { width: 1280, height: 720 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -403,13 +465,15 @@ impl ExportPreset {
     pub fn prores_4444_alpha() -> Self {
         Self {
             name: "ProRes 4444 XQ + Alpha".into(),
-            container: Container::Mov,
-            video: VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
-            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+            artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+                container: Container::Mov,
+                video: VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
+                audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+                video_coding: VideoCodingStructure::IntraOnly,
+            }),
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
-            video_coding: VideoCodingStructure::IntraOnly,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Twelve,
                 VideoRange::Full,
@@ -417,6 +481,24 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::Preserve,
             color_target: ExportColorTarget::FollowSequence,
+        }
+    }
+
+    /// Lossless, full-range sRGB PNG frames with straight alpha.
+    pub fn png_sequence() -> Self {
+        Self {
+            name: "PNG 图像序列".into(),
+            artifact: ExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 },
+            resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
+            video_signal: ExportVideoSignal::explicit(
+                DeliveryBitDepth::Eight,
+                VideoRange::Full,
+                ExportChromaSampling::Rgb,
+            ),
+            alpha_mode: ExportAlphaMode::Preserve,
+            color_target: ExportColorTarget::RenderingView(ColorSpace::Srgb),
         }
     }
 }
@@ -439,16 +521,19 @@ pub enum BuiltinExportPreset {
     Proxy720p,
     /// ProRes 4444 XQ with preserved alpha.
     ProRes4444Alpha,
+    /// Lossless numbered PNG frames with a durable manifest.
+    PngSequence,
 }
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
         Self::Proxy720p,
         Self::ProRes4444Alpha,
+        Self::PngSequence,
     ];
 
     /// Stable non-localized identifier for Headless validation and preset selection.
@@ -459,6 +544,7 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "tiktok-vertical",
             Self::Proxy720p => "proxy-720p",
             Self::ProRes4444Alpha => "prores-4444-alpha",
+            Self::PngSequence => "png-sequence",
         }
     }
 
@@ -470,6 +556,7 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "TikTok 竖屏 9:16",
             Self::Proxy720p => "代理文件 720p",
             Self::ProRes4444Alpha => "ProRes 4444 XQ + Alpha（12-bit）",
+            Self::PngSequence => "PNG 图像序列（无损 + Alpha）",
         }
     }
 
@@ -481,6 +568,7 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => ExportPreset::tiktok_vertical(),
             Self::Proxy720p => ExportPreset::proxy_720p(),
             Self::ProRes4444Alpha => ExportPreset::prores_4444_alpha(),
+            Self::PngSequence => ExportPreset::png_sequence(),
         }
     }
 }

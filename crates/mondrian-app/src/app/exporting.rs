@@ -23,7 +23,7 @@ pub struct TimelineExportRequest {
     pub sequence_id: Option<SequenceId>,
     /// Timeline range to render.
     pub range: TimelineExportRange,
-    /// Output media file path.
+    /// Output media-file path or image-sequence directory path.
     pub output_path: PathBuf,
     /// Final namespace policy frozen at admission.
     pub output_policy: ExportOutputPolicy,
@@ -81,15 +81,16 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
         .collect()
 }
 
-/// File extension implied by an export preset container.
+/// File or directory suffix implied by an export artifact.
 pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
-    match preset.container {
-        Container::Mp4 => "mp4",
-        Container::Mov => "mov",
-        Container::Mkv => "mkv",
-        Container::Gif => "gif",
-        Container::Mxf => "mxf",
-        Container::Webm => "webm",
+    match preset.media_file().map(|media| media.container) {
+        Some(Container::Mp4) => "mp4",
+        Some(Container::Mov) => "mov",
+        Some(Container::Mkv) => "mkv",
+        Some(Container::Gif) => "gif",
+        Some(Container::Mxf) => "mxf",
+        Some(Container::Webm) => "webm",
+        None => "pngseq",
     }
 }
 
@@ -201,7 +202,10 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         }
 
-        let include_audio = !matches!(&request.preset.audio, AudioCodecConfig::Disabled);
+        let include_audio = request
+            .preset
+            .media_file()
+            .is_some_and(|media| !matches!(media.audio, AudioCodecConfig::Disabled));
         let timeline = match capture_timeline_export_snapshot(
             self,
             sequence,
@@ -839,7 +843,7 @@ mod tests {
         let mut state = AppState::default();
         state.set_export_draft_output_path("E:/renders/delivery.mp4");
         let mut mov = state.export_draft.preset.clone();
-        mov.container = Container::Mov;
+        mov.media_file_mut().expect("media preset").container = Container::Mov;
 
         state.set_export_draft_preset(mov.clone());
 
@@ -849,7 +853,7 @@ mod tests {
         );
 
         state.set_export_draft_output_path("E:/renders/delivery.custom");
-        mov.container = Container::Mxf;
+        mov.media_file_mut().expect("media preset").container = Container::Mxf;
         state.set_export_draft_preset(mov);
 
         assert_eq!(state.export_draft.output_path, "E:/renders/delivery.custom");
