@@ -135,6 +135,12 @@ pub enum AudioProcessorHostError {
     /// A processor failed while executing one admitted block.
     #[error("audio processor block execution failed: {0}")]
     Process(String),
+    /// An Adapter unwound across the Host boundary.
+    #[error("audio processor adapter panicked during {0}")]
+    AdapterPanicked(&'static str),
+    /// A prior failure left an exclusive instance in unknown mutable state.
+    #[error("audio processor instance is poisoned and must be recreated")]
+    PoisonedInstance,
 }
 
 /// Exact generated owner of one processor occurrence.

@@ -15,6 +15,7 @@ use crate::{
 use mondrian_core::ParameterId;
 use mondrian_core::{AudioChannelLayout, AudioSampleRate};
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -29,8 +30,9 @@ impl PreparedProcessorFactoryBinding {
         request: AudioProcessorPrepareRequest<'_>,
     ) -> Result<Self, AudioProcessorHostError> {
         let mode = request.render_contract().processing_mode;
-        let factory = resolver.prepare(request)?;
-        let contract = factory.execution_contract();
+        let factory = isolate_adapter_call("resolution", || resolver.prepare(request))?;
+        let contract =
+            isolate_adapter_value("execution-contract query", || factory.execution_contract())?;
         if !contract.admits(mode) {
             return Err(AudioProcessorHostError::InvalidContract(format!(
                 "processor does not admit {mode:?} execution"
@@ -44,13 +46,16 @@ impl PreparedProcessorFactoryBinding {
     }
 
     fn create(&self) -> Result<Box<dyn AudioProcessor>, AudioProcessorHostError> {
-        if self.factory.execution_contract() != self.contract {
+        let current_contract = isolate_adapter_value("execution-contract revalidation", || {
+            self.factory.execution_contract()
+        })?;
+        if current_contract != self.contract {
             return Err(AudioProcessorHostError::InvalidContract(
                 "prepared factory changed its execution contract before Session creation"
                     .to_owned(),
             ));
         }
-        self.factory.create()
+        isolate_adapter_call("instance creation", || self.factory.create())
     }
 }
 
@@ -97,6 +102,7 @@ struct HostedProcessorInstance {
 enum HostedProcessorContinuity {
     Stateless,
     Unentered,
+    Failed,
     Pending {
         epoch: crate::AudioContinuityEpoch,
     },
@@ -217,7 +223,12 @@ impl PreparedProcessorHost {
             } else {
                 let signal_start_sample =
                     subtract_signal_delay(entry.start_sample, processor.input_signal_delay_frames)?;
-                instance.processor.enter_state(signal_start_sample)?;
+                if let Err(error) = isolate_adapter_call("state entry", || {
+                    instance.processor.enter_state(signal_start_sample)
+                }) {
+                    instance.continuity = HostedProcessorContinuity::Failed;
+                    return Err(error.into());
+                }
                 instance.continuity = HostedProcessorContinuity::Active {
                     epoch: entry.epoch,
                     next_sample: signal_start_sample,
@@ -277,8 +288,16 @@ impl PreparedProcessorHost {
                 HostedProcessorContinuity::Unentered => {
                     return Err(AudioExecutionError::StateEntryRequired);
                 }
+                HostedProcessorContinuity::Failed => {
+                    return Err(AudioProcessorHostError::PoisonedInstance.into());
+                }
                 HostedProcessorContinuity::Pending { epoch } => {
-                    instance.processor.enter_state(signal_request.start_sample)?;
+                    if let Err(error) = isolate_adapter_call("lazy state entry", || {
+                        instance.processor.enter_state(signal_request.start_sample)
+                    }) {
+                        instance.continuity = HostedProcessorContinuity::Failed;
+                        return Err(error.into());
+                    }
                     instance.continuity = HostedProcessorContinuity::Active {
                         epoch,
                         next_sample: signal_request.start_sample,
@@ -305,7 +324,12 @@ impl PreparedProcessorHost {
                 backend,
             );
             let mut audio = MainBusAudioIo { channel_layout, frames: request.frames, pcm };
-            instance.processor.process(context, &mut audio, batch)?;
+            if let Err(error) = isolate_adapter_call("block processing", || {
+                instance.processor.process(context, &mut audio, batch)
+            }) {
+                instance.continuity = HostedProcessorContinuity::Failed;
+                return Err(error.into());
+            }
             if let HostedProcessorContinuity::Active { epoch, .. } = instance.continuity {
                 let next_sample = signal_request
                     .start_sample
@@ -357,6 +381,26 @@ impl PreparedProcessorHost {
                 Ok((parameter_id, events))
             })
             .collect()
+    }
+}
+
+fn isolate_adapter_call<T>(
+    operation: &'static str,
+    call: impl FnOnce() -> Result<T, AudioProcessorHostError>,
+) -> Result<T, AudioProcessorHostError> {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(result) => result,
+        Err(_) => Err(AudioProcessorHostError::AdapterPanicked(operation)),
+    }
+}
+
+fn isolate_adapter_value<T>(
+    operation: &'static str,
+    call: impl FnOnce() -> T,
+) -> Result<T, AudioProcessorHostError> {
+    match catch_unwind(AssertUnwindSafe(call)) {
+        Ok(value) => Ok(value),
+        Err(_) => Err(AudioProcessorHostError::AdapterPanicked(operation)),
     }
 }
 

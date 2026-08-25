@@ -566,6 +566,16 @@ Module owns graph traversal, PCM flow, summing, envelopes, and delay placement;
 it neither reconstructs processor batches nor reaches into a processor's
 mutable state. A failed entry consumes and poisons its new epoch before any
 instance resets, so partial multi-processor reset can never resume old history.
+Every untrusted Resolver, Factory, and Processor trait call is also an unwind
+boundary. A panic during resolution, contract query, instance creation, state
+entry, or block processing becomes a typed `AdapterPanicked` failure. State
+entry/block failures mark the exclusive hosted instance poisoned before the
+error leaves the Host; stateful outer Sessions poison their continuity epoch,
+while a failed stateless instance refuses every later callback and requires a
+new Session. This protects Mondrian from Rust unwind across the Host Interface,
+but it is not crash, access-violation, hang, or deadline isolation. VST3/CLAP
+remain unavailable unless a concrete out-of-process Adapter supplies those
+stronger guarantees; the built-in resolver continues to fail them closed.
 At root entry, stateful Track/Bus/Output occurrences enter immediately because
 their strips evaluate every requested block. A stateful Contribution occurrence
 remains pending until its causal execution span first intersects a request,

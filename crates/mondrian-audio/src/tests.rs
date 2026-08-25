@@ -61,10 +61,13 @@ impl AudioPcmSource for FailingSource {
     }
 }
 
+#[derive(Default)]
 struct TestDelayProcessorResolver {
     latency_frames: usize,
     realtime_capable: bool,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
 }
 
 impl AudioProcessorResolver for TestDelayProcessorResolver {
@@ -126,6 +129,8 @@ impl AudioProcessorResolver for TestDelayProcessorResolver {
             contract,
             delay_samples: scratch_samples,
             fail_first_state_entry: self.fail_first_state_entry,
+            panic_on_state_entry: self.panic_on_state_entry,
+            panic_on_process: self.panic_on_process,
         }))
     }
 }
@@ -134,6 +139,8 @@ struct TestDelayProcessorFactory {
     contract: AudioProcessorExecutionContract,
     delay_samples: usize,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
 }
 
 impl AudioProcessorFactory for TestDelayProcessorFactory {
@@ -146,6 +153,8 @@ impl AudioProcessorFactory for TestDelayProcessorFactory {
             samples: vec![0.0; self.delay_samples],
             cursor: 0,
             fail_first_state_entry: self.fail_first_state_entry,
+            panic_on_state_entry: self.panic_on_state_entry,
+            panic_on_process: self.panic_on_process,
         }))
     }
 }
@@ -154,10 +163,16 @@ struct TestDelayProcessor {
     samples: Vec<f32>,
     cursor: usize,
     fail_first_state_entry: bool,
+    panic_on_state_entry: bool,
+    panic_on_process: bool,
 }
 
 impl AudioProcessor for TestDelayProcessor {
     fn enter_state(&mut self, _start_sample: i64) -> Result<(), AudioProcessorHostError> {
+        assert!(
+            !self.panic_on_state_entry,
+            "injected processor state-entry panic"
+        );
         if self.fail_first_state_entry {
             self.fail_first_state_entry = false;
             return Err(AudioProcessorHostError::StateEntry(
@@ -175,6 +190,7 @@ impl AudioProcessor for TestDelayProcessor {
         audio: &mut dyn AudioProcessorAudioIo,
         _parameters: AudioParameterEventBatch<'_>,
     ) -> Result<(), AudioProcessorHostError> {
+        assert!(!self.panic_on_process, "injected processor process panic");
         let expected = context
             .request()
             .frames
@@ -1687,6 +1703,7 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -1750,6 +1767,7 @@ fn hosted_algorithmic_latency_drives_pdc_and_partitioned_pcm() {
         latency_frames: 7,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let long_sequence = sequence_with_parallel_hosted_delay();
     let long_output = long_sequence.audio_program.outputs[0].id;
@@ -1843,6 +1861,7 @@ fn algorithmic_latency_preserves_signal_time_for_every_downstream_automation_sta
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -1971,6 +1990,7 @@ fn public_lookahead_and_compensation_storage_fail_closed_at_preparation() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let lookahead_error = PreparedAudioPlan::prepare_with_processor_resolver(
         Arc::clone(&compiled),
@@ -2032,6 +2052,7 @@ fn processor_mode_capability_is_enforced_during_preparation() {
         latency_frames: 2,
         realtime_capable: false,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let error = PreparedAudioPlan::prepare_with_processor_resolver(
         compiled,
@@ -2069,6 +2090,7 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: true,
+        ..Default::default()
     };
     let plan = Arc::new(
         PreparedAudioPlan::prepare_with_processor_resolver(
@@ -2127,6 +2149,106 @@ fn failed_processor_state_entry_poisons_the_new_epoch_before_partial_reset() {
         )
         .expect("recovered render");
     assert_eq!(pcm, vec![2.0, 4.0, 6.0, 8.0]);
+}
+
+#[test]
+fn processor_panic_is_contained_and_poisons_stateful_continuity() {
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 2,
+        realtime_capable: true,
+        panic_on_process: true,
+        ..Default::default()
+    };
+    let plan = prepared_parallel_delay_plan(&resolver);
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let epoch = AudioContinuityEpoch::new(70);
+    session
+        .enter_state(AudioStateEntry { epoch, start_sample: 0 })
+        .expect("state entry before injected process panic");
+    let mut source = RampSource::default();
+    let mut pcm = vec![0.0; 4];
+    assert!(matches!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::AdapterPanicked("block processing")
+        ))
+    ));
+    assert_eq!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ContinuityPoisoned(epoch))
+    );
+}
+
+#[test]
+fn failed_stateless_processor_instance_cannot_be_reused() {
+    let resolver = TestDelayProcessorResolver {
+        latency_frames: 0,
+        realtime_capable: true,
+        panic_on_process: true,
+        ..Default::default()
+    };
+    let plan = prepared_parallel_delay_plan(&resolver);
+    assert!(!plan.requires_state_entry());
+    let mut session = AudioRenderSession::new(plan).expect("Session");
+    let mut source = RampSource::default();
+    let mut pcm = vec![0.0; 4];
+    assert!(matches!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::AdapterPanicked("block processing")
+        ))
+    ));
+    assert_eq!(
+        session.render_into(
+            &mut source,
+            AudioRenderRequest { start_sample: 0, frames: 4 },
+            &mut pcm,
+        ),
+        Err(AudioExecutionError::ProcessorHost(
+            AudioProcessorHostError::PoisonedInstance
+        ))
+    );
+}
+
+fn prepared_parallel_delay_plan(resolver: &TestDelayProcessorResolver) -> Arc<PreparedAudioPlan> {
+    let sequence = sequence_with_parallel_hosted_delay();
+    let output = sequence.audio_program.outputs[0].id;
+    let compiled = Arc::new(
+        compile_audio_program(&sequence, AudioCompileRequest::program(output))
+            .expect("semantic program"),
+    );
+    Arc::new(
+        PreparedAudioPlan::prepare_with_processor_resolver(
+            compiled,
+            AudioRenderContract {
+                sample_rate: 2,
+                channel_layout: AudioChannelLayout::Mono,
+                max_block_frames: 4,
+                processing_mode: AudioProcessingMode::Realtime,
+                processor_session_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+                public_output_lookahead_budget_frames:
+                    AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+                compensation_delay_scratch_budget_bytes:
+                    AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+            },
+            AudioKernelBackend::RuntimeVectorized,
+            resolver,
+        )
+        .expect("hosted plan"),
+    )
 }
 
 #[test]
@@ -2480,6 +2602,7 @@ fn nested_public_output_hides_child_lookahead_without_double_compensation() {
         latency_frames: 2,
         realtime_capable: true,
         fail_first_state_entry: false,
+        ..Default::default()
     };
     let mut runtime = AudioProgramRuntime::build_with_processor_resolver(
         &root,
