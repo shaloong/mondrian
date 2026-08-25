@@ -646,6 +646,19 @@ unrouted source cannot fail a selected export or consume its source-window
 grant. The ordinary `build` Interface remains the whole-Program contract used
 by continuous Playback and consumes the same mute-resolved Signal Closure.
 
+The PCM24 audio-stem artifact selects every public Program Output in authored
+order at capture time. Capture retains one independently compiled semantic
+closure per Output, freezes its stable ID and display name, and unions the
+reachable Sequence/media identities only for external dependency resolution.
+Execution never derives stems by soloing Tracks or by mutating one master mix:
+each stem is rendered from its own frozen root through the same compiled Audio
+Program Runtime used by mixdown. Every WAV is independently probed for exact
+PCM codec, semantic layout, sample rate, and rational duration, then hashed.
+Per-output loudness/true-peak evidence and immutable identity are written to a
+versioned manifest before Storage atomically publishes the complete sibling
+directory. Cancellation, a missing output, or one invalid file rejects the
+whole artifact; no partial stem package is visible at the destination.
+
 Offline export enters one fresh epoch at its exact sample-range start. Realtime
 Playback carries its generation on every PCM work request: the first admitted
 window is `Enter`, later windows are `Continue`, and the Timeline Adapter rejects
@@ -743,7 +756,10 @@ failure aborts the Export instead of omitting evidence. The qualified weighting
 matrix is deliberately limited to Mono, Stereo, 5.1(side), 5.1(back), and 7.1.
 Discrete, custom, and immersive speaker sets fail closed until a normative
 weighting table and conformance corpus are admitted. This Module never changes
-PCM and is not placed on the realtime callback.
+PCM and is not placed on the realtime callback. Audio-stem export constructs an
+independent analyzer for every frozen Program Output and persists every report
+inside the package manifest; the primary report also remains available through
+the common job diagnostics Interface.
 
 Exact automation is evaluated in its owner domain and is invariant under block
 partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an

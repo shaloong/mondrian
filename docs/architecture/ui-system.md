@@ -3,10 +3,11 @@
 The Export panel edits the same typed `ExportPreset` consumed by queue
 admission. Artifact-family-specific controls are projected from
 `ExportArtifactEncoding`: media-file presets expose container/video/audio and
-coding controls, while image-sequence presets present a directory deliverable
-and cannot manufacture media-file fields. Built-in preset selection replaces
-the complete editable draft and rewrites only an output suffix that still
-follows the previous built-in artifact.
+coding controls, image-sequence presets present a picture directory, and the
+PCM24 audio-stem preset presents a directory containing every public Audio
+Program Output. Directory artifacts cannot manufacture media-file fields.
+Built-in preset selection replaces the complete editable draft and rewrites
+only an output suffix that still follows the previous built-in artifact.
 
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
@@ -1132,6 +1133,14 @@ snapshot, so no parallel UI-only field bag can disagree with enqueue. A
 container edit rewrites the output suffix only when that suffix still matched
 the previous container; an explicitly custom suffix is preserved. Admission
 freezes the edited preset into the job.
+
+The Audio Stems PCM24 built-in uses the synthetic `.wavstems` suffix only to
+make the destination's directory nature unambiguous in the draft. Queue
+capture, rather than the panel, selects every public Program Output in authored
+order and freezes its identity and label. The published directory contains
+deterministically named WAV files plus a validation manifest; the panel never
+models stems as a codec toggle on a media-file artifact or attempts to infer
+success from individual files.
 
 The materialized preset also carries one typed `ExportColorTarget`: follow
 Sequence Program Output, explicit colorimetric output, or an explicit

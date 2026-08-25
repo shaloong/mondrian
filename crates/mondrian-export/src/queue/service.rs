@@ -16,8 +16,11 @@ use mondrian_renderer::{RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkin
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::preset::{AudioCodecConfig, ExportConfig, ExportOutputPolicy};
-use crate::{prepare_timeline_export_dependencies, validate_timeline_export_execution_snapshot};
+use crate::preset::{ExportConfig, ExportOutputPolicy};
+use crate::{
+    prepare_timeline_export_dependencies_with_audio_selection,
+    validate_timeline_export_execution_snapshot_with_audio_selection,
+};
 
 use super::{ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure, JobExecutionResult};
 
@@ -853,18 +856,14 @@ impl RenderQueue {
 
     /// Admit a heavy immutable submission or return a structured rejection.
     pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
-        let include_audio = job
-            .config
-            .preset
-            .media_file()
-            .is_some_and(|media| !matches!(media.audio, AudioCodecConfig::Disabled));
+        let audio_selection = job.config.preset.audio_program_selection();
         let resource_policy = self.inner.state.lock().resource_policy;
         if job.config.timeline.prepared_execution().is_none() {
-            let prepared = match prepare_timeline_export_dependencies(
+            let prepared = match prepare_timeline_export_dependencies_with_audio_selection(
                 &job.config.timeline.sequence,
                 &job.config.timeline.sequences,
                 job.config.timeline.range,
-                include_audio,
+                audio_selection,
             ) {
                 Ok(prepared) => prepared,
                 Err(error) => {
@@ -924,12 +923,12 @@ impl RenderQueue {
                 detail: "immutable export visual execution snapshot is unavailable".to_owned(),
             });
         };
-        if let Err(error) = validate_timeline_export_execution_snapshot(
+        if let Err(error) = validate_timeline_export_execution_snapshot_with_audio_selection(
             &job.config.timeline.sequence,
             &job.config.timeline.sequences,
             &job.config.timeline.color_environment,
             job.config.timeline.range,
-            include_audio,
+            audio_selection,
             prepared_execution,
             &job.config.timeline.media,
         ) {

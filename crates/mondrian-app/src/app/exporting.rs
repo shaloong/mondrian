@@ -3,10 +3,11 @@
 use super::*;
 use mondrian_core::{JobId, MondrianError, Result};
 use mondrian_export::delivery::resolve_export_delivery;
-use mondrian_export::prepare_timeline_export_dependencies;
+use mondrian_export::prepare_timeline_export_dependencies_with_audio_selection;
 use mondrian_export::preset::{
-    AudioCodecConfig, BuiltinExportPreset, Container, ExportConfig, ExportMediaDependency,
-    ExportOutputPolicy, ExportPreset, TimelineExportRange, TimelineExportSnapshot,
+    BuiltinExportPreset, Container, ExportAudioProgramSelection, ExportConfig,
+    ExportMediaDependency, ExportOutputPolicy, ExportPreset, TimelineExportRange,
+    TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
@@ -83,6 +84,9 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
 
 /// File or directory suffix implied by an export artifact.
 pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
+    if preset.audio_stem_format().is_some() {
+        return "wavstems";
+    }
     match preset.media_file().map(|media| media.container) {
         Some(Container::Mp4) => "mp4",
         Some(Container::Mov) => "mov",
@@ -202,16 +206,13 @@ impl AppState {
             return Err(export_error("enqueue_timeline_export", reason));
         }
 
-        let include_audio = request
-            .preset
-            .media_file()
-            .is_some_and(|media| !matches!(media.audio, AudioCodecConfig::Disabled));
-        let timeline = match capture_timeline_export_snapshot(
+        let audio_selection = request.preset.audio_program_selection();
+        let timeline = match capture_timeline_export_snapshot_with_audio_selection(
             self,
             sequence,
             sequences,
             request.range,
-            include_audio,
+            audio_selection,
         ) {
             Ok(timeline) => timeline,
             Err(reason) => {
@@ -284,9 +285,33 @@ pub(crate) fn capture_timeline_export_snapshot(
     range: TimelineExportRange,
     include_audio: bool,
 ) -> std::result::Result<TimelineExportSnapshot, String> {
-    let dependencies =
-        prepare_timeline_export_dependencies(&sequence, &sequences, range, include_audio)
-            .map_err(|error| error.to_string())?;
+    capture_timeline_export_snapshot_with_audio_selection(
+        state,
+        sequence,
+        sequences,
+        range,
+        if include_audio {
+            ExportAudioProgramSelection::Primary
+        } else {
+            ExportAudioProgramSelection::Disabled
+        },
+    )
+}
+
+pub(crate) fn capture_timeline_export_snapshot_with_audio_selection(
+    state: &AppState,
+    sequence: mondrian_timeline::sequence::Sequence,
+    sequences: Vec<mondrian_timeline::sequence::Sequence>,
+    range: TimelineExportRange,
+    audio_selection: ExportAudioProgramSelection,
+) -> std::result::Result<TimelineExportSnapshot, String> {
+    let dependencies = prepare_timeline_export_dependencies_with_audio_selection(
+        &sequence,
+        &sequences,
+        range,
+        audio_selection,
+    )
+    .map_err(|error| error.to_string())?;
 
     let media = resolve_export_media_dependencies(state, dependencies.media_components())?;
     let nested_sequences = sequences

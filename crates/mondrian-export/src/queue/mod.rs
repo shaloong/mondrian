@@ -1,5 +1,9 @@
 //! 后台渲染队列
 
+use crate::audio_stems::{
+    stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
+    AudioStemValidationContract,
+};
 use crate::delivery::{
     ffmpeg_audio_channel_layout, ResolvedExportArtifactEncoding, ResolvedExportDeliveryContract,
 };
@@ -17,7 +21,7 @@ use crate::validator::{
     validate_export_output_cancellable, ExpectedStream, ExpectedVideoConstraints,
     ExportValidationExpectations,
 };
-use crate::{PreparedTimelineAudioSnapshot, PreparedTimelineVisualSnapshot};
+use crate::{PreparedTimelineAudioOutputSnapshot, PreparedTimelineVisualSnapshot};
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
     AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
@@ -1916,6 +1920,16 @@ impl ExportExecutor for FfmpegExportExecutor {
         report(ExportProgress::preparing(0.01));
 
         let final_output = job.config.output_path.as_path();
+        if job.config.preset.audio_stem_format().is_some() {
+            return execute_audio_stems_export(
+                job,
+                final_output,
+                cancel,
+                execution_gate,
+                report,
+                report_diagnostics,
+            );
+        }
         if job.config.preset.image_sequence_format().is_some() {
             return execute_image_sequence_export(
                 job,
@@ -1995,6 +2009,250 @@ impl ExportExecutor for FfmpegExportExecutor {
         match finalize_export_output(staging, final_output, job.config.output_policy) {
             Ok(evidence) => JobExecutionResult::Published(evidence),
             Err(failure) => JobExecutionResult::PublicationFailed(failure),
+        }
+    }
+}
+
+fn execute_audio_stems_export(
+    job: &RenderJob,
+    final_output: &Path,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+) -> JobExecutionResult {
+    if job.config.output_policy != ExportOutputPolicy::CreateNew {
+        return JobExecutionResult::Failed(
+            "audio-stem packages support CreateNew publication only".to_owned(),
+        );
+    }
+    if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+        return JobExecutionResult::Failed(reason);
+    }
+    let delivery = match crate::delivery::resolve_export_delivery(
+        &job.config.preset,
+        &job.config.timeline.sequence.settings,
+        &job.config.timeline.color_environment,
+    ) {
+        Ok(delivery) => delivery,
+        Err(error) => return JobExecutionResult::Failed(error.to_string()),
+    };
+    let range = match compute_timeline_render_range_for_delivery(&job.config.timeline, &delivery) {
+        Ok(range) => range,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
+    let Some(format) = job.config.preset.audio_stem_format() else {
+        return JobExecutionResult::Failed(
+            "audio-stem execution selected a non-stem preset".to_owned(),
+        );
+    };
+    let Some(prepared_audio) =
+        job.config.timeline.prepared_execution().and_then(|execution| execution.audio())
+    else {
+        return JobExecutionResult::Failed(
+            "audio-stem export has no immutable Program Output closure".to_owned(),
+        );
+    };
+    let staging = match OwnedPublicationDirectory::create_sibling(
+        final_output,
+        &format!("export-{}", job.id()),
+    ) {
+        Ok(staging) => staging,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "failed to reserve audio-stem sibling directory for {}: {error:#}",
+                final_output.display()
+            ));
+        }
+    };
+    let partial_output = staging.path().to_path_buf();
+    let sample_rate = job.config.timeline.sequence.settings.audio_sample_rate.max(8_000);
+    let channel_layout = job.config.timeline.sequence.settings.audio_channel_layout;
+    let total_sample_frames =
+        match timeline_audio_sample_range(range, sample_rate).and_then(|(_, frames)| {
+            u64::try_from(frames)
+                .map_err(|_| "audio-stem sample-frame count exceeds u64".to_owned())
+        }) {
+            Ok(frames) => frames,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+    let output_count = prepared_audio.output_count();
+    let mut stems = Vec::with_capacity(output_count);
+    let mut primary_analysis = None;
+    for (index, output) in prepared_audio.outputs().enumerate() {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+            return JobExecutionResult::Cancelled;
+        }
+        let temp = match tempfile::Builder::new()
+            .prefix("mondrian-export-stem-")
+            .suffix(".f32")
+            .tempfile()
+        {
+            Ok(temp) => temp,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "failed to allocate stem PCM temporary file: {error}"
+                ));
+            }
+        };
+        let temp_path = temp.path().to_path_buf();
+        drop(temp);
+        let _temp_guard = ExportAudioTempFile::armed(&temp_path);
+        let mut analysis = None;
+        let progress_base = 0.02 + 0.70 * index as f32 / output_count.max(1) as f32;
+        let progress_span = 0.70 / output_count.max(1) as f32;
+        let mut stem_progress = |progress: ExportProgress| {
+            let local = ((progress.fraction - 0.02) / 0.14).clamp(0.0, 1.0);
+            report(ExportProgress::preparing(
+                progress_base + progress_span * local,
+            ));
+        };
+        match render_timeline_audio_to_pcm_f32(
+            &temp_path,
+            &job.config.timeline,
+            output,
+            range,
+            sample_rate,
+            channel_layout,
+            execution_gate.resource_policy(),
+            cancel,
+            execution_gate,
+            &mut stem_progress,
+            &mut analysis,
+        ) {
+            JobExecutionResult::ReversibleWorkCompleted => {}
+            JobExecutionResult::Cancelled => return JobExecutionResult::Cancelled,
+            JobExecutionResult::Failed(reason) => return JobExecutionResult::Failed(reason),
+            JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
+                return JobExecutionResult::Failed(
+                    "audio-stem render crossed publication authority".to_owned(),
+                );
+            }
+        }
+        let Some(analysis) = analysis else {
+            return JobExecutionResult::Failed(format!(
+                "Program Output {} completed without loudness evidence",
+                output.output_id()
+            ));
+        };
+        if index == 0 {
+            primary_analysis = Some(analysis);
+        }
+        let file_name = stem_file_name(index, output.output_id());
+        let output_path = stem_path(staging.path(), index, output.output_id());
+        let Some(ffmpeg_layout) = ffmpeg_audio_channel_layout(channel_layout) else {
+            return JobExecutionResult::Failed(format!(
+                "audio-stem layout {channel_layout} has no explicit WAV lowering"
+            ));
+        };
+        let mut command = mondrian_media::ffmpeg_command();
+        command
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("f32le")
+            .arg("-ar")
+            .arg(sample_rate.to_string())
+            .arg("-channel_layout")
+            .arg(ffmpeg_layout)
+            .arg("-ac")
+            .arg(channel_layout.channel_count().to_string())
+            .arg("-i")
+            .arg(&temp_path)
+            .arg("-map")
+            .arg("0:a:0")
+            .arg("-c:a")
+            .arg("pcm_s24le")
+            .arg("-rf64")
+            .arg("auto")
+            .arg("-f")
+            .arg("wav")
+            .arg(&output_path);
+        let encoded = mondrian_media::run_supervised_command(
+            &mut command,
+            None,
+            SupervisedProcessPolicy {
+                stdout: SupervisedStreamCapture::Drain,
+                stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
+                ..SupervisedProcessPolicy::default()
+            },
+            cancel,
+        );
+        let encoded = match encoded {
+            Ok(encoded) => encoded,
+            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "audio-stem encoder process failed for {}: {error}",
+                    output.output_id()
+                ));
+            }
+        };
+        if !encoded.status.success() {
+            let detail = String::from_utf8_lossy(&encoded.stderr).trim().to_owned();
+            return JobExecutionResult::Failed(format!(
+                "audio-stem encoder failed for {}: {}",
+                output.output_id(),
+                if detail.is_empty() {
+                    encoded.status.to_string()
+                } else {
+                    detail
+                }
+            ));
+        }
+        stems.push(AudioStemExpectation {
+            output_id: output.output_id(),
+            name: output.name().to_owned(),
+            file_name,
+            loudness: analysis,
+        });
+    }
+    if let Some(audio) = primary_analysis {
+        report_diagnostics(ExportJobDiagnostics {
+            audio: Some(audio),
+            ..ExportJobDiagnostics::default()
+        });
+    }
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::validating(0.95));
+    if let Err(error) = validate_and_write_audio_stem_manifest(
+        staging.path(),
+        AudioStemValidationContract {
+            format,
+            sample_rate,
+            channel_layout,
+            sample_frames: total_sample_frames,
+            stems,
+        },
+        cancel,
+    ) {
+        return if cancel.is_canceled() {
+            JobExecutionResult::Cancelled
+        } else {
+            JobExecutionResult::Failed(format!("audio-stem validation failed: {error}"))
+        };
+    }
+    if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+        return JobExecutionResult::Failed(reason);
+    }
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::publishing(0.995));
+    match staging.preserve_source_on_before_namespace_failure().publish_create_new() {
+        Ok(evidence) => JobExecutionResult::Published(
+            DurableExportPublication::from_directory_storage(evidence),
+        ),
+        Err(failure) => {
+            JobExecutionResult::PublicationFailed(ExportPublicationFailure::from_directory_storage(
+                failure,
+                final_output,
+                Some(partial_output),
+            ))
         }
     }
 }
@@ -2237,7 +2495,8 @@ fn execute_timeline_export(
 
         let audio_codec = match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { audio, .. } => audio,
-            ResolvedExportArtifactEncoding::ImageSequence { .. } => &AudioCodecConfig::Disabled,
+            ResolvedExportArtifactEncoding::ImageSequence { .. }
+            | ResolvedExportArtifactEncoding::AudioStems { .. } => &AudioCodecConfig::Disabled,
         };
         let audio_input = prepare_timeline_audio_input(
             audio_codec,
@@ -2310,6 +2569,11 @@ fn execute_timeline_export(
                     alpha_mode: job.config.preset.alpha_mode,
                 })
             }
+            ResolvedExportArtifactEncoding::AudioStems { .. } => {
+                return JobExecutionResult::Failed(
+                    "audio-stem package entered the visual export executor".to_owned(),
+                );
+            }
         };
         let resolved_video_encoder = match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { video, .. } => {
@@ -2332,6 +2596,11 @@ fn execute_timeline_export(
                 }
             }
             ResolvedExportArtifactEncoding::ImageSequence { .. } => None,
+            ResolvedExportArtifactEncoding::AudioStems { .. } => {
+                return JobExecutionResult::Failed(
+                    "audio-stem package entered video encoder resolution".to_owned(),
+                );
+            }
         };
         let mut cmd = mondrian_media::ffmpeg_command();
         let frame_contract = export_frame_contract(delivery.bit_depth);
@@ -2435,6 +2704,11 @@ fn execute_timeline_export(
                     .arg("-f")
                     .arg("image2")
                     .arg(output_path);
+            }
+            ResolvedExportArtifactEncoding::AudioStems { .. } => {
+                return JobExecutionResult::Failed(
+                    "audio-stem package entered FFmpeg video command construction".to_owned(),
+                );
             }
         }
 
@@ -2636,7 +2910,7 @@ fn prepare_timeline_audio_input(
     match render_timeline_audio_to_pcm_f32(
         temp_path.as_path(),
         timeline,
-        prepared_audio,
+        prepared_audio.primary_output(),
         range,
         sample_rate,
         channel_layout,
@@ -2707,7 +2981,7 @@ impl Drop for ExportAudioTempFile {
 fn render_timeline_audio_to_pcm_f32(
     output_path: &Path,
     timeline: &TimelineExportSnapshot,
-    prepared_audio: &PreparedTimelineAudioSnapshot,
+    prepared_audio: &PreparedTimelineAudioOutputSnapshot,
     range: TimelineRenderRange,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
@@ -6691,6 +6965,68 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_executor_publishes_all_program_outputs_as_validated_audio_stems() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping audio-stem integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary export parent");
+        let output = directory.path().join("programs.wavstems");
+        let mut config = dummy_config(&output.to_string_lossy());
+        config.preset = crate::preset::ExportPreset::audio_stems_pcm24();
+        let alternate_output = mondrian_core::ProgramOutputId::new();
+        config.timeline.sequence.audio_program.outputs.push(
+            mondrian_timeline::audio::AudioProgramOutput {
+                id: alternate_output,
+                name: "Dialogue & Effects".to_owned(),
+                main_source: mondrian_timeline::audio::ProgramOutputMainSource::RoutedInputs,
+                strip: mondrian_timeline::audio::AudioChannelStrip::default(),
+            },
+        );
+        refresh_test_execution_snapshot_with_audio_selection(
+            &mut config.timeline,
+            crate::preset::ExportAudioProgramSelection::All,
+        );
+        let expected_ids = config
+            .timeline
+            .sequence
+            .audio_program
+            .outputs
+            .iter()
+            .map(|output| output.id)
+            .collect::<Vec<_>>();
+        let job = RenderJob::new(config);
+        let result = FfmpegExportExecutor.execute(
+            &job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |_| {},
+        );
+
+        assert!(
+            matches!(result, JobExecutionResult::Published(_)),
+            "{result:?}"
+        );
+        let manifest_path = output.join(crate::audio_stems::AUDIO_STEM_MANIFEST_FILE_NAME);
+        let manifest: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(&manifest_path).expect("read published stem manifest"),
+        )
+        .expect("parse published stem manifest");
+        let stems = manifest["stems"].as_array().expect("stem manifest entries");
+        assert_eq!(stems.len(), expected_ids.len());
+        for (index, output_id) in expected_ids.into_iter().enumerate() {
+            let path = output.join(crate::audio_stems::stem_file_name(index, output_id));
+            assert!(path.is_file(), "{}", path.display());
+            let probe = crate::validator::probe_export_output(&path).expect("probe published stem");
+            assert_eq!(
+                probe.audio.and_then(|audio| audio.codec_name),
+                Some("pcm_s24le".to_owned())
+            );
+        }
+    }
+
+    #[test]
     fn ffmpeg_executor_publishes_probe_qualified_h264_media() {
         if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
             eprintln!("skipping H.264 integration test: FFmpeg unavailable");
@@ -6789,12 +7125,26 @@ mod tests {
     }
 
     fn refresh_test_execution_snapshot(timeline: &mut TimelineExportSnapshot, include_audio: bool) {
+        refresh_test_execution_snapshot_with_audio_selection(
+            timeline,
+            if include_audio {
+                crate::preset::ExportAudioProgramSelection::Primary
+            } else {
+                crate::preset::ExportAudioProgramSelection::Disabled
+            },
+        );
+    }
+
+    fn refresh_test_execution_snapshot_with_audio_selection(
+        timeline: &mut TimelineExportSnapshot,
+        audio_selection: crate::preset::ExportAudioProgramSelection,
+    ) {
         let resource_policy = service::ExportExecutionResourcePolicy::default();
-        let mut execution = crate::prepare_timeline_export_dependencies(
+        let mut execution = crate::prepare_timeline_export_dependencies_with_audio_selection(
             &timeline.sequence,
             &timeline.sequences,
             timeline.range,
-            include_audio,
+            audio_selection,
         )
         .expect("prepare exact test execution snapshot")
         .execution_snapshot()

@@ -5,15 +5,16 @@
 //! Transition, and media identities can contribute to one export selection.
 
 use crate::{
-    ExportMediaDependency, ResolvedTimelineExportRange, TimelineExportRange,
-    TimelineExportRangeError,
+    preset::ExportAudioProgramSelection, ExportMediaDependency, ResolvedTimelineExportRange,
+    TimelineExportRange, TimelineExportRangeError,
 };
 use mondrian_audio::{
     compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
     AudioProgramExecutionDemand, CompiledAudioProgram,
 };
 use mondrian_core::{
-    AssetId, AudioSourceComponentId, SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
+    AssetId, AudioSourceComponentId, ProgramOutputId, SequenceId, SequenceRevision, TimelineTime,
+    VideoTransitionId,
 };
 use mondrian_effects::effect_registry_revision;
 use mondrian_renderer::{
@@ -149,24 +150,41 @@ impl PreparedTimelineVisualSnapshot {
 
 /// Exact selected-range audio semantic evidence frozen for one export.
 ///
-/// The retained root Program is the pure author-to-semantic result used for
-/// admission, execution-demand selection, and root Runtime preparation. Audio
-/// compilation does not consult processor registries, devices, files, or media
-/// adapters.
+/// Each retained root Program is the pure author-to-semantic result used for
+/// admission, execution-demand selection, and Runtime preparation. Ordinary
+/// mixdown retains the primary public output; a stem artifact retains every
+/// public output in authored order. Audio compilation does not consult
+/// processor registries, devices, files, or media adapters.
 #[derive(Debug, Clone)]
 pub struct PreparedTimelineAudioSnapshot {
-    closure: AudioDependencyClosure,
-    root_program: Arc<CompiledAudioProgram>,
+    primary_output: PreparedTimelineAudioOutputSnapshot,
+    additional_outputs: Vec<PreparedTimelineAudioOutputSnapshot>,
     sequence_ids: BTreeSet<SequenceId>,
     media_components: BTreeMap<AssetId, BTreeSet<AudioSourceComponentId>>,
-    execution_demand: AudioProgramExecutionDemand,
     range: ResolvedTimelineExportRange,
 }
 
-impl PreparedTimelineAudioSnapshot {
-    /// Exact immutable root semantic Program selected at admission.
+/// Exact frozen semantics for one root public Program Output.
+#[derive(Debug, Clone)]
+pub struct PreparedTimelineAudioOutputSnapshot {
+    name: String,
+    closure: AudioDependencyClosure,
+}
+
+impl PreparedTimelineAudioOutputSnapshot {
+    /// Stable root public output identity.
+    pub fn output_id(&self) -> ProgramOutputId {
+        self.closure.root_program().output_id()
+    }
+
+    /// User-authored label frozen with the export attempt.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Exact immutable root semantic Program.
     pub fn root_program(&self) -> &Arc<CompiledAudioProgram> {
-        &self.root_program
+        self.closure.root_program()
     }
 
     /// Exact root/nested occurrence Programs and dependency evidence.
@@ -175,8 +193,40 @@ impl PreparedTimelineAudioSnapshot {
     }
 
     /// Conservative proof governing whether PCM execution may be omitted.
-    pub const fn execution_demand(&self) -> AudioProgramExecutionDemand {
-        self.execution_demand
+    pub fn execution_demand(&self) -> AudioProgramExecutionDemand {
+        self.closure.execution_demand()
+    }
+}
+
+impl PreparedTimelineAudioSnapshot {
+    /// Exact immutable root semantic Program selected at admission.
+    pub fn root_program(&self) -> &Arc<CompiledAudioProgram> {
+        self.primary_output().root_program()
+    }
+
+    /// Exact root/nested occurrence Programs and dependency evidence.
+    pub fn closure(&self) -> &AudioDependencyClosure {
+        self.primary_output().closure()
+    }
+
+    /// Conservative proof governing whether PCM execution may be omitted.
+    pub fn execution_demand(&self) -> AudioProgramExecutionDemand {
+        self.primary_output.execution_demand()
+    }
+
+    /// Ordered public outputs frozen for this artifact.
+    pub fn outputs(&self) -> impl Iterator<Item = &PreparedTimelineAudioOutputSnapshot> {
+        std::iter::once(&self.primary_output).chain(self.additional_outputs.iter())
+    }
+
+    /// Number of frozen public outputs.
+    pub fn output_count(&self) -> usize {
+        1_usize.saturating_add(self.additional_outputs.len())
+    }
+
+    /// Primary/default public output used by ordinary mixdown delivery.
+    pub fn primary_output(&self) -> &PreparedTimelineAudioOutputSnapshot {
+        &self.primary_output
     }
 
     /// Root and nested Sequence identities selected by audio reachability.
@@ -404,6 +454,25 @@ pub fn prepare_timeline_export_dependencies(
     range: TimelineExportRange,
     include_audio: bool,
 ) -> Result<PreparedTimelineExportDependencies, TimelineExportDependencyError> {
+    prepare_timeline_export_dependencies_with_audio_selection(
+        root,
+        sequences,
+        range,
+        if include_audio {
+            ExportAudioProgramSelection::Primary
+        } else {
+            ExportAudioProgramSelection::Disabled
+        },
+    )
+}
+
+/// Prepare dependencies with an explicit public Program Output selection.
+pub fn prepare_timeline_export_dependencies_with_audio_selection(
+    root: &Sequence,
+    sequences: &[Sequence],
+    range: TimelineExportRange,
+    audio_selection: ExportAudioProgramSelection,
+) -> Result<PreparedTimelineExportDependencies, TimelineExportDependencyError> {
     let resolved_range = range.resolve(root)?;
     let (first, last) =
         resolved_range
@@ -488,27 +557,65 @@ pub fn prepare_timeline_export_dependencies(
         }
     })?;
 
-    if include_audio {
-        let audio =
-            compile_audio_dependency_closure(root, sequences, None, resolved_range.time_range()?)?;
-        dependencies.sequence_ids.extend(audio.sequence_ids().iter().copied());
-        for (asset_id, components) in audio.media_components() {
+    if audio_selection != ExportAudioProgramSelection::Disabled {
+        let selected_outputs = match audio_selection {
+            ExportAudioProgramSelection::Disabled => Vec::new(),
+            ExportAudioProgramSelection::Primary => vec![None],
+            ExportAudioProgramSelection::All => {
+                root.audio_program.outputs.iter().map(|output| Some(output.id)).collect()
+            }
+        };
+        let mut outputs = Vec::with_capacity(selected_outputs.len());
+        let mut audio_sequence_ids = BTreeSet::new();
+        let mut audio_media_components =
+            BTreeMap::<AssetId, BTreeSet<AudioSourceComponentId>>::new();
+        for selected_output in selected_outputs {
+            let audio = compile_audio_dependency_closure(
+                root,
+                sequences,
+                selected_output,
+                resolved_range.time_range()?,
+            )?;
+            audio_sequence_ids.extend(audio.sequence_ids().iter().copied());
+            for (asset_id, components) in audio.media_components() {
+                audio_media_components
+                    .entry(*asset_id)
+                    .or_default()
+                    .extend(components.iter().copied());
+            }
+            let output_id = audio.root_program().output_id();
+            let name = root
+                .audio_program
+                .outputs
+                .iter()
+                .find(|output| output.id == output_id)
+                .map(|output| output.name.clone())
+                .ok_or_else(
+                    || TimelineExportDependencyError::AudioClosureEvidenceMismatch {
+                        detail: format!("compiled root Program Output {output_id} is not authored"),
+                    },
+                )?;
+            outputs.push(PreparedTimelineAudioOutputSnapshot { name, closure: audio });
+        }
+        dependencies.sequence_ids.extend(audio_sequence_ids.iter().copied());
+        for (asset_id, components) in &audio_media_components {
             dependencies
                 .media_components
                 .entry(*asset_id)
                 .or_default()
                 .extend(components.iter().copied());
         }
-        let root_program = Arc::clone(audio.root_program());
-        let audio_sequence_ids = audio.sequence_ids().clone();
-        let audio_media_components = audio.media_components().clone();
-        let execution_demand = audio.execution_demand();
+        let mut outputs = outputs.into_iter();
+        let primary_output = outputs.next().ok_or_else(|| {
+            TimelineExportDependencyError::AudioClosureEvidenceMismatch {
+                detail: "audio selection produced no public Program Output".to_owned(),
+            }
+        })?;
         dependencies.execution_snapshot.audio = Some(PreparedTimelineAudioSnapshot {
-            closure: audio,
-            root_program,
+            primary_output,
+            additional_outputs: outputs.collect(),
             sequence_ids: audio_sequence_ids,
             media_components: audio_media_components,
-            execution_demand,
             range: resolved_range,
         });
     }
@@ -528,6 +635,31 @@ pub fn validate_timeline_export_execution_snapshot(
     color_environment: &mondrian_core::ProjectColorEnvironment,
     range: TimelineExportRange,
     include_audio: bool,
+    execution: &PreparedTimelineExecutionSnapshot,
+    media: &HashMap<AssetId, ExportMediaDependency>,
+) -> Result<(), TimelineExportDependencyError> {
+    validate_timeline_export_execution_snapshot_with_audio_selection(
+        root,
+        sequences,
+        color_environment,
+        range,
+        if include_audio {
+            ExportAudioProgramSelection::Primary
+        } else {
+            ExportAudioProgramSelection::Disabled
+        },
+        execution,
+        media,
+    )
+}
+
+/// Validate a frozen execution snapshot against an explicit audio selection.
+pub fn validate_timeline_export_execution_snapshot_with_audio_selection(
+    root: &Sequence,
+    sequences: &[Sequence],
+    color_environment: &mondrian_core::ProjectColorEnvironment,
+    range: TimelineExportRange,
+    audio_selection: ExportAudioProgramSelection,
     execution: &PreparedTimelineExecutionSnapshot,
     media: &HashMap<AssetId, ExportMediaDependency>,
 ) -> Result<(), TimelineExportDependencyError> {
@@ -617,8 +749,11 @@ pub fn validate_timeline_export_execution_snapshot(
         .copied()
         .map(|asset_id| (asset_id, BTreeSet::new()))
         .collect::<BTreeMap<_, _>>();
-    match (include_audio, execution.audio()) {
-        (true, Some(frozen_audio)) => {
+    match (audio_selection, execution.audio()) {
+        (
+            ExportAudioProgramSelection::Primary | ExportAudioProgramSelection::All,
+            Some(frozen_audio),
+        ) => {
             if frozen_audio.range() != resolved_range {
                 return Err(
                     TimelineExportDependencyError::AudioClosureEvidenceMismatch {
@@ -627,24 +762,67 @@ pub fn validate_timeline_export_execution_snapshot(
                     },
                 );
             }
-            let audio = compile_audio_dependency_closure(
-                root,
-                sequences,
-                None,
-                visual.range().time_range()?,
-            )?;
-            let root_program = audio.root_program();
-            if &audio != frozen_audio.closure()
-                || root_program.as_ref() != frozen_audio.root_program().as_ref()
-                || audio.execution_demand() != frozen_audio.execution_demand()
-                || audio.sequence_ids() != frozen_audio.sequence_ids()
-                || audio.media_components() != frozen_audio.media_components()
-            {
-                return Err(TimelineExportDependencyError::AudioClosureEvidenceMismatch {
-                    detail:
-                        "pure semantic recompilation differs from the frozen root Program or reachability"
+            let selected_outputs = match audio_selection {
+                ExportAudioProgramSelection::Primary => vec![None],
+                ExportAudioProgramSelection::All => {
+                    root.audio_program.outputs.iter().map(|output| Some(output.id)).collect()
+                }
+                ExportAudioProgramSelection::Disabled => Vec::new(),
+            };
+            if selected_outputs.len() != frozen_audio.output_count() {
+                return Err(
+                    TimelineExportDependencyError::AudioClosureEvidenceMismatch {
+                        detail: "frozen public Program Output count differs from selection"
                             .to_owned(),
-                });
+                    },
+                );
+            }
+            let mut audio_sequence_ids = BTreeSet::new();
+            let mut audio_media_components =
+                BTreeMap::<AssetId, BTreeSet<AudioSourceComponentId>>::new();
+            for (selected_output, frozen_output) in
+                selected_outputs.into_iter().zip(frozen_audio.outputs())
+            {
+                let audio = compile_audio_dependency_closure(
+                    root,
+                    sequences,
+                    selected_output,
+                    visual.range().time_range()?,
+                )?;
+                let output_id = audio.root_program().output_id();
+                let name = root
+                    .audio_program
+                    .outputs
+                    .iter()
+                    .find(|output| output.id == output_id)
+                    .map(|output| output.name.as_str());
+                if &audio != frozen_output.closure()
+                    || name != Some(frozen_output.name())
+                    || audio.execution_demand() != frozen_output.execution_demand()
+                {
+                    return Err(TimelineExportDependencyError::AudioClosureEvidenceMismatch {
+                        detail: format!(
+                            "pure semantic recompilation differs for frozen Program Output {output_id}"
+                        ),
+                    });
+                }
+                audio_sequence_ids.extend(audio.sequence_ids().iter().copied());
+                for (asset_id, components) in audio.media_components() {
+                    audio_media_components
+                        .entry(*asset_id)
+                        .or_default()
+                        .extend(components.iter().copied());
+                }
+            }
+            if &audio_sequence_ids != frozen_audio.sequence_ids()
+                || &audio_media_components != frozen_audio.media_components()
+            {
+                return Err(
+                    TimelineExportDependencyError::AudioClosureEvidenceMismatch {
+                        detail: "frozen audio union reachability differs from selected outputs"
+                            .to_owned(),
+                    },
+                );
             }
             required_sequence_ids.extend(frozen_audio.sequence_ids().iter().copied());
             for (asset_id, components) in frozen_audio.media_components() {
@@ -654,8 +832,10 @@ pub fn validate_timeline_export_execution_snapshot(
                     .extend(components.iter().copied());
             }
         }
-        (true, None) => return Err(TimelineExportDependencyError::MissingPreparedAudioProgram),
-        (false, Some(_)) => {
+        (ExportAudioProgramSelection::Primary | ExportAudioProgramSelection::All, None) => {
+            return Err(TimelineExportDependencyError::MissingPreparedAudioProgram);
+        }
+        (ExportAudioProgramSelection::Disabled, Some(_)) => {
             return Err(
                 TimelineExportDependencyError::AudioClosureEvidenceMismatch {
                     detail: "audio execution evidence is present for an audio-disabled export"
@@ -663,7 +843,7 @@ pub fn validate_timeline_export_execution_snapshot(
                 },
             );
         }
-        (false, None) => {}
+        (ExportAudioProgramSelection::Disabled, None) => {}
     }
     let actual_sequence_ids = std::iter::once(root.id)
         .chain(sequences.iter().map(|sequence| sequence.id))

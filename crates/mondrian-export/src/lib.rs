@@ -2,6 +2,8 @@
 //!
 //! 导出与渲染系统：渲染队列 / 硬件编码 / 格式预设
 
+mod artifact_identity;
+mod audio_stems;
 pub mod capture;
 pub mod delivery;
 mod hardware_encoding;
@@ -12,19 +14,23 @@ pub mod validator;
 pub mod video_encoding;
 
 pub use capture::{
-    prepare_timeline_export_dependencies, validate_timeline_export_execution_snapshot,
-    PreparedTimelineAudioSnapshot, PreparedTimelineExecutionSnapshot,
-    PreparedTimelineExportDependencies, PreparedTimelineVisualSnapshot,
-    TimelineExportDependencyError,
+    prepare_timeline_export_dependencies,
+    prepare_timeline_export_dependencies_with_audio_selection,
+    validate_timeline_export_execution_snapshot,
+    validate_timeline_export_execution_snapshot_with_audio_selection,
+    PreparedTimelineAudioOutputSnapshot, PreparedTimelineAudioSnapshot,
+    PreparedTimelineExecutionSnapshot, PreparedTimelineExportDependencies,
+    PreparedTimelineVisualSnapshot, TimelineExportDependencyError,
 };
 pub use delivery::{
     resolve_export_delivery, ExportDeliveryError, ExportDeliveryIssueCode,
     ResolvedExportDeliveryContract,
 };
 pub use preset::{
-    BuiltinExportPreset, ExportConfig, ExportFrameSampling, ExportMediaDependency,
-    ExportOutputPolicy, ExportPreset, ResolvedTimelineExportRange, TimelineExportRange,
-    TimelineExportRangeError, TimelineExportSnapshot,
+    AudioStemFormat, BuiltinExportPreset, ExportAudioProgramSelection, ExportConfig,
+    ExportFrameSampling, ExportMediaDependency, ExportOutputPolicy, ExportPreset,
+    ResolvedTimelineExportRange, TimelineExportRange, TimelineExportRangeError,
+    TimelineExportSnapshot,
 };
 pub use queue::{
     expected_export_video_signal, ExportAdmissionError, ExportArtifactPublicationEvidence,

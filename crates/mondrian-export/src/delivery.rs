@@ -6,9 +6,10 @@
 //! Timeline Export Snapshot before admitting work.
 
 use crate::preset::{
-    AudioCodecConfig, Av1Profile, Container, ExportAlphaMode, ExportArtifactEncoding,
-    ExportChromaSampling, ExportColorTarget, ExportFrameSampling, ExportPreset, HevcProfile,
-    ImageSequenceFormat, ProResProfile, Resolution, VideoCodecConfig, VideoRateControl,
+    AudioCodecConfig, AudioStemFormat, Av1Profile, Container, ExportAlphaMode,
+    ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget, ExportFrameSampling,
+    ExportPreset, HevcProfile, ImageSequenceFormat, ProResProfile, Resolution, VideoCodecConfig,
+    VideoRateControl,
 };
 use mondrian_core::{
     AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
@@ -97,6 +98,11 @@ pub enum ResolvedExportArtifactEncoding {
         /// Exact still-image representation for every frame.
         format: ImageSequenceFormat,
     },
+    /// One atomically published directory of public Program Output WAV files.
+    AudioStems {
+        /// Exact shared sample representation.
+        format: AudioStemFormat,
+    },
 }
 
 /// Fully explicit export target admitted before rendering begins.
@@ -157,6 +163,9 @@ pub fn resolve_export_delivery(
         ExportArtifactEncoding::ImageSequence { format } => {
             ResolvedExportArtifactEncoding::ImageSequence { format: *format }
         }
+        ExportArtifactEncoding::AudioStems { format } => {
+            ResolvedExportArtifactEncoding::AudioStems { format: *format }
+        }
     };
 
     let bit_depth = preset.video_signal.bit_depth.resolve(settings.delivery.bit_depth);
@@ -187,9 +196,14 @@ pub fn resolve_export_delivery(
         ExportArtifactEncoding::ImageSequence { .. } => {
             crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
         }
+        ExportArtifactEncoding::AudioStems { .. } => {
+            crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
+        }
     };
 
-    validate_alpha(preset)?;
+    if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
+        validate_alpha(preset)?;
+    }
     let pixel_format = match &preset.artifact {
         ExportArtifactEncoding::MediaFile(media) => {
             resolve_pixel_format(&media.video, preset.alpha_mode, bit_depth, chroma_sampling)?
@@ -200,8 +214,11 @@ pub fn resolve_export_delivery(
             bit_depth,
             chroma_sampling,
         )?,
+        ExportArtifactEncoding::AudioStems { .. } => "none",
     };
-    validate_dimensions(resolution, chroma_sampling)?;
+    if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
+        validate_dimensions(resolution, chroma_sampling)?;
+    }
     let color_target = resolve_export_color_target(preset, settings, color_environment)?;
     validate_color_output(
         preset,
@@ -617,6 +634,7 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
             (Container::Mov, VideoCodecConfig::ProRes { profile }) if profile.is_4444()
         ),
         ExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 } => true,
+        ExportArtifactEncoding::AudioStems { .. } => false,
     };
     if supported {
         return Ok(());
@@ -823,6 +841,26 @@ mod tests {
             crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
         );
         assert_eq!(contract.color_target.color_space, ColorSpace::Srgb);
+    }
+
+    #[test]
+    fn audio_stems_select_all_program_outputs_without_video_encoding() {
+        let preset = ExportPreset::audio_stems_pcm24();
+        assert_eq!(
+            preset.audio_program_selection(),
+            crate::preset::ExportAudioProgramSelection::All
+        );
+        let contract = resolve_export_delivery(
+            &preset,
+            &SequenceSettings::default(),
+            &ProjectColorEnvironment::default(),
+        )
+        .expect("typed audio stems should resolve");
+        assert!(matches!(
+            contract.artifact,
+            ResolvedExportArtifactEncoding::AudioStems { format: AudioStemFormat::WavePcm24 }
+        ));
+        assert_eq!(contract.pixel_format, "none");
     }
 
     #[test]

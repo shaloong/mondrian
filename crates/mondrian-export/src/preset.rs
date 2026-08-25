@@ -269,6 +269,25 @@ pub enum ImageSequenceFormat {
     Png8,
 }
 
+/// Sample representation used by every file in an audio-stem package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioStemFormat {
+    /// Broadcast-wave-compatible 24-bit integer PCM WAV.
+    WavePcm24,
+}
+
+/// Public Program Output selection implied by one physical artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportAudioProgramSelection {
+    /// Do not capture or execute audio.
+    Disabled,
+    /// Capture only the Sequence default/primary Program Output.
+    Primary,
+    /// Capture every public Program Output in stable authored order.
+    All,
+}
+
 /// Physical artifact family produced by one preset.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
@@ -279,6 +298,11 @@ pub enum ExportArtifactEncoding {
     ImageSequence {
         /// Exact still-image representation for every frame.
         format: ImageSequenceFormat,
+    },
+    /// One validated WAV per public Program Output plus a content manifest.
+    AudioStems {
+        /// Exact sample representation shared by every stem.
+        format: AudioStemFormat,
     },
 }
 
@@ -339,7 +363,8 @@ impl ExportPreset {
     pub const fn media_file(&self) -> Option<&EncodedMediaOutput> {
         match &self.artifact {
             ExportArtifactEncoding::MediaFile(media) => Some(media),
-            ExportArtifactEncoding::ImageSequence { .. } => None,
+            ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. } => None,
         }
     }
 
@@ -347,7 +372,8 @@ impl ExportPreset {
     pub fn media_file_mut(&mut self) -> Option<&mut EncodedMediaOutput> {
         match &mut self.artifact {
             ExportArtifactEncoding::MediaFile(media) => Some(media),
-            ExportArtifactEncoding::ImageSequence { .. } => None,
+            ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. } => None,
         }
     }
 
@@ -356,6 +382,31 @@ impl ExportPreset {
         match self.artifact {
             ExportArtifactEncoding::MediaFile(_) => None,
             ExportArtifactEncoding::ImageSequence { format } => Some(format),
+            ExportArtifactEncoding::AudioStems { .. } => None,
+        }
+    }
+
+    /// Return the shared WAV representation when this preset publishes stems.
+    pub const fn audio_stem_format(&self) -> Option<AudioStemFormat> {
+        match self.artifact {
+            ExportArtifactEncoding::AudioStems { format } => Some(format),
+            ExportArtifactEncoding::MediaFile(_) | ExportArtifactEncoding::ImageSequence { .. } => {
+                None
+            }
+        }
+    }
+
+    /// Exact audio-program selection required by this artifact.
+    pub const fn audio_program_selection(&self) -> ExportAudioProgramSelection {
+        match &self.artifact {
+            ExportArtifactEncoding::MediaFile(media) => match media.audio {
+                AudioCodecConfig::Disabled => ExportAudioProgramSelection::Disabled,
+                AudioCodecConfig::Aac { .. }
+                | AudioCodecConfig::Pcm { .. }
+                | AudioCodecConfig::Mp3 { .. } => ExportAudioProgramSelection::Primary,
+            },
+            ExportArtifactEncoding::ImageSequence { .. } => ExportAudioProgramSelection::Disabled,
+            ExportArtifactEncoding::AudioStems { .. } => ExportAudioProgramSelection::All,
         }
     }
 
@@ -501,6 +552,20 @@ impl ExportPreset {
             color_target: ExportColorTarget::RenderingView(ColorSpace::Srgb),
         }
     }
+
+    /// Lossless 24-bit WAV files for every public Program Output.
+    pub fn audio_stems_pcm24() -> Self {
+        Self {
+            name: "Program Output Stems（24-bit WAV）".into(),
+            artifact: ExportArtifactEncoding::AudioStems { format: AudioStemFormat::WavePcm24 },
+            resolution: None,
+            frame_rate: ExportParameter::FollowSequence,
+            frame_sampling: ExportFrameSampling::FrameHold,
+            video_signal: ExportVideoSignal::default(),
+            alpha_mode: ExportAlphaMode::FlattenBlack,
+            color_target: ExportColorTarget::FollowSequence,
+        }
+    }
 }
 
 /// Stable identities for product-owned delivery presets.
@@ -523,17 +588,20 @@ pub enum BuiltinExportPreset {
     ProRes4444Alpha,
     /// Lossless numbered PNG frames with a durable manifest.
     PngSequence,
+    /// Lossless WAV package containing every public Program Output.
+    AudioStemsPcm24,
 }
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
         Self::Proxy720p,
         Self::ProRes4444Alpha,
         Self::PngSequence,
+        Self::AudioStemsPcm24,
     ];
 
     /// Stable non-localized identifier for Headless validation and preset selection.
@@ -545,6 +613,7 @@ impl BuiltinExportPreset {
             Self::Proxy720p => "proxy-720p",
             Self::ProRes4444Alpha => "prores-4444-alpha",
             Self::PngSequence => "png-sequence",
+            Self::AudioStemsPcm24 => "audio-stems-pcm24",
         }
     }
 
@@ -557,6 +626,7 @@ impl BuiltinExportPreset {
             Self::Proxy720p => "代理文件 720p",
             Self::ProRes4444Alpha => "ProRes 4444 XQ + Alpha（12-bit）",
             Self::PngSequence => "PNG 图像序列（无损 + Alpha）",
+            Self::AudioStemsPcm24 => "Program Output Stems（24-bit WAV）",
         }
     }
 
@@ -569,6 +639,7 @@ impl BuiltinExportPreset {
             Self::Proxy720p => ExportPreset::proxy_720p(),
             Self::ProRes4444Alpha => ExportPreset::prores_4444_alpha(),
             Self::PngSequence => ExportPreset::png_sequence(),
+            Self::AudioStemsPcm24 => ExportPreset::audio_stems_pcm24(),
         }
     }
 }

@@ -5,12 +5,10 @@
 //! and writes the manifest before the enclosing directory crosses the
 //! namespace publication Seam.
 
+use crate::artifact_identity::sha256_file;
 use crate::preset::{ExportAlphaMode, ImageSequenceFormat};
 use mondrian_core::{ColorSpace, ExecutionCancellationToken, Rational};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-use std::fs::File;
-use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
@@ -106,7 +104,7 @@ pub(crate) fn validate_and_write_manifest(
             index,
             file_name,
             byte_len: metadata.len(),
-            sha256: sha256_file(&path, cancel)?,
+            sha256: sha256_file(&path, cancel, "image-sequence frame")?,
         });
     }
 
@@ -166,27 +164,6 @@ fn validate_frame_decode(
         ));
     }
     Ok(())
-}
-
-fn sha256_file(path: &Path, cancel: &ExecutionCancellationToken) -> Result<String, String> {
-    let file = File::open(path)
-        .map_err(|error| format!("cannot hash encoded frame {}: {error}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if cancel.is_canceled() {
-            return Err("image-sequence hashing cancelled".to_owned());
-        }
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|error| format!("cannot hash encoded frame {}: {error}", path.display()))?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(format!("{:x}", digest.finalize()))
 }
 
 #[cfg(test)]

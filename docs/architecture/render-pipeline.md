@@ -251,6 +251,16 @@ publishes the complete populated directory with create-new semantics. The final
 route therefore never exposes a partial sequence, cancellation cannot authorize
 publication, and an existing directory wins without recursive replacement.
 
+Audio-stem execution uses the same directory-publication boundary but has no
+visual encoder path. The preset selects every frozen public Audio Program
+Output; Export renders each exact root independently through the shared Audio
+Runtime, converts it to PCM24 WAV, and probes codec, sample rate, semantic
+channel layout, and exact rational sample duration. A versioned manifest binds
+the ordered strong Output identities and captured labels to deterministic file
+names, byte lengths, SHA-256 identities, and per-output loudness evidence.
+Storage publishes the directory only after every stem and the manifest are
+durable and validated, so a package is an all-or-nothing export artifact.
+
 Preview performs that same dynamic evaluation before its canonical
 media-demand collector can publish a decode request and before a
 generated-source Adapter runs. The renderer prepares an immutable
