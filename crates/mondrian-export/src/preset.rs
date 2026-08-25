@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::video_encoding::VideoCodingStructure;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resolution {
     pub width: u32,
@@ -288,6 +290,9 @@ pub struct ExportPreset {
     /// Explicit temporal sampling policy for cadence conversion.
     #[serde(default)]
     pub frame_sampling: ExportFrameSampling,
+    /// Explicit codec-family picture structure; encoder defaults are never delivery authority.
+    #[serde(default)]
+    pub video_coding: VideoCodingStructure,
     /// Encoded signal representation. Creative output color remains Sequence-owned.
     #[serde(default)]
     pub video_signal: ExportVideoSignal,
@@ -313,6 +318,7 @@ impl ExportPreset {
             resolution: Some(Resolution { width: 1920, height: 1080 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -336,6 +342,7 @@ impl ExportPreset {
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Ten,
                 VideoRange::Legal,
@@ -358,6 +365,7 @@ impl ExportPreset {
             resolution: Some(Resolution { width: 1080, height: 1920 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -380,6 +388,7 @@ impl ExportPreset {
             resolution: Some(Resolution { width: 1280, height: 720 }),
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Eight,
                 VideoRange::Legal,
@@ -400,6 +409,7 @@ impl ExportPreset {
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: VideoCodingStructure::IntraOnly,
             video_signal: ExportVideoSignal::explicit(
                 DeliveryBitDepth::Twelve,
                 VideoRange::Full,

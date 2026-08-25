@@ -1,7 +1,11 @@
 //! Export helpers: codec arguments, transactional process monitoring, and validation.
 use super::*;
 
-pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig) {
+pub(crate) fn apply_video_codec_args(
+    cmd: &mut Command,
+    codec: &VideoCodecConfig,
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+) {
     match codec {
         VideoCodecConfig::H264 { profile, rate_control } => {
             cmd.arg("-c:v")
@@ -46,6 +50,42 @@ pub(crate) fn apply_video_codec_args(cmd: &mut Command, codec: &VideoCodecConfig
         VideoCodecConfig::Gif { .. } => {
             cmd.arg("-c:v").arg("gif");
         }
+    }
+    apply_video_coding_structure_args(cmd, coding);
+}
+
+fn apply_video_coding_structure_args(
+    cmd: &mut Command,
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+) {
+    use crate::video_encoding::ResolvedVideoCodingStructure;
+
+    match coding {
+        ResolvedVideoCodingStructure::H26xLongGop {
+            keyframe_interval_frames,
+            max_b_frames,
+            closed_gop,
+            scene_cut: _,
+        } => {
+            cmd.arg("-g")
+                .arg(keyframe_interval_frames.to_string())
+                .arg("-keyint_min")
+                .arg(keyframe_interval_frames.to_string())
+                .arg("-bf")
+                .arg(max_b_frames.to_string())
+                .arg("-flags")
+                .arg(if closed_gop { "+cgop" } else { "-cgop" });
+        }
+        ResolvedVideoCodingStructure::Av1RandomAccess {
+            keyframe_interval_frames,
+            lookahead_frames,
+        } => {
+            cmd.arg("-g")
+                .arg(keyframe_interval_frames.to_string())
+                .arg("-lag-in-frames")
+                .arg(lookahead_frames.to_string());
+        }
+        ResolvedVideoCodingStructure::IntraOnly => {}
     }
 }
 
@@ -237,7 +277,8 @@ pub(crate) fn apply_export_video_signal_args(
     }
 }
 
-/// Emit encoder-native color signaling for the H.264/H.265 VUI.
+/// Emit one encoder-native H.264/H.265 parameter dictionary containing both
+/// the resolved GOP contract and VUI/HDR signaling.
 ///
 /// FFmpeg 8 no longer maps the container-level `-color_primaries` and
 /// `-color_trc` options into the x264/x265 bitstream, which would otherwise
@@ -252,35 +293,64 @@ pub(crate) fn apply_encoder_signal_params(
     delivery: &ResolvedExportDeliveryContract,
 ) -> Result<(), String> {
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
-    let Some(tags) = contract.color_space.ffmpeg_tags() else {
-        return Ok(());
-    };
-    let Some(matrix) = contract.yuv_matrix else {
-        return Ok(());
-    };
-    let vui = format!(
-        "colorprim={}:transfer={}:colormatrix={}",
-        tags.color_primaries,
-        tags.color_trc,
-        matrix.tag_name()
-    );
     match codec {
         VideoCodecConfig::H264 { .. } => {
-            cmd.arg("-x264-params").arg(vui);
+            let mut params = h26x_coding_params(delivery.video_coding)?;
+            append_encoder_vui_params(&mut params, contract);
+            cmd.arg("-x264-params").arg(params.join(":"));
         }
         VideoCodecConfig::Hevc { .. } => {
-            let mut params = vui;
+            let mut params = h26x_coding_params(delivery.video_coding)?;
+            append_encoder_vui_params(&mut params, contract);
             if settings.delivery.static_hdr_metadata_policy.writes_authored_metadata() {
-                params.push(':');
-                params.push_str(&h265_hdr_metadata_params(settings)?);
+                params.push(h265_hdr_metadata_params(settings)?);
             }
-            cmd.arg("-x265-params").arg(params);
+            cmd.arg("-x265-params").arg(params.join(":"));
         }
         VideoCodecConfig::Av1 { .. }
         | VideoCodecConfig::ProRes { .. }
         | VideoCodecConfig::Gif { .. } => {}
     }
     Ok(())
+}
+
+fn h26x_coding_params(
+    coding: crate::video_encoding::ResolvedVideoCodingStructure,
+) -> Result<Vec<String>, String> {
+    let crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+        keyframe_interval_frames,
+        max_b_frames,
+        closed_gop,
+        scene_cut,
+    } = coding
+    else {
+        return Err("H.264/HEVC encoder received a non-H26x coding contract".to_owned());
+    };
+    Ok(vec![
+        format!("keyint={keyframe_interval_frames}"),
+        format!("min-keyint={keyframe_interval_frames}"),
+        format!("bframes={max_b_frames}"),
+        format!(
+            "scenecut={}",
+            match scene_cut {
+                crate::video_encoding::VideoSceneCutPolicy::Adaptive => 40,
+                crate::video_encoding::VideoSceneCutPolicy::Disabled => 0,
+            }
+        ),
+        format!("open-gop={}", u8::from(!closed_gop)),
+    ])
+}
+
+fn append_encoder_vui_params(params: &mut Vec<String>, contract: ExportVideoSignalContract) {
+    let (Some(tags), Some(matrix)) = (contract.color_space.ffmpeg_tags(), contract.yuv_matrix)
+    else {
+        return;
+    };
+    params.extend([
+        format!("colorprim={}", tags.color_primaries),
+        format!("transfer={}", tags.color_trc),
+        format!("colormatrix={}", matrix.tag_name()),
+    ]);
 }
 
 fn h265_hdr_metadata_params(settings: &SequenceSettings) -> Result<String, String> {

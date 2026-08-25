@@ -7,6 +7,7 @@ pub mod delivery;
 pub mod preset;
 pub mod queue;
 pub mod validator;
+pub mod video_encoding;
 
 pub use capture::{
     prepare_timeline_export_dependencies, validate_timeline_export_execution_snapshot,
@@ -32,4 +33,8 @@ pub use queue::{
     ExportJobSnapshot, ExportProgress, ExportProgressDetail, ExportProgressPhase,
     ExportPublicationState, ExportQueueDiagnostics, JobStatus, RenderJob, RenderQueue,
     EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
+};
+pub use video_encoding::{
+    resolve_video_coding_structure, ResolvedVideoCodingStructure, VideoCodingStructure,
+    VideoSceneCutPolicy,
 };

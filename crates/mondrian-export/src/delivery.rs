@@ -89,6 +89,8 @@ pub struct ResolvedExportDeliveryContract {
     pub frame_rate: mondrian_core::Rational,
     /// Temporal resampling policy applied from the Sequence grid.
     pub frame_sampling: ExportFrameSampling,
+    /// Exact codec picture structure resolved for the output cadence.
+    pub video_coding: crate::video_encoding::ResolvedVideoCodingStructure,
     /// Exact encoded sample aspect ratio inherited from Sequence Program Output.
     pub sample_aspect_ratio: mondrian_core::SampleAspectRatio,
     /// Exact encoded scan order. Current delivery admission is progressive-only.
@@ -138,6 +140,14 @@ pub fn resolve_export_delivery(
             format!("不支持的恒定导出帧率: {frame_rate}"),
         ));
     }
+    let video_coding = crate::video_encoding::resolve_video_coding_structure(
+        &preset.video,
+        preset.video_coding,
+        frame_rate,
+    )
+    .map_err(|detail| {
+        ExportDeliveryError::new(ExportDeliveryIssueCode::InvalidCodecParameter, detail)
+    })?;
 
     validate_alpha(preset)?;
     let pixel_format =
@@ -157,6 +167,7 @@ pub fn resolve_export_delivery(
         resolution,
         frame_rate,
         frame_sampling: preset.frame_sampling,
+        video_coding,
         sample_aspect_ratio: settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
             ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleColorOutput,
@@ -708,6 +719,7 @@ mod tests {
             resolution: None,
             frame_rate: ExportParameter::FollowSequence,
             frame_sampling: ExportFrameSampling::FrameHold,
+            video_coding: crate::video_encoding::VideoCodingStructure::h26x_delivery(),
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: crate::preset::ExportColorTarget::FollowSequence,

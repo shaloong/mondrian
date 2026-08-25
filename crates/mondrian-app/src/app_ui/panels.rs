@@ -43,6 +43,7 @@ use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
     ExportProgressPhase, JobStatus,
 };
+use mondrian_export::{VideoCodingStructure, VideoSceneCutPolicy};
 use mondrian_media::info::ChannelLayout;
 use mondrian_media::{
     AudioStreamInfo, VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary,
@@ -4418,6 +4419,15 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         .map(|video| {
             let label = export_video_codec_label(&video);
             let mut updated = preset.clone();
+            updated.video_coding = match video {
+                VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. } => {
+                    VideoCodingStructure::h26x_delivery()
+                }
+                VideoCodecConfig::Av1 { .. } => VideoCodingStructure::av1_delivery(),
+                VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => {
+                    VideoCodingStructure::IntraOnly
+                }
+            };
             updated.video = video;
             MenuItem::new(label, export_preset_update_action(updated))
         })
@@ -5027,6 +5037,116 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 Box::new(max_bitrate_input),
             ))
             .with_row(PropertyRow::new("VBV buffer kbit", Box::new(buffer_input)));
+
+        match model.preset.video_coding {
+            VideoCodingStructure::H26xLongGop {
+                keyframe_interval_seconds,
+                max_b_frames,
+                closed_gop,
+                scene_cut,
+            } => {
+                let keyframe_preset = model.preset.clone();
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
+                    .with_step(1.0)
+                    .on_change(move |seconds| {
+                        let mut updated = keyframe_preset.clone();
+                        if let VideoCodingStructure::H26xLongGop {
+                            keyframe_interval_seconds, ..
+                        } = &mut updated.video_coding
+                        {
+                            *keyframe_interval_seconds = seconds.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let b_frame_preset = model.preset.clone();
+                let b_frame_input = NumberInput::new(max_b_frames as f64, 0.0, 4.0)
+                    .with_step(1.0)
+                    .on_change(move |frames| {
+                        let mut updated = b_frame_preset.clone();
+                        if let VideoCodingStructure::H26xLongGop { max_b_frames, .. } =
+                            &mut updated.video_coding
+                        {
+                            *max_b_frames = frames.round() as u8;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let closed_preset = model.preset.clone();
+                let closed_checkbox =
+                    Checkbox::new("封闭 GOP", closed_gop).on_change(move |enabled| {
+                        let mut updated = closed_preset.clone();
+                        if let VideoCodingStructure::H26xLongGop { closed_gop, .. } =
+                            &mut updated.video_coding
+                        {
+                            *closed_gop = enabled;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let scene_cut_preset = model.preset.clone();
+                let scene_cut_checkbox = Checkbox::new(
+                    "场景切换插入关键帧",
+                    scene_cut == VideoSceneCutPolicy::Adaptive,
+                )
+                .on_change(move |enabled| {
+                    let mut updated = scene_cut_preset.clone();
+                    if let VideoCodingStructure::H26xLongGop { scene_cut, .. } =
+                        &mut updated.video_coding
+                    {
+                        *scene_cut = if enabled {
+                            VideoSceneCutPolicy::Adaptive
+                        } else {
+                            VideoSceneCutPolicy::Disabled
+                        };
+                    }
+                    export_preset_update_action(updated)
+                });
+                encoding_section = encoding_section
+                    .with_row(PropertyRow::new(
+                        "关键帧间隔（秒）",
+                        Box::new(keyframe_input),
+                    ))
+                    .with_row(PropertyRow::new("最大连续 B 帧", Box::new(b_frame_input)))
+                    .with_row(PropertyRow::new("GOP", Box::new(closed_checkbox)))
+                    .with_row(PropertyRow::new("场景切换", Box::new(scene_cut_checkbox)));
+            }
+            VideoCodingStructure::Av1RandomAccess {
+                keyframe_interval_seconds,
+                lookahead_frames,
+            } => {
+                let keyframe_preset = model.preset.clone();
+                let keyframe_input = NumberInput::new(keyframe_interval_seconds as f64, 1.0, 10.0)
+                    .with_step(1.0)
+                    .on_change(move |seconds| {
+                        let mut updated = keyframe_preset.clone();
+                        if let VideoCodingStructure::Av1RandomAccess {
+                            keyframe_interval_seconds,
+                            ..
+                        } = &mut updated.video_coding
+                        {
+                            *keyframe_interval_seconds = seconds.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                let lookahead_preset = model.preset.clone();
+                let lookahead_input = NumberInput::new(lookahead_frames as f64, 0.0, 120.0)
+                    .with_step(1.0)
+                    .on_change(move |frames| {
+                        let mut updated = lookahead_preset.clone();
+                        if let VideoCodingStructure::Av1RandomAccess { lookahead_frames, .. } =
+                            &mut updated.video_coding
+                        {
+                            *lookahead_frames = frames.round() as u16;
+                        }
+                        export_preset_update_action(updated)
+                    });
+                encoding_section = encoding_section
+                    .with_row(PropertyRow::new(
+                        "关键帧间隔（秒）",
+                        Box::new(keyframe_input),
+                    ))
+                    .with_row(PropertyRow::new("Lookahead 帧", Box::new(lookahead_input)));
+            }
+            VideoCodingStructure::IntraOnly => {}
+        }
     } else if let VideoCodecConfig::Gif { colors, dither } = model.preset.video {
         let colors_preset = model.preset.clone();
         let colors_input =

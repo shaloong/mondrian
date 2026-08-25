@@ -2185,7 +2185,7 @@ fn execute_timeline_export(
             }
         }
 
-        apply_video_codec_args(&mut cmd, &job.config.preset.video);
+        apply_video_codec_args(&mut cmd, &job.config.preset.video, delivery.video_coding);
         apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
         if let Err(err) = apply_encoder_signal_params(
             &mut cmd,
@@ -6357,6 +6357,12 @@ mod tests {
             resolution: crate::preset::Resolution { width: 1_920, height: 1_080 },
             frame_rate: Rational::FPS_25,
             frame_sampling: crate::preset::ExportFrameSampling::FrameHold,
+            video_coding: crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+                keyframe_interval_frames: 50,
+                max_b_frames: 3,
+                closed_gop: true,
+                scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+            },
             sample_aspect_ratio: mondrian_core::SampleAspectRatio::SQUARE,
             field_order: mondrian_core::timeline_data::FieldOrder::Progressive,
             bit_depth,
@@ -8557,6 +8563,7 @@ mod tests {
         config.preset.container = Container::Mov;
 
         config.preset.video = VideoCodecConfig::ProRes { profile: ProResProfile::Hq };
+        config.preset.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
         config.preset.video_signal = ExportVideoSignal {
             bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Twelve),
             range: ExportParameter::Explicit(VideoRange::Full),
@@ -8667,6 +8674,15 @@ mod tests {
         ] {
             let mut config = dummy_config("hdr-unsupported-metadata.mov");
             config.preset.container = container;
+            config.preset.video_coding = match codec {
+                VideoCodecConfig::Av1 { .. } => {
+                    crate::video_encoding::VideoCodingStructure::av1_delivery()
+                }
+                VideoCodecConfig::ProRes { .. } => {
+                    crate::video_encoding::VideoCodingStructure::IntraOnly
+                }
+                _ => unreachable!("test matrix contains only AV1 and ProRes"),
+            };
             config.preset.video = codec;
             config.preset.video_signal = ExportVideoSignal {
                 bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
@@ -8803,6 +8819,7 @@ mod tests {
         let mut config = dummy_config("untagged.gif");
         config.preset.container = Container::Gif;
         config.preset.video = VideoCodecConfig::Gif { colors: 256, dither: true };
+        config.preset.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
         config.preset.audio = AudioCodecConfig::Disabled;
         config.preset.video_signal = ExportVideoSignal {
             bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Eight),
@@ -10059,6 +10076,12 @@ mod tests {
                 profile: crate::preset::H264Profile::High,
                 rate_control: VideoRateControl::constrained_quality(18, 8_000, 16_000),
             },
+            crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+                keyframe_interval_frames: 60,
+                max_b_frames: 3,
+                closed_gop: true,
+                scene_cut: crate::video_encoding::VideoSceneCutPolicy::Disabled,
+            },
         );
         let h264_args = h264
             .get_args()
@@ -10068,6 +10091,9 @@ mod tests {
         assert!(h264_args.windows(2).any(|pair| pair == ["-maxrate", "8000k"]));
         assert!(h264_args.windows(2).any(|pair| pair == ["-bufsize", "16000k"]));
         assert!(!h264_args.iter().any(|arg| arg == "-b:v"));
+        assert!(h264_args.windows(2).any(|pair| pair == ["-g", "60"]));
+        assert!(h264_args.windows(2).any(|pair| pair == ["-bf", "3"]));
+        assert!(h264_args.windows(2).any(|pair| pair == ["-flags", "+cgop"]));
 
         let mut hevc = Command::new("ffmpeg");
         apply_video_codec_args(
@@ -10075,6 +10101,12 @@ mod tests {
             &VideoCodecConfig::Hevc {
                 profile: HevcProfile::Main10,
                 rate_control: VideoRateControl::constant_quality(20),
+            },
+            crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
+                keyframe_interval_frames: 50,
+                max_b_frames: 2,
+                closed_gop: true,
+                scene_cut: crate::video_encoding::VideoSceneCutPolicy::Adaptive,
             },
         );
         let hevc_args = hevc
@@ -10084,6 +10116,8 @@ mod tests {
         assert!(hevc_args.windows(2).any(|pair| pair == ["-c:v", "libx265"]));
         assert!(hevc_args.windows(2).any(|pair| pair == ["-profile:v", "main10"]));
         assert!(hevc_args.windows(2).any(|pair| pair == ["-crf", "20"]));
+        assert!(hevc_args.windows(2).any(|pair| pair == ["-g", "50"]));
+        assert!(hevc_args.windows(2).any(|pair| pair == ["-bf", "2"]));
     }
 
     #[test]
@@ -10169,6 +10203,8 @@ mod tests {
         );
         assert!(args[1].contains("transfer=smpte2084"));
         assert!(args[1].contains("colormatrix=bt2020nc"));
+        assert!(args[1].contains("keyint=50:min-keyint=50:bframes=3"));
+        assert!(args[1].contains("scenecut=0:open-gop=0"));
         assert!(args[1].contains("master-display="));
         assert!(args[1].contains(":max-cll="));
 
@@ -10184,13 +10220,13 @@ mod tests {
         )
         .expect("valid encoder signal params");
         let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        assert_eq!(
-            args,
-            vec![
-                "-x264-params",
-                "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"
-            ]
-        );
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[0], "-x264-params");
+        assert!(args[1].contains("keyint=50:min-keyint=50:bframes=3"));
+        assert!(args[1].contains("scenecut=0:open-gop=0"));
+        assert!(args[1].contains("colorprim=bt2020"));
+        assert!(args[1].contains("transfer=smpte2084"));
+        assert!(args[1].contains("colormatrix=bt2020nc"));
     }
 
     #[test]

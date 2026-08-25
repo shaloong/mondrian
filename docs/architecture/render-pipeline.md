@@ -1340,6 +1340,20 @@ audio sample coverage is derived from exact output duration rather than a
 rounded source-frame count. Encoder input cadence and post-encode ffprobe
 expectations consume the same resolved numerator and denominator.
 
+Video picture structure is admitted by `mondrian-export::video_encoding`, not
+left to an FFmpeg build's defaults. H.264/HEVC presets carry maximum keyframe
+interval in output-time seconds, B-picture cap, closed/open GOP intent, and an
+explicit scene-cut policy. Admission converts the interval to frames with
+checked rational ceiling arithmetic (for example two seconds at 30000/1001 is
+60 frames) and rejects a codec-family mismatch before preflight/render. AV1
+uses a separate random-access/lookahead contract because AV1 references are not
+H.26x B pictures; ProRes and GIF are explicitly intra-only. The FFmpeg adapter
+emits generic GOP arguments and one encoder-native x264/x265 parameter
+dictionary, merging picture structure with VUI and HDR metadata so later
+options cannot overwrite earlier policy. The export panel edits these typed
+values and changes the picture-structure family whenever the codec family is
+changed.
+
 After encoding, `mondrian-export` runs ffprobe through one typed
 `ExportValidationExpectations` contract. Stream presence is a closed
 `Required(exact constraints) / Forbidden` algebra rather than independent
