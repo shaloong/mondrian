@@ -2374,6 +2374,7 @@ dependencies = [
  "mondrian-core",
  "mondrian-timeline",
  "pulp",
+ "serde",
  "thiserror 1.0.69",
 ]
 

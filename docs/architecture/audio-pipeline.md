@@ -720,6 +720,21 @@ R128/ATSC A/85 filtering, windows, gating, channel weighting, oversampled true
 peak, hold/decay presentation, and offline normalization remain separate
 versioned observation or processing stages.
 
+Offline Program delivery now passes the exact rendered floating-point PCM
+through a separate `AudioLoudnessAnalyzer` observation Module before the encoder
+Adapter sees it. The analyzer applies BS.1770 K-weighting, 400 ms blocks at
+100 ms steps, the EBU R128 -70 LUFS absolute and -10 LU relative gates, and a
+four-times windowed-sinc true-peak reconstruction. Its immutable report retains
+integrated/latest momentary/latest short-term loudness, linear/dBTP maximum,
+complete-block count, and exact observed sample-frame count in Export job
+diagnostics. Proven-silent Programs produce explicit digital-silence evidence;
+analyzer construction, non-finite PCM, partial interleaved frames, or finalizing
+failure aborts the Export instead of omitting evidence. The qualified weighting
+matrix is deliberately limited to Mono, Stereo, 5.1(side), 5.1(back), and 7.1.
+Discrete, custom, and immersive speaker sets fail closed until a normative
+weighting table and conformance corpus are admitted. This Module never changes
+PCM and is not placed on the realtime callback.
+
 Exact automation is evaluated in its owner domain and is invariant under block
 partition. Timeline-to-sample conversion uses `AudioSamplePosition` with an
 explicit rounding policy. Static source-time spans map the first sample exactly
@@ -1191,6 +1206,10 @@ The automated suite must prove:
 - Track/Bus/Program Output sample-peak/RMS observation publishes one complete
   block-atomic bank, preserves unclipped and non-finite evidence, and never
   exposes hidden priming or claims loudness/true-peak conformance;
+- offline Program observation matches the 48 kHz BS.1770 K-weighting reference
+  coefficients, exercises both EBU gates, excludes LFE energy, detects a
+  synthetic intersample peak at four-times reconstruction, and carries exact
+  silence/finite-signal evidence through a probe-qualified FFmpeg export;
 - a root audition request retains only selected Track program sources, while
   nested public outputs remain canonical independent Runtime instances;
 - timeline/audio crates compile and test independently;

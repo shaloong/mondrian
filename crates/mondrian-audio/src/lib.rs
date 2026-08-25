@@ -14,6 +14,7 @@ mod dependency;
 mod dsp;
 mod latency;
 mod lookahead_limiter;
+mod loudness;
 mod meter;
 mod plan;
 mod processor;
@@ -31,6 +32,7 @@ pub use delivery::{
 pub use dependency::{
     compile_audio_dependency_closure, AudioDependencyClosure, AudioDependencyError,
 };
+pub use loudness::{AudioLoudnessAnalyzer, AudioLoudnessError, AudioLoudnessReport};
 pub use meter::{
     AudioChannelMeterReading, AudioMeterFrame, AudioMeterObserver, AudioMeterTarget,
     AudioMeterTargetFrame,

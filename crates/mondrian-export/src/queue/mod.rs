@@ -19,9 +19,9 @@ use crate::validator::{
 };
 use crate::{PreparedTimelineAudioSnapshot, PreparedTimelineVisualSnapshot};
 use mondrian_audio::{
-    AudioContinuityEpoch, AudioDecodedSource, AudioMediaResolver, AudioProcessingMode,
-    AudioProgramDeliveryRuntime, AudioProgramRuntime, AudioRenderContract, AudioRenderRequest,
-    ResolvedAudioSource,
+    AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
+    AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
+    AudioRenderContract, AudioRenderRequest, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
 #[cfg(test)]
@@ -767,12 +767,14 @@ fn execute_export_gpu_output_boundary_with_backend(
 }
 
 /// Diagnostics accumulated for one export job.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
 pub struct ExportJobDiagnostics {
     /// Color-management diagnostics observed while rendering this job.
     pub color: ExportJobColorDiagnostics,
     /// Visual execution diagnostics observed by the immutable export attempt.
     pub visual: ExportJobVisualDiagnostics,
+    /// Standards loudness/true-peak observation of the rendered Program audio.
+    pub audio: Option<AudioLoudnessReport>,
 }
 
 impl ExportJobDiagnostics {
@@ -2127,12 +2129,23 @@ enum TimelineAudioInput {
         path: PathBuf,
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
+        analysis: AudioLoudnessReport,
     },
     Silent {
         sample_rate: u32,
         channel_layout: AudioChannelLayout,
+        analysis: AudioLoudnessReport,
     },
     Disabled,
+}
+
+impl TimelineAudioInput {
+    const fn analysis(&self) -> Option<AudioLoudnessReport> {
+        match self {
+            Self::PcmFile { analysis, .. } | Self::Silent { analysis, .. } => Some(*analysis),
+            Self::Disabled => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2238,6 +2251,7 @@ fn execute_timeline_export(
             Ok(input) => input,
             Err(outcome) => return outcome,
         };
+        let audio_analysis = audio_input.analysis();
         if let TimelineAudioInput::PcmFile { path, .. } = &audio_input {
             temp_audio_path_to_cleanup = Some(path.clone());
         }
@@ -2253,7 +2267,7 @@ fn execute_timeline_export(
                 let expected_audio = match &audio_input {
                     TimelineAudioInput::Disabled => None,
                     TimelineAudioInput::PcmFile { sample_rate, channel_layout, .. }
-                    | TimelineAudioInput::Silent { sample_rate, channel_layout } => {
+                    | TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
                         match expected_audio_constraints(audio, *sample_rate, *channel_layout) {
                             Some(expected) => Some(expected),
                             None => {
@@ -2338,7 +2352,7 @@ fn execute_timeline_export(
             .arg("pipe:0");
 
         match &audio_input {
-            TimelineAudioInput::PcmFile { path, sample_rate, channel_layout } => {
+            TimelineAudioInput::PcmFile { path, sample_rate, channel_layout, .. } => {
                 let Some(ffmpeg_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
@@ -2360,7 +2374,7 @@ fn execute_timeline_export(
                     .arg("1:a:0")
                     .arg("-shortest");
             }
-            TimelineAudioInput::Silent { sample_rate, channel_layout } => {
+            TimelineAudioInput::Silent { sample_rate, channel_layout, .. } => {
                 let Some(channel_layout) = ffmpeg_audio_channel_layout(*channel_layout) else {
                     return JobExecutionResult::Failed(format!(
                         "audio output layout {channel_layout:?} has no explicit FFmpeg lowering"
@@ -2454,7 +2468,10 @@ fn execute_timeline_export(
             report,
             report_diagnostics,
             &mut visual_session,
-            media_diagnostics.issue_summary,
+            ExportRenderInitialDiagnostics {
+                asset_issue_summary: media_diagnostics.issue_summary,
+                audio_analysis,
+            },
         ) {
             JobExecutionResult::ReversibleWorkCompleted => {}
             JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
@@ -2584,7 +2601,21 @@ fn prepare_timeline_audio_input(
             )
         })?;
     if !prepared_audio.execution_demand().requires_execution() {
-        return Ok(TimelineAudioInput::Silent { sample_rate, channel_layout });
+        let sample_frames = u64::try_from(
+            timeline_audio_sample_range(range, sample_rate)
+                .map_err(JobExecutionResult::Failed)?
+                .1,
+        )
+        .map_err(|_| {
+            JobExecutionResult::Failed(
+                "audio sample-frame count exceeds loudness evidence capacity".to_owned(),
+            )
+        })?;
+        return Ok(TimelineAudioInput::Silent {
+            sample_rate,
+            channel_layout,
+            analysis: AudioLoudnessReport::digital_silence(sample_frames),
+        });
     }
 
     let temp = tempfile::Builder::new()
@@ -2601,6 +2632,7 @@ fn prepare_timeline_audio_input(
     let mut temp_guard = ExportAudioTempFile::armed(&temp_path);
     let resource_policy = execution_gate.resource_policy();
 
+    let mut analysis = None;
     match render_timeline_audio_to_pcm_f32(
         temp_path.as_path(),
         timeline,
@@ -2612,10 +2644,21 @@ fn prepare_timeline_audio_input(
         cancel,
         execution_gate,
         report,
+        &mut analysis,
     ) {
         JobExecutionResult::ReversibleWorkCompleted => {
             temp_guard.defuse();
-            Ok(TimelineAudioInput::PcmFile { path: temp_path, sample_rate, channel_layout })
+            let Some(analysis) = analysis else {
+                return Err(JobExecutionResult::Failed(
+                    "rendered audio completed without loudness/true-peak evidence".to_owned(),
+                ));
+            };
+            Ok(TimelineAudioInput::PcmFile {
+                path: temp_path,
+                sample_rate,
+                channel_layout,
+                analysis,
+            })
         }
         JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
             Err(JobExecutionResult::Failed(
@@ -2672,6 +2715,7 @@ fn render_timeline_audio_to_pcm_f32(
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
+    analysis_out: &mut Option<AudioLoudnessReport>,
 ) -> JobExecutionResult {
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
         return JobExecutionResult::Cancelled;
@@ -2748,8 +2792,24 @@ fn render_timeline_audio_to_pcm_f32(
         Ok(sample_range) => sample_range,
         Err(error) => return JobExecutionResult::Failed(error),
     };
+    let mut loudness = match AudioLoudnessAnalyzer::new(sample_rate, channel_layout) {
+        Ok(analyzer) => analyzer,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "导出音频响度/真峰值分析合同不可用: {error}"
+            ));
+        }
+    };
     if total_samples == 0 {
-        return JobExecutionResult::ReversibleWorkCompleted;
+        return match loudness.finish() {
+            Ok(report) => {
+                *analysis_out = Some(report);
+                JobExecutionResult::ReversibleWorkCompleted
+            }
+            Err(error) => {
+                JobExecutionResult::Failed(format!("完成空导出音频响度/真峰值分析失败: {error}"))
+            }
+        };
     }
     if delivery.requires_state_entry()
         && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
@@ -2794,6 +2854,9 @@ fn render_timeline_audio_to_pcm_f32(
             }
             return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
         }
+        if let Err(error) = loudness.observe_interleaved(&pcm[..chunk_samples]) {
+            return JobExecutionResult::Failed(format!("导出音频响度/真峰值分析失败: {error}"));
+        }
         sample_bytes.clear();
         sample_bytes.reserve(chunk_samples * 4);
         for sample in &pcm[..chunk_samples] {
@@ -2812,6 +2875,12 @@ fn render_timeline_audio_to_pcm_f32(
     if let Err(err) = writer.flush() {
         return JobExecutionResult::Failed(format!("刷新临时音频文件失败: {}", err));
     }
+    *analysis_out = match loudness.finish() {
+        Ok(report) => Some(report),
+        Err(error) => {
+            return JobExecutionResult::Failed(format!("完成导出音频响度/真峰值分析失败: {error}"));
+        }
+    };
     JobExecutionResult::ReversibleWorkCompleted
 }
 
@@ -3007,7 +3076,7 @@ fn write_timeline_frames(
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
-    asset_issue_summary: VideoColorDiagnosticIssueAggregate,
+    initial_diagnostics: ExportRenderInitialDiagnostics,
 ) -> JobExecutionResult {
     render_timeline_frames_with_sink(
         timeline,
@@ -3021,7 +3090,7 @@ fn write_timeline_frames(
         report,
         report_diagnostics,
         visual_session,
-        asset_issue_summary,
+        initial_diagnostics,
         &mut |canvas| {
             let owned = std::mem::take(canvas);
             match child.write_owned(owned, cancel) {
@@ -3033,6 +3102,12 @@ fn write_timeline_frames(
             }
         },
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportRenderInitialDiagnostics {
+    asset_issue_summary: VideoColorDiagnosticIssueAggregate,
+    audio_analysis: Option<AudioLoudnessReport>,
 }
 
 fn render_timeline_frames_with_sink(
@@ -3047,7 +3122,7 @@ fn render_timeline_frames_with_sink(
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
-    asset_issue_summary: VideoColorDiagnosticIssueAggregate,
+    initial_diagnostics: ExportRenderInitialDiagnostics,
     write_frame: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), JobExecutionResult>,
 ) -> JobExecutionResult {
     let frame_contract = export_frame_contract(delivery.bit_depth);
@@ -3055,7 +3130,10 @@ fn render_timeline_frames_with_sink(
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
-    diagnostics.color.record_asset_issue_summary(asset_issue_summary);
+    diagnostics
+        .color
+        .record_asset_issue_summary(initial_diagnostics.asset_issue_summary);
+    diagnostics.audio = initial_diagnostics.audio_analysis;
 
     for index in 0..total {
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
@@ -6624,12 +6702,13 @@ mod tests {
         config.preset.resolution = Some(crate::preset::Resolution { width: 256, height: 256 });
         refresh_test_execution_snapshot(&mut config.timeline, true);
         let job = RenderJob::new(config);
+        let mut latest_diagnostics = None;
         let result = FfmpegExportExecutor.execute(
             &job,
             &ExecutionCancellationToken::new(),
             &open_execution_gate(),
             &mut |_| {},
-            &mut |_| {},
+            &mut |diagnostics| latest_diagnostics = Some(diagnostics),
         );
 
         assert!(
@@ -6637,6 +6716,12 @@ mod tests {
             "{result:?}"
         );
         assert!(output.is_file());
+        let analysis = latest_diagnostics
+            .and_then(|diagnostics| diagnostics.audio)
+            .expect("Program audio analysis evidence");
+        assert_eq!(analysis.integrated_lufs, None);
+        assert_eq!(analysis.true_peak_dbtp, None);
+        assert!(analysis.sample_frames > 0);
     }
 
     fn test_delivery_contract(

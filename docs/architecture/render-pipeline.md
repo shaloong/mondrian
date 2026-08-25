@@ -1799,6 +1799,13 @@ reports:
 explicit metadata/override totals, policy assumptions/rejections, data-texture
 bypasses, legacy RGBA8 reason totals, float/linear completeness, GPU blockers,
 GPU blocker breakdowns, legacy RGBA8 reason breakdowns, and GPU path readiness.
+The same immutable job-diagnostics publication also carries the optional
+`AudioLoudnessReport` generated from the exact rendered Program PCM before
+encoding. Audio-disabled delivery leaves it absent; audio-enabled delivery must
+publish either exact digital-silence evidence or a completed finite-signal
+BS.1770/EBU R128 and four-times true-peak observation. Missing or failed
+analysis is a terminal reversible-work failure, never a successful export with
+an empty metric.
 Export simulation perf JSONL includes this evidence only through the versioned
 `color_report`; `color_health*` fields are not a supported external report
 surface. Export simulation `passed` must include that report verdict: default

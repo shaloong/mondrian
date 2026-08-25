@@ -12,3 +12,4 @@ mondrian-core.workspace = true
 mondrian-timeline.workspace = true
 thiserror.workspace = true
 pulp.workspace = true
+serde.workspace = true
