@@ -384,7 +384,11 @@ impl D3D12NativeVideoImportBackend {
             entry.prepared_yuv = Some(yuv_decoder.prepare_pass(
                 device,
                 &yuv_plan,
-                GpuNativeYuvPlaneViews { luma: views.luma, chroma: views.chroma },
+                GpuNativeYuvPlaneViews {
+                    luma: views.luma,
+                    chroma: views.chroma,
+                    chroma_v: views.chroma,
+                },
             ));
         }
 

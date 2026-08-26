@@ -14,10 +14,9 @@ use super::playback_acceptance::{
     ProfessionalNativeVideoGpuTimingEvidence, ProfessionalPlaybackObservation,
     PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS, PROFESSIONAL_MIN_ACCURATE_SEEKS,
     PROFESSIONAL_MIN_OBSERVED_DURATION_US, PROFESSIONAL_MIN_READY_BASIS_POINTS,
-    PROFESSIONAL_MIN_SUPERSEDED_SEEKS, PROFESSIONAL_MIN_VISIBLE_PERCENT,
-    PROFESSIONAL_MIN_WARM_SEEKS, PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US,
-    PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US, PROFESSIONAL_READY_TIMEOUT_MS,
-    PROFESSIONAL_TOTAL_TIMEOUT_MS,
+    PROFESSIONAL_MIN_VISIBLE_PERCENT, PROFESSIONAL_MIN_WARM_SEEKS,
+    PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US, PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US,
+    PROFESSIONAL_READY_TIMEOUT_MS, PROFESSIONAL_TOTAL_TIMEOUT_MS,
 };
 use super::playback_preview::{pump_playback_preview, PlaybackPreviewPumpOutcome};
 use super::*;
@@ -1898,6 +1897,9 @@ fn evaluate_playback_resize(
     if end_frame <= start_frame {
         failures.push("resize_no_forward_progress");
     }
+    if end_frame.saturating_sub(start_frame) != observed_observations as i64 {
+        failures.push("resize_non_unit_forward_progress");
+    }
     if first_epoch.is_none() || first_epoch != last_epoch {
         failures.push("resize_epoch_changed");
     }
@@ -2031,6 +2033,7 @@ struct PreviewMediaPlaybackProbeConfig {
     gpu_candidate_threshold_ms: u128,
     ready_timeout: Duration,
     seek_probe_count: usize,
+    seek_threshold_per_settled_ms: u128,
     resume_probe_frames: usize,
     resize_probe_frames: usize,
     video_layer_count: u32,
@@ -3567,6 +3570,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             gpu_candidate_threshold_ms,
             ready_timeout,
             seek_probe_count: 0,
+            seek_threshold_per_settled_ms: 1_000,
             resume_probe_frames: 0,
             resize_probe_frames: 0,
             video_layer_count: 1,
@@ -5149,6 +5153,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             gpu_candidate_threshold_ms: PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
             ready_timeout,
             seek_probe_count: QUALIFICATION_SEEK_PROBES,
+            seek_threshold_per_settled_ms: 1_000,
             resume_probe_frames: 12,
             resize_probe_frames: 8,
             video_layer_count: 1,
@@ -5489,6 +5494,11 @@ fn run_external_continuous_playback_gate(
             .unwrap_or_default()
             .min(200)
     };
+    let seek_threshold_per_settled_ms = if professional {
+        1_000
+    } else {
+        env_u128("MONDRIAN_PREVIEW_EXTERNAL_SEEK_MS", 3_000)
+    };
     let source_frame_count = media_info
         .primary_video()
         .and_then(|video| video.total_frames)
@@ -5527,6 +5537,7 @@ fn run_external_continuous_playback_gate(
             gpu_candidate_threshold_ms,
             ready_timeout,
             seek_probe_count,
+            seek_threshold_per_settled_ms,
             resume_probe_frames,
             resize_probe_frames: if seek_probe_count == 0 { 0 } else { 8 },
             video_layer_count,
@@ -6234,7 +6245,8 @@ fn run_preview_media_continuous_playback_probe(
             run_case(
                 "preview_media.cross_region_seek_readiness",
                 1,
-                u128::from(config.seek_probe_count as u64).saturating_mul(1_000),
+                u128::from(config.seek_probe_count.saturating_add(1) as u64)
+                    .saturating_mul(config.seek_threshold_per_settled_ms),
                 || {
                     run_headless_cross_region_seeks(
                         &preview_service,
@@ -6273,6 +6285,17 @@ fn run_preview_media_continuous_playback_probe(
         .transpose()?;
 
     let mut playback_resize_probe = None;
+    let mut playback_resize_context = (config.resize_probe_frames > 0)
+        .then(|| {
+            prepare_headless_playback_resize_probe(
+                &preview_service,
+                &mut state,
+                &mut gpu_adapter,
+                &mut headless_gpu_resize,
+                config.ready_timeout,
+            )
+        })
+        .transpose()?;
     let playback_resize_case = (config.resize_probe_frames > 0)
         .then(|| {
             run_case(
@@ -6285,6 +6308,9 @@ fn run_preview_media_continuous_playback_probe(
                         &mut state,
                         &mut gpu_adapter,
                         &mut headless_gpu_resize,
+                        playback_resize_context
+                            .as_mut()
+                            .context("playback-resize setup omitted its prepared context")?,
                         config.resize_probe_frames,
                         authored_resolution,
                         authored_resolution_scale,
@@ -6669,9 +6695,12 @@ fn run_headless_cross_region_seeks(
         )?;
     }
 
-    let supersession_count = usize::try_from(PROFESSIONAL_MIN_SUPERSEDED_SEEKS)
-        .unwrap_or(usize::MAX)
-        .saturating_add(1);
+    // Scale the latest-wins gesture burst with the declared gate. A
+    // professional gate already requests 100 settled regions and therefore
+    // retains the 101-input stress burst. A short local gate must not silently
+    // perform that professional workload while budgeting only its one
+    // declared seek.
+    let supersession_count = seek_count.saturating_add(1);
     anyhow::ensure!(
         frame_count > supersession_count,
         "seek fixture has too few latest-wins regions"
@@ -6776,27 +6805,27 @@ fn run_headless_pause_seek_resume_probe(
     );
     anyhow::ensure!(
         evidence.passed,
-        "pause-seek-resume gate failed: {:?}",
-        evidence.failures
+        "pause-seek-resume gate failed: {evidence:?}; last_preroll={:?}; realtime_timing={:?}; preview_diagnostics={:?}",
+        preview_service.last_video_preroll_observation_for_test(),
+        realtime_driver.timing,
+        preview_service.diagnostics(),
     );
     Ok(evidence)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_headless_playback_resize_probe(
+struct HeadlessPlaybackResizeProbeContext {
+    root: AppUiAppRoot,
+    realtime_driver: HeadlessRealtimePlaybackDriver,
+    start_frame: i64,
+}
+
+fn prepare_headless_playback_resize_probe(
     preview_service: &HeadlessPreviewRuntime,
     state: &mut AppState,
     gpu_adapter: &mut HeadlessViewerGpuAdapter,
     gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
-    observation_count: usize,
-    authored_resolution: Resolution,
-    authored_resolution_scale: f32,
     timeout: Duration,
-) -> anyhow::Result<PreviewPlaybackResizeEvidence> {
-    anyhow::ensure!(
-        observation_count > 0,
-        "playback-resize probe requires at least one observation"
-    );
+) -> anyhow::Result<HeadlessPlaybackResizeProbeContext> {
     anyhow::ensure!(
         state.playback_engine.snapshot().state == mondrian_playback::TransportState::Paused,
         "playback-resize probe must begin from Paused transport"
@@ -6841,13 +6870,40 @@ fn run_headless_playback_resize_probe(
         }
     }
 
+    Ok(HeadlessPlaybackResizeProbeContext {
+        root,
+        realtime_driver,
+        start_frame: state.current_frame(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_headless_playback_resize_probe(
+    preview_service: &HeadlessPreviewRuntime,
+    state: &mut AppState,
+    gpu_adapter: &mut HeadlessViewerGpuAdapter,
+    gpu_summary: &mut HeadlessViewerGpuExecutionSummary,
+    context: &mut HeadlessPlaybackResizeProbeContext,
+    observation_count: usize,
+    authored_resolution: Resolution,
+    authored_resolution_scale: f32,
+    timeout: Duration,
+) -> anyhow::Result<PreviewPlaybackResizeEvidence> {
+    anyhow::ensure!(
+        observation_count > 0,
+        "playback-resize probe requires at least one observation"
+    );
+    anyhow::ensure!(
+        state.is_playing(),
+        "prepared playback-resize probe lost Playing transport authority"
+    );
     const WINDOW_BOUNDS: [(f32, f32); 4] = [
         (1280.0, 720.0),
         (1600.0, 900.0),
         (1024.0, 768.0),
         (1920.0, 1080.0),
     ];
-    let start_frame = state.current_frame();
+    let start_frame = context.start_frame;
     let mut readiness = PreviewReadinessCounts::default();
     let mut observed_observations = 0usize;
     let mut first_epoch = None;
@@ -6857,9 +6913,9 @@ fn run_headless_playback_resize_probe(
     for index in 0..observation_count {
         let (width, height) = WINDOW_BOUNDS[index % WINDOW_BOUNDS.len()];
         let bounds = Rect::new(0.0, 0.0, width, height);
-        root.refresh_playback_frame_from_app_state(state, None);
-        TreeWalker::layout(&mut root, bounds);
-        let geometry = crate::app_ui::shell::viewer_presentation_geometry(&root)
+        context.root.refresh_playback_frame_from_app_state(state, None);
+        TreeWalker::layout(&mut context.root, bounds);
+        let geometry = crate::app_ui::shell::viewer_presentation_geometry(&context.root)
             .context("resized production UI root omitted Viewer presentation geometry")?;
         presentation_extents.insert((
             geometry.presentation.output_width,
@@ -6880,7 +6936,7 @@ fn run_headless_playback_resize_probe(
             gpu_adapter,
             gpu_summary,
             timeout,
-            &mut realtime_driver,
+            &mut context.realtime_driver,
         )? {
             HeadlessRealtimeIntervalOutcome::Advanced { epoch, sample, .. } => {
                 let epoch = epoch.get();
@@ -7855,7 +7911,7 @@ fn wait_for_headless_gpu_ready_observation_impl(
 ) -> anyhow::Result<HeadlessPreviewSample> {
     let deadline = Instant::now() + timeout;
     let work_watch = preview_service.work_watch();
-    let target_intent = HeadlessGpuCandidateIntent::from_state(state);
+    let mut target_intent = HeadlessGpuCandidateIntent::from_state(state);
     let mut candidate_binding = None;
     let mut candidate_output_binding = None;
     let mut candidate_status = HeadlessGpuCandidateStatus::Loading;
@@ -7920,6 +7976,21 @@ fn wait_for_headless_gpu_ready_observation_impl(
         }
         if requirement == HeadlessPreviewObservationRequirement::DemandTerminal {
             let current_intent = sampled_intent;
+            if headless_terminal_observation_may_retarget_quality(target_intent, current_intent) {
+                // Playback pressure may supersede the representation policy
+                // while retaining the same timeline opportunity. The old
+                // demand has lost authority; close only the newly issued
+                // exact demand and never let its old binding satisfy it.
+                target_intent = current_intent;
+                candidate_binding = None;
+                candidate_output_binding = None;
+                candidate_status = HeadlessGpuCandidateStatus::Loading;
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "timed out retargeting Headless terminal observation to the latest quality demand: {target_intent:?}"
+                );
+                continue;
+            }
             anyhow::ensure!(
                 current_intent.epoch == target_intent.epoch
                     && current_intent.quality_revision == target_intent.quality_revision
@@ -7971,6 +8042,22 @@ fn wait_for_headless_gpu_ready_observation_impl(
     }
 }
 
+fn headless_terminal_observation_may_retarget_quality(
+    target: HeadlessGpuCandidateIntent,
+    current: HeadlessGpuCandidateIntent,
+) -> bool {
+    let Some(current_demand) = current.pending_demand else {
+        return false;
+    };
+    target.epoch == current.epoch
+        && target.frame == current.frame
+        && current.quality_revision > target.quality_revision
+        && current.pending_demand != target.pending_demand
+        && current_demand.epoch == current.epoch
+        && current_demand.quality_revision == current.quality_revision
+        && current_demand.target_frame == current.frame
+}
+
 fn headless_demand_resolved_without_ready(
     target: HeadlessGpuCandidateIntent,
     current: HeadlessGpuCandidateIntent,
@@ -8004,6 +8091,34 @@ fn terminal_headless_observation_closes_a_consumed_exact_demand_without_ready() 
         HeadlessGpuCandidateStatus::DroppedLate,
     ));
     assert_ne!(resolved.pending_demand, Some(target_demand));
+}
+
+#[test]
+fn terminal_headless_observation_retargets_only_a_newer_exact_quality_demand() {
+    let target = headless_candidate_test_intent(7);
+    let target_demand = target.pending_demand.expect("running intent demand");
+    let revised_quality = target.quality_revision.saturating_add(1);
+    let revised_demand = mondrian_playback::FrameDemandIdentity {
+        quality_revision: revised_quality,
+        ..target_demand
+    };
+    let revised = HeadlessGpuCandidateIntent {
+        quality_revision: revised_quality,
+        pending_demand: Some(revised_demand),
+        ..target
+    };
+
+    assert!(headless_terminal_observation_may_retarget_quality(
+        target, revised
+    ));
+    assert!(!headless_terminal_observation_may_retarget_quality(
+        target,
+        HeadlessGpuCandidateIntent { frame: 8, ..revised }
+    ));
+    assert!(!headless_terminal_observation_may_retarget_quality(
+        target,
+        HeadlessGpuCandidateIntent { pending_demand: None, ..revised }
+    ));
 }
 
 fn wait_for_headless_playback_preroll(

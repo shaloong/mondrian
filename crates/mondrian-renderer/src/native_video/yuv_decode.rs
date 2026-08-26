@@ -1,4 +1,4 @@
-//! Renderer-owned native NV12/P010 to encoded RGB conversion.
+//! Renderer-owned interleaved or planar YUV to encoded RGB conversion.
 
 use crate::{
     ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan,
@@ -14,6 +14,7 @@ use wgpu::util::DeviceExt;
 const YUV_DECODE_SHADER: &str = r#"
 struct DecodeUniforms {
     extent: vec4<u32>,
+    plane_layout: vec4<u32>,
     code_range: vec4<f32>,
     chroma_matrix0: vec4<f32>,
     matrix1: vec4<f32>,
@@ -21,7 +22,8 @@ struct DecodeUniforms {
 
 @group(0) @binding(0) var luma_texture: texture_2d<f32>;
 @group(0) @binding(1) var chroma_texture: texture_2d<f32>;
-@group(0) @binding(2) var<uniform> uniforms: DecodeUniforms;
+@group(0) @binding(2) var chroma_v_texture: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> uniforms: DecodeUniforms;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
@@ -32,6 +34,12 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<
 
 fn load_chroma(coordinate: vec2<i32>, dimensions: vec2<i32>) -> vec2<f32> {
     let clamped = clamp(coordinate, vec2<i32>(0), dimensions - vec2<i32>(1));
+    if uniforms.plane_layout.x != 0u {
+        return vec2<f32>(
+            textureLoad(chroma_texture, clamped, 0).r,
+            textureLoad(chroma_v_texture, clamped, 0).r,
+        );
+    }
     return textureLoad(chroma_texture, clamped, 0).rg;
 }
 
@@ -54,7 +62,8 @@ fn sample_luma(source_center: vec2<f32>) -> f32 {
 
 fn sample_chroma(source_center: vec2<f32>) -> vec2<f32> {
     let sample_coordinate =
-        (source_center - uniforms.chroma_matrix0.yz) * vec2<f32>(0.5);
+        (source_center - uniforms.chroma_matrix0.yz)
+        * vec2<f32>(0.5, uniforms.matrix1.w);
     let base = vec2<i32>(floor(sample_coordinate));
     let weight = fract(sample_coordinate);
     let dimensions = vec2<i32>(textureDimensions(chroma_texture));
@@ -100,8 +109,37 @@ pub struct GpuNativeVideoExtent {
 pub struct GpuNativeYuvPlaneViews<'a> {
     /// Full-resolution luma plane.
     pub luma: &'a wgpu::TextureView,
-    /// Half-resolution interleaved CbCr plane.
+    /// Interleaved CbCr plane, or the standalone Cb plane for planar input.
     pub chroma: &'a wgpu::TextureView,
+    /// Separate Cr plane for planar input; aliases `chroma` for interleaved input.
+    pub chroma_v: &'a wgpu::TextureView,
+}
+
+/// Physical chroma texture layout consumed by the YUV shader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuYuvChromaPlaneLayout {
+    /// Cb and Cr occupy the two channels of one texture.
+    Interleaved,
+    /// Cb and Cr occupy independent single-channel textures.
+    Planar,
+}
+
+/// Chroma subsampling represented by shader-visible YUV planes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuYuvChromaSubsampling {
+    /// One interleaved CbCr texel covers a 2x2 luma region.
+    Cs420,
+    /// One interleaved CbCr texel covers a 2x1 luma region.
+    Cs422,
+}
+
+/// Alignment of high-bit code values inside normalized 16-bit textures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GpuYuvCodeAlignment {
+    /// Native P010 layout: ten code bits occupy the most-significant bits.
+    MostSignificant,
+    /// Planar FFmpeg layout: ten code bits occupy the least-significant bits.
+    LeastSignificant,
 }
 
 /// Validated native YUV decode pass plan.
@@ -109,6 +147,12 @@ pub struct GpuNativeYuvPlaneViews<'a> {
 pub struct GpuNativeYuvDecodePlan {
     /// Native decoder texture layout.
     pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Horizontal and vertical chroma sampling contract.
+    pub chroma_subsampling: GpuYuvChromaSubsampling,
+    /// Physical chroma texture layout.
+    pub chroma_plane_layout: GpuYuvChromaPlaneLayout,
+    /// Alignment used by high-bit component code values.
+    pub code_alignment: GpuYuvCodeAlignment,
     /// Visible frame extent written to the encoded RGB output.
     pub source_visible_extent: GpuNativeVideoExtent,
     /// Renderer materialization extent written to encoded RGB.
@@ -150,6 +194,78 @@ impl GpuNativeYuvDecodePlan {
         video_sampling: GpuNativeDecodedFrameVideoSampling,
         output: GpuColorFrameHandle,
     ) -> Result<Self, GpuNativeYuvDecodePlanError> {
+        Self::new_with_layout(
+            source_texture_format,
+            GpuYuvChromaSubsampling::Cs420,
+            GpuYuvCodeAlignment::MostSignificant,
+            source_visible_extent,
+            output_extent,
+            storage_extent,
+            video_sampling,
+            output,
+        )
+    }
+
+    /// Build and validate a YUV decode plan with explicit chroma subsampling.
+    pub fn new_with_chroma_subsampling(
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        chroma_subsampling: GpuYuvChromaSubsampling,
+        source_visible_extent: GpuNativeVideoExtent,
+        output_extent: GpuNativeVideoExtent,
+        storage_extent: GpuNativeVideoExtent,
+        video_sampling: GpuNativeDecodedFrameVideoSampling,
+        output: GpuColorFrameHandle,
+    ) -> Result<Self, GpuNativeYuvDecodePlanError> {
+        Self::new_with_layout(
+            source_texture_format,
+            chroma_subsampling,
+            GpuYuvCodeAlignment::MostSignificant,
+            source_visible_extent,
+            output_extent,
+            storage_extent,
+            video_sampling,
+            output,
+        )
+    }
+
+    /// Build and validate a YUV decode plan with explicit storage layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_layout(
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        chroma_subsampling: GpuYuvChromaSubsampling,
+        code_alignment: GpuYuvCodeAlignment,
+        source_visible_extent: GpuNativeVideoExtent,
+        output_extent: GpuNativeVideoExtent,
+        storage_extent: GpuNativeVideoExtent,
+        video_sampling: GpuNativeDecodedFrameVideoSampling,
+        output: GpuColorFrameHandle,
+    ) -> Result<Self, GpuNativeYuvDecodePlanError> {
+        Self::new_with_plane_layout(
+            source_texture_format,
+            chroma_subsampling,
+            GpuYuvChromaPlaneLayout::Interleaved,
+            code_alignment,
+            source_visible_extent,
+            output_extent,
+            storage_extent,
+            video_sampling,
+            output,
+        )
+    }
+
+    /// Build and validate a YUV decode plan with explicit plane layout.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_plane_layout(
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        chroma_subsampling: GpuYuvChromaSubsampling,
+        chroma_plane_layout: GpuYuvChromaPlaneLayout,
+        code_alignment: GpuYuvCodeAlignment,
+        source_visible_extent: GpuNativeVideoExtent,
+        output_extent: GpuNativeVideoExtent,
+        storage_extent: GpuNativeVideoExtent,
+        video_sampling: GpuNativeDecodedFrameVideoSampling,
+        output: GpuColorFrameHandle,
+    ) -> Result<Self, GpuNativeYuvDecodePlanError> {
         if source_visible_extent.width == 0 || source_visible_extent.height == 0 {
             return Err(GpuNativeYuvDecodePlanError::EmptyVisibleExtent);
         }
@@ -164,7 +280,10 @@ impl GpuNativeYuvDecodePlan {
                 storage: storage_extent,
             });
         }
-        if !storage_extent.width.is_multiple_of(2) || !storage_extent.height.is_multiple_of(2) {
+        if !storage_extent.width.is_multiple_of(2)
+            || (chroma_subsampling == GpuYuvChromaSubsampling::Cs420
+                && !storage_extent.height.is_multiple_of(2))
+        {
             return Err(GpuNativeYuvDecodePlanError::OddStorageExtent { storage: storage_extent });
         }
         let expected_bit_depth = match source_texture_format {
@@ -174,6 +293,14 @@ impl GpuNativeYuvDecodePlan {
                 return Err(GpuNativeYuvDecodePlanError::UnsupportedSourceFormat { format: other })
             }
         };
+        if source_texture_format == GpuNativeDecodedFrameTextureFormat::Nv12
+            && code_alignment != GpuYuvCodeAlignment::MostSignificant
+        {
+            return Err(GpuNativeYuvDecodePlanError::InvalidCodeAlignment {
+                format: source_texture_format,
+                alignment: code_alignment,
+            });
+        }
         if video_sampling.bit_depth != expected_bit_depth {
             return Err(GpuNativeYuvDecodePlanError::BitDepthMismatch {
                 format: source_texture_format,
@@ -223,6 +350,9 @@ impl GpuNativeYuvDecodePlan {
         }
         Ok(Self {
             source_texture_format,
+            chroma_subsampling,
+            chroma_plane_layout,
+            code_alignment,
             source_visible_extent,
             output_extent,
             storage_extent,
@@ -234,6 +364,9 @@ impl GpuNativeYuvDecodePlan {
     fn sampling_contract(&self) -> GpuNativeYuvSamplingContract {
         GpuNativeYuvSamplingContract {
             source_texture_format: self.source_texture_format,
+            chroma_subsampling: self.chroma_subsampling,
+            chroma_plane_layout: self.chroma_plane_layout,
+            code_alignment: self.code_alignment,
             source_visible_extent: self.source_visible_extent,
             output_extent: self.output_extent,
             storage_extent: self.storage_extent,
@@ -259,17 +392,25 @@ pub enum GpuNativeYuvDecodePlanError {
         /// Decoder storage extent.
         storage: GpuNativeVideoExtent,
     },
-    /// 4:2:0 storage dimensions must be even.
-    #[error("native YUV 4:2:0 storage extent must be even, got {storage:?}")]
+    /// Subsampled storage dimensions violate the declared chroma layout.
+    #[error("subsampled YUV storage extent is incompatible with its chroma layout: {storage:?}")]
     OddStorageExtent {
         /// Invalid storage extent.
         storage: GpuNativeVideoExtent,
     },
-    /// Source format is not a supported two-plane YUV layout.
+    /// Source format is not a supported YUV texture representation.
     #[error("native YUV decode does not support source format {format:?}")]
     UnsupportedSourceFormat {
         /// Unsupported source texture format.
         format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The code alignment is invalid for the selected texture representation.
+    #[error("YUV format {format:?} does not support {alignment:?} code alignment")]
+    InvalidCodeAlignment {
+        /// Source texture representation.
+        format: GpuNativeDecodedFrameTextureFormat,
+        /// Requested component alignment.
+        alignment: GpuYuvCodeAlignment,
     },
     /// Effective coded depth conflicts with the native texture format.
     #[error("native YUV format {format:?} requires {expected}-bit values, got {actual}")]
@@ -311,6 +452,9 @@ pub enum GpuNativeYuvDecodePlanError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GpuNativeYuvSamplingContract {
     source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    chroma_subsampling: GpuYuvChromaSubsampling,
+    chroma_plane_layout: GpuYuvChromaPlaneLayout,
+    code_alignment: GpuYuvCodeAlignment,
     source_visible_extent: GpuNativeVideoExtent,
     output_extent: GpuNativeVideoExtent,
     storage_extent: GpuNativeVideoExtent,
@@ -321,6 +465,7 @@ struct GpuNativeYuvSamplingContract {
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 struct GpuNativeYuvDecodeUniforms {
     extent: [u32; 4],
+    plane_layout: [u32; 4],
     code_range: [f32; 4],
     chroma_matrix0: [f32; 4],
     matrix1: [f32; 4],
@@ -332,7 +477,10 @@ impl GpuNativeYuvDecodeUniforms {
         let max_code = ((1u32 << plan.video_sampling.bit_depth) - 1) as f32;
         let code_scale = match plan.source_texture_format {
             GpuNativeDecodedFrameTextureFormat::Nv12 => 255.0,
-            GpuNativeDecodedFrameTextureFormat::P010 => 65_535.0 / 64.0,
+            GpuNativeDecodedFrameTextureFormat::P010 => match plan.code_alignment {
+                GpuYuvCodeAlignment::MostSignificant => 65_535.0 / 64.0,
+                GpuYuvCodeAlignment::LeastSignificant => 65_535.0,
+            },
             _ => unreachable!("plan validation restricts native YUV source formats"),
         };
         let (y_offset, y_scale, chroma_offset, chroma_scale) = match plan.video_sampling.range {
@@ -344,7 +492,7 @@ impl GpuNativeYuvDecodeUniforms {
             ),
             GpuVideoRange::Full => (0.0, 1.0 / max_code, 128.0 * bit_scale, 1.0 / max_code),
         };
-        let chroma_origin = match plan.video_sampling.chroma_location {
+        let mut chroma_origin = match plan.video_sampling.chroma_location {
             GpuVideoChromaLocation::Left => [0.5, 1.0],
             GpuVideoChromaLocation::Center => [1.0, 1.0],
             GpuVideoChromaLocation::TopLeft => [0.5, 0.5],
@@ -352,6 +500,9 @@ impl GpuNativeYuvDecodeUniforms {
                 unreachable!("plan validation requires explicit chroma location")
             }
         };
+        if plan.chroma_subsampling == GpuYuvChromaSubsampling::Cs422 {
+            chroma_origin[1] = 0.5;
+        }
         let (kr, kb) = match plan.video_sampling.matrix {
             ColorMatrixCoefficients::Bt709 => (0.2126, 0.0722),
             ColorMatrixCoefficients::Fcc => (0.30, 0.11),
@@ -372,9 +523,23 @@ impl GpuNativeYuvDecodeUniforms {
                 plan.output_extent.width,
                 plan.output_extent.height,
             ],
+            plane_layout: [
+                u32::from(plan.chroma_plane_layout == GpuYuvChromaPlaneLayout::Planar),
+                0,
+                0,
+                0,
+            ],
             code_range: [code_scale, y_offset, y_scale, chroma_offset],
             chroma_matrix0: [chroma_scale, chroma_origin[0], chroma_origin[1], r_cr],
-            matrix1: [g_cb, g_cr, b_cb, 0.0],
+            matrix1: [
+                g_cb,
+                g_cr,
+                b_cb,
+                match plan.chroma_subsampling {
+                    GpuYuvChromaSubsampling::Cs420 => 0.5,
+                    GpuYuvChromaSubsampling::Cs422 => 1.0,
+                },
+            ],
         }
     }
 
@@ -417,8 +582,9 @@ impl GpuNativeYuvDecoder {
             entries: &[
                 texture_binding(0),
                 texture_binding(1),
+                texture_binding(2),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 2,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -506,6 +672,10 @@ impl GpuNativeYuvDecoder {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: wgpu::BindingResource::TextureView(planes.chroma_v),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
                     resource: uniform_buffer.as_entire_binding(),
                 },
             ],
@@ -642,6 +812,61 @@ mod tests {
         assert_rgb_close(
             uniforms.decode_code_values(recovered, 512.0, 512.0),
             [1.0; 3],
+        );
+    }
+
+    #[test]
+    fn right_aligned_ten_bit_normalization_recovers_code_values() {
+        let mut plan = decode_plan(
+            GpuNativeDecodedFrameTextureFormat::P010,
+            GpuVideoRange::Limited,
+            ColorMatrixCoefficients::Bt2020NonConstant,
+            10,
+            GpuVideoChromaLocation::Left,
+        );
+        plan.code_alignment = GpuYuvCodeAlignment::LeastSignificant;
+        let uniforms = GpuNativeYuvDecodeUniforms::from_plan(&plan);
+        let sampled_white = 940.0 / 65_535.0;
+        let recovered = sampled_white * uniforms.code_range[0];
+        assert!((recovered - 940.0).abs() < 1.0e-5);
+        assert_rgb_close(
+            uniforms.decode_code_values(recovered, 512.0, 512.0),
+            [1.0; 3],
+        );
+    }
+
+    #[test]
+    fn yuv422_uses_full_height_chroma_and_centered_vertical_origin() {
+        let mut plan = decode_plan(
+            GpuNativeDecodedFrameTextureFormat::P010,
+            GpuVideoRange::Limited,
+            ColorMatrixCoefficients::Bt2020NonConstant,
+            10,
+            GpuVideoChromaLocation::TopLeft,
+        );
+        plan.chroma_subsampling = GpuYuvChromaSubsampling::Cs422;
+        let uniforms = GpuNativeYuvDecodeUniforms::from_plan(&plan);
+        assert_eq!(uniforms.matrix1[3], 1.0);
+        assert_eq!(uniforms.chroma_matrix0[2], 0.5);
+    }
+
+    #[test]
+    fn planar_chroma_layout_is_an_explicit_shader_contract() {
+        let mut plan = decode_plan(
+            GpuNativeDecodedFrameTextureFormat::P010,
+            GpuVideoRange::Limited,
+            ColorMatrixCoefficients::Bt709,
+            10,
+            GpuVideoChromaLocation::Left,
+        );
+        assert_eq!(
+            GpuNativeYuvDecodeUniforms::from_plan(&plan).plane_layout[0],
+            0
+        );
+        plan.chroma_plane_layout = GpuYuvChromaPlaneLayout::Planar;
+        assert_eq!(
+            GpuNativeYuvDecodeUniforms::from_plan(&plan).plane_layout[0],
+            1
         );
     }
 
@@ -806,7 +1031,11 @@ mod tests {
         let prepared = decoder.prepare_pass(
             &context.device,
             &plan,
-            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+            GpuNativeYuvPlaneViews {
+                luma: &luma_view,
+                chroma: &chroma_view,
+                chroma_v: &chroma_view,
+            },
         );
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-decode"),
@@ -949,7 +1178,11 @@ mod tests {
         let prepared = decoder.prepare_pass(
             &context.device,
             &plan,
-            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+            GpuNativeYuvPlaneViews {
+                luma: &luma_view,
+                chroma: &chroma_view,
+                chroma_v: &chroma_view,
+            },
         );
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-scale"),
@@ -1056,7 +1289,11 @@ mod tests {
         let prepared = decoder.prepare_pass(
             &context.device,
             &decode_plan,
-            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+            GpuNativeYuvPlaneViews {
+                luma: &luma_view,
+                chroma: &chroma_view,
+                chroma_v: &chroma_view,
+            },
         );
         let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("mondrian-test-native-yuv-ocio"),

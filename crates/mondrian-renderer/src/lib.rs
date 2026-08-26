@@ -15,6 +15,7 @@ pub mod color_report_vocab;
 pub mod color_stage;
 pub mod color_transform;
 pub mod context;
+mod cpu_yuv;
 pub mod display_calibration;
 pub mod gpu_compositor;
 pub mod gpu_output_working_set;
@@ -178,10 +179,10 @@ pub use native_video::{
 pub use native_video::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
     GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass, NativeVideoImportCandidateTimingReceipt,
-    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
-    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, NativeVideoImportToken,
+    GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
+    GpuYuvCodeAlignment, NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, NativeVideoImportToken,
     GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO, NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
     NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION,
 };
@@ -302,8 +303,8 @@ pub use timeline_temporal::{
 };
 pub use viewer_execution::{
     native_source_texture_format_from_decoded, native_video_sampling_from_decoded,
-    ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer, ViewerGpuMediaSource,
-    ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
+    ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer,
+    ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
     ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
 };
 pub use viewer_runtime::{

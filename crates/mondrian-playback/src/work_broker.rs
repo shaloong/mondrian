@@ -337,6 +337,12 @@ pub struct FrameWorkBrokerDiagnostics {
     pub pruned_queued: u64,
     /// Older unstarted playback-current payloads superseded by a newer demand.
     pub superseded_queued_playback_current: u64,
+    /// Running leases invalidated by a non-locality-preserving generation rotation.
+    pub in_flight_generation_invalidations: u64,
+    /// Running leases invalidated because their exact pending binding disappeared.
+    pub in_flight_binding_invalidations: u64,
+    /// Same-generation Playback leases detached after their binding disappeared.
+    pub in_flight_binding_locality_detachments: u64,
     /// Execution completions accepted as current.
     pub completed_current: u64,
     /// Execution completions admitted for cache only.
@@ -433,6 +439,9 @@ struct FrameWorkBrokerMetrics {
     canceled_requests: u64,
     pruned_queued: u64,
     superseded_queued_playback_current: u64,
+    in_flight_generation_invalidations: u64,
+    in_flight_binding_invalidations: u64,
+    in_flight_binding_locality_detachments: u64,
     completed_current: u64,
     completed_cache_only: u64,
     completed_stale: u64,
@@ -577,6 +586,44 @@ where
         state.latest_generation
     }
 
+    /// Begin a new generation while preserving only running Playback locality.
+    ///
+    /// This transition expires publication authority for an already-running
+    /// [`FrameInFlightDeadlinePolicy::FinishForLocality`] Playback lease, but
+    /// deliberately does not rebind queued work. It is the exact boundary for
+    /// representation changes such as adaptive Preview resolution: finishing
+    /// one bounded decode keeps the worker-owned demux/codec Session warm,
+    /// while pruning old-representation prefetch lets the new current frame
+    /// enter the lane immediately.
+    ///
+    /// Source, Playback Epoch, authored semantics, and lifecycle changes must
+    /// use [`Self::begin_generation`]. Viewer-only changes whose queued media
+    /// identities remain valid should use
+    /// [`Self::begin_generation_preserving_playback_locality`].
+    pub fn begin_generation_preserving_in_flight_playback_locality(&self) -> u64 {
+        let mut state = lock_state(&self.shared.state);
+        let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
+        for execution in state.in_flight.values_mut() {
+            if execution.work_class == FrameWorkClass::Playback
+                && execution.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality
+                && execution.completed_at.is_none()
+                && execution.preempted_at.is_none()
+                && execution.invalidated_at.is_none()
+            {
+                execution.presentation_binding_expired = true;
+            }
+        }
+        state.latest_generation = state.latest_generation.saturating_add(1);
+        let queued_before = state.queue.len();
+        prune_obsolete_locked(&mut state);
+        let pruned = queued_before.saturating_sub(state.queue.len());
+        state.metrics.pruned_queued = state.metrics.pruned_queued.saturating_add(pruned as u64);
+        refresh_in_flight_invalidations_locked(&mut state, now);
+        self.shared.changed.notify_all();
+        state.latest_generation
+    }
+
     /// Observe an externally allocated generation and prune older queued bindings.
     pub fn prune_before(&self, generation: u64) -> usize {
         let mut state = lock_state(&self.shared.state);
@@ -634,6 +681,11 @@ where
                 requested_execution_budget,
             );
             let binding = binding_for(&request);
+            restore_same_generation_playback_demand_binding_locked(
+                &mut state,
+                &request.key,
+                binding,
+            );
             if let Some(index) =
                 state.queue.iter().position(|queued| queued.request.key == request.key)
             {
@@ -698,7 +750,7 @@ where
                 bump(&mut state.metrics.dropped_backpressure);
                 return FrameWorkSubmission::DroppedBackpressure;
             };
-            let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
+            let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction, now);
             state.pending.insert(
                 request.key.clone(),
                 PendingBinding {
@@ -730,7 +782,7 @@ where
             bump(&mut state.metrics.dropped_backpressure);
             return FrameWorkSubmission::DroppedBackpressure;
         };
-        let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction);
+        let (evicted_prefetch, evicted_still) = apply_eviction(&mut state, eviction, now);
         state.pending.insert(
             request.key.clone(),
             PendingBinding {
@@ -1202,6 +1254,7 @@ where
         state.queue.retain(|queued| &queued.request.key != key);
         for execution in state.in_flight.values_mut().filter(|execution| &execution.key == key) {
             execution.presentation_binding_expired = false;
+            execution.invalidated_at.get_or_insert(now);
         }
         let queued = before.saturating_sub(state.queue.len());
         state.metrics.canceled_requests =
@@ -1259,6 +1312,28 @@ where
     pub fn synchronize_playback_current_demand(&self, active: FrameDemandIdentity) -> usize {
         let mut state = lock_state(&self.shared.state);
         state.active_playback_demand = Some(active);
+        let latest_generation = state.latest_generation;
+        let BrokerState { pending, in_flight, .. } = &mut *state;
+        for execution in in_flight.values_mut() {
+            let rebound_to_active_demand = pending.get(&execution.key).is_some_and(|pending| {
+                pending.binding.generation >= latest_generation
+                    && pending.binding.work_class == execution.work_class
+                    && pending.binding.resource_scope == execution.resource_scope
+                    && pending.binding.demand_identity == Some(active)
+            });
+            if execution.priority == FrameWorkPriority::Current
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.demand_identity.is_some_and(|identity| identity != active)
+                && !rebound_to_active_demand
+                && execution.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality
+                && execution.completed_at.is_none()
+                && execution.preempted_at.is_none()
+                && execution.invalidated_at.is_none()
+            {
+                execution.presentation_binding_expired = true;
+            }
+        }
         let superseded_keys = state
             .queue
             .iter()
@@ -1269,9 +1344,6 @@ where
             })
             .map(|queued| queued.request.key.clone())
             .collect::<Vec<_>>();
-        if superseded_keys.is_empty() {
-            return 0;
-        }
         state.queue.retain(|queued| {
             !(queued.request.priority == FrameWorkPriority::Current
                 && queued.request.work_class == FrameWorkClass::Playback
@@ -1530,7 +1602,7 @@ where
             return true;
         }
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-        remove_key_locked(&mut state, key);
+        remove_key_locked(&mut state, key, now);
         refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.skipped_obsolete);
         self.shared.changed.notify_all();
@@ -1586,7 +1658,7 @@ where
             return false;
         }
         let now = observe_now_locked(self.shared.clock.as_ref(), &mut state);
-        remove_key_locked(&mut state, key);
+        remove_key_locked(&mut state, key, now);
         refresh_in_flight_invalidations_locked(&mut state, now);
         bump(&mut state.metrics.evicted_still);
         self.shared.changed.notify_all();
@@ -1618,6 +1690,11 @@ where
             canceled_requests: state.metrics.canceled_requests,
             pruned_queued: state.metrics.pruned_queued,
             superseded_queued_playback_current: state.metrics.superseded_queued_playback_current,
+            in_flight_generation_invalidations: state.metrics.in_flight_generation_invalidations,
+            in_flight_binding_invalidations: state.metrics.in_flight_binding_invalidations,
+            in_flight_binding_locality_detachments: state
+                .metrics
+                .in_flight_binding_locality_detachments,
             completed_current: state.metrics.completed_current,
             completed_cache_only: state.metrics.completed_cache_only,
             completed_stale: state.metrics.completed_stale,
@@ -1764,6 +1841,42 @@ where
         && execution.demand_identity == binding.demand_identity
         && !execution.presentation_binding_expired
         && execution.preempted_at.is_none()
+}
+
+fn restore_same_generation_playback_demand_binding_locked<K, D, P>(
+    state: &mut BrokerState<K, D, P>,
+    key: &K,
+    binding: FrameRequestBinding<D>,
+) where
+    K: Eq,
+    D: Copy,
+{
+    let active_demand = state.active_playback_demand;
+    if binding.priority != FrameWorkPriority::Current
+        || binding.work_class != FrameWorkClass::Playback
+        || binding.demand_identity != active_demand
+    {
+        return;
+    }
+    for execution in state.in_flight.values_mut().filter(|execution| {
+        &execution.key == key
+            && execution.generation == binding.generation
+            && execution.work_class == binding.work_class
+            && execution.resource_scope == binding.resource_scope
+            && execution.demand_identity != binding.demand_identity
+            && execution.in_flight_deadline_policy == FrameInFlightDeadlinePolicy::FinishForLocality
+            && execution.completed_at.is_none()
+            && execution.preempted_at.is_none()
+            && execution.invalidated_at.is_none()
+    }) {
+        // Demand synchronization detaches an old identity before pruning its
+        // queued siblings, keeping the decoder lease alive but cache-only. A
+        // later same-generation request for the exact media key may legally
+        // bind that reusable result to the active demand. Generation rotation
+        // and age expiry cannot enter here: the former changes generation,
+        // while the latter retains the same demand identity.
+        execution.presentation_binding_expired = false;
+    }
 }
 
 fn pending_binding_has_execution_owner_locked<K, D, P>(
@@ -1999,18 +2112,19 @@ where
 fn apply_eviction<K, D, P>(
     state: &mut BrokerState<K, D, P>,
     eviction: Evicted<K>,
+    now: MonotonicTimestamp,
 ) -> (Option<K>, Option<K>)
 where
     K: Clone + Eq + Hash,
 {
     match eviction {
         Evicted::Prefetch(key) => {
-            remove_key_locked(state, &key);
+            remove_key_locked(state, &key, now);
             bump(&mut state.metrics.evicted_prefetch);
             (Some(key), None)
         }
         Evicted::Still(key) => {
-            remove_key_locked(state, &key);
+            remove_key_locked(state, &key, now);
             bump(&mut state.metrics.evicted_still);
             (None, Some(key))
         }
@@ -2018,14 +2132,18 @@ where
     }
 }
 
-fn remove_key_locked<K, D, P>(state: &mut BrokerState<K, D, P>, key: &K)
-where
+fn remove_key_locked<K, D, P>(
+    state: &mut BrokerState<K, D, P>,
+    key: &K,
+    invalidated_at: MonotonicTimestamp,
+) where
     K: Eq + Hash,
 {
     state.pending.remove(key);
     state.queue.retain(|queued| &queued.request.key != key);
     for execution in state.in_flight.values_mut().filter(|execution| &execution.key == key) {
         execution.presentation_binding_expired = false;
+        execution.invalidated_at.get_or_insert(invalidated_at);
     }
 }
 
@@ -2338,7 +2456,7 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
 ) where
     K: Eq + Hash,
 {
-    let BrokerState { latest_generation, pending, in_flight, .. } = state;
+    let BrokerState { latest_generation, pending, in_flight, metrics, .. } = state;
     for execution in in_flight.values_mut() {
         if execution.presentation_binding_expired {
             let retained_playback_locality = execution.work_class == FrameWorkClass::Playback
@@ -2360,7 +2478,24 @@ fn refresh_in_flight_invalidations_locked<K, D, P>(
                 .map(|budget| execution.started_at.saturating_add(budget));
             execution.invalidated_at = None;
         } else if execution.invalidated_at.is_none() {
-            execution.invalidated_at = Some(now);
+            let retain_same_generation_playback_locality = execution.generation
+                >= *latest_generation
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.in_flight_deadline_policy
+                    == FrameInFlightDeadlinePolicy::FinishForLocality;
+            if retain_same_generation_playback_locality {
+                // The execution remains useful only for its stateful decoder
+                // locality and resolves without publication authority.
+                execution.presentation_binding_expired = true;
+                bump(&mut metrics.in_flight_binding_locality_detachments);
+            } else {
+                execution.invalidated_at = Some(now);
+                if execution.generation < *latest_generation {
+                    bump(&mut metrics.in_flight_generation_invalidations);
+                } else {
+                    bump(&mut metrics.in_flight_binding_invalidations);
+                }
+            }
         }
         let preempted_at = if execution.priority == FrameWorkPriority::Prefetch {
             oldest_other_current_request(

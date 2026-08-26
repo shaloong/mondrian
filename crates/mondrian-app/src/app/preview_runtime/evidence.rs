@@ -504,7 +504,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.record_playback_current_hardware_recovery(priority, &diagnostics);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
-            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+            | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 bump(&self.metrics.decode_in_process_cpu_frames);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}

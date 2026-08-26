@@ -231,6 +231,15 @@ pub(super) fn decode_thumbnail(
                     ),
                 ));
             }
+            Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+                return Err(failure(
+                    ThumbnailFailureReason::UnexpectedGpuFrame,
+                    format!(
+                        "thumbnail requires CPU RGBA, got compact CPU YUV {:?} {:?}",
+                        frame.chroma_subsampling, frame.sample_format
+                    ),
+                ));
+            }
             Err(error) => {
                 return Err(failure(
                     ThumbnailFailureReason::DecodeFailed,

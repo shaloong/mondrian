@@ -562,6 +562,8 @@ pub enum DecodedFrameResidency {
     CpuRgba,
     /// Decoder output is CPU RGBA f32 memory.
     CpuFloat,
+    /// Decoder output is compact CPU YUV planes awaiting GPU materialization.
+    CpuYuv,
     /// Decoder output is a GPU texture or hardware frame.
     GpuTexture,
 }
@@ -585,6 +587,10 @@ pub enum DecodedVideoSurfaceFormat {
     Yuv420p,
     /// Planar 10-bit YUV 4:2:0.
     Yuv420p10le,
+    /// Planar 8-bit YUV 4:2:2.
+    Yuv422p,
+    /// Planar 10-bit YUV 4:2:2.
+    Yuv422p10le,
     /// Packed RGBA8.
     Rgba8,
     /// Packed BGRA8.
@@ -1414,6 +1420,7 @@ impl DecodedFrameResidency {
         match self {
             Self::CpuRgba => "CpuRgba",
             Self::CpuFloat => "CpuFloat",
+            Self::CpuYuv => "CpuYuv",
             Self::GpuTexture => "GpuTexture",
         }
     }
@@ -1428,6 +1435,8 @@ impl DecodedVideoSurfaceFormat {
             Self::P010 => "P010",
             Self::Yuv420p => "Yuv420p",
             Self::Yuv420p10le => "Yuv420p10le",
+            Self::Yuv422p => "Yuv422p",
+            Self::Yuv422p10le => "Yuv422p10le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
             Self::Other => "Other",
@@ -1442,8 +1451,8 @@ impl DecodedVideoSurfaceFormat {
     /// Effective bit depth for formats with a fixed Mondrian contract.
     pub fn fixed_bit_depth(self) -> Option<u8> {
         match self {
-            Self::Nv12 | Self::Yuv420p | Self::Rgba8 | Self::Bgra8 => Some(8),
-            Self::P010 | Self::Yuv420p10le => Some(10),
+            Self::Nv12 | Self::Yuv420p | Self::Yuv422p | Self::Rgba8 | Self::Bgra8 => Some(8),
+            Self::P010 | Self::Yuv420p10le | Self::Yuv422p10le => Some(10),
             Self::Unknown | Self::Other => None,
         }
     }

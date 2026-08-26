@@ -153,6 +153,7 @@ pub struct ViewerGpuExecutionRuntime {
     resource_grant: ViewerGpuExecutionResourceGrant,
     last_active_working_set: Option<ViewerGpuActiveWorkingSetEstimate>,
     native_video_import: ViewerNativeVideoImportRuntime,
+    cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime,
     color_output: RenderGpuOutputBoundaryRuntime,
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
@@ -209,6 +210,7 @@ impl ViewerGpuExecutionRuntime {
                     Arc::clone(&resource_pool),
                     native_import_gpu_timing_policy,
                 ),
+            cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime::new(),
             color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(
                 &resource_pool,
             ))?,
@@ -256,6 +258,7 @@ impl ViewerGpuExecutionRuntime {
     /// exact execution contracts, and resources owned by an active candidate.
     pub fn clear_idle_resources(&self) {
         self.resource_pool.clear();
+        self.cpu_yuv_upload.clear();
     }
 
     /// Native decoder import capability exposed to preview scheduling.
@@ -324,6 +327,7 @@ impl ViewerGpuExecutionRuntime {
 
     /// Release resources scoped to the current candidate, retaining pipelines.
     pub fn clear_frame_resources(&mut self) {
+        self.cpu_yuv_upload.begin_frame();
         self.working_compositor.clear_frame_resources();
         self.color_output.clear_frame_resources();
         self.spatial.clear_frame_resources();
@@ -436,6 +440,7 @@ impl ViewerGpuExecutionRuntime {
             &mut heterogeneous_inputs,
             &mut self.color_output,
             &mut self.native_video_import,
+            &self.cpu_yuv_upload,
             &self.working_compositor,
             &self.resource_pool,
             device,
@@ -753,6 +758,7 @@ impl ViewerGpuExecutionRuntime {
         self.display_calibration.clear();
         self.program_scopes.clear();
         self.color_output.clear_frame_resources();
+        self.cpu_yuv_upload.clear();
         self.resource_pool.invalidate();
         self.last_active_working_set = None;
     }
@@ -1168,6 +1174,7 @@ fn prepare_composite<'a>(
     heterogeneous_inputs: &mut [Option<ViewerHeterogeneousGpuInput>],
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
+    cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
@@ -1196,6 +1203,7 @@ fn prepare_composite<'a>(
                     &mut prepared,
                     runtime,
                     native_runtime,
+                    cpu_yuv_upload,
                     compositor,
                     resource_pool,
                     device,
@@ -1243,6 +1251,7 @@ fn prepare_composite<'a>(
                     &mut prepared,
                     runtime,
                     native_runtime,
+                    cpu_yuv_upload,
                     compositor,
                     resource_pool,
                     device,
@@ -1257,6 +1266,7 @@ fn prepare_composite<'a>(
                     &mut prepared,
                     runtime,
                     native_runtime,
+                    cpu_yuv_upload,
                     compositor,
                     resource_pool,
                     device,
@@ -1286,6 +1296,7 @@ fn prepare_transition_input<'a>(
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
+    cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
@@ -1309,6 +1320,7 @@ fn prepare_transition_input<'a>(
             prepared,
             runtime,
             native_runtime,
+            cpu_yuv_upload,
             compositor,
             resource_pool,
             device,
@@ -1327,6 +1339,7 @@ fn prepare_source_layer<'a>(
     prepared: &mut PreparedComposite<'a>,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
     native_runtime: &mut ViewerNativeVideoImportRuntime,
+    cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
     compositor: &GpuFrameCompositor,
     resource_pool: &Arc<GpuColorFrameWgpuResourcePool>,
     device: &wgpu::Device,
@@ -1338,6 +1351,7 @@ fn prepare_source_layer<'a>(
             frame,
             gpu_source,
             native_source,
+            cpu_yuv_source,
             heterogeneous_input,
             opacity,
             blend_mode,
@@ -1347,7 +1361,11 @@ fn prepare_source_layer<'a>(
         } => {
             prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
             if let Some(address) = heterogeneous_input {
-                if frame.is_some() || gpu_source.is_some() || native_source.is_some() {
+                if frame.is_some()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                {
                     return Err(ViewerGpuExecutionError::InvalidHeterogeneousInput {
                         reason: "heterogeneous media source is not exclusive",
                     });
@@ -1406,7 +1424,23 @@ fn prepare_source_layer<'a>(
                     frame_seed: *frame_seed,
                 });
             }
-            prepared.residency.record_source(gpu_source.as_ref(), native_source.as_ref());
+            prepared.residency.record_source(
+                gpu_source.as_ref(),
+                native_source.as_ref(),
+                cpu_yuv_source.as_ref(),
+            );
+            let cpu_yuv_handle = match cpu_yuv_source.as_ref() {
+                Some(source) => Some(record_cpu_yuv_video_layer(
+                    source,
+                    native_runtime,
+                    cpu_yuv_upload,
+                    runtime,
+                    device,
+                    queue,
+                    encoder,
+                )?),
+                None => None,
+            };
             let mut native_import_error = None;
             let native_handle = match native_source.as_ref() {
                 Some(source) => match record_native_video_layer(source, native_runtime, runtime) {
@@ -1432,9 +1466,13 @@ fn prepare_source_layer<'a>(
                 },
                 None => None,
             };
-            let source = if let Some(handle) = native_handle {
+            let source = if let Some(handle) = cpu_yuv_handle.or(native_handle) {
                 let index = prepared.gpu_input_handles.len();
                 prepared.gpu_input_handles.push(handle);
+                if cpu_yuv_source.is_some() {
+                    prepared.residency.gpu_input_layers =
+                        prepared.residency.gpu_input_layers.saturating_add(1);
+                }
                 PreparedCompositeLayerSource::GpuFrame(index)
             } else {
                 match gpu_source.as_ref() {
@@ -1815,6 +1853,35 @@ fn record_native_video_layer(
     Ok(handle)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn record_cpu_yuv_video_layer(
+    source: &crate::ViewerGpuCpuYuvSource,
+    native_runtime: &mut ViewerNativeVideoImportRuntime,
+    cpu_yuv_upload: &crate::cpu_yuv::CpuYuvUploadRuntime,
+    color_runtime: &mut RenderGpuOutputBoundaryRuntime,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+) -> Result<GpuColorFrameHandle, ViewerGpuExecutionError> {
+    crate::cpu_yuv::record_cpu_yuv_frame(
+        &native_runtime.cpu_yuv_decoder,
+        cpu_yuv_upload,
+        &source.frame,
+        &source.input_transform,
+        source.materialization_width,
+        source.materialization_height,
+        color_runtime,
+        device,
+        queue,
+        encoder,
+    )
+    .map_err(|error| {
+        ViewerGpuExecutionError::InputPreparation(format!(
+            "compact CPU YUV GPU materialization failed: {error}"
+        ))
+    })
+}
+
 fn record_gpu_input_layer(
     source: &ViewerGpuMediaSource,
     runtime: &mut RenderGpuOutputBoundaryRuntime,
@@ -1872,9 +1939,11 @@ impl ViewerGpuExecutionResidency {
         &mut self,
         media_source: Option<&ViewerGpuMediaSource>,
         native_source: Option<&ViewerGpuNativeSource>,
+        cpu_yuv_source: Option<&crate::ViewerGpuCpuYuvSource>,
     ) {
         let facts = native_source
             .map(ViewerGpuNativeVideoFacts::from_native_source)
+            .or_else(|| cpu_yuv_source.map(ViewerGpuNativeVideoFacts::from_cpu_yuv_source))
             .or_else(|| media_source.map(ViewerGpuNativeVideoFacts::from_media_source))
             .unwrap_or_default();
         if facts.decoder_residency == DecodedFrameResidency::GpuTexture {
@@ -1894,6 +1963,28 @@ impl ViewerGpuExecutionResidency {
 }
 
 impl ViewerGpuNativeVideoFacts {
+    fn from_cpu_yuv_source(source: &crate::ViewerGpuCpuYuvSource) -> Self {
+        let source_texture_format = Some(match source.frame.sample_format {
+            mondrian_media::CpuYuvSampleFormat::Unorm8 => GpuNativeDecodedFrameTextureFormat::Nv12,
+            mondrian_media::CpuYuvSampleFormat::Unorm16Lsb10 => {
+                GpuNativeDecodedFrameTextureFormat::P010
+            }
+        });
+        let source_video_sampling = source_texture_format.and_then(|format| {
+            native_video_sampling_from_decoded(
+                source.frame.source_color.color_space,
+                format,
+                source.frame.video_sampling,
+            )
+        });
+        Self {
+            decoder_residency: DecodedFrameResidency::CpuYuv,
+            decoder_handle_kind: None,
+            source_texture_format,
+            source_video_sampling,
+        }
+    }
+
     fn from_media_source(source: &ViewerGpuMediaSource) -> Self {
         let source_texture_format = (source.decoder_residency == DecodedFrameResidency::GpuTexture)
             .then(|| native_source_texture_format_from_decoded(source.decoded_surface_format))
@@ -2650,28 +2741,30 @@ mod tests {
             ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)
                 .expect("Viewer GPU runtime");
         for timeline_frame in 7..10 {
-            let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
-                frame: None,
-                gpu_source: Some(ViewerGpuMediaSource {
-                    source: Arc::clone(&source),
-                    input_transform: RenderInputTransform::to_working_gpu(
-                        WorkingColorSpace::LinearRec709,
-                        false,
-                        ColorEngine::mondrian_standard(),
-                    ),
-                    decoder_residency: DecodedFrameResidency::CpuRgba,
-                    decoder_handle_kind: None,
-                    decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
-                    decoded_video_sampling: DecodedVideoSampling::default(),
-                }),
-                native_source: None,
-                heterogeneous_input: None,
-                opacity: 1.0,
-                blend_mode: BlendMode::Normal,
-                transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
-                effect_plan: Arc::clone(&effect_plan),
-                frame_seed: timeline_frame,
-            });
+            let layer =
+                ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
+                    frame: None,
+                    gpu_source: Some(ViewerGpuMediaSource {
+                        source: Arc::clone(&source),
+                        input_transform: RenderInputTransform::to_working_gpu(
+                            WorkingColorSpace::LinearRec709,
+                            false,
+                            ColorEngine::mondrian_standard(),
+                        ),
+                        decoder_residency: DecodedFrameResidency::CpuRgba,
+                        decoder_handle_kind: None,
+                        decoded_surface_format: DecodedVideoSurfaceFormat::Rgba8,
+                        decoded_video_sampling: DecodedVideoSampling::default(),
+                    }),
+                    native_source: None,
+                    cpu_yuv_source: None,
+                    heterogeneous_input: None,
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: [0.5, 0.0, 1.0, 0.0, 0.5, 1.0],
+                    effect_plan: Arc::clone(&effect_plan),
+                    frame_seed: timeline_frame,
+                }));
             let mut encoder =
                 context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("viewer-effect-domain-integration-resource-reuse"),
@@ -2745,17 +2838,18 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
         });
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: None,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
             frame_seed: 9,
-        });
+        }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -2835,17 +2929,18 @@ mod tests {
             color_space: WorkingColorSpace::LinearRec709,
             data: vec![[0.18, 0.08, 0.02, 1.0]; 16],
         });
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
             gpu_source: None,
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: None,
             opacity: 0.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan,
             frame_seed: 9,
-        });
+        }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -2923,17 +3018,18 @@ mod tests {
         .expect("valid display-domain graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU effect plan"));
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
-            layer: TimelineSolidColorLayer {
-                color: Color { r: 0.18, g: 0.08, b: 0.02, a: 0.75 },
-                opacity: 1.0,
-                blend_mode: BlendMode::Normal,
-                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                effect_graph: Arc::new(graph),
-                frame_seed: 11,
-            },
-            effect_plan,
-        });
+        let layer =
+            ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::SolidColor {
+                layer: TimelineSolidColorLayer {
+                    color: Color { r: 0.18, g: 0.08, b: 0.02, a: 0.75 },
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                    effect_graph: Arc::new(graph),
+                    frame_seed: 11,
+                },
+                effect_plan,
+            }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -2997,17 +3093,18 @@ mod tests {
             .expect("valid scene-linear identity graph");
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
-            layer: TimelineSolidColorLayer {
-                color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
-                opacity: 1.0,
-                blend_mode: BlendMode::Normal,
-                transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
-                effect_graph: Arc::clone(&graph),
-                frame_seed: 0,
-            },
-            effect_plan,
-        });
+        let layer =
+            ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::SolidColor {
+                layer: TimelineSolidColorLayer {
+                    color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
+                    opacity: 1.0,
+                    blend_mode: BlendMode::Normal,
+                    transform: [0.75, 0.0, 0.125, 0.0, 0.75, 0.125],
+                    effect_graph: Arc::clone(&graph),
+                    frame_seed: 0,
+                },
+                effect_plan,
+            }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -3074,17 +3171,19 @@ mod tests {
         let effect_plan =
             Arc::new(lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"));
         let source = |color, frame_seed| {
-            crate::ViewerGpuTransitionInput::Source(crate::ViewerGpuSourceLayer::SolidColor {
-                layer: TimelineSolidColorLayer {
-                    color,
-                    opacity: 1.0,
-                    blend_mode: BlendMode::Normal,
-                    transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
-                    effect_graph: Arc::clone(&graph),
-                    frame_seed,
+            crate::ViewerGpuTransitionInput::Source(Box::new(
+                crate::ViewerGpuSourceLayer::SolidColor {
+                    layer: TimelineSolidColorLayer {
+                        color,
+                        opacity: 1.0,
+                        blend_mode: BlendMode::Normal,
+                        transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                        effect_graph: Arc::clone(&graph),
+                        frame_seed,
+                    },
+                    effect_plan: Arc::clone(&effect_plan),
                 },
-                effect_plan: Arc::clone(&effect_plan),
-            })
+            ))
         };
         let layer =
             ViewerGpuExecutionLayer::CrossDissolve(Box::new(crate::ViewerGpuCrossDissolveLayer {
@@ -3231,17 +3330,18 @@ mod tests {
         let identity_plan = Arc::new(
             lower_effect_graph_to_gpu_plan(&identity_graph).expect("lower Viewer identity plan"),
         );
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: None,
             gpu_source: None,
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: Some(0),
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             effect_plan: identity_plan,
             frame_seed: FRAME_SEED,
-        });
+        }));
         let output_boundary = RenderOutputColorBoundary::display(
             ColorSpace::Rec709,
             false,
@@ -3355,7 +3455,7 @@ mod tests {
             false,
             ColorEngine::mondrian_standard(),
         );
-        let layer = ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::Media {
+        let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: None,
             gpu_source: Some(ViewerGpuMediaSource {
                 source: Arc::clone(&source),
@@ -3366,6 +3466,7 @@ mod tests {
                 decoded_video_sampling: DecodedVideoSampling::default(),
             }),
             native_source: None,
+            cpu_yuv_source: None,
             heterogeneous_input: None,
             opacity: 1.0,
             blend_mode: BlendMode::Normal,
@@ -3374,7 +3475,7 @@ mod tests {
                 lower_effect_graph_to_gpu_plan(&graph).expect("GPU identity plan"),
             ),
             frame_seed: 0,
-        });
+        }));
         let boundary = RenderOutputColorBoundary::from_intent(
             crate::RenderOutputColorBoundaryTarget::Display,
             ColorSpace::Rec709,
@@ -3500,7 +3601,7 @@ mod tests {
             lower_effect_graph_to_gpu_plan(&adjustment_graph).expect("GPU adjustment plan"),
         );
         let layers = [
-            ViewerGpuExecutionLayer::Source(crate::ViewerGpuSourceLayer::SolidColor {
+            ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::SolidColor {
                 layer: TimelineSolidColorLayer {
                     color: Color { r: 0.18, g: 0.08, b: 0.02, a: 1.0 },
                     opacity: 1.0,
@@ -3510,7 +3611,7 @@ mod tests {
                     frame_seed: 0,
                 },
                 effect_plan: scene_plan,
-            }),
+            })),
             ViewerGpuExecutionLayer::Adjustment {
                 effect_plan: adjustment_plan,
                 opacity: 0.6,

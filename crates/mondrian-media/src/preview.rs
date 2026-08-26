@@ -46,9 +46,9 @@ mod reverse_decode_window;
 mod seek_index;
 
 pub use decode_contract::{
-    PreviewDecodeAlphaPresence, PreviewDecodeContractError, PreviewDecodeKey,
-    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
-    PreviewNativeSurfaceHint, PreviewRepresentationQuality,
+    PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence, PreviewDecodeContractError,
+    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
+    PreviewDecodeSource, PreviewNativeSurfaceHint, PreviewRepresentationQuality,
 };
 pub use demux_worker::run_preview_demux_worker;
 pub use seek_index::{
@@ -206,6 +206,8 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
     InProcessFfmpegCpuFloat,
+    /// In-process FFmpeg decoder retained compact CPU YUV planes for GPU materialization.
+    InProcessFfmpegCpuYuv,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
     InProcessFfmpegNative,
     /// Experimental external `ffmpeg` process returned CPU RGBA bytes.
@@ -466,6 +468,11 @@ pub struct PreviewDecodeRequest<'a> {
     pub max_width: Option<u32>,
     /// Optional maximum output height.
     pub max_height: Option<u32>,
+    /// Exact decoded-payload representation promised by the request identity.
+    ///
+    /// Session reuse and materialization must preserve this value; a compact
+    /// YUV request cannot silently return an RGBA payload under the same key.
+    pub representation: PreviewDecodeRepresentation,
     /// Access pattern that drives decoder residency and seek policy.
     pub access_mode: PreviewDecodeAccessMode,
     /// Optional complete bounded file-revision evidence resolved by the caller.
@@ -547,6 +554,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_sample: key.source_sample(),
             max_width,
             max_height,
+            representation: key.representation(),
             access_mode,
             fingerprint: Some(key.source().fingerprint()),
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
@@ -569,6 +577,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_sample,
             max_width: None,
             max_height: None,
+            representation: PreviewDecodeRepresentation::NativeCpu,
             access_mode,
             fingerprint: None,
             adaptive_hints: PreviewDecodeAdaptiveHints::default(),
@@ -1062,6 +1071,7 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
+            Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",
             Self::PlaybackSessionRingHit => "PlaybackSessionRingHit",
@@ -1520,6 +1530,8 @@ pub enum PreviewDecodeOutcome {
     Frame(RgbaFrame),
     /// Decode completed with a CPU scene-linear RGBA f32 preview frame.
     FloatFrame(FloatRgbaFrame),
+    /// Decode completed with compact CPU YUV planes for direct GPU materialization.
+    CpuYuvFrame(CpuYuvFrame),
     /// Decode completed with a GPU-resident native frame.
     NativeGpuFrame(PreviewNativeDecodedFrame),
     /// The caller marked this request obsolete before a frame was returned.
@@ -1651,9 +1663,21 @@ fn preview_decode_threading_config_for_codec(
     codec_id: ffmpeg::codec::Id,
     access_mode: PreviewDecodeAccessMode,
     decode_pixels: u64,
+    worker_thread_limit: Option<usize>,
 ) -> PreviewDecodeThreadingConfig {
     let requested = preview_decode_threading_config(access_mode, decode_pixels);
+    let requested = cap_preview_decode_threading_config(requested, worker_thread_limit);
     apply_preview_codec_threading_policy(codec_id, requested)
+}
+
+fn cap_preview_decode_threading_config(
+    requested: PreviewDecodeThreadingConfig,
+    worker_thread_limit: Option<usize>,
+) -> PreviewDecodeThreadingConfig {
+    PreviewDecodeThreadingConfig {
+        kind: requested.kind,
+        count: requested.count.min(worker_thread_limit.unwrap_or(usize::MAX).max(1)),
+    }
 }
 
 fn apply_preview_codec_threading_policy(

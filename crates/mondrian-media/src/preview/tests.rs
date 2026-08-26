@@ -9,14 +9,15 @@ use super::{
     materialize_decoded_frame, preview_create_rgba_scaler, preview_decode_interrupt_callback,
     preview_external_ffmpeg_cpu_rgba_allowed_for_access_mode, preview_hardware_extra_frames,
     resolve_cpu_rgba_contract, run_external_decode_command_cancellable,
-    select_decoded_temporal_candidate, temporal_selection_is_approximate, DecodedRgbaFrameContract,
-    DecodedTemporalCandidate, DecodedTemporalExtent, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp, MediaFileFingerprint,
-    MediaFileObjectIdentity, PreviewDecodeAccessMode, PreviewDecodeAccessPolicy,
-    PreviewDecodeAdaptiveHints, PreviewDecodeBackend, PreviewDecodeCancellation,
-    PreviewDecodeCancellationCheckpoint, PreviewDecodeCancellationSource, PreviewDecodeDiagnostics,
-    PreviewDecodeExecutionObserver, PreviewDecodeExecutionPath, PreviewDecodeExecutionStage,
-    PreviewDecodeInterruptState, PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRequest,
+    select_decoded_temporal_candidate, temporal_selection_is_approximate, CpuYuvChromaPlaneLayout,
+    CpuYuvChromaPlanes, DecodedRgbaFrameContract, DecodedTemporalCandidate, DecodedTemporalExtent,
+    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, MediaFileChangeStamp,
+    MediaFileFingerprint, MediaFileObjectIdentity, PreviewDecodeAccessMode,
+    PreviewDecodeAccessPolicy, PreviewDecodeAdaptiveHints, PreviewDecodeBackend,
+    PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
+    PreviewDecodeCancellationSource, PreviewDecodeDiagnostics, PreviewDecodeExecutionObserver,
+    PreviewDecodeExecutionPath, PreviewDecodeExecutionStage, PreviewDecodeInterruptState,
+    PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodeRepresentation, PreviewDecodeRequest,
     PreviewDecodeSeekStrategy, PreviewDecodeSessionContext, PreviewDecodeSessionDisposition,
     PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
     PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
@@ -963,6 +964,24 @@ fn preview_decode_cpu_budget_coordinates_workers_and_decoder_threads() {
             PreviewDecodeAccessMode::RandomAccessStillFrame,
         ),
         10
+    );
+}
+
+#[test]
+fn worker_thread_limit_caps_playback_failover_without_changing_threading_kind() {
+    let requested =
+        PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::Slice, count: 10 };
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, Some(3)),
+        PreviewDecodeThreadingConfig { kind: PreviewDecodeThreadingKind::Slice, count: 3 }
+    );
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, None),
+        requested
+    );
+    assert_eq!(
+        super::cap_preview_decode_threading_config(requested, Some(0)).count,
+        1
     );
 }
 
@@ -2246,6 +2265,7 @@ fn gpu_preferred_software_frame_falls_back_with_structured_reason() {
     let mut scaler_color_contract = None;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut scaler,
         &mut scaler_source_format,
@@ -2284,6 +2304,7 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
     );
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut None,
         &mut None,
@@ -2310,6 +2331,98 @@ fn high_bit_depth_cpu_materialization_preserves_encoded_float_precision() {
 }
 
 #[test]
+fn compact_cpu_yuv_representation_is_exact_and_fail_closed() {
+    let mut decoded = ffmpeg::util::frame::video::Video::new(
+        ffmpeg::util::format::pixel::Pixel::YUV422P10LE,
+        4,
+        2,
+    );
+    decoded.set_color_space(ffmpeg::util::color::Space::BT709);
+    decoded.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let mut plan = PreviewHardwareDecodePlan::resolve(
+        PreviewHardwareDecodeRequest::Auto,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        PreviewDecodeBackend::Software,
+        ffmpeg::codec::Id::H264,
+        None,
+    );
+    let payload = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-yuv422p10le"),
+        test_source_color(),
+    )
+    .expect("exact YUV422P10LE representation must remain compact");
+    let PreviewDecodedFramePayload::CpuYuv(frame) = payload else {
+        panic!("compact representation must not expand into an RGBA payload");
+    };
+    assert_eq!(frame.chroma_plane_layout(), CpuYuvChromaPlaneLayout::Planar);
+    let luma = frame.luma_plane();
+    assert!(luma.bytes_per_row() >= 4 * 2);
+    assert!(luma.data().len() >= luma.bytes_per_row() as usize * 2);
+    let CpuYuvChromaPlanes::Planar { cb, cr } = frame.chroma_planes() else {
+        panic!("FFmpeg YUV422P10LE must retain separate Cb and Cr planes");
+    };
+    assert!(cb.bytes_per_row() >= 2 * 2);
+    assert_eq!(cb.bytes_per_row(), cr.bytes_per_row());
+    assert!(frame.retained_bytes() >= 4 * 2 * 4);
+    assert_eq!(frame.chroma_width, 2);
+    assert_eq!(frame.chroma_height, 2);
+    assert_eq!(
+        frame.diagnostics.path,
+        PreviewDecodePath::InProcessFfmpegCpuYuv
+    );
+
+    let scaled = materialize_decoded_frame(
+        &decoded,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        2,
+        1,
+        Path::new("synthetic-scaled-yuv422p10le"),
+        test_source_color(),
+    )
+    .expect("adaptive compact representation must materialize its requested extent");
+    let PreviewDecodedFramePayload::CpuYuv(scaled) = scaled else {
+        panic!("scaled compact representation must remain a YUV payload");
+    };
+    assert_eq!((scaled.width, scaled.height), (2, 1));
+    assert_eq!((scaled.chroma_width, scaled.chroma_height), (1, 1));
+    assert_eq!(
+        scaled.chroma_plane_layout(),
+        CpuYuvChromaPlaneLayout::Planar
+    );
+    assert!(scaled.retained_bytes() >= 2 * 4);
+    assert_eq!(scaled.diagnostics.stage_durations.rgba_copy_us, 0);
+
+    let mismatched =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 4, 2);
+    let error = materialize_decoded_frame(
+        &mismatched,
+        PreviewDecodeRepresentation::CompactCpuYuv,
+        &mut plan,
+        &mut None,
+        &mut None,
+        &mut None,
+        4,
+        2,
+        Path::new("synthetic-yuv-mismatch"),
+        test_source_color(),
+    )
+    .expect_err("compact representation must reject a decoder layout mismatch");
+    assert!(error.to_string().contains("expected YUV422P10LE"));
+}
+
+#[test]
 fn interlaced_decoded_frame_fails_before_native_or_cpu_materialization() {
     let mut decoded =
         ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGBA, 2, 2);
@@ -2327,6 +2440,7 @@ fn interlaced_decoded_frame_fails_before_native_or_cpu_materialization() {
     );
     let error = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut None,
         &mut None,
@@ -2369,6 +2483,7 @@ fn scene_linear_ffmpeg_float_frame_preserves_extended_range_rgba() {
     );
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeCpu,
         &mut plan,
         &mut None,
         &mut None,
@@ -2413,6 +2528,7 @@ fn gpu_required_software_frame_fails_closed() {
     plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
     let error = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -2440,6 +2556,7 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
     plan.request = PreviewHardwareDecodeRequest::PreferGpuResident;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -2453,7 +2570,9 @@ fn explicit_d3d11_nv12_frame_materializes_native_without_cpu_payload() {
 
     let frame = match &payload {
         PreviewDecodedFramePayload::NativeGpu(frame) => frame,
-        PreviewDecodedFramePayload::CpuRgba(_) | PreviewDecodedFramePayload::CpuFloat(_) => {
+        PreviewDecodedFramePayload::CpuRgba(_)
+        | PreviewDecodedFramePayload::CpuFloat(_)
+        | PreviewDecodedFramePayload::CpuYuv(_) => {
             panic!("explicit D3D11 NV12 frame must not transfer to CPU")
         }
     };
@@ -2485,6 +2604,7 @@ fn explicit_d3d12_p010_frame_materializes_native_with_decode_fence() {
     plan.request = PreviewHardwareDecodeRequest::RequireGpuResident;
     let payload = materialize_decoded_frame(
         &decoded,
+        PreviewDecodeRepresentation::NativeSurface,
         &mut plan,
         &mut None,
         &mut None,
@@ -3309,6 +3429,7 @@ fn canceled_codec_work_forces_seek_before_session_reuse() {
     let diagnostics = match recovered {
         PreviewDecodeOutcome::Frame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::FloatFrame(frame) => frame.diagnostics,
+        PreviewDecodeOutcome::CpuYuvFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::NativeGpuFrame(frame) => frame.diagnostics,
         PreviewDecodeOutcome::Canceled(cancellation) => {
             panic!("recovery decode unexpectedly canceled: {cancellation:?}")
@@ -3395,6 +3516,9 @@ fn preview_decode_fixture_perf_smoke() {
         PreviewDecodeOutcome::FloatFrame(_) => {
             panic!("Rec.709 still-frame perf fixture unexpectedly decoded as float")
         }
+        PreviewDecodeOutcome::CpuYuvFrame(_) => {
+            panic!("still-frame perf decode requires CPU RGBA output")
+        }
     };
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let report = PreviewDecodePerfReport {
@@ -3478,43 +3602,49 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         )
         .with_max_size(max_width, max_height)
         .with_fingerprint(fingerprint);
-        let frame = match decode_preview_frame_cancellable(request, || false)
-            .expect("decode preview fixture frame")
-        {
-            PreviewDecodeOutcome::Frame(frame) => frame,
-            PreviewDecodeOutcome::Canceled(_) => {
-                panic!("playback sequence perf decode canceled")
-            }
-            PreviewDecodeOutcome::NativeGpuFrame(_) => {
-                panic!("playback sequence perf decode requires CPU RGBA output")
-            }
-            PreviewDecodeOutcome::FloatFrame(_) => {
-                panic!("Rec.709 playback perf fixture unexpectedly decoded as float")
-            }
-        };
+        let (decoded_width, decoded_height, diagnostics) =
+            match decode_preview_frame_cancellable(request, || false)
+                .expect("decode preview fixture frame")
+            {
+                PreviewDecodeOutcome::Frame(frame) => {
+                    (frame.width, frame.height, frame.diagnostics)
+                }
+                PreviewDecodeOutcome::FloatFrame(frame) => {
+                    (frame.width, frame.height, frame.diagnostics)
+                }
+                PreviewDecodeOutcome::Canceled(_) => {
+                    panic!("playback sequence perf decode canceled")
+                }
+                PreviewDecodeOutcome::NativeGpuFrame(_) => {
+                    panic!("playback sequence perf decode requires CPU RGBA output")
+                }
+                PreviewDecodeOutcome::CpuYuvFrame(_) => {
+                    panic!("CPU-addressable playback perf decode returned compact GPU input")
+                }
+            };
         let elapsed_us = duration_us(frame_started.elapsed());
         total_us = total_us.saturating_add(elapsed_us);
         max_us = max_us.max(elapsed_us);
-        if !frame.diagnostics.cache_hit {
+        if !diagnostics.cache_hit {
             uncached_total_us = uncached_total_us.saturating_add(elapsed_us);
             uncached_frame_count = uncached_frame_count.saturating_add(1);
             uncached_max_us = uncached_max_us.max(elapsed_us);
         }
-        total_stage_durations.accumulate(frame.diagnostics.stage_durations);
+        total_stage_durations.accumulate(diagnostics.stage_durations);
         max_frame_stage_durations =
-            max_stage_durations(max_frame_stage_durations, frame.diagnostics.stage_durations);
+            max_stage_durations(max_frame_stage_durations, diagnostics.stage_durations);
         frames.push(PreviewDecodeSequenceFrameReport {
             index,
             timestamp_secs,
             elapsed_us,
-            decoded_width: frame.width,
-            decoded_height: frame.height,
-            cache_hit: frame.diagnostics.cache_hit,
-            seek_performed: frame.diagnostics.seek_performed,
-            decoded_frame_count: frame.diagnostics.decoded_frame_count,
-            threading_kind: frame.diagnostics.threading_kind.as_str(),
-            threading_count: frame.diagnostics.threading_count,
-            stage_durations: frame.diagnostics.stage_durations,
+            decoded_width,
+            decoded_height,
+            cache_hit: diagnostics.cache_hit,
+            seek_performed: diagnostics.seek_performed,
+            decoded_frame_count: diagnostics.decoded_frame_count,
+            threading_kind: diagnostics.threading_kind.as_str(),
+            threading_count: diagnostics.threading_count,
+            stage_durations: diagnostics.stage_durations,
         });
     }
     let wall_us = duration_us(started.elapsed());
@@ -3802,6 +3932,15 @@ fn full_and_reduced_representations_decode_independently_from_the_same_source() 
         let PreviewDecodeOutcome::Frame(frame) = outcome else {
             panic!("representation {index} must return an RGBA frame");
         };
+        assert_eq!(
+            frame.diagnostics.session_disposition,
+            if index == 0 {
+                PreviewDecodeSessionDisposition::Opened
+            } else {
+                PreviewDecodeSessionDisposition::Reused
+            },
+            "materialization representation changes must not reopen the compressed-stream decoder"
+        );
         assert_eq!(
             (frame.width, frame.height),
             expected,

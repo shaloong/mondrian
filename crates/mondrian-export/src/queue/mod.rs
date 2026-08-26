@@ -6091,6 +6091,13 @@ fn decode_video_layer_scaled(
                     diagnostics,
                 )
             }
+            Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
+                return Err(format!(
+                    "asset={} path={} err=export still-frame CPU fallback requires CPU-addressable RGB, got compact GPU-materialization YUV",
+                    asset_id,
+                    path.display()
+                ));
+            }
             Ok(PreviewDecodeOutcome::Canceled(_)) => {
                 return Err(format!(
                     "asset={} path={} err=export still-frame decode canceled unexpectedly",

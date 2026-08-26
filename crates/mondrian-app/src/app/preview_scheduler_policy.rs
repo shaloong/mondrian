@@ -31,8 +31,10 @@ const PREVIEW_SCRUB_SLOW_SCORE_MAX: u8 = 3;
 /// Conservative physical reservation for one speculative decoded frame.
 ///
 /// CPU bytes include both the retained source payload and the lazily
-/// materialized working float frame. Native requests additionally reserve one
-/// decoder-surface unit while retaining CPU-fallback headroom.
+/// materialized working float frame. A renderer-requested compact YUV source
+/// has no CPU working fallback, so its exact plane footprint is reserved
+/// without inventing a full RGBA float payload. Native requests additionally
+/// reserve one decoder-surface unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct MediaPreviewResidencyReservation {
     pub(crate) entries: usize,
@@ -41,26 +43,23 @@ pub(crate) struct MediaPreviewResidencyReservation {
 }
 
 impl MediaPreviewResidencyReservation {
-    fn for_key(key: &MediaPreviewKey, hardware: PreviewHardwareDecodeRequest) -> Self {
+    fn for_key(key: &MediaPreviewKey, _hardware: PreviewHardwareDecodeRequest) -> Self {
         let resolution = key.residency_resolution();
         let pixels = (resolution.width as usize).saturating_mul(resolution.height as usize);
-        let bytes_per_pixel = if key.decode.source_color().color_space.is_scene_linear() {
+        let cpu_bytes = if key.decode.representation().is_compact_cpu_yuv() {
+            key.decode.source().compact_cpu_yuv_hint().map_or_else(
+                || pixels.saturating_mul(2 * 4 * std::mem::size_of::<f32>()),
+                |hint| hint.retained_bytes_for_extent(resolution),
+            )
+        } else if key.decode.source_color().color_space.is_scene_linear() {
             // Retained RGBA f32 source plus a possible working RGBA f32 frame.
-            2 * 4 * std::mem::size_of::<f32>()
+            pixels.saturating_mul(2 * 4 * std::mem::size_of::<f32>())
         } else {
             // Retained encoded RGBA8 source plus a working RGBA f32 frame.
-            4 + 4 * std::mem::size_of::<f32>()
+            pixels.saturating_mul(4 + 4 * std::mem::size_of::<f32>())
         };
-        let decoder_resource_units = usize::from(matches!(
-            hardware,
-            PreviewHardwareDecodeRequest::PreferGpuResident
-                | PreviewHardwareDecodeRequest::RequireGpuResident
-        ));
-        Self {
-            entries: 1,
-            cpu_bytes: pixels.saturating_mul(bytes_per_pixel),
-            decoder_resource_units,
-        }
+        let decoder_resource_units = usize::from(key.decode.representation().is_native_surface());
+        Self { entries: 1, cpu_bytes, decoder_resource_units }
     }
 }
 
@@ -411,6 +410,69 @@ mod tests {
         )
     }
 
+    fn four_k_compact_yuv_key() -> MediaPreviewKey {
+        let resolution = mondrian_core::Resolution { width: 3840, height: 2160 };
+        let stream = mondrian_media::VideoStreamInfo {
+            index: 0,
+            codec: mondrian_core::VideoCodec::H264,
+            duration: Some(std::time::Duration::from_secs(1)),
+            codec_profile: mondrian_media::VideoCodecProfile::H264High422,
+            width: resolution.width,
+            height: resolution.height,
+            picture: mondrian_core::PictureStreamMetadata::default(),
+            frame_rate: Rational::new(60_000, 1_001),
+            frame_rate_proven: true,
+            pixel_format: mondrian_core::PixelFormat::Yuv422p10le,
+            pixel_format_proven: true,
+            color_range: mondrian_media::DecodedVideoRange::Limited,
+            color_interpretation: mondrian_media::DetectedColorInterpretation::decoder_unavailable(
+            ),
+            color_metadata: None,
+            color_metadata_hints: Vec::new(),
+            hdr_metadata: Vec::new(),
+            bit_depth: 10,
+            has_alpha: false,
+            avg_bitrate: 205_000_000,
+            total_frames: Some(60),
+        };
+        let source_color = mondrian_media::PreviewSourceColorContract::automatic(
+            mondrian_core::ColorSpace::Rec709,
+            mondrian_media::DecodedVideoRange::Limited,
+        );
+        let source = mondrian_media::PreviewDecodeSource::from_probed_stream(
+            std::path::PathBuf::from("E:/media/sony-high422.mp4"),
+            MediaPreviewKey::test_fingerprint(4_422),
+            &stream,
+        )
+        .expect("valid compact CPU YUV source");
+        let representation = mondrian_media::PreviewDecodeRepresentation::canonical(
+            &source,
+            mondrian_media::PreviewDecodePayloadRequirement::NativeAllowed,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode,
+            mondrian_media::PreviewRepresentationQuality::Full,
+            source_color,
+        )
+        .expect("valid compact CPU YUV representation");
+        let decode = mondrian_media::PreviewDecodeKey::new(
+            source,
+            mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            representation,
+            source_color,
+        )
+        .expect("valid compact CPU YUV key");
+        MediaPreviewKey {
+            asset_id: AssetId::new(),
+            decode,
+            source_resolution: resolution,
+            picture_geometry: mondrian_core::ResolvedPictureGeometry::square(resolution)
+                .expect("valid source geometry"),
+            alpha_interpretation: mondrian_core::timeline_data::AlphaInterpretation::Straight,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+            input_tone_map: false,
+            engine: mondrian_core::types::ColorEngine::mondrian_standard(),
+        }
+    }
+
     #[test]
     fn four_k_encoded_reservation_covers_source_and_working_payloads() {
         let reservation = media_preview_residency_reservation(
@@ -436,6 +498,21 @@ mod tests {
             reservation.cpu_bytes,
             3840usize * 2160usize * (2 * 4 * std::mem::size_of::<f32>())
         );
+        assert_eq!(reservation.decoder_resource_units, 0);
+    }
+
+    #[test]
+    fn compact_cpu_yuv_reservation_matches_exact_planes_without_decoder_surface() {
+        let key = four_k_compact_yuv_key();
+        assert_eq!(
+            key.decode.representation(),
+            mondrian_media::PreviewDecodeRepresentation::CompactCpuYuv
+        );
+        let reservation = media_preview_residency_reservation(
+            &key,
+            PreviewHardwareDecodeRequest::PreferHardwareDecode,
+        );
+        assert_eq!(reservation.cpu_bytes, 3840usize * 2160usize * 4);
         assert_eq!(reservation.decoder_resource_units, 0);
     }
 

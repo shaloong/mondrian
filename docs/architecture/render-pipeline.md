@@ -1013,6 +1013,19 @@ bridge pool. The media-owned decoder surface remains under the Frame Store
 native-resource grant instead of being counted twice. Native/GPU/CPU source
 alternatives are summed conservatively because a failed preferred path can
 have created partial resources before its correctness fallback is selected.
+Compact CPU YUV is a separate source alternative: its media-owned retained
+FFmpeg planes are charged by Frame Store residency, while the Viewer estimate
+charges uploaded `R16Unorm` luma/Cb/Cr textures, encoded-RGB intermediate, and
+working output. Interleaved native sources continue to use `R16Unorm` luma plus
+`Rg16Unorm` CbCr. The Renderer reuses the native-video YUV sampling pass with
+explicit 4:2:2 geometry and least-significant-bit 10-bit code alignment, then
+enters the sole OCIO GPU input stage. It never creates a CPU RGBA working
+fallback for this representation. Compact plane textures are Viewer-runtime
+resources: one slot is retained per contributing compact layer in a candidate,
+reset between candidates, reused only through queue-ordered submissions, and
+retired by critical trim or device reset. Steady playback therefore performs
+bounded texture updates rather than allocating two device textures per layer
+and frame.
 For a heterogeneous source, source preparation uses the wgpu Adapter's
 non-aliasing physical recording bytes and texture count, not the semantic
 plan's optimal live-set peak. All extent, count, and byte arithmetic is

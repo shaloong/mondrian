@@ -117,9 +117,19 @@ precision. The native import plan owns distinct encoded-source and
 linear-working handles so a
 backend cannot skip, reorder, or mislabel either pass.
 
-The YUV shader uses unfiltered `textureLoad` operations because NV12/P010 plane
-formats are not assumed filterable. It performs renderer-defined bilinear 4:2:0
-chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
+The same YUV shader is also the sole materializer for media-owned compact CPU
+YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
+CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
+luma/CbCr views; FFmpeg `YUV422P10LE` binds stride-preserving luma/Cb/Cr views
+directly, without a CPU repack. The explicit layout contract distinguishes
+two-plane from three-plane storage, 4:2:0 from 4:2:2, and most-significant-bit
+P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layouts produce the same typed
+`Source + EncodedFloat` intermediate and therefore share color validation,
+OCIO execution, spatial scaling, and Viewer composition semantics.
+
+The YUV shader uses unfiltered `textureLoad` operations because YUV plane
+formats are not assumed filterable. It performs renderer-defined bilinear
+4:2:0 or 4:2:2 chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
 expands full or limited range in coded-value space, and applies BT.709 or
 BT.2020 non-constant-luminance matrix coefficients. P010 samples are first
 converted from normalized 16-bit storage (`code10 << 6`) back to exact 10-bit

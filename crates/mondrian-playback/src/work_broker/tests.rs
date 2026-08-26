@@ -561,6 +561,37 @@ fn superseded_in_flight_playback_current_finishes_for_locality_without_publicati
 }
 
 #[test]
+fn superseded_playback_demand_with_old_queue_preserves_running_decoder_locality() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut running = request(1, generation, FrameWorkClass::Playback);
+    running.demand_identity = Some(demand_identity(1));
+    running.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(running);
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected current receive: {other:?}"),
+    };
+
+    let mut old_queued = request(2, generation, FrameWorkClass::Playback);
+    old_queued.demand_identity = Some(demand_identity(1));
+    old_queued.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(old_queued);
+
+    assert_eq!(
+        broker.synchronize_playback_current_demand(demand_identity(2)),
+        1
+    );
+    assert_eq!(broker.execution_cancellation(execution.id), None);
+    let resolution = broker.resolve_execution(execution.id, true);
+    assert_eq!(resolution.completion, FrameRequestCompletion::CacheOnly);
+    assert!(resolution.binding.is_none());
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.queued_work, 0);
+    assert_eq!(diagnostics.in_flight_work, 0);
+}
+
+#[test]
 fn spatial_generation_rotation_retains_playback_decode_without_publication() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -632,6 +663,43 @@ fn viewer_generation_rotation_rebinds_queued_playback_prefetch() {
 }
 
 #[test]
+fn representation_rotation_retains_running_playback_but_prunes_old_queue() {
+    let broker = FrameWorkBroker::new(3, 3);
+    let generation = broker.begin_generation();
+    let mut running = request(1, generation, FrameWorkClass::Playback);
+    running.demand_identity = Some(demand_identity(1));
+    running.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(running);
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected current receive: {other:?}"),
+    };
+
+    let mut queued = request(2, generation, FrameWorkClass::Playback);
+    queued.priority = FrameWorkPriority::Prefetch;
+    queued.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    assert!(matches!(
+        broker.submit(queued),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    let next = broker.begin_generation_preserving_in_flight_playback_locality();
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.latest_generation, next);
+    assert_eq!(diagnostics.queued_work, 0);
+    assert_eq!(diagnostics.pending_requests, 0);
+    assert_eq!(diagnostics.pruned_queued, 1);
+    assert_eq!(diagnostics.in_flight_generation_invalidations, 0);
+    assert_eq!(diagnostics.in_flight_binding_invalidations, 0);
+    assert_eq!(broker.execution_cancellation(execution.id), None);
+
+    let resolution = broker.resolve_execution(execution.id, true);
+    assert_eq!(resolution.completion, FrameRequestCompletion::CacheOnly);
+    assert!(resolution.binding.is_none());
+    assert_eq!(broker.diagnostics().pending_requests, 0);
+}
+
+#[test]
 fn semantic_generation_rotation_cancels_previously_retained_playback_decode() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();
@@ -647,6 +715,7 @@ fn semantic_generation_rotation_cancels_previously_retained_playback_decode() {
     broker.begin_generation_preserving_playback_locality();
     assert_eq!(broker.execution_cancellation(execution.id), None);
     broker.begin_generation();
+    assert_eq!(broker.diagnostics().in_flight_generation_invalidations, 1);
     assert!(matches!(
         broker.execution_cancellation(execution.id),
         Some(FrameExecutionCancellation::Superseded { .. })
@@ -681,6 +750,55 @@ fn same_key_execution_may_rebind_to_the_active_playback_demand() {
         Some(demand_identity(2))
     );
     assert_eq!(broker.diagnostics().queued_work, 0);
+}
+
+#[test]
+fn reusable_winner_detaches_running_playback_fallback_without_canceling_decoder_locality() {
+    let broker = FrameWorkBroker::new(2, 2);
+    let generation = broker.begin_generation();
+    let mut original = request(1, generation, FrameWorkClass::Playback);
+    original.demand_identity = Some(demand_identity(1));
+    original.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    broker.submit(original);
+    let winner = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected original receive: {other:?}"),
+    };
+
+    let mut fallback = request(1, generation, FrameWorkClass::Playback);
+    fallback.demand_identity = Some(demand_identity(2));
+    fallback.in_flight_deadline_policy = FrameInFlightDeadlinePolicy::FinishForLocality;
+    assert!(matches!(
+        broker.submit(fallback),
+        FrameWorkSubmission::Queued { .. }
+    ));
+    let fallback = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected fallback receive: {other:?}"),
+    };
+
+    assert!(broker.mark_execution_completed(winner.id));
+    let winner_resolution = broker.resolve_execution(winner.id, true);
+    assert_eq!(
+        winner_resolution.completion,
+        FrameRequestCompletion::Current
+    );
+    assert_eq!(
+        winner_resolution.binding.expect("latest binding").demand_identity,
+        Some(demand_identity(2))
+    );
+    assert_eq!(broker.execution_cancellation(fallback.id), None);
+    let diagnostics = broker.diagnostics();
+    assert_eq!(diagnostics.in_flight_binding_invalidations, 0);
+    assert_eq!(diagnostics.in_flight_binding_locality_detachments, 1);
+
+    assert!(broker.mark_execution_completed(fallback.id));
+    let fallback_resolution = broker.resolve_execution(fallback.id, true);
+    assert_eq!(
+        fallback_resolution.completion,
+        FrameRequestCompletion::CacheOnly
+    );
+    assert_eq!(fallback_resolution.binding, None);
 }
 
 #[test]

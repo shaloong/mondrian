@@ -483,6 +483,7 @@ fn estimate_source(
             frame,
             gpu_source,
             native_source,
+            cpu_yuv_source,
             heterogeneous_input,
             effect_plan,
             frame_seed,
@@ -490,7 +491,11 @@ fn estimate_source(
         } => {
             let mut effect_extent = None::<(u32, u32, u64)>;
             if let Some(address) = heterogeneous_input {
-                if frame.is_some() || gpu_source.is_some() || native_source.is_some() {
+                if frame.is_some()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                {
                     return Err(
                         ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput {
                             reason: "heterogeneous media source is not exclusive",
@@ -564,6 +569,37 @@ fn estimate_source(
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 return Ok(());
+            }
+
+            if let Some(source) = cpu_yuv_source {
+                let encoded_rgb_bytes = checked_texture_bytes(
+                    source.materialization_width,
+                    source.materialization_height,
+                    8,
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                )?;
+                let working_bytes = checked_texture_bytes(
+                    source.materialization_width,
+                    source.materialization_height,
+                    16,
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                )?;
+                let bytes = u64::try_from(source.frame.retained_bytes())
+                    .ok()
+                    .and_then(|bytes| bytes.checked_add(encoded_rgb_bytes))
+                    .and_then(|bytes| bytes.checked_add(working_bytes))
+                    .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                        stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                    })?;
+                estimate.source_preparation.checked_add(
+                    ViewerGpuActiveTextureDemand { textures: 4, bytes },
+                    ViewerGpuActiveWorkingSetStage::SourcePreparation,
+                )?;
+                observe_effect_extent(
+                    &mut effect_extent,
+                    source.materialization_width,
+                    source.materialization_height,
+                )?;
             }
 
             if let Some(source) = native_source {
@@ -984,6 +1020,12 @@ fn native_surface_texture_bytes(
         DecodedVideoSurfaceFormat::P010 | DecodedVideoSurfaceFormat::Yuv420p10le => pixels
             .checked_mul(3)
             .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
+        DecodedVideoSurfaceFormat::Yuv422p => pixels
+            .checked_mul(2)
+            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
+        DecodedVideoSurfaceFormat::Yuv422p10le => pixels
+            .checked_mul(4)
+            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
         DecodedVideoSurfaceFormat::Rgba8 | DecodedVideoSurfaceFormat::Bgra8 => pixels
             .checked_mul(4)
             .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
@@ -1119,28 +1161,30 @@ mod tests {
             })
         };
         let layers = [
-            ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
                 gpu_source: None,
                 native_source: None,
+                cpu_yuv_source: None,
                 heterogeneous_input: None,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan: Arc::clone(&effect_plan),
                 frame_seed: 0,
-            }),
-            ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
+            })),
+            ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
                 gpu_source: None,
                 native_source: None,
+                cpu_yuv_source: None,
                 heterogeneous_input: None,
                 opacity: 1.0,
                 blend_mode: BlendMode::Normal,
                 transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
                 effect_plan,
                 frame_seed: 0,
-            }),
+            })),
         ];
 
         with_request(4, 4, &layers, |request| {
@@ -1158,7 +1202,7 @@ mod tests {
     fn cross_dissolve_accounts_for_both_endpoint_accumulators_and_output() {
         let (graph, effect_plan) = identity_effect();
         let source = |color, seed| {
-            ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::SolidColor {
+            ViewerGpuTransitionInput::Source(Box::new(ViewerGpuSourceLayer::SolidColor {
                 layer: TimelineSolidColorLayer {
                     color,
                     opacity: 1.0,
@@ -1168,7 +1212,7 @@ mod tests {
                     frame_seed: seed,
                 },
                 effect_plan: Arc::clone(&effect_plan),
-            })
+            }))
         };
         let layers = [ViewerGpuExecutionLayer::CrossDissolve(Box::new(
             crate::ViewerGpuCrossDissolveLayer {

@@ -783,6 +783,11 @@ authoritative cancellation evidence: the NonPlayback lane may take one
 `Current + Playback` replacement ahead of ordinary Interactive/Still current
 backlog. It never takes Playback Prefetch, never admits a second live failover,
 and never releases the old execution's physical lease before normal return.
+The NonPlayback worker carries an explicit per-worker decoder-thread cap into
+its worker-owned media Session context. Therefore a failover request cannot
+reinterpret its `PlaybackCursor` access mode as authority to open a second
+full-machine FFmpeg software decoder while the canceled Playback Session is
+still unwinding.
 Because workers filter by lane, enqueue and priority promotion wake all preview
 workers, not just one; otherwise a playback-only queue could wake the
 non-playback worker and leave the playback worker asleep until another request
@@ -1019,8 +1024,10 @@ scrub backends.
 Software decoder threading follows the same residency boundary. Interactive
 and Still sessions use the fair per-worker CPU share, while `PlaybackCursor`
 may use the larger bounded decoder-thread grant after reserving UI, render, and
-audio cores. Playback and Interactive residency are mutually exclusive, so the
-idle NonPlayback workers cannot multiply this grant during playback. Explicit
+audio cores. Playback and Interactive residency are ordinarily mutually
+exclusive. The one cancellation failover exception retains the NonPlayback
+worker's fair-share cap even though its request is `PlaybackCursor`, so it
+cannot multiply the full Playback grant while the old Session returns. Explicit
 thread-count environment overrides remain bounded by the same machine grant.
 Real-media validation treats hardware engagement as an optimization: a CPU
 fallback that proves the complete continuous window as exact, on-time Ready
@@ -1490,7 +1497,10 @@ output extent. Authored Preview scale, Window size, and nested composition
 resolution are spatial targets and never enter `PreviewDecodeKey`. Playback's
 temporary `PreviewResolutionScale` is different: each coherently sampled frame
 request projects `Full`, `Half`, or `Quarter` into an explicit media
-representation (`NativeCpu`, `Reduced(2)`, or `Reduced(4)`). That choice rotates
+representation (`NativeCpu`, `Reduced(2)`, or `Reduced(4)`). A source with an
+exact compact YUV contract instead uses `CompactCpuYuv` or
+`ReducedCompactCpuYuv(divisor)`, so adaptive recovery cannot expand a proven
+plane payload into RGBA. That choice rotates
 the decode/cache identity and charges residency at the materialized source
 raster. Returning to Full restores the original identity, so the full and
 reduced frames may coexist without invalidating one another. A renderer-admitted
@@ -1498,6 +1508,10 @@ native surface remains at source extent and is sampled directly into the lower
 Viewer target; reduced CPU decode must not force a native surface through host
 memory. Divisor one and empty proxy representations are rejected at the decode
 key boundary to prevent duplicate or non-materializable cache identities.
+Representation is a materialization/cache contract, not compressed-stream
+decoder identity. For an unchanged source, stream, hardware plan, and color
+contract, the worker reuses its demux/codec Session and atomically rebinds only
+the representation geometry, scaler, and materialized-frame rings.
 Tests that assert fixed residency counts must inject an explicit machine-resource
 profile; they must not inherit product host detection because that detection can
 legitimately select a reduced realtime representation.
@@ -1596,6 +1610,10 @@ inside that already-admitted media worker. They must not fan each worker into
 Rayon's process-global pool or any other unbudgeted inner executor; measured
 inner parallelism may be added only through an explicit media-domain grant with
 cancellation and workload evidence.
+Each worker bootstrap carries its lane-specific FFmpeg thread ceiling into the
+non-`Send` decode context. Access-mode defaults and environment overrides may
+choose any lower value but cannot exceed that ceiling; diagnostics report the
+actual decoder threading observed after FFmpeg opens the codec.
 Single-worker systems use one `Any` lane; every multi-worker production system
 uses one `Playback` lane plus one shared `NonPlayback` lane. The Broker's work
 classes and realtime-over-Still preemption keep exact Still work from taking
@@ -2249,9 +2267,10 @@ the color seam is narrow without creating a second frame object model.
 
 `mondrian_media::preview::frame_materialization` owns the next execution
 boundary. It consumes a decoded FFmpeg frame plus the prepared hardware plan
-and produces exactly one CPU RGBA8, CPU scene-linear float, or native-resource
-payload. Hardware-to-CPU transfer, native fallback classification, float-plane
-unpacking/resizing, swscale execution, row copying, scaler reuse, and their
+and produces exactly one CPU RGBA8, CPU scene-linear float, compact CPU YUV, or
+native-resource payload. Hardware-to-CPU transfer, native fallback
+classification, float-plane unpacking/resizing, swscale execution, row
+retention/copying, scaler reuse, and their
 stage timings remain inside this Module. The decode Session owns input, seek,
 demux, codec continuity, and candidate selection only; it cannot implement a
 second pixel-output path. Conversely, materialization cannot seek, read packets,
@@ -2957,17 +2976,36 @@ publication evidence and is therefore authoritative over a cancellation request
 that arrives after the commit point. The complete contract is specified in
 `docs/specs/export-spec.md` and [Render Pipeline](render-pipeline.md).
 
-The renderer now owns a GPU input-stage resource contract for decoded CPU RGBA8
-source frames: upload to `Rgba8Unorm`, execute the OCIO GPU input transform, and
-produce a GPU-resident linear working frame in a float texture. This is the
-bridge for guarded rollout of GPU input transforms. The app viewer uses this
-contract for supported media preview layers before GPU working-space
-compositing, falling back per-layer to CPU working-frame upload only when the
-GPU input stage cannot be recorded. It is not yet a hardware decode or
-zero-copy media path because CPU RGBA8 and scene-linear float outcomes still
-hand CPU memory to the renderer. The float outcome currently enters the CPU
-OCIO input stage; a future GPU float-source upload contract must remain distinct
-from the RGBA8 encoded-source upload.
+The renderer owns one typed GPU input-stage resource contract for all decoded
+CPU source representations. RGBA8 uploads to `Rgba8Unorm`; source-encoded float
+and scene-linear float upload losslessly to `Rgba32Float` while retaining their
+distinct `EncodedFloat` versus `LinearFloat` descriptors. The stage then runs
+the resolved OCIO GPU input transform and produces a GPU-resident linear
+working frame. This is the bridge for guarded rollout of GPU input transforms.
+The app viewer uses it for supported media preview layers before GPU
+working-space compositing, falling back per-layer to CPU working-frame upload
+only when the GPU input stage cannot be recorded. CPU outcomes still require
+one host-to-device upload; native decoder surfaces use the separate low-copy
+import contract and never masquerade as one of these CPU source types.
+
+An exact probed `Yuv422p10le` source may instead resolve to the explicit
+`CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU
+materialization. Media retains an independently reference-counted immutable
+FFmpeg `AVFrame` with its native 16-bit luma, Cb, and Cr planes and explicit row
+strides. It does not repack or interleave roughly 33 MiB for every UHD frame.
+The reservation includes conservative FFmpeg row alignment, while actual Frame
+Store accounting uses the retained plane allocations.
+Half/Quarter recovery resolves to `ReducedCompactCpuYuv`, scales the planes to
+the representation extent, and retains that scaled AVFrame under the same exact
+YUV sampling contract without a second plane copy.
+The representation is part of the decode key but not the compressed-stream
+decoder Session identity, so
+Frame Store admission reserves the physical plane footprint and zero native
+decoder-surface units. A returned layout other than `YUV422P10LE` fails the
+request; it cannot silently publish an RGBA allocation under the compact
+identity. CPU-addressable analysis, thumbnails, scene-linear sources, and
+reduced representations without a compact source contract continue through
+their typed RGBA/float paths.
 
 ## Asset Classification
 

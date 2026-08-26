@@ -318,6 +318,8 @@ pub struct PreviewProductionRuntime<O: Clone> {
     transport_playing: Cell<bool>,
     transport_epoch: Cell<Option<mondrian_playback::PlaybackEpoch>>,
     playback_pressure: Cell<PlaybackPressureState>,
+    #[cfg(test)]
+    last_video_preroll_observation: Cell<Option<PreviewVideoPreroll>>,
     applied_resource_trim: Cell<crate::app::execution_resource_coordination::ResourceTrimRequest>,
     heterogeneous_effect_decision: Cell<
         crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision,
@@ -610,7 +612,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     None => unreachable!("required packaged worker was checked before spawn"),
                 };
             let worker_decode_context_bootstrap = worker_decode_context_bootstrap
-                .with_worker_resources(decode_worker_resources.clone());
+                .with_worker_resources(decode_worker_resources.clone())
+                .with_decoder_thread_limit(match worker_lane {
+                    MediaPreviewWorkerLane::NonPlayback => {
+                        decode_cpu_budget.decoder_threads_per_worker
+                    }
+                    MediaPreviewWorkerLane::Any | MediaPreviewWorkerLane::Playback => {
+                        decode_cpu_budget.max_decoder_threads_per_worker
+                    }
+                });
             decode_residency.register_worker(worker_lane);
             match std::thread::Builder::new()
                 .name(format!("mondrian-preview-worker-{worker_index}"))
@@ -680,6 +690,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             transport_playing: Cell::new(false),
             transport_epoch: Cell::new(None),
             playback_pressure: Cell::new(PlaybackPressureState::default()),
+            #[cfg(test)]
+            last_video_preroll_observation: Cell::new(None),
             applied_resource_trim: Cell::new(
                 crate::app::execution_resource_coordination::ResourceTrimRequest::None,
             ),
@@ -734,6 +746,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Runtime's typed result pumps remain the sole completion authority.
     pub(crate) fn work_watch(&self) -> PreviewWorkWatch {
         self.work_watch.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn last_video_preroll_observation_for_test(&self) -> Option<PreviewVideoPreroll> {
+        self.last_video_preroll_observation.get()
     }
 
     #[cfg(test)]
@@ -2204,18 +2221,27 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if will_rotate {
             self.try_release_settled_transport_media_residency();
         }
-        let preserve_playback_locality = self
+        let generation_transition = self
             .execution
             .borrow()
             .current_generation_key()
-            .is_some_and(|current| key.has_compatible_playback_media_authority(current));
-        let binding = self.execution.borrow_mut().bind_generation(key, || {
-            if preserve_playback_locality {
-                self.scheduler.begin_generation_preserving_playback_locality()
-            } else {
-                self.scheduler.begin_generation()
-            }
-        });
+            .map_or(ViewerPreviewGenerationTransition::Semantic, |current| {
+                key.transition_from(current)
+            });
+        let binding =
+            self.execution
+                .borrow_mut()
+                .bind_generation(key, || match generation_transition {
+                    ViewerPreviewGenerationTransition::ViewerOnly => {
+                        self.scheduler.begin_generation_preserving_playback_locality()
+                    }
+                    ViewerPreviewGenerationTransition::Representation => {
+                        self.scheduler.begin_generation_preserving_in_flight_playback_locality()
+                    }
+                    ViewerPreviewGenerationTransition::Semantic => {
+                        self.scheduler.begin_generation()
+                    }
+                });
         let generation = match binding {
             PreviewGenerationBinding::Current(generation)
             | PreviewGenerationBinding::Rotated(generation) => generation,
@@ -2309,24 +2335,39 @@ struct ViewerPreviewGenerationKey {
     seek_source: crate::app::ui_actions::TimelineSeekSource,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerPreviewGenerationTransition {
+    /// Only final Viewer presentation changed; queued media keys remain valid.
+    ViewerOnly,
+    /// Decode representation changed; only a running codec Session remains useful.
+    Representation,
+    /// Source, authoring, transport, or lifecycle authority changed.
+    Semantic,
+}
+
 impl ViewerPreviewGenerationKey {
-    /// Whether a Viewer-generation rotation leaves the underlying playback
-    /// media work identity unchanged.
+    /// Classify which physical playback work remains valid across a rotation.
     ///
     /// Monitor/color contracts and presentation source may rotate final Viewer
     /// work while the queued media keys remain reusable. Output dimensions are
     /// deliberately part of this predicate: a scale change may reuse the open
     /// decoder Session, but old-size queued work would occupy the entire bounded
     /// prefetch window and starve admission of the new Half/Quarter keys.
-    fn has_compatible_playback_media_authority(&self, current: &Self) -> bool {
-        self.playing
+    fn transition_from(&self, current: &Self) -> ViewerPreviewGenerationTransition {
+        let same_decode_authority = self.playing
             && current.playing
             && self.playback_epoch == current.playback_epoch
             && self.sequence_id == current.sequence_id
             && self.sequence_revision == current.sequence_revision
-            && self.project_author_generation == current.project_author_generation
-            && self.width == current.width
-            && self.height == current.height
+            && self.project_author_generation == current.project_author_generation;
+        if !same_decode_authority {
+            return ViewerPreviewGenerationTransition::Semantic;
+        }
+        if self.width == current.width && self.height == current.height {
+            ViewerPreviewGenerationTransition::ViewerOnly
+        } else {
+            ViewerPreviewGenerationTransition::Representation
+        }
     }
 
     fn from_snapshot(
@@ -2443,7 +2484,13 @@ impl<O: Clone> PlaybackPreviewAdapter for PreviewProductionRuntime<O> {
         &self,
         request: PreviewVideoPrerollRequest<'_>,
     ) -> Option<PreviewVideoPreroll> {
-        self.playback_video_preroll_readiness(request.snapshot(), request.proxy_demands())
+        let readiness =
+            self.playback_video_preroll_readiness(request.snapshot(), request.proxy_demands());
+        #[cfg(test)]
+        if let Some(readiness) = readiness {
+            self.last_video_preroll_observation.set(Some(readiness));
+        }
+        readiness
     }
 }
 

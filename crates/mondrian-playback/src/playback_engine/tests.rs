@@ -1174,7 +1174,7 @@ fn repeated_presentable_degradation_enters_resolution_recovery() {
 }
 
 #[test]
-fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
+fn clock_superseded_unpresented_demands_escalate_bounded_resolution_recovery() {
     let policy = PlaybackPolicy {
         pressure_window: 3,
         pressure_threshold: 3,
@@ -1198,21 +1198,19 @@ fn clock_superseded_unpresented_demands_enter_resolution_recovery() {
         3
     );
 
-    for instant in [160, 200, 240] {
+    for instant in [160, 200] {
         engine.tick(ts(instant)).unwrap();
     }
     assert_eq!(
         engine.snapshot().preview_scale,
         PreviewResolutionScale::Half,
-        "a new scale must receive one terminal execution attempt before another reduction"
+        "less than one complete pressure window must not thrash scale"
     );
-
-    let half_attempt = current_delivery(&engine, FrameDeliveryKind::Late, ts(240));
-    engine.observe_frame_delivery(half_attempt).unwrap();
+    engine.tick(ts(240)).unwrap();
     assert_eq!(
         engine.snapshot().preview_scale,
         PreviewResolutionScale::Quarter,
-        "a failed Half attempt may authorize the next bounded reduction"
+        "a complete window with no current Half result must authorize the next bounded reduction"
     );
 }
 

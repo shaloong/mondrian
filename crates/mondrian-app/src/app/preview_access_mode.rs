@@ -471,6 +471,12 @@ pub struct MediaPreviewSchedulerDiagnostics {
     pub pruned_obsolete_requests: u64,
     /// Older unstarted playback-current jobs superseded by a newer demand.
     pub superseded_queued_playback_current: u64,
+    /// Running jobs invalidated by a non-locality-preserving generation rotation.
+    pub in_flight_generation_invalidations: u64,
+    /// Running jobs invalidated because their exact pending binding disappeared.
+    pub in_flight_binding_invalidations: u64,
+    /// Same-generation Playback jobs retained for decoder locality after binding removal.
+    pub in_flight_binding_locality_detachments: u64,
     /// Pending prefetch requests removed so a current-frame request can run.
     pub evicted_prefetch_requests: u64,
     /// Pending still-frame requests removed so real-time current work can run.
@@ -1089,6 +1095,10 @@ impl MediaPreviewScheduler {
         self.broker.begin_generation_preserving_playback_locality()
     }
 
+    pub(crate) fn begin_generation_preserving_in_flight_playback_locality(&self) -> u64 {
+        self.broker.begin_generation_preserving_in_flight_playback_locality()
+    }
+
     pub(crate) fn submit_job(
         &self,
         mut job: MediaPreviewJob,
@@ -1485,6 +1495,9 @@ impl MediaPreviewScheduler {
             canceled_requests: state.canceled_requests,
             pruned_obsolete_requests: state.pruned_queued,
             superseded_queued_playback_current: state.superseded_queued_playback_current,
+            in_flight_generation_invalidations: state.in_flight_generation_invalidations,
+            in_flight_binding_invalidations: state.in_flight_binding_invalidations,
+            in_flight_binding_locality_detachments: state.in_flight_binding_locality_detachments,
             evicted_prefetch_requests: state.evicted_prefetch,
             evicted_still_requests: state.evicted_still,
         }

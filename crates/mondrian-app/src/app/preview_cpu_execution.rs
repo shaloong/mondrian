@@ -55,10 +55,13 @@ impl PreviewCpuExecutionError {
         match self {
             Self::WorkingFrame(MediaPreviewWorkingFrameError::NativeSurfaceRequiresGpu {
                 ..
-            }) => PreviewUnavailability::blocked(
-                PreviewOutputStage::InputAdaptation,
-                self.to_string(),
-            ),
+            })
+            | Self::WorkingFrame(MediaPreviewWorkingFrameError::CpuYuvRequiresGpu) => {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::InputAdaptation,
+                    self.to_string(),
+                )
+            }
             Self::WorkingFrame(MediaPreviewWorkingFrameError::InputColorTransform { .. }) => {
                 PreviewUnavailability::failed(PreviewOutputStage::InputAdaptation, self.to_string())
             }

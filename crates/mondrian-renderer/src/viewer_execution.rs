@@ -9,7 +9,7 @@ use std::sync::Arc;
 use mondrian_core::{types::BlendMode, ColorMatrixCoefficients, ColorSpace};
 use mondrian_effects::{CompiledEffectGpuPlan, PreparedHeterogeneousCpuCompletion};
 use mondrian_media::{
-    DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
+    CpuYuvFrame, DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     PreviewNativeDecodedFrame,
 };
@@ -28,11 +28,12 @@ use crate::{
     CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation,
-    GpuVideoRange, HeterogeneousGpuContinuationRequest, NativeVideoImportCandidateTimingReceipt,
-    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
-    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, RenderInputTransform, TimelineSolidColorLayer,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuNativeYuvDecoder,
+    GpuVideoChromaLocation, GpuVideoRange, HeterogeneousGpuContinuationRequest,
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
+    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, RenderInputTransform,
+    TimelineSolidColorLayer,
 };
 
 /// One exact CPU-prefix completion consumed by a Viewer GPU continuation.
@@ -61,6 +62,8 @@ pub enum ViewerGpuSourceLayer {
         gpu_source: Option<ViewerGpuMediaSource>,
         /// Native decoder surface for low-copy renderer import.
         native_source: Option<ViewerGpuNativeSource>,
+        /// Compact CPU YUV planes for direct GPU video materialization.
+        cpu_yuv_source: Option<ViewerGpuCpuYuvSource>,
         /// Address into
         /// [`crate::ViewerGpuExecutionRequest::heterogeneous_inputs`] when this
         /// source begins at an already-completed CPU Effect prefix.
@@ -94,7 +97,7 @@ pub enum ViewerGpuTransitionInput {
     /// Explicit absence of coverage from a disabled endpoint.
     Transparent,
     /// Media or generated source prepared through the ordinary source seam.
-    Source(ViewerGpuSourceLayer),
+    Source(Box<ViewerGpuSourceLayer>),
 }
 
 /// Complete payload for one typed two-input Viewer visual Transition.
@@ -113,7 +116,7 @@ pub struct ViewerGpuCrossDissolveLayer {
 /// One renderer-neutral layer or graph node entering Viewer GPU execution.
 pub enum ViewerGpuExecutionLayer {
     /// Ordinary source occupying one position in the bottom-to-top stack.
-    Source(ViewerGpuSourceLayer),
+    Source(Box<ViewerGpuSourceLayer>),
     /// Full-frame adjustment over the current working composite.
     Adjustment {
         /// Working-space GPU effect plan.
@@ -162,9 +165,23 @@ pub struct ViewerGpuNativeSource {
     pub native_frame: Arc<PreviewNativeDecodedFrame>,
 }
 
+/// Compact CPU YUV source plus its complete GPU materialization contract.
+#[derive(Debug, Clone)]
+pub struct ViewerGpuCpuYuvSource {
+    /// Media-owned compact luma and interleaved chroma planes.
+    pub frame: Arc<CpuYuvFrame>,
+    /// Complete source-to-working input transform.
+    pub input_transform: RenderInputTransform,
+    /// Width materialized into the renderer working graph.
+    pub materialization_width: u32,
+    /// Height materialized into the renderer working graph.
+    pub materialization_height: u32,
+}
+
 /// Renderer backend lifetime for native decoded-frame import.
 pub struct ViewerNativeVideoImportRuntime {
     support: GpuNativeDecodedFrameImportSupport,
+    pub(crate) cpu_yuv_decoder: GpuNativeYuvDecoder,
     #[cfg(target_os = "windows")]
     backend: Option<D3D12NativeVideoImportBackend>,
     #[cfg(target_os = "macos")]
@@ -235,6 +252,7 @@ impl ViewerNativeVideoImportRuntime {
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: Some(backend),
                 },
                 Err(error) => Self {
@@ -242,6 +260,7 @@ impl ViewerNativeVideoImportRuntime {
                         format!("{:?}", adapter.get_info().backend),
                         format!("native D3D12VA YUV + OCIO backend unavailable: {error}"),
                     ),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: None,
                 },
             }
@@ -257,6 +276,7 @@ impl ViewerNativeVideoImportRuntime {
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: Some(backend),
                 },
                 Err(error) => Self {
@@ -264,6 +284,7 @@ impl ViewerNativeVideoImportRuntime {
                         format!("{:?}", adapter.get_info().backend),
                         format!("native VideoToolbox Metal + OCIO backend unavailable: {error}"),
                     ),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: None,
                 },
             }
@@ -279,6 +300,7 @@ impl ViewerNativeVideoImportRuntime {
             ) {
                 Ok(backend) => Self {
                     support: backend.support().clone(),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: Some(backend),
                 },
                 Err(error) => Self {
@@ -286,6 +308,7 @@ impl ViewerNativeVideoImportRuntime {
                         format!("{:?}", adapter.get_info().backend),
                         format!("native VA-API Vulkan + OCIO backend unavailable: {error}"),
                     ),
+                    cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
                     backend: None,
                 },
             }
@@ -295,6 +318,7 @@ impl ViewerNativeVideoImportRuntime {
             let _ = (device, queue, resource_pool, gpu_timing_policy);
             Self {
                 support: unavailable_native_import_support(adapter, device.features()),
+                cpu_yuv_decoder: GpuNativeYuvDecoder::new(device),
             }
         }
     }

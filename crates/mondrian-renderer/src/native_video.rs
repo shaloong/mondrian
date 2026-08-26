@@ -94,7 +94,8 @@ pub const GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO: u64 = 2;
 pub use yuv_decode::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
     GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass,
+    GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
+    GpuYuvCodeAlignment,
 };
 
 #[cfg(target_os = "windows")]

@@ -121,7 +121,11 @@ where
         let prepared_yuv = self.yuv_decoder.prepare_pass(
             &self.device,
             &yuv_plan,
-            GpuNativeYuvPlaneViews { luma: &luma_view, chroma: &chroma_view },
+            GpuNativeYuvPlaneViews {
+                luma: &luma_view,
+                chroma: &chroma_view,
+                chroma_v: &chroma_view,
+            },
         );
         let (_, encoded_payload) =
             GpuNativeYuvDecoder::allocate_output(&self.device, &yuv_plan).into_parts();

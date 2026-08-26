@@ -31,6 +31,53 @@ pub enum PreviewNativeSurfaceHint {
     P010,
 }
 
+/// Compact CPU YUV representation conservatively inferred from a probed source.
+///
+/// This is planning evidence only. The decoded frame remains authoritative and
+/// may still fall back to another CPU representation when FFmpeg produces a
+/// different surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PreviewCompactCpuYuvHint {
+    /// Planar little-endian 10-bit 4:2:2 retained as immutable Y, Cb, and Cr planes.
+    Yuv422p10le,
+}
+
+impl PreviewCompactCpuYuvHint {
+    /// Tightly packed retained bytes per luma pixel.
+    pub const fn retained_bytes_per_pixel(self) -> usize {
+        match self {
+            Self::Yuv422p10le => 4,
+        }
+    }
+
+    /// Conservative retained FFmpeg plane bytes for one materialized extent.
+    ///
+    /// Software decoders may align each plane row beyond the visible raster.
+    /// Reserving 256-byte row alignment keeps admission valid across SIMD and
+    /// codec-specific allocation policies while avoiding a full-frame copy
+    /// merely to make the allocation tightly packed.
+    pub const fn retained_bytes_for_extent(self, extent: Resolution) -> usize {
+        match self {
+            Self::Yuv422p10le => {
+                let luma_row = align_up_saturating((extent.width as usize).saturating_mul(2), 256);
+                let chroma_row =
+                    align_up_saturating((extent.width.div_ceil(2) as usize).saturating_mul(2), 256);
+                luma_row
+                    .saturating_add(chroma_row.saturating_mul(2))
+                    .saturating_mul(extent.height as usize)
+            }
+        }
+    }
+}
+
+const fn align_up_saturating(value: usize, alignment: usize) -> usize {
+    if alignment == 0 {
+        return value;
+    }
+    let units = value.saturating_add(alignment.saturating_sub(1)) / alignment;
+    units.saturating_mul(alignment)
+}
+
 /// Strength of physical Alpha evidence attached to one decode source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PreviewDecodeAlphaPresence {
@@ -54,6 +101,7 @@ pub struct PreviewDecodeSource {
     video_stream_index: u32,
     alpha_presence: PreviewDecodeAlphaPresence,
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
+    compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
     source_extent: Resolution,
 }
 
@@ -98,6 +146,7 @@ impl PreviewDecodeSource {
             stream.index,
             alpha_presence,
             native_surface_hint_from_stream(stream, sampling.pixel_format),
+            compact_cpu_yuv_hint_from_pixel_format(sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
         )
     }
@@ -143,6 +192,12 @@ impl PreviewDecodeSource {
             PROXY_PRIMARY_VIDEO_STREAM_INDEX,
             PreviewDecodeAlphaPresence::Opaque,
             native_surface_hint,
+            match manifest.encoding {
+                ProxyEncodingProfile::DnxHrHqx10 => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+                ProxyEncodingProfile::H264High8
+                | ProxyEncodingProfile::H265Main10
+                | ProxyEncodingProfile::DnxHrSq8 => None,
+            },
             source_extent,
         )
     }
@@ -165,6 +220,7 @@ impl PreviewDecodeSource {
             video_stream_index,
             PreviewDecodeAlphaPresence::Unknown,
             None,
+            None,
             source_extent,
         )
     }
@@ -175,6 +231,7 @@ impl PreviewDecodeSource {
         video_stream_index: u32,
         alpha_presence: PreviewDecodeAlphaPresence,
         native_surface_hint: Option<PreviewNativeSurfaceHint>,
+        compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
         source_extent: Resolution,
     ) -> Result<Self, PreviewDecodeContractError> {
         if path.as_os_str().is_empty() {
@@ -197,6 +254,7 @@ impl PreviewDecodeSource {
             video_stream_index,
             alpha_presence,
             native_surface_hint,
+            compact_cpu_yuv_hint,
             source_extent,
         })
     }
@@ -224,6 +282,11 @@ impl PreviewDecodeSource {
     /// Conservative native decoder surface family, when proven.
     pub const fn native_surface_hint(&self) -> Option<PreviewNativeSurfaceHint> {
         self.native_surface_hint
+    }
+
+    /// Compact CPU YUV layout expected from the selected physical stream.
+    pub const fn compact_cpu_yuv_hint(&self) -> Option<PreviewCompactCpuYuvHint> {
+        self.compact_cpu_yuv_hint
     }
 
     /// The source's own raster extent (never a consumer/output extent).
@@ -271,6 +334,20 @@ pub enum PreviewDecodeRepresentation {
     /// Media's own representation at its source raster extent, materialized as
     /// CPU-addressable pixels. Decode never swscales to an output extent.
     NativeCpu,
+    /// Media's source raster retained as compact CPU YUV planes for direct
+    /// Renderer upload and GPU color materialization.
+    ///
+    /// This identity is admitted only from an exact probed layout and a
+    /// GPU-capable downstream payload contract. A decoder format mismatch is
+    /// an execution error; it cannot silently expand into an RGBA payload
+    /// under the same cache and residency identity.
+    CompactCpuYuv,
+    /// Reduced-raster compact CPU YUV planes for realtime recovery.
+    ///
+    /// The divisor is physical cache/materialization identity, while the
+    /// underlying compressed-stream decoder remains reusable across Full,
+    /// Half, and Quarter representation changes.
+    ReducedCompactCpuYuv { divisor: NonZeroU32 },
     /// Media's own representation as a decoder-native surface at source
     /// extent; the renderer materializes the composition target from it.
     NativeSurface,
@@ -301,6 +378,7 @@ impl PreviewDecodeRepresentation {
         payload_requirement: PreviewDecodePayloadRequirement,
         hardware_request: PreviewHardwareDecodeRequest,
         representation_quality: PreviewRepresentationQuality,
+        source_color: PreviewSourceColorContract,
     ) -> Result<Self, PreviewDecodeContractError> {
         let native_requested = matches!(
             hardware_request,
@@ -323,9 +401,23 @@ impl PreviewDecodeRepresentation {
             );
         }
         match representation_quality {
+            PreviewRepresentationQuality::Full
+                if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
+                    && source.compact_cpu_yuv_hint().is_some()
+                    && !source_color.color_space.is_scene_linear() =>
+            {
+                Ok(Self::CompactCpuYuv)
+            }
             PreviewRepresentationQuality::Full => Ok(Self::NativeCpu),
             PreviewRepresentationQuality::Reduced { divisor } if divisor.get() == 1 => {
                 Err(PreviewDecodeContractError::IdentityReducedRepresentation)
+            }
+            PreviewRepresentationQuality::Reduced { divisor }
+                if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
+                    && source.compact_cpu_yuv_hint().is_some()
+                    && !source_color.color_space.is_scene_linear() =>
+            {
+                Ok(Self::ReducedCompactCpuYuv { divisor })
             }
             PreviewRepresentationQuality::Reduced { divisor } => Ok(Self::Reduced { divisor }),
         }
@@ -348,6 +440,14 @@ impl PreviewDecodeRepresentation {
         !self.is_native_surface()
     }
 
+    /// Whether this representation preserves exact compact CPU YUV planes.
+    pub const fn is_compact_cpu_yuv(self) -> bool {
+        matches!(
+            self,
+            Self::CompactCpuYuv | Self::ReducedCompactCpuYuv { .. }
+        )
+    }
+
     /// The representation's own raster extent given a concrete source extent.
     ///
     /// Native representations keep the source extent; a reduced representation
@@ -356,8 +456,8 @@ impl PreviewDecodeRepresentation {
     /// output/composition extent.
     pub const fn extent_for_source(self, source: Resolution) -> Resolution {
         match self {
-            Self::NativeCpu | Self::NativeSurface => source,
-            Self::Reduced { divisor } => {
+            Self::NativeCpu | Self::CompactCpuYuv | Self::NativeSurface => source,
+            Self::Reduced { divisor } | Self::ReducedCompactCpuYuv { divisor } => {
                 let divisor = divisor.get();
                 Resolution {
                     width: source.width.div_ceil(divisor),
@@ -427,7 +527,7 @@ impl PreviewDecodeKey {
                 boundary: source_sample.boundary(),
             });
         }
-        validate_representation_for_source(representation, &source)?;
+        validate_representation_for_source(representation, &source, source_color)?;
         Ok(Self {
             source,
             source_sample,
@@ -460,6 +560,7 @@ impl PreviewDecodeKey {
 fn validate_representation_for_source(
     representation: PreviewDecodeRepresentation,
     source: &PreviewDecodeSource,
+    source_color: PreviewSourceColorContract,
 ) -> Result<(), PreviewDecodeContractError> {
     match representation {
         PreviewDecodeRepresentation::NativeSurface => {
@@ -472,10 +573,26 @@ fn validate_representation_for_source(
                 })
             }
         }
-        PreviewDecodeRepresentation::Proxy(extent) => validate_extent(extent),
-        PreviewDecodeRepresentation::Reduced { divisor } if divisor.get() == 1 => {
+        PreviewDecodeRepresentation::Reduced { divisor }
+        | PreviewDecodeRepresentation::ReducedCompactCpuYuv { divisor }
+            if divisor.get() == 1 =>
+        {
             Err(PreviewDecodeContractError::IdentityReducedRepresentation)
         }
+        PreviewDecodeRepresentation::CompactCpuYuv
+        | PreviewDecodeRepresentation::ReducedCompactCpuYuv { .. } => {
+            if source.compact_cpu_yuv_hint().is_some()
+                && !source_color.color_space.is_scene_linear()
+            {
+                Ok(())
+            } else {
+                Err(PreviewDecodeContractError::CompactCpuYuvUnavailable {
+                    compact_hint: source.compact_cpu_yuv_hint(),
+                    source_color_space: source_color.color_space,
+                })
+            }
+        }
+        PreviewDecodeRepresentation::Proxy(extent) => validate_extent(extent),
         PreviewDecodeRepresentation::NativeCpu | PreviewDecodeRepresentation::Reduced { .. } => {
             Ok(())
         }
@@ -545,6 +662,16 @@ pub enum PreviewDecodeContractError {
         /// Physical native-surface hint.
         native_surface_hint: Option<PreviewNativeSurfaceHint>,
     },
+    /// Compact CPU YUV requires an exact physical layout and nonlinear source encoding.
+    #[error(
+        "compact CPU YUV Preview output is unavailable for hint={compact_hint:?}, color={source_color_space:?}"
+    )]
+    CompactCpuYuvUnavailable {
+        /// Exact physical compact-layout evidence, when present.
+        compact_hint: Option<PreviewCompactCpuYuvHint>,
+        /// Resolved source color identity.
+        source_color_space: mondrian_core::ColorSpace,
+    },
     /// A required native request cannot be reconciled with source/output facts.
     #[error(
         "required native Preview output is unavailable for requirement={payload_requirement:?}, alpha={alpha_presence:?}, surface={native_surface_hint:?}"
@@ -610,6 +737,15 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Rgba64le
         | PixelFormat::P012
         | PixelFormat::P016 => None,
+    }
+}
+
+const fn compact_cpu_yuv_hint_from_pixel_format(
+    pixel_format: PixelFormat,
+) -> Option<PreviewCompactCpuYuvHint> {
+    match pixel_format {
+        PixelFormat::Yuv422p10le => Some(PreviewCompactCpuYuvHint::Yuv422p10le),
+        _ => None,
     }
 }
 
@@ -796,6 +932,97 @@ mod tests {
     }
 
     #[test]
+    fn compact_cpu_yuv_hint_requires_exact_probed_layout() {
+        let mut sony_422 = video_stream(8, PixelFormat::Yuv422p10le, true);
+        sony_422.codec = VideoCodec::H264;
+        sony_422.codec_profile = VideoCodecProfile::H264High422;
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/h264-high422.mp4"),
+            exact_fingerprint(17),
+            &sony_422,
+        )
+        .expect("H.264 High 4:2:2 source");
+        assert_eq!(source.native_surface_hint(), None);
+        assert_eq!(
+            source.compact_cpu_yuv_hint(),
+            Some(PreviewCompactCpuYuvHint::Yuv422p10le)
+        );
+        assert_eq!(
+            source
+                .compact_cpu_yuv_hint()
+                .map(PreviewCompactCpuYuvHint::retained_bytes_per_pixel),
+            Some(4)
+        );
+        assert_eq!(
+            PreviewCompactCpuYuvHint::Yuv422p10le
+                .retained_bytes_for_extent(Resolution { width: 3840, height: 2160 }),
+            3840usize * 2160usize * 4
+        );
+        assert_eq!(
+            PreviewCompactCpuYuvHint::Yuv422p10le
+                .retained_bytes_for_extent(Resolution { width: 1921, height: 1080 }),
+            8192usize * 1080usize
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("GPU-capable Preview may retain compact software-decoded YUV"),
+            PreviewDecodeRepresentation::CompactCpuYuv
+        );
+        let half_divisor = NonZeroU32::new(2).expect("divisor");
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Reduced { divisor: half_divisor },
+                source_color(),
+            )
+            .expect("adaptive Preview must retain the compact YUV contract"),
+            PreviewDecodeRepresentation::ReducedCompactCpuYuv { divisor: half_divisor }
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::CpuAddressable,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                source_color(),
+            )
+            .expect("CPU consumers require RGB-addressable pixels"),
+            PreviewDecodeRepresentation::NativeCpu
+        );
+        let linear_source_color = PreviewSourceColorContract::automatic(
+            ColorSpace::LinearRec709,
+            DecodedVideoRange::Limited,
+        );
+        assert_eq!(
+            PreviewDecodeRepresentation::canonical(
+                &source,
+                PreviewDecodePayloadRequirement::NativeAllowed,
+                PreviewHardwareDecodeRequest::PreferHardwareDecode,
+                PreviewRepresentationQuality::Full,
+                linear_source_color,
+            )
+            .expect("scene-linear sources keep their float CPU representation"),
+            PreviewDecodeRepresentation::NativeCpu
+        );
+
+        let yuv444 = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/yuv444p10.mov"),
+            exact_fingerprint(18),
+            &video_stream(9, PixelFormat::Yuv444p10le, true),
+        )
+        .expect("10-bit 4:4:4 source");
+        assert_eq!(yuv444.compact_cpu_yuv_hint(), None);
+    }
+
+    #[test]
     fn unproven_sampling_incomplete_revision_and_relative_path_are_rejected() {
         let unproven = video_stream(2, PixelFormat::P010, false);
         assert!(matches!(
@@ -899,6 +1126,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("native representation"),
             PreviewDecodeRepresentation::NativeSurface
@@ -909,6 +1137,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::CpuAddressable,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("CPU representation"),
             PreviewDecodeRepresentation::NativeCpu
@@ -926,6 +1155,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::PreferGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             )
             .expect("preferred native may safely downgrade"),
             PreviewDecodeRepresentation::NativeCpu
@@ -936,6 +1166,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::NativeAllowed,
                 PreviewHardwareDecodeRequest::RequireGpuResident,
                 PreviewRepresentationQuality::Full,
+                source_color(),
             ),
             Err(PreviewDecodeContractError::RequiredNativeOutputUnavailable { .. })
         ));
@@ -975,6 +1206,14 @@ mod tests {
             "reduced CPU representations remain CPU-addressable"
         );
         assert!(!half.is_native_surface());
+        let compact_half = PreviewDecodeRepresentation::ReducedCompactCpuYuv {
+            divisor: NonZeroU32::new(2).expect("divisor"),
+        };
+        assert_eq!(
+            compact_half.extent_for_source(source_extent),
+            half.extent_for_source(source_extent)
+        );
+        assert!(compact_half.is_compact_cpu_yuv());
     }
 
     #[test]
@@ -993,6 +1232,7 @@ mod tests {
                 PreviewRepresentationQuality::Reduced {
                     divisor: NonZeroU32::new(2).expect("divisor"),
                 },
+                source_color(),
             )
             .expect("reduced CPU representation"),
             PreviewDecodeRepresentation::Reduced { divisor: NonZeroU32::new(2).expect("divisor") }
@@ -1003,6 +1243,7 @@ mod tests {
                 PreviewDecodePayloadRequirement::CpuAddressable,
                 PreviewHardwareDecodeRequest::Auto,
                 PreviewRepresentationQuality::Reduced { divisor: NonZeroU32::MIN },
+                source_color(),
             ),
             Err(PreviewDecodeContractError::IdentityReducedRepresentation)
         );
@@ -1022,6 +1263,7 @@ mod tests {
                 PreviewRepresentationQuality::Reduced {
                     divisor: NonZeroU32::new(4).expect("divisor"),
                 },
+                source_color(),
             )
             .expect("native surface preference wins over reduced quality"),
             PreviewDecodeRepresentation::NativeSurface

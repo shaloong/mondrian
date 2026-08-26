@@ -4769,14 +4769,16 @@ fn planned_gpu_source_upload_transform(
     }
     let supported_source_encoding = matches!(
         upload_input.encoding,
-        ColorFrameEncoding::EncodedRgba8 | ColorFrameEncoding::LinearFloat
+        ColorFrameEncoding::EncodedRgba8
+            | ColorFrameEncoding::EncodedFloat
+            | ColorFrameEncoding::LinearFloat
     );
     if upload_input.domain != ColorFrameDomain::Source
         || !supported_source_encoding
         || upload_input.residency != ColorFrameResidency::Cpu
     {
         return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
-            reason: "GPU input upload must consume CPU RGBA8 or scene-linear float source data",
+            reason: "GPU input upload must consume CPU RGBA8, source-encoded float, or scene-linear float source data",
         });
     }
     if gpu_output.domain != ColorFrameDomain::Working
@@ -7271,6 +7273,42 @@ mod tests {
         assert_eq!(
             resources.output.texture_format(),
             GpuColorFrameTextureFormat::Rgba32Float
+        );
+    }
+
+    #[test]
+    fn gpu_input_stage_resource_plan_uploads_encoded_float_without_quantization() {
+        let samples = vec![-0.25, 0.18, 2.0, 1.0, 4.0, 0.5, -1.0, 0.25];
+        let source =
+            CpuSourceColorFrame::EncodedFloat(CpuEncodedFloatColorFrame::source_flat_rgba_f32(
+                2,
+                1,
+                ColorSpace::Rec709,
+                samples.clone(),
+            ));
+        let stage_plan = gpu_input_stage_plan_for_source(&source);
+        let mut ids = GpuColorFrameIdAllocator::new(707).expect("frame id allocator");
+
+        let resources =
+            RenderGpuInputStageResourcePlan::from_cpu_source_frame(&mut ids, &source, &stage_plan)
+                .expect("GPU encoded-float input stage resources");
+
+        let upload = resources.input_upload.expect("encoded-float source upload");
+        assert_eq!(
+            upload.texture_format,
+            GpuColorFrameTextureFormat::Rgba32Float
+        );
+        assert_eq!(
+            bytemuck::cast_slice::<u8, f32>(upload.bytes()),
+            samples.as_slice()
+        );
+        assert_eq!(
+            upload.handle.descriptor().encoding,
+            ColorFrameEncoding::EncodedFloat
+        );
+        assert_eq!(
+            resources.output.descriptor().encoding,
+            ColorFrameEncoding::LinearFloat
         );
     }
 

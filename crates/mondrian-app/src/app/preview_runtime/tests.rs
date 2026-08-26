@@ -23,6 +23,22 @@ use mondrian_ui_widgets::{
     ViewerFrameImage,
 };
 
+fn viewer_gpu_source_layer(layer: &ViewerGpuExecutionLayer) -> Option<&ViewerGpuSourceLayer> {
+    match layer {
+        ViewerGpuExecutionLayer::Source(source) => Some(source.as_ref()),
+        ViewerGpuExecutionLayer::Adjustment { .. } | ViewerGpuExecutionLayer::CrossDissolve(_) => {
+            None
+        }
+    }
+}
+
+fn viewer_gpu_transition_source(input: &ViewerGpuTransitionInput) -> Option<&ViewerGpuSourceLayer> {
+    match input {
+        ViewerGpuTransitionInput::Transparent => None,
+        ViewerGpuTransitionInput::Source(source) => Some(source.as_ref()),
+    }
+}
+
 fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
     let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");
     mondrian_core::TimelineTime::new(numerator, time_base.den).expect("valid test time")
@@ -861,8 +877,9 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         Some(managed_icc_display_snapshot(ColorSpace::Srgb).contract_identity()),
     );
     assert_ne!(current, presentation_rotated);
-    assert!(
-        presentation_rotated.has_compatible_playback_media_authority(&current),
+    assert_eq!(
+        presentation_rotated.transition_from(&current),
+        ViewerPreviewGenerationTransition::ViewerOnly,
         "presentation-only rotation must retain the running decoder session"
     );
 
@@ -876,9 +893,10 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         Some(managed_icc_display_snapshot(ColorSpace::Srgb).contract_identity()),
     );
     assert_ne!(current, spatially_rotated);
-    assert!(
-        !spatially_rotated.has_compatible_playback_media_authority(&current),
-        "old-size queued work must not starve the new adaptive-scale window"
+    assert_eq!(
+        spatially_rotated.transition_from(&current),
+        ViewerPreviewGenerationTransition::Representation,
+        "representation rotation must retain only the running decoder session"
     );
 
     state.seek(6).expect("seek");
@@ -895,7 +913,10 @@ fn playback_generation_survives_frame_advance_but_not_discontinuity() {
         current, after_seek,
         "seek must invalidate the prior playback epoch"
     );
-    assert!(!after_seek.has_compatible_playback_media_authority(&current));
+    assert_eq!(
+        after_seek.transition_from(&current),
+        ViewerPreviewGenerationTransition::Semantic
+    );
 
     state.pause().expect("pause");
     let idle_a = viewer_preview_generation_key_for_state(
@@ -1418,8 +1439,8 @@ fn paused_gpu_candidate_carries_untimed_presentation_authority() {
         PreviewGpuWorkingInput::GpuComposite { layers } => {
             assert_eq!(layers.len(), 1);
             assert!(matches!(
-                layers[0],
-                ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor { .. })
+                viewer_gpu_source_layer(&layers[0]),
+                Some(ViewerGpuSourceLayer::SolidColor { .. })
             ));
         }
     }
@@ -1573,12 +1594,8 @@ fn gpu_composite_layers_accept_transformed_media_frame() {
         .expect("affine transformed media should stay on GPU composite path");
 
     assert_eq!(layers.len(), 1);
-    match &layers[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
-            opacity,
-            transform: actual_transform,
-            ..
-        }) => {
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { opacity, transform: actual_transform, .. }) => {
             assert_eq!(*opacity, 0.85);
             assert_eq!(*actual_transform, transform);
         }
@@ -1611,10 +1628,8 @@ fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
         &mut scratch,
     )
     .expect("first lowering");
-    let first_plan = match &first[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media { effect_plan, .. }) => {
-            Arc::clone(effect_plan)
-        }
+    let first_plan = match viewer_gpu_source_layer(&first[0]) {
+        Some(ViewerGpuSourceLayer::Media { effect_plan, .. }) => Arc::clone(effect_plan),
         _ => panic!("expected media layer"),
     };
     let second = gpu_composite_layers_for_resolved_with_session(
@@ -1623,10 +1638,8 @@ fn gpu_viewer_lowering_reuses_the_preview_owned_effect_session() {
         &mut scratch,
     )
     .expect("cached lowering");
-    let second_plan = match &second[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media { effect_plan, .. }) => {
-            effect_plan
-        }
+    let second_plan = match viewer_gpu_source_layer(&second[0]) {
+        Some(ViewerGpuSourceLayer::Media { effect_plan, .. }) => effect_plan,
         _ => panic!("expected media layer"),
     };
 
@@ -1671,12 +1684,12 @@ fn gpu_composite_layers_lower_cross_dissolve_as_typed_two_input_node() {
         ViewerGpuExecutionLayer::CrossDissolve(transition) => {
             assert_eq!(transition.progress, 0.25);
             assert!(matches!(
-                &transition.left,
-                ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::Media { opacity: 0.8, .. })
+                viewer_gpu_transition_source(&transition.left),
+                Some(ViewerGpuSourceLayer::Media { opacity: 0.8, .. })
             ));
             assert!(matches!(
-                &transition.right,
-                ViewerGpuTransitionInput::Source(ViewerGpuSourceLayer::SolidColor { .. })
+                viewer_gpu_transition_source(&transition.right),
+                Some(ViewerGpuSourceLayer::SolidColor { .. })
             ));
         }
         _ => panic!("expected typed Cross Dissolve execution node"),
@@ -1735,12 +1748,8 @@ fn gpu_composite_layers_lower_supported_working_effects() {
     let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
         .expect("supported effects should stay on GPU composite path");
 
-    match &layers[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
-            effect_plan,
-            frame_seed,
-            ..
-        }) => {
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { effect_plan, frame_seed, .. }) => {
             assert_eq!(effect_plan.operations().len(), 2);
             assert_eq!(*frame_seed, 19);
         }
@@ -1780,10 +1789,8 @@ fn gpu_composite_layers_lower_solid_and_adjustment_effects() {
         .expect("solid and adjustment point effects should remain GPU-native");
 
     assert_eq!(layers.len(), 2);
-    match &layers[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor {
-            effect_plan, ..
-        }) => {
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::SolidColor { effect_plan, .. }) => {
             assert_eq!(effect_plan.operations().len(), 1);
         }
         _ => panic!("expected solid layer"),
@@ -1832,8 +1839,8 @@ fn gpu_composite_layers_skip_leading_adjustment_before_layer_limit() {
 
     assert_eq!(layers.len(), 1);
     assert!(matches!(
-        layers[0],
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::SolidColor { .. })
+        viewer_gpu_source_layer(&layers[0]),
+        Some(ViewerGpuSourceLayer::SolidColor { .. })
     ));
 }
 
@@ -1870,13 +1877,8 @@ fn gpu_composite_layers_accept_source_only_media_frame() {
     let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
         .expect("source-only media should stay on GPU input/composite path");
 
-    match &layers[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
-            frame,
-            gpu_source,
-            native_source,
-            ..
-        }) => {
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { frame, gpu_source, native_source, .. }) => {
             assert!(frame.is_none());
             assert!(gpu_source.is_some());
             assert!(native_source.is_none());
@@ -1912,13 +1914,8 @@ fn gpu_composite_layers_preserve_native_source_only_media_frame() {
     let layers = gpu_composite_layers_for_resolved(&elements, WorkingColorSpace::LinearRec709)
         .expect("native source-only media should reach GPU composite admission");
 
-    match &layers[0] {
-        ViewerGpuExecutionLayer::Source(ViewerGpuSourceLayer::Media {
-            frame,
-            gpu_source,
-            native_source,
-            ..
-        }) => {
+    match viewer_gpu_source_layer(&layers[0]) {
+        Some(ViewerGpuSourceLayer::Media { frame, gpu_source, native_source, .. }) => {
             assert!(frame.is_none());
             assert!(gpu_source.is_none());
             let native_source = native_source.as_ref().expect("native source");

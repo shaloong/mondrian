@@ -39,7 +39,8 @@ use super::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewSemanticIdentity, PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::{
-    MediaPreviewFrame, MediaPreviewGpuSourceFrame, MediaPreviewNativeSourceFrame,
+    MediaPreviewCpuYuvSourceFrame, MediaPreviewFrame, MediaPreviewGpuSourceFrame,
+    MediaPreviewNativeSourceFrame,
 };
 use super::preview_scheduler_policy::{
     preview_decode_presentation_quality, MediaPreviewFailureReason,
@@ -1172,6 +1173,89 @@ fn decode_media_preview_inner(
                 residency_work: job.residency_work,
             }
         }
+        Ok(PreviewDecodeOutcome::CpuYuvFrame(frame)) => {
+            let decode_diagnostics = frame.diagnostics;
+            if job.key.source_has_alpha() {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "alpha-bearing media reached an opaque compact YUV preview payload".to_owned(),
+                );
+            }
+            let decode_execution = frame.decode_execution;
+            let presentation_quality =
+                match preview_decode_presentation_quality(&decode_diagnostics) {
+                    Ok(quality) => quality,
+                    Err(reason) => {
+                        return media_preview_temporal_failure(
+                            job,
+                            queue_wait_us,
+                            decode_elapsed_us,
+                            decode_diagnostics,
+                            reason,
+                        );
+                    }
+                };
+            let frame_identity = media_preview_frame_identity(
+                &job.key,
+                MediaPreviewDecodedFrameEvidence::CpuYuv {
+                    width: frame.width,
+                    height: frame.height,
+                    selected_pts: decode_diagnostics.selected_pts,
+                    surface_format: decode_diagnostics.decoded_surface_format,
+                    sampling: frame.video_sampling,
+                    execution: decode_execution,
+                },
+            );
+            let sampled_resolution = job
+                .key
+                .decode
+                .representation()
+                .materialization_extent_for_source(logical_resolution);
+            let input_transform = RenderInputTransform::to_working_gpu(
+                job.key.working_color_space,
+                job.key.input_tone_map,
+                job.key.engine.clone(),
+            );
+            let cpu_yuv_source = MediaPreviewCpuYuvSourceFrame::from_decode(frame, input_transform);
+            MediaPreviewResult {
+                key: job.key,
+                frame: Some(
+                    MediaPreviewFrame::from_cpu_yuv(
+                        cpu_yuv_source,
+                        sampled_resolution,
+                        logical_resolution,
+                        frame_identity,
+                        presentation_quality,
+                        PreviewDecodeExecutionSummary::from_path(decode_execution),
+                    )
+                    .with_picture_geometry(picture_geometry)
+                    .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
+                ),
+                error: None,
+                failure_reason: None,
+                generation: job.generation,
+                priority,
+                access_mode,
+                queue_disposition: MediaPreviewQueueDisposition::Ready,
+                queue_wait_us,
+                decode_elapsed_us,
+                deadline_at,
+                logical_cancellation_observed: None,
+                canceled: false,
+                cancellation_phase: None,
+                cancel_reason: None,
+                concrete_media_checkpoint: None,
+                decode_diagnostics: Some(decode_diagnostics),
+                color_diagnostics: None,
+                color_stage_diagnostics: None,
+                demand_identity,
+                execution_id,
+                residency_work: job.residency_work,
+            }
+        }
         Ok(PreviewDecodeOutcome::NativeGpuFrame(frame)) => {
             let decode_diagnostics = frame.diagnostics;
             if job.key.source_has_alpha() {
@@ -1434,6 +1518,14 @@ enum MediaPreviewDecodedFrameEvidence {
         width: u32,
         height: u32,
         color_contract: DecodedRgbaFrameContract,
+        selected_pts: Option<i64>,
+        surface_format: DecodedVideoSurfaceFormat,
+        sampling: DecodedVideoSampling,
+        execution: PreviewDecodeExecutionPath,
+    },
+    CpuYuv {
+        width: u32,
+        height: u32,
         selected_pts: Option<i64>,
         surface_format: DecodedVideoSurfaceFormat,
         sampling: DecodedVideoSampling,

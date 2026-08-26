@@ -598,19 +598,35 @@ changing semantic class, eviction, and completion-driven binding removal all
 refresh this state. `ReusedInFlight` requires a real locked-registry attempt
 with exact generation, demand identity, key, and class. A cross-binding request
 queues a bounded fallback; a reusable old completion atomically consumes the
-new binding and removes that fallback, while non-reusable completion or failure
-leaves it self-progressing. Beginning a generation immediately prunes older
+new binding and removes that fallback. If the fallback has already started,
+same-generation `Playback + FinishForLocality` work permanently loses
+publication authority but is allowed to return normally so its worker-owned
+stateful decoder is not torn down. Explicit key cancellation, capacity
+eviction, semantic generation advance, preemption, and shutdown stamp an
+authoritative invalidation and still cancel that lease. Non-reusable completion
+or failure leaves the fallback self-progressing. Beginning a generation immediately prunes older
 pending/queued fallback work but retains in-flight leases for cancellation or a
 later explicitly queued rebound. The Viewer-only, same-Playback-Epoch locality
 rotation is narrower: it rebinds queued `FinishForLocality` Playback work to the
 new generation before pruning, so a bounded forward queue survives output-only
 changes without regaining stale Viewer publication authority. A compatible
+decode-representation rotation (for example Full to Half Preview resolution)
+uses a still narrower boundary: an already-running `FinishForLocality` lease
+loses publication authority but may finish to preserve its worker-owned codec
+Session, while all queued old-representation work is pruned. This prevents both
+an avoidable decoder reopen and starvation of the new representation by stale
+prefetch. A compatible
 same-key request that rebinds in-flight work
 clears the temporary invalidation timestamp, so latest-wins reuse is not
 mislabeled as cancellation. Adapters may translate the generic disposition and
 monotonic age into domain-specific diagnostics, but cannot reconstruct policy
 from separate freshness, competing-work, or timestamp queries. The Broker does
-not own codec-specific reasons.
+not own codec-specific reasons. Stable Broker diagnostics separately count the
+first transition to generation invalidation, exact-binding invalidation, and
+same-generation in-flight binding detachment retained solely for Playback
+decoder locality.
+This preserves enough evidence to distinguish an erroneous semantic rotation
+from an explicit key/binding removal without sampling private queue state.
 
 Cancellation acceptance measures two non-overlapping intervals from the same
 execution: authority request to `LogicalCancellationObserved`, then that
@@ -668,7 +684,10 @@ an idle NonPlayback lane may dequeue one `Current + Playback` replacement.
 That authorized replacement outranks ordinary Interactive and Still current
 backlog so sustained non-playback demand cannot starve playback recovery. It may
 never take Playback Prefetch, never admits a second live cross-lane replacement,
-and does not release the old execution's resource lease. The current App deliberately instantiates
+and does not release the old execution's resource lease. The generic Broker
+does not assign codec threads; the App media Adapter must cap a cross-lane
+replacement at the NonPlayback worker's CPU share so recovery cannot overlap
+two full-machine software decoders. The current App deliberately instantiates
 only Playback plus shared NonPlayback workers (or one Any worker on a constrained
 CPU); dedicated Interactive and Still lanes remain capabilities of the generic
 Broker, not additional production decoder pools.
@@ -805,6 +824,15 @@ usable output. During startup priming, however, the Adapter must keep advancing
 the authoritative Clock: expiry of the bounded priming hold permits frame
 skips and a later exact-current output, rather than freezing the expired frame
 zero demand forever.
+
+Pressure recovery may advance the quality revision while a terminal Headless
+observation is closing the same Epoch and timeline frame. The observation then
+retires the superseded demand and retargets only a newer, internally consistent
+current demand for that exact coordinate. It clears every old candidate and
+physical-output binding before retrying. An Epoch change, coordinate change,
+quality regression, missing replacement demand, or inconsistent replacement
+identity remains a terminal contract failure; the rule never lets old pixels
+satisfy a new representation policy.
 
 Headless readiness uses one candidate rule in startup, realtime, paused-still,
 and validation paths. Ordinary queue-ordered publication is usable when its
@@ -1242,8 +1270,13 @@ callback counters remain evidence.
 - One active Playback current-demand identity per session; the same demand may
   own every media key in a multi-layer frame, while a newer demand atomically
   removes all older unstarted `Current/Playback` payloads across keys. An older
-  in-flight execution may finish for decoder locality, but it no longer owns
-  presentation or failure-publication authority.
+  in-flight execution is detached from publication authority before those
+  queued siblings are removed, so queue pruning cannot invalidate the worker's
+  demux/codec locality. It finishes cache-only unless the active demand later
+  requests the exact same media key, generation, class, and resource scope; in
+  that one case a reusable completion may atomically satisfy the new demand.
+  Representation/generation rotation and stalled-demand expiration remain
+  permanently detached and cannot use this same-generation demand rebound.
 - Prefetch has a separately bounded budget and is discarded first.
 - Worker completion polling has both count and wall-time budgets; its producer
   transport holds at most eight queued results plus one pending publisher per
@@ -1773,9 +1806,13 @@ decode capability probes.
 6. Late video cannot pause Audio/Synthetic Master during stable playback.
 7. Priming is bounded and has an explicit timeout outcome.
 8. Automatic recovery may change only temporary preview resolution.
-   One quality revision must observe a non-canceled terminal execution attempt
-   before another resolution change; a timely first result clears pressure
-   accumulated while the new spatial work was materializing.
+   One quality revision must observe either a non-canceled terminal execution
+   attempt or one complete pressure window of clock-superseded demands before
+   another resolution change. The latter is bounded evidence that the new
+   representation produced no current frame in its useful interval; waiting
+   indefinitely for a stale terminal result would deadlock recovery. A timely
+   first result clears pressure accumulated while the new spatial work was
+   materializing.
 9. Blocked color/capability paths cannot be relabeled as ordinary buffering.
 10. Preview and export retain identical timeline/effect/color interpretation;
     only realtime scheduling, resolution, and presentation may differ.

@@ -1362,7 +1362,8 @@ impl PreviewDecodeAccessModeProfile {
         self.frames = self.frames.saturating_add(1);
         match diagnostics.path {
             PreviewDecodePath::InProcessFfmpegCpuRgba
-            | PreviewDecodePath::InProcessFfmpegCpuFloat => {
+            | PreviewDecodePath::InProcessFfmpegCpuFloat
+            | PreviewDecodePath::InProcessFfmpegCpuYuv => {
                 self.in_process_cpu_frames = self.in_process_cpu_frames.saturating_add(1);
             }
             PreviewDecodePath::InProcessFfmpegNative => {}

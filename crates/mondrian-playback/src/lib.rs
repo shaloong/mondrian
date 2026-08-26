@@ -811,6 +811,9 @@ pub struct PlaybackEngine {
     preview_scale: PreviewResolutionScale,
     quality_revision: u64,
     quality_change_awaiting_delivery: bool,
+    /// Clock-superseded demands observed while waiting for the first terminal
+    /// result at a newly selected Preview scale.
+    quality_change_missed_demands: usize,
     recent_pressure: Vec<bool>,
     consecutive_healthy: usize,
     next_demand_sequence: u64,
@@ -861,6 +864,7 @@ impl PlaybackEngine {
             preview_scale: PreviewResolutionScale::Full,
             quality_revision: 0,
             quality_change_awaiting_delivery: false,
+            quality_change_missed_demands: 0,
             recent_pressure: Vec::with_capacity(policy.pressure_window),
             consecutive_healthy: 0,
             next_demand_sequence: 1,
@@ -1594,6 +1598,7 @@ impl PlaybackEngine {
         let quality_attempt_observed = delivery.kind() != FrameDeliveryKind::Canceled;
         if self.quality_change_awaiting_delivery && quality_attempt_observed {
             self.quality_change_awaiting_delivery = false;
+            self.quality_change_missed_demands = 0;
             if healthy {
                 // Missed demands accumulated while the new spatial work was
                 // still being materialized do not prove that scale is itself
@@ -1632,6 +1637,7 @@ impl PlaybackEngine {
                 .checked_add(1)
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
             self.quality_change_awaiting_delivery = true;
+            self.quality_change_missed_demands = 0;
             self.refresh_frame_demand(self.last_timestamp)?;
             self.consecutive_healthy = 0;
             if self.preview_scale == PreviewResolutionScale::Full {
@@ -2018,6 +2024,7 @@ impl PlaybackEngine {
         self.recent_pressure.clear();
         self.consecutive_healthy = 0;
         self.quality_change_awaiting_delivery = false;
+        self.quality_change_missed_demands = 0;
         self.active_demand = None;
         self.terminal_delivery = None;
         self.priming_current_presentable = false;
@@ -2079,6 +2086,22 @@ impl PlaybackEngine {
                     )
             });
             let quality_changed = if missed_presentation {
+                if self.quality_change_awaiting_delivery {
+                    self.quality_change_missed_demands = self
+                        .quality_change_missed_demands
+                        .checked_add(1)
+                        .ok_or(PlaybackError::TransportArithmeticOverflow)?;
+                    if self.quality_change_missed_demands >= self.policy.pressure_window {
+                        // A complete pressure window of clock-superseded
+                        // demands is itself a bounded terminal observation:
+                        // the new representation has not produced one current
+                        // frame within its useful presentation interval. Do
+                        // not wait forever for a stale execution result before
+                        // trying the next bounded recovery scale.
+                        self.quality_change_awaiting_delivery = false;
+                        self.quality_change_missed_demands = 0;
+                    }
+                }
                 self.push_pressure(true);
                 self.consecutive_healthy = 0;
                 self.apply_pressure_scale_down()?.1
@@ -2114,6 +2137,7 @@ impl PlaybackEngine {
                 .checked_add(1)
                 .ok_or(PlaybackError::TransportArithmeticOverflow)?;
             self.quality_change_awaiting_delivery = true;
+            self.quality_change_missed_demands = 0;
             self.refresh_frame_demand(self.last_timestamp)?;
         }
         self.recent_pressure.clear();

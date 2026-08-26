@@ -150,6 +150,7 @@ pub struct PreviewDecodeSessionContext {
     execution_observer: PreviewDecodeExecutionObserver,
     demux_worker: Option<PreviewDemuxWorkerConfig>,
     resources: PreviewDecodeWorkerResources,
+    decoder_thread_limit: Option<usize>,
     hardware_failure_quarantine: HashMap<PreviewHardwareFailureQuarantineKey, Instant>,
 }
 
@@ -181,6 +182,7 @@ pub struct PreviewDecodeSessionContextBootstrap {
     execution_observer: PreviewDecodeExecutionObserver,
     demux_worker: Option<PreviewDemuxWorkerConfig>,
     resources: PreviewDecodeWorkerResources,
+    decoder_thread_limit: Option<usize>,
 }
 
 impl PreviewDecodeSessionContextBootstrap {
@@ -195,6 +197,7 @@ impl PreviewDecodeSessionContextBootstrap {
             execution_observer: self.execution_observer.clone(),
             demux_worker: self.demux_worker.clone(),
             resources: self.resources.clone(),
+            decoder_thread_limit: self.decoder_thread_limit,
         }
     }
 
@@ -204,12 +207,24 @@ impl PreviewDecodeSessionContextBootstrap {
         self
     }
 
+    /// Cap FFmpeg decoder threads opened by this worker context.
+    ///
+    /// A non-Playback scheduling lane may execute bounded Playback failover
+    /// work. The explicit cap keeps that exceptional Session inside the
+    /// App-owned CPU budget instead of multiplying the full Playback grant
+    /// across workers.
+    pub fn with_decoder_thread_limit(mut self, limit: usize) -> Self {
+        self.decoder_thread_limit = Some(limit.max(1));
+        self
+    }
+
     /// Construct the worker-owned context on the current thread.
     pub fn build(self) -> PreviewDecodeSessionContext {
         PreviewDecodeSessionContext::with_execution_observer(
             self.execution_observer,
             self.demux_worker,
             self.resources,
+            self.decoder_thread_limit,
         )
     }
 }
@@ -221,12 +236,13 @@ impl PreviewDecodeSessionContext {
             PreviewDecodeExecutionObserver::new(),
             None,
             PreviewDecodeWorkerResources::default(),
+            None,
         )
     }
 
     /// Create an empty worker-local context with explicit family resources.
     pub fn with_worker_resources(resources: PreviewDecodeWorkerResources) -> Self {
-        Self::with_execution_observer(PreviewDecodeExecutionObserver::new(), None, resources)
+        Self::with_execution_observer(PreviewDecodeExecutionObserver::new(), None, resources, None)
     }
 
     /// Create a worker bootstrap without retaining its observer.
@@ -235,6 +251,7 @@ impl PreviewDecodeSessionContext {
             execution_observer: PreviewDecodeExecutionObserver::new(),
             demux_worker: None,
             resources: PreviewDecodeWorkerResources::default(),
+            decoder_thread_limit: None,
         }
     }
 
@@ -255,6 +272,7 @@ impl PreviewDecodeSessionContext {
                 execution_observer: observer.clone(),
                 demux_worker: None,
                 resources: PreviewDecodeWorkerResources::default(),
+                decoder_thread_limit: None,
             },
             observer,
         )
@@ -278,6 +296,7 @@ impl PreviewDecodeSessionContext {
                 execution_observer: observer.clone(),
                 demux_worker: Some(PreviewDemuxWorkerConfig::new(executable, observer.clone())),
                 resources: PreviewDecodeWorkerResources::default(),
+                decoder_thread_limit: None,
             },
             observer,
         )
@@ -287,6 +306,7 @@ impl PreviewDecodeSessionContext {
         execution_observer: PreviewDecodeExecutionObserver,
         demux_worker: Option<PreviewDemuxWorkerConfig>,
         resources: PreviewDecodeWorkerResources,
+        decoder_thread_limit: Option<usize>,
     ) -> Self {
         Self {
             sessions: PreviewDecodeSessions {
@@ -297,6 +317,7 @@ impl PreviewDecodeSessionContext {
             execution_observer,
             demux_worker,
             resources,
+            decoder_thread_limit,
             hardware_failure_quarantine: HashMap::new(),
         }
     }
@@ -362,6 +383,7 @@ impl PreviewDecodeSessionContext {
             request,
             &self.resources,
             self.demux_worker.as_ref(),
+            self.decoder_thread_limit,
             Arc::clone(&should_cancel),
         );
         if let Err(error) = &first {
@@ -393,6 +415,7 @@ impl PreviewDecodeSessionContext {
                     software_request,
                     &self.resources,
                     self.demux_worker.as_ref(),
+                    self.decoder_thread_limit,
                     should_cancel,
                 ) {
                     Ok(outcome) => Ok(mark_runtime_hardware_fallback(
@@ -433,6 +456,7 @@ fn mark_runtime_hardware_fallback(
     let diagnostics = match &mut outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&mut frame.diagnostics),
+        PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&mut frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
     };
@@ -621,6 +645,7 @@ struct PreviewDecodeSession {
     requested_video_stream_index: Option<u32>,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    representation: PreviewDecodeRepresentation,
     backend: PreviewDecodeBackend,
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
@@ -759,6 +784,7 @@ enum PreviewSeekToTarget {
 pub(super) enum PreviewDecodedFramePayload {
     CpuRgba(RgbaFrame),
     CpuFloat(FloatRgbaFrame),
+    CpuYuv(CpuYuvFrame),
     NativeGpu(PreviewNativeDecodedFrame),
 }
 
@@ -774,11 +800,18 @@ impl From<FloatRgbaFrame> for PreviewDecodedFramePayload {
     }
 }
 
+impl From<CpuYuvFrame> for PreviewDecodedFramePayload {
+    fn from(frame: CpuYuvFrame) -> Self {
+        Self::CpuYuv(frame)
+    }
+}
+
 impl PreviewDecodedFramePayload {
     pub(super) fn reserved_cpu_bytes(&self) -> usize {
         match self {
             Self::CpuRgba(frame) => frame.rgba().len(),
             Self::CpuFloat(frame) => frame.rgba().len().saturating_mul(std::mem::size_of::<f32>()),
+            Self::CpuYuv(frame) => frame.retained_bytes(),
             Self::NativeGpu(_) => 0,
         }
     }
@@ -787,6 +820,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.into_playback_ring_hit(elapsed)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.into_playback_ring_hit(elapsed)),
+            Self::CpuYuv(frame) => Self::CpuYuv(frame.into_playback_ring_hit(elapsed)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -803,6 +837,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_temporal_selection(requested_pts, selected_extent))
             }
+            Self::CpuYuv(frame) => {
+                Self::CpuYuv(frame.with_temporal_selection(requested_pts, selected_extent))
+            }
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -811,6 +848,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_access_policy(policy)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_access_policy(policy)),
+            Self::CpuYuv(frame) => Self::CpuYuv(frame.with_access_policy(policy)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -827,6 +865,9 @@ impl PreviewDecodedFramePayload {
             Self::CpuFloat(frame) => {
                 Self::CpuFloat(frame.with_seek_index_diagnostics(diagnostics, resolution))
             }
+            Self::CpuYuv(frame) => {
+                Self::CpuYuv(frame.with_seek_index_diagnostics(diagnostics, resolution))
+            }
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -835,6 +876,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_stage_durations(durations)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_stage_durations(durations)),
+            Self::CpuYuv(frame) => Self::CpuYuv(frame.with_stage_durations(durations)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -843,6 +885,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_hardware_decode_plan(plan)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_hardware_decode_plan(plan)),
+            Self::CpuYuv(frame) => Self::CpuYuv(frame.with_hardware_decode_plan(plan)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -851,6 +894,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => Self::CpuRgba(frame.with_decoded_surface_format(format)),
             Self::CpuFloat(frame) => Self::CpuFloat(frame.with_decoded_surface_format(format)),
+            Self::CpuYuv(frame) => Self::CpuYuv(frame.with_decoded_surface_format(format)),
             Self::NativeGpu(frame) => Self::NativeGpu(frame),
         }
     }
@@ -859,6 +903,7 @@ impl PreviewDecodedFramePayload {
         match self {
             Self::CpuRgba(frame) => PreviewDecodeOutcome::Frame(frame),
             Self::CpuFloat(frame) => PreviewDecodeOutcome::FloatFrame(frame),
+            Self::CpuYuv(frame) => PreviewDecodeOutcome::CpuYuvFrame(frame),
             Self::NativeGpu(frame) => PreviewDecodeOutcome::NativeGpuFrame(frame),
         }
     }
@@ -1255,11 +1300,13 @@ struct PreviewDecodeSessionOpenRequest<'a> {
     video_stream_index: Option<u32>,
     max_width: Option<u32>,
     max_height: Option<u32>,
+    representation: PreviewDecodeRepresentation,
     access_mode: PreviewDecodeAccessMode,
     backend: PreviewDecodeBackend,
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
+    decoder_thread_limit: Option<usize>,
 }
 
 impl PreviewDecodeSession {
@@ -1302,11 +1349,13 @@ impl PreviewDecodeSession {
             video_stream_index: requested_video_stream_index,
             max_width,
             max_height,
+            representation,
             access_mode,
             backend,
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            decoder_thread_limit,
         } = request;
         let PreviewPacketSourceOpen {
             source,
@@ -1340,8 +1389,12 @@ impl PreviewDecodeSession {
             u64::from((*raw).width.max(0) as u32)
                 .saturating_mul(u64::from((*raw).height.max(0) as u32))
         };
-        let requested_threading =
-            preview_decode_threading_config_for_codec(codec_id, access_mode, decode_pixels);
+        let requested_threading = preview_decode_threading_config_for_codec(
+            codec_id,
+            access_mode,
+            decode_pixels,
+            decoder_thread_limit,
+        );
         let ffmpeg_threading = ffmpeg::codec::threading::Config {
             kind: requested_threading.kind.to_ffmpeg(),
             count: requested_threading.count,
@@ -1473,6 +1526,7 @@ impl PreviewDecodeSession {
             requested_video_stream_index,
             max_width,
             max_height,
+            representation,
             backend,
             hardware_decode_request,
             hardware_decode_device_selector,
@@ -1542,8 +1596,16 @@ impl PreviewDecodeSession {
     /// valid for the same physical stream and decode contract. CPU payloads in
     /// the Playback ring and the swscale context do carry the old extent, so
     /// those output-only resources must be invalidated atomically.
-    fn rebind_output_geometry(&mut self, max_width: Option<u32>, max_height: Option<u32>) {
-        if self.max_width == max_width && self.max_height == max_height {
+    fn rebind_output_contract(
+        &mut self,
+        representation: PreviewDecodeRepresentation,
+        max_width: Option<u32>,
+        max_height: Option<u32>,
+    ) {
+        if self.representation == representation
+            && self.max_width == max_width
+            && self.max_height == max_height
+        {
             return;
         }
         let (target_width, target_height) = fit_target_size(
@@ -1552,6 +1614,7 @@ impl PreviewDecodeSession {
             max_width,
             max_height,
         );
+        self.representation = representation;
         self.max_width = max_width;
         self.max_height = max_height;
         self.target_width = target_width;
@@ -1835,6 +1898,41 @@ impl PreviewDecodeSession {
                     }
                     return Ok(PreviewDecodeOutcome::FloatFrame(frame));
                 }
+                PreviewDecodedFramePayload::CpuYuv(frame) => {
+                    let conversion_us = frame
+                        .diagnostics
+                        .stage_durations
+                        .hardware_transfer_us
+                        .saturating_add(frame.diagnostics.stage_durations.rgba_copy_us);
+                    let packet_decode_us =
+                        duration_us(decode_started_at.elapsed()).saturating_sub(conversion_us);
+                    let frame = frame
+                        .with_access_mode(access_mode)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            cache_lookup_us,
+                            seek_us,
+                            packet_decode_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_decode_work(seek_performed, result.decoded_frame_count)
+                        .with_temporal_selection(target_pts, result.selected_extent)
+                        .with_access_policy(policy)
+                        .with_forward_reused(should_continue_forward)
+                        .with_seek_index_diagnostics(self.seek_index.diagnostics(), seek_resolution)
+                        .with_threading(self.threading_kind, self.threading_count)
+                        .with_hardware_decode_plan(&self.hardware_decode_plan)
+                        .with_decoded_surface_format(self.decoded_surface_format)
+                        .with_decode_execution();
+                    if policy.use_playback_ring
+                        && let Some(selected_extent) = result.selected_extent
+                    {
+                        self.playback_ring.put(
+                            selected_extent,
+                            PreviewDecodedFramePayload::CpuYuv(frame.clone()),
+                        );
+                    }
+                    return Ok(PreviewDecodeOutcome::CpuYuvFrame(frame));
+                }
                 PreviewDecodedFramePayload::NativeGpu(mut frame) => {
                     let mut diagnostics = frame
                         .diagnostics
@@ -2086,6 +2184,7 @@ impl PreviewDecodeSession {
             exact_select_distance_pts
         };
         let source_color = self.source_color;
+        let representation = self.representation;
 
         let choose_and_convert = |hardware_decode_plan: &mut PreviewHardwareDecodePlan,
                                   scaler: &mut Option<ffmpeg::software::scaling::Context>,
@@ -2147,6 +2246,7 @@ impl PreviewDecodeSession {
                 .set_checkpoint(PreviewDecodeCancellationCheckpoint::FrameMaterialization);
             let frame = materialize_decoded_frame_with_session_output_lease(
                 selected_frame,
+                representation,
                 hardware_decode_plan,
                 scaler,
                 scaler_format_contract,
@@ -2469,6 +2569,7 @@ pub(super) fn decode_preview_frame_outcome(
         let mut context = context.borrow_mut();
         let execution_observer = context.execution_observer.clone();
         let resources = context.resources.clone();
+        let decoder_thread_limit = context.decoder_thread_limit;
         let _execution = execution_observer.begin_request();
         decode_preview_frame_outcome_in_sessions(
             &mut context.sessions,
@@ -2476,6 +2577,7 @@ pub(super) fn decode_preview_frame_outcome(
             request,
             &resources,
             None,
+            decoder_thread_limit,
             should_cancel,
         )
     })
@@ -2487,6 +2589,7 @@ fn decode_preview_frame_outcome_in_sessions(
     request: PreviewDecodeRequest<'_>,
     resources: &PreviewDecodeWorkerResources,
     demux_worker: Option<&PreviewDemuxWorkerConfig>,
+    decoder_thread_limit: Option<usize>,
     should_cancel: PreviewDecodeCancelProbe,
 ) -> Result<PreviewDecodeOutcome> {
     let PreviewDecodeRequest {
@@ -2495,6 +2598,7 @@ fn decode_preview_frame_outcome_in_sessions(
         source_sample,
         max_width,
         max_height,
+        representation,
         access_mode,
         fingerprint,
         adaptive_hints,
@@ -2548,11 +2652,13 @@ fn decode_preview_frame_outcome_in_sessions(
             video_stream_index,
             max_width,
             max_height,
+            representation,
             access_mode,
             backend,
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            decoder_thread_limit,
         };
         let mut session_open_us = 0;
 
@@ -2625,7 +2731,7 @@ fn decode_preview_frame_outcome_in_sessions(
                 reason: "preview decoder Session was unavailable after successful setup".to_owned(),
             });
         };
-        session.rebind_output_geometry(max_width, max_height);
+        session.rebind_output_contract(representation, max_width, max_height);
         let interrupt_state = Arc::clone(&session.interrupt_state);
         let _interrupt_guard = interrupt_state.install(Arc::clone(&should_cancel));
         let mut external_process_us = 0;
@@ -2637,7 +2743,12 @@ fn decode_preview_frame_outcome_in_sessions(
             hardware_decode_device_selector,
         );
 
-        if preview_external_ffmpeg_cpu_rgba_enabled(access_mode) {
+        // The optional external helper publishes only RGBA. It cannot satisfy
+        // a compact-plane cache/session identity without changing its physical
+        // residency contract, so that representation remains in-process.
+        if !representation.is_compact_cpu_yuv()
+            && preview_external_ffmpeg_cpu_rgba_enabled(access_mode)
+        {
             interrupt_state.set_checkpoint(PreviewDecodeCancellationCheckpoint::ExternalProcess);
             if should_cancel() {
                 return Ok(PreviewDecodeOutcome::Canceled(
@@ -2786,6 +2897,30 @@ fn decode_preview_frame_outcome_in_sessions(
                         .with_elapsed(started_at.elapsed()),
                 ))
             }
+            PreviewDecodeOutcome::CpuYuvFrame(frame) => {
+                let result_session_disposition = if frame.diagnostics.session_disposition
+                    == PreviewDecodeSessionDisposition::BypassedCache
+                {
+                    PreviewDecodeSessionDisposition::BypassedCache
+                } else {
+                    session_disposition
+                };
+                Ok(PreviewDecodeOutcome::CpuYuvFrame(
+                    frame
+                        .with_access_mode(access_mode)
+                        .with_seek_strategy(
+                            PreviewDecodeAccessPolicy::for_access_mode(access_mode).seek_strategy,
+                        )
+                        .with_session_disposition(result_session_disposition)
+                        .with_stage_durations(PreviewDecodeStageDurations {
+                            session_open_us,
+                            output_lease_wait_us,
+                            external_process_us,
+                            ..PreviewDecodeStageDurations::default()
+                        })
+                        .with_elapsed(started_at.elapsed()),
+                ))
+            }
             PreviewDecodeOutcome::NativeGpuFrame(mut frame) => {
                 frame.diagnostics = frame
                     .diagnostics
@@ -2848,6 +2983,7 @@ pub(super) fn finalize_preview_decode_outcome(
     let diagnostics = match &outcome {
         PreviewDecodeOutcome::Frame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::FloatFrame(frame) => Some(&frame.diagnostics),
+        PreviewDecodeOutcome::CpuYuvFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::NativeGpuFrame(frame) => Some(&frame.diagnostics),
         PreviewDecodeOutcome::Canceled(_) => None,
     };

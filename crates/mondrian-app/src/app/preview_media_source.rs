@@ -279,6 +279,7 @@ pub(crate) fn resolve_preview_media_source(
         payload_requirement,
         hardware_request,
         request.representation_quality,
+        source_color,
     ) {
         Ok(representation) => representation,
         Err(error) => {
