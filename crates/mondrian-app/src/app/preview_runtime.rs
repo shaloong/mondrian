@@ -87,11 +87,12 @@ use crate::app::preview_raster_frame::{
 };
 use crate::app::preview_scheduler_policy::{
     media_preview_forward_prefetch_window_frames, media_preview_residency_reservation,
-    playback_frame_delivery_kind, playback_hardware_recovery_signals, MediaPreviewFailureReason,
+    media_preview_steady_prefetch_reservation_limit, playback_frame_delivery_kind,
+    playback_hardware_recovery_signals, MediaPreviewFailureReason,
     MediaPreviewResidencyReservation, PlaybackDecodeExecution, PlaybackPressureState,
     PlaybackPressureTransition, PreviewScrubAdaptationState,
     MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US, MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
-    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
+    MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES, MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT,
 };
 #[cfg(test)]
 use crate::app::preview_scheduler_policy::{
@@ -270,6 +271,9 @@ pub(crate) enum PreviewPresentationState<O> {
 pub(crate) enum PreviewVisualGpuCompletionDisposition {
     /// The completion is current, on time, and may become visible.
     PublishCurrent,
+    /// The ticketless immediate successor completed on time and may occupy the
+    /// bounded prepared-output slot without becoming visible.
+    PrepareSuccessor,
     /// The artifact is cache-only, stale, or no longer belongs to this
     /// Preview lifecycle. Adapter resources must be released without
     /// publication.
@@ -320,6 +324,13 @@ pub struct PreviewProductionRuntime<O: Clone> {
     playback_pressure: Cell<PlaybackPressureState>,
     #[cfg(test)]
     last_video_preroll_observation: Cell<Option<PreviewVideoPreroll>>,
+    /// Last immutable product resource policy applied at Preview's domain seam.
+    ///
+    /// Candidate polling is level-triggered, but policy reconfiguration is not:
+    /// reapplying an equal decision would repeatedly take cache/decoder locks on
+    /// the realtime presentation thread without changing any authority.
+    applied_resource_decision:
+        Cell<Option<crate::app::execution_resource_coordination::PreviewExecutionDecision>>,
     applied_resource_trim: Cell<crate::app::execution_resource_coordination::ResourceTrimRequest>,
     heterogeneous_effect_decision: Cell<
         crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision,
@@ -692,6 +703,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             playback_pressure: Cell::new(PlaybackPressureState::default()),
             #[cfg(test)]
             last_video_preroll_observation: Cell::new(None),
+            applied_resource_decision: Cell::new(None),
             applied_resource_trim: Cell::new(
                 crate::app::execution_resource_coordination::ResourceTrimRequest::None,
             ),
@@ -854,6 +866,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         bump(&self.metrics.gpu_preview_candidate_requests);
         self.synchronize_visual_program_authoring_session(snapshot);
         self.synchronize_transport_intent(transport.intent());
+        if transport.is_playing()
+            && !transport.is_speculative_preparation()
+            && let Some(active) = transport.demand().map(PreviewFrameDemandSnapshot::identity)
+        {
+            self.scheduler.synchronize_playback_current_demand(active);
+        }
         self.pump_visual_execution_results(
             transport
                 .is_playing()
@@ -984,7 +1002,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
         if transport.is_playing()
             && transport.demand().is_none()
-            && !transport.is_successor_preparation()
+            && !transport.is_speculative_preparation()
         {
             if transport.is_priming() {
                 // Presenting the priming current frame consumes its Frame
@@ -1084,6 +1102,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 let cache_key = evaluation.output_key.with_monitor_adaptation(&monitor_adaptation);
                 let cache_reusable =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable);
+                if transport.is_lookahead_preparation()
+                    && cache_reusable
+                    && self
+                        .execution
+                        .borrow()
+                        .exact_current_output()
+                        .is_some_and(|(current, _)| current == &cache_key)
+                {
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
                 if transport.is_successor_preparation()
                     && cache_reusable
                     && self
@@ -1121,6 +1150,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }
             }
             FrameResolutionOutcome::Empty => {
+                if transport.is_lookahead_preparation() {
+                    self.scheduler.prune_obsolete();
+                    return PreviewGpuFrameState::Prepared;
+                }
                 if transport.is_successor_preparation() {
                     self.execution
                         .borrow_mut()
@@ -1399,7 +1432,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     let admission = VisualExecutionAdmission::new(
                         visual_key,
                         generation,
-                        if transport.is_successor_preparation() {
+                        if transport.is_speculative_preparation() {
                             mondrian_playback::FrameWorkPriority::Prefetch
                         } else {
                             mondrian_playback::FrameWorkPriority::Current
@@ -1586,17 +1619,44 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             program_output_boundary,
             monitor_adaptation,
             candidate_id,
-            if transport.is_successor_preparation() {
+            generation,
+            if transport.is_speculative_preparation() {
                 crate::app::preview_execution::PreviewGpuFramePurpose::SuccessorPreparation
             } else {
                 crate::app::preview_execution::PreviewGpuFramePurpose::Current
             },
             playback_intent,
+            self.execution.borrow().presentation_quality(),
             self.playback_presentation_ticket(snapshot),
             decode_execution,
             heterogeneous_execution,
             media_residency_protections,
         )))
+    }
+
+    /// Bind one exact CPU-complete speculative frame to the freshly captured
+    /// current Frame Demand without repeating Timeline, effect, or media work.
+    ///
+    /// Generation and complete playback intent are both required. A resize,
+    /// authoring change, display-contract change, seek, or quality rotation
+    /// therefore retires the staged artifact instead of publishing it under a
+    /// different execution contract.
+    pub(crate) fn bind_staged_gpu_frame_for_current(
+        &self,
+        mut frame: Box<PreviewGpuFrame>,
+        snapshot: &PreviewExecutionSnapshot<'_>,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        let intent = snapshot.transport().playback_intent();
+        if frame.generation() != self.execution.borrow().generation()
+            || frame.playback_intent() != intent
+            || frame.has_heterogeneous_gpu_execution()
+        {
+            return None;
+        }
+        let ticket = snapshot.presentation_ticket(frame.presentation_quality())?;
+        self.scheduler.synchronize_playback_current_demand(ticket.identity());
+        frame.bind_current_presentation(ticket);
+        Some(frame)
     }
 
     /// Build the exact ticket that a Presentation Adapter may complete only
@@ -1754,6 +1814,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         execution: PreviewGpuHeterogeneousExecution,
         completed: &mondrian_renderer::ViewerHeterogeneousGpuCompletedBatch,
+        successor_preparation: bool,
     ) -> Result<PreviewVisualGpuCompletionDisposition, PreviewGpuHeterogeneousCompletionError> {
         let reusable = execution.reusable();
         if let Err(error) = execution.validate_completed(completed) {
@@ -1785,7 +1846,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 },
             );
         }
-        if finalization.may_publish_current() {
+        if successor_preparation && finalization.may_cache() {
+            Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor)
+        } else if finalization.may_publish_current() {
             Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent)
         } else {
             Ok(PreviewVisualGpuCompletionDisposition::Release)
@@ -2517,6 +2580,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         &self,
         decision: &crate::app::execution_resource_coordination::PreviewExecutionDecision,
     ) {
+        if self.applied_resource_decision.get() == Some(*decision) {
+            return;
+        }
+        self.applied_resource_decision.set(Some(*decision));
         bump(&self.metrics.resource_decision_applications);
         self.heterogeneous_effect_decision.set(decision.heterogeneous_effects);
         self.frame_store.borrow_mut().reconfigure(decision.frame_store);

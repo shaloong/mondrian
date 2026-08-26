@@ -323,6 +323,32 @@ fn bind_existing_updates_queued_metadata_without_replacing_or_dropping_payload()
 }
 
 #[test]
+fn promoted_current_queue_wait_starts_at_latest_binding() {
+    let clock = ManualRuntimeClock::at(Duration::from_millis(10));
+    let broker = FrameWorkBroker::new_with_clock(1, 1, clock.clone());
+    let generation = broker.begin_generation();
+    let mut prefetch = request(1, generation, FrameWorkClass::Playback);
+    prefetch.priority = FrameWorkPriority::Prefetch;
+    assert!(matches!(
+        broker.submit(prefetch),
+        FrameWorkSubmission::Queued { .. }
+    ));
+
+    clock.set(Duration::from_millis(110));
+    assert!(matches!(
+        broker.bind_existing(binding_request(1, generation, FrameWorkClass::Playback)),
+        FrameWorkBindingSubmission::UpdatedQueued { priority_promoted: true, .. }
+    ));
+    clock.set(Duration::from_millis(117));
+
+    let execution = match broker.receive(FrameWorkerLane::Playback) {
+        Some(FrameWorkReceive::Ready(execution)) => execution,
+        other => panic!("unexpected receive: {other:?}"),
+    };
+    assert_eq!(execution.queue_wait, Duration::from_millis(7));
+}
+
+#[test]
 fn bind_existing_rebinds_compatible_in_flight_work() {
     let broker = FrameWorkBroker::new(2, 2);
     let generation = broker.begin_generation();

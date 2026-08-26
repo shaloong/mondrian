@@ -188,6 +188,12 @@ pub struct FrameWorkExecution<K, D, P> {
     pub demand_identity: Option<FrameDemandIdentity>,
     /// Captured Adapter deadline.
     pub deadline: Option<D>,
+    /// Time spent waiting under the latest compatible request binding.
+    ///
+    /// A metadata-only prefetch-to-current promotion restarts this interval,
+    /// so realtime evidence never charges intentional speculative residency to
+    /// the later current request.
+    pub queue_wait: Duration,
     /// Opaque Adapter execution payload.
     pub payload: P,
 }
@@ -2397,6 +2403,9 @@ where
     let index =
         next_work_index_with_failover(&state.queue, lane, now, allow_current_playback_failover)?;
     let queued = state.queue.remove(index)?;
+    let queue_wait = state.pending.get(&queued.request.key).map_or(Duration::ZERO, |pending| {
+        elapsed_since(now, pending.requested_at)
+    });
     let request = queued.request;
     let id = FrameExecutionId(state.next_execution_id);
     state.next_execution_id = state.next_execution_id.saturating_add(1);
@@ -2441,6 +2450,7 @@ where
         resource_scope: request.resource_scope,
         demand_identity: request.demand_identity,
         deadline: request.deadline.map(FrameWorkDeadline::adapter_deadline),
+        queue_wait,
         payload: request.payload,
     };
     Some(if expired {

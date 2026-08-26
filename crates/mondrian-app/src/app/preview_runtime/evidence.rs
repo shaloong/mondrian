@@ -663,6 +663,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         priority: MediaPreviewRequestPriority,
         access_mode: PreviewDecodeAccessMode,
         queue_wait_us: u64,
+        owns_current_presentation: bool,
     ) {
         add_cell(&self.metrics.decode_queue_wait_total_us, queue_wait_us);
         self.metrics
@@ -670,11 +671,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             .set(self.metrics.decode_queue_wait_max_us.get().max(queue_wait_us));
         self.metrics.decode_queue_wait_last_us.set(queue_wait_us);
         match priority {
-            MediaPreviewRequestPriority::Current => {
+            MediaPreviewRequestPriority::Current if owns_current_presentation => {
                 self.metrics
                     .decode_current_queue_wait_max_us
                     .set(self.metrics.decode_current_queue_wait_max_us.get().max(queue_wait_us));
             }
+            MediaPreviewRequestPriority::Current => {}
             MediaPreviewRequestPriority::Prefetch => {
                 self.metrics
                     .decode_prefetch_queue_wait_max_us
@@ -750,6 +752,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 .get(),
             forward_prefetch_min_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES,
             forward_prefetch_max_frames: MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES,
+            steady_prefetch_reservation_limit: MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT,
             forward_prefetch_window_evaluations: self
                 .metrics
                 .playback_forward_prefetch_window_evaluations

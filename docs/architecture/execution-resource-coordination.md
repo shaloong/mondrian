@@ -250,8 +250,12 @@ Viewer GPU output residency is a separate typed grant because renderer-owned
 working/output textures are not Frame Store entries. Nominal
 below-minimum/8/16/32 GiB profiles retain at most 1/2/3/3 idle textures per
 exact extent/format/usage contract and 48/128/256/384 MiB across contracts.
-Speculative trim retains at most one per contract and halves the byte grant;
-Aggressive trim grants zero idle residency and requests idle release. This
+Speculative trim retains at most one per contract while preserving the
+machine-class byte grant. That bound is the frame-to-frame hot-set envelope,
+not a duplicate-cache target: halving it can evict one UHD float working
+texture as later display textures return and reintroduce synchronous GPU
+allocation into realtime successor preparation. Aggressive trim grants zero
+idle residency and requests idle release. This
 narrow `PreviewViewerGpuExecutionDecision` contains only the renderer grant and
 that release instruction; the Headless Adapter does not receive the unrelated
 Frame Store, decode, title, or Effect policy fields. The single

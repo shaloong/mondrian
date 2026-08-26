@@ -6,7 +6,6 @@
 //! queue reached the recorded presentation output.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(test)]
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
@@ -16,8 +15,8 @@ use crate::app::execution_resource_coordination::{
     apply_preview_viewer_gpu_resource_decision, PreviewViewerGpuExecutionDecision,
 };
 use crate::app::preview_execution::{
-    PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuHeterogeneousExecution,
-    PreviewGpuWorkingInput,
+    PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuFrameStaging,
+    PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
 use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationMember, ViewerGpuDeviceGenerationRetirement,
@@ -36,18 +35,20 @@ use crate::app::FramePresentationDisposition;
 use mondrian_renderer::profile::GpuTimestampSample;
 #[cfg(test)]
 use mondrian_renderer::NativeVideoImportGpuTimingDiagnostics;
+#[cfg(test)]
+use mondrian_renderer::ViewerGpuExecutionError;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     profile::gpu_timestamp_query_device_features,
     profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
-    request_adapter_with_native_video_preference, GpuCompositingDiagnostics,
-    GpuCompositorTextureBindingDiagnostics, GpuCompositorUniformArenaDiagnostics,
-    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
-    NativeVideoImportCandidateTimingReceipt, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
-    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
+    GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
+    GpuCompositorUniformArenaDiagnostics, GpuNativeDecodedFrameImportSupport,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
+    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
+    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError,
+    ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
@@ -180,6 +181,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
     pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
+    /// Cumulative exact-contract texture-pool evidence after this record.
+    pub resource_pool_diagnostics: GpuColorFrameWgpuResourcePoolDiagnostics,
     /// Structured GPU color-stage evidence for a newly rendered output.
     pub stage_diagnostics: Option<RenderColorStageDiagnostics>,
     /// Explicit native/GPU-input fallback reasons for a newly rendered output.
@@ -308,6 +311,8 @@ pub(crate) struct HeadlessViewerGpuAdapter {
         HeadlessViewerGpuOutput,
         ViewerGpuPresentationOutputLease,
     >,
+    #[cfg(any(test, feature = "validation"))]
+    staged_successors: PreviewGpuFrameStaging,
 }
 
 struct HeadlessViewerGpuSubmissionOwner {
@@ -665,7 +670,51 @@ impl HeadlessViewerGpuAdapter {
             reported_orphaned_completion_count: 0,
             submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
             physical_outputs: ViewerGpuPublicationSlots::default(),
+            #[cfg(any(test, feature = "validation"))]
+            staged_successors: PreviewGpuFrameStaging::default(),
         })
+    }
+
+    /// Retain one CPU-complete ticketless frame without consuming GPU
+    /// submission or presentation-output capacity.
+    #[cfg(test)]
+    pub(crate) fn stage_successor(
+        &mut self,
+        frame: Box<PreviewGpuFrame>,
+    ) -> Result<(), ViewerGpuExecutionError> {
+        debug_assert!(frame.is_successor_preparation());
+        let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+        self.runtime.prepare_cpu_yuv_uploads(layers)?;
+        self.staged_successors.stage(frame);
+        Ok(())
+    }
+
+    /// Take the staged frame only after it becomes the exact immediate
+    /// successor. A transport/quality rotation retires stale work through RAII.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn take_staged_successor_for_intent(
+        &mut self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        self.staged_successors.take_exact(intent)
+    }
+
+    /// Whether the bounded CPU staging slot already owns this exact intent.
+    #[cfg(test)]
+    pub(crate) fn has_staged_successor_for_intent(
+        &self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.staged_successors.contains(intent)
+    }
+
+    /// Retire CPU-complete frames outside the current bounded horizon.
+    #[cfg(test)]
+    pub(crate) fn retain_staged_successor_intents(
+        &mut self,
+        intents: &[crate::app::preview_execution::PreviewPlaybackIntent],
+    ) {
+        self.staged_successors.retain_only(intents);
     }
 
     /// Adapter identity bound to this execution device.
@@ -718,7 +767,10 @@ impl HeadlessViewerGpuAdapter {
     /// completion callbacks. The callback carries no completion authority;
     /// consumers still drain this Adapter's typed lifecycle.
     pub(crate) fn install_completion_waker(&mut self, waker: impl Fn() + Send + Sync + 'static) {
-        self.device_progress.install_waker(waker);
+        let waker: Arc<dyn Fn() + Send + Sync> = Arc::new(waker);
+        let progress_waker = Arc::clone(&waker);
+        self.device_progress.install_waker(move || progress_waker());
+        self.runtime.install_cpu_yuv_upload_waker(move || waker());
     }
 
     /// Native import support exposed to the preview scheduling Adapter.
@@ -827,7 +879,10 @@ impl HeadlessViewerGpuAdapter {
                 height: frame.height,
             });
         }
-        let progress_permit = self.device_progress.reserve_submission()?;
+        let progress_permit = self
+            .device_progress
+            .reserve_submission()
+            .map_err(map_headless_device_progress_reserve_error)?;
         let completion_signal = progress_permit.completion_signal();
         let reservation = self.submission_lifecycle.reserve().map_err(|error| match error {
             ViewerGpuSubmissionAdmissionError::Backpressured => {
@@ -982,6 +1037,7 @@ impl HeadlessViewerGpuAdapter {
                     self.runtime.compositor_texture_binding_diagnostics(),
                 ),
                 spatial_diagnostics: Some(record.spatial_diagnostics),
+                resource_pool_diagnostics: self.runtime.color_output_diagnostics().resource_pool,
                 stage_diagnostics: Some(record.stage_diagnostics),
                 fallback_reasons: record.fallback_reasons,
                 decode_execution: frame.decode_execution(),
@@ -1181,6 +1237,52 @@ impl HeadlessViewerGpuAdapter {
         Ok(disposition)
     }
 
+    /// Retain a callback-validated heterogeneous ticketless successor without
+    /// changing the visible output.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retain_completed_heterogeneous_successor(
+        &mut self,
+        completed: &mut HeadlessViewerGpuCompletedCandidate,
+        retain: impl FnOnce(&PreviewGpuFrame, &HeadlessViewerGpuOutput),
+    ) -> Result<(), HeadlessViewerGpuError> {
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
+        }
+        if completed.quarantine_reason.is_some()
+            || !completed.frame.is_successor_preparation()
+            || completed.frame.presentation_ticket().is_some()
+            || completed.queued_publication.is_some()
+            || completed.heterogeneous_completion.is_none()
+            || completed.successor_prepared
+        {
+            return Err(HeadlessViewerGpuError::InvalidPublicationOrder(
+                "heterogeneous successor retention requires one callback-validated ticketless candidate"
+                    .to_owned(),
+            ));
+        }
+        ensure_physical_publication_available(
+            &completed.presentation_lease,
+            completed.submission_id,
+        )?;
+        retain(&completed.frame, &completed.execution.output);
+        if let Some(terminal) = self.device_progress.generation_terminal() {
+            return Err(HeadlessViewerGpuError::DeviceGenerationTerminal(terminal));
+        }
+        let Some(lease) = completed.presentation_lease.take() else {
+            return Err(HeadlessViewerGpuError::MissingPresentationOutput(
+                completed.submission_id.get(),
+            ));
+        };
+        completed.successor_prepared = true;
+        let _ = self.physical_outputs.publish_prepared(
+            completed.submission_id,
+            completed.frame.output_key.clone(),
+            completed.execution.output.clone(),
+            lease,
+        );
+        Ok(())
+    }
+
     /// Whether Preview's complete cloneable artifact has the exact live
     /// move-only physical owner.
     pub(crate) fn has_current_physical_output_artifact(
@@ -1290,14 +1392,25 @@ impl HeadlessViewerGpuAdapter {
             .is_some_and(|owner| owner.queued_publication.is_some())
     }
 
-    /// Whether one exact in-flight submission already populated the successor slot.
-    pub(crate) fn has_prepared_successor_submission(
+    /// Whether one exact in-flight submission is the ticketless successor.
+    pub(crate) fn has_successor_preparation_submission(
         &self,
         submission_id: ViewerGpuSubmissionId,
     ) -> bool {
         self.submission_lifecycle
             .owner(submission_id)
-            .is_some_and(|owner| owner.successor_prepared)
+            .is_some_and(|owner| owner.frame.is_successor_preparation())
+    }
+
+    /// Whether an exact successor intent already owns a submitted GPU slot.
+    #[cfg(test)]
+    pub(crate) fn has_successor_submission_for_intent(
+        &self,
+        intent: crate::app::preview_execution::PreviewPlaybackIntent,
+    ) -> bool {
+        self.submission_lifecycle.any_owner(|owner| {
+            owner.frame.is_successor_preparation() && owner.frame.playback_intent() == intent
+        })
     }
 
     /// Presentation ticket carried by the retained candidate.
@@ -1756,6 +1869,17 @@ pub(crate) enum HeadlessViewerGpuError {
     Timestamp(String),
 }
 
+fn map_headless_device_progress_reserve_error(
+    error: ViewerGpuDeviceProgressReserveError,
+) -> HeadlessViewerGpuError {
+    match error {
+        ViewerGpuDeviceProgressReserveError::Backpressured => HeadlessViewerGpuError::Backpressure(
+            "the bounded Viewer GPU device-progress capacity is full".to_owned(),
+        ),
+        error => HeadlessViewerGpuError::DeviceProgressReserve(error),
+    }
+}
+
 fn ensure_headless_gpu_deadline(
     deadline: HeadlessGpuCompletionDeadline,
 ) -> Result<std::time::Duration, HeadlessViewerGpuError> {
@@ -1856,6 +1980,16 @@ mod tests {
             .expect("completion safety deadline");
 
         assert!(completion_deadline.instant() > frame_presentation_deadline);
+    }
+
+    #[test]
+    fn bounded_device_progress_saturation_is_retriable_headless_backpressure() {
+        assert!(matches!(
+            map_headless_device_progress_reserve_error(
+                ViewerGpuDeviceProgressReserveError::Backpressured,
+            ),
+            HeadlessViewerGpuError::Backpressure(_)
+        ));
     }
 
     #[test]

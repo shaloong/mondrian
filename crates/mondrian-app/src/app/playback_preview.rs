@@ -164,6 +164,21 @@ pub(crate) fn observe_playback_video_preroll(
     state: &mut AppState,
     adapter: &impl PlaybackPreviewAdapter,
 ) -> bool {
+    let presentation_successor_ready =
+        state.preview_successor_execution_request(std::time::Instant::now()).is_none();
+    observe_playback_video_preroll_with_presentation_readiness(
+        state,
+        adapter,
+        presentation_successor_ready,
+    )
+}
+
+/// Apply media lookahead together with a physically prepared successor fact.
+pub(crate) fn observe_playback_video_preroll_with_presentation_readiness(
+    state: &mut AppState,
+    adapter: &impl PlaybackPreviewAdapter,
+    presentation_successor_ready: bool,
+) -> bool {
     // Terminal deliveries may have rotated or stopped the Playback Session.
     // Capture preroll only after those facts were applied; reusing the poll
     // turn's transport intent would observe a stale Epoch or Priming state.
@@ -176,6 +191,7 @@ pub(crate) fn observe_playback_video_preroll(
             demand,
             readiness.ready_media_frames,
             readiness.preservable_media_frames,
+            presentation_successor_ready,
             observed_at,
         )
     })
@@ -296,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn pump_binds_preroll_to_the_recaptured_exact_demand() {
+    fn pump_binds_preroll_to_the_recaptured_exact_demand_and_waits_for_successor() {
         let mut state = AppState::new();
         state.set_playback_frame_running(4);
         let identity =
@@ -318,9 +334,15 @@ mod tests {
 
         let outcome = pump_playback_preview(&mut state, &adapter);
 
-        assert!(outcome.transport_change);
+        assert!(
+            !outcome.transport_change,
+            "media residency alone must not start the clock before the immediate successor is physically prepared"
+        );
         assert!(state.is_playing());
         assert_eq!(adapter.preroll_demand.get(), Some(identity));
+        assert!(observe_playback_video_preroll_with_presentation_readiness(
+            &mut state, &adapter, true
+        ));
     }
 
     #[test]

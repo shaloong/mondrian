@@ -526,7 +526,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             return;
         };
         let playback_direction = transport.playback_direction();
-        let prefetch_slots_available = prefetch_window_frames.saturating_sub(prefetch_pressure);
+        // The dedicated preroll-observation seam may admit the complete
+        // temporal prefix before Clock start. This recurring scheduler only
+        // replenishes bounded physical work; granting it the full Priming
+        // window would duplicate that authority and replace ready residency
+        // with queued reservations.
+        let physical_reservation_limit =
+            media_preview_steady_prefetch_reservation_limit(prefetch_window_frames);
+        let prefetch_slots_available = physical_reservation_limit.saturating_sub(prefetch_pressure);
         if prefetch_slots_available == 0 {
             bump(&self.metrics.prefetch_skipped_prefetch_backlog);
             return;

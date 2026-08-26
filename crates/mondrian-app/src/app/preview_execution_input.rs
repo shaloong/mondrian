@@ -65,6 +65,19 @@ impl AppState {
         PreviewFrameExecutionRequest::successor(self.preview_execution_snapshot(sampled_at), self)
     }
 
+    /// Capture ticketless CPU preparation for a bounded future playback frame.
+    pub(crate) fn preview_lookahead_execution_request(
+        &self,
+        sampled_at: Instant,
+        offset: usize,
+    ) -> Option<PreviewFrameExecutionRequest<'_>> {
+        PreviewFrameExecutionRequest::lookahead(
+            self.preview_execution_snapshot(sampled_at),
+            self,
+            offset,
+        )
+    }
+
     /// Recapture preroll facts after terminal Frame Deliveries were applied.
     pub(crate) fn preview_video_preroll_request(
         &self,

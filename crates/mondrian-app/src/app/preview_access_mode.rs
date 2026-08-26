@@ -493,6 +493,9 @@ pub(crate) struct MediaPreviewJob {
     pub(crate) adaptive_hints: PreviewDecodeAdaptiveHints,
     pub(crate) hardware_decode_request: PreviewHardwareDecodeRequest,
     pub(crate) hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
+    /// Effective request-binding admission instant used for queue-wait evidence.
+    /// Metadata-only priority/class/generation rebinding refreshes this value at
+    /// dequeue without replacing the physical execution payload.
     pub(crate) enqueued_at: Instant,
     pub(crate) deadline_at: Option<Instant>,
     /// Opaque Playback Session identity; media workers only carry it.
@@ -877,6 +880,8 @@ fn media_preview_job_from_execution(
     execution: mondrian_playback::FrameWorkExecution<MediaPreviewKey, Instant, MediaPreviewJob>,
 ) -> MediaPreviewJob {
     let mut job = execution.payload;
+    let dequeued_at = Instant::now();
+    job.enqueued_at = dequeued_at.checked_sub(execution.queue_wait).unwrap_or(dequeued_at);
     job.key = execution.key;
     job.generation = execution.generation;
     job.priority = media_preview_priority(execution.priority);

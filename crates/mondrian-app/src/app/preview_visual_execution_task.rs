@@ -599,7 +599,6 @@ impl VisualExecutionGpuFinalization {
     }
 
     /// Current and CacheOnly artifacts may enter semantic caches.
-    #[cfg(test)]
     pub(crate) const fn may_cache(self) -> bool {
         self.completion_recorded
             && self.resolution.completion.should_cache()

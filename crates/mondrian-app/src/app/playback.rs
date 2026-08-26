@@ -1456,6 +1456,7 @@ impl AppState {
             demand,
             ready_media_frames,
             preservable_media_frames,
+            true,
             Instant::now(),
         )
     }
@@ -1465,12 +1466,14 @@ impl AppState {
         demand: FrameDemandIdentity,
         ready_media_frames: usize,
         preservable_media_frames: usize,
+        presentation_successor_ready: bool,
         observed_at: Instant,
     ) -> bool {
         let observation = VideoPrerollObservation {
             demand,
             ready_media_frames,
             preservable_media_frames,
+            presentation_successor_ready,
         };
         let observed_timestamp = match self.playback_timestamp_for_observation(observed_at) {
             Ok(timestamp) => timestamp.max(self.playback_engine.monotonic_high_water()),
@@ -2173,7 +2176,7 @@ mod tests {
             .map(|demand| demand.identity())
             .expect("frame demand after play");
         let observed_at = state.playback_observation_instant_anchor;
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, observed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, observed_at));
         assert_eq!(
             state.advance_playback_clock(Duration::ZERO).status,
             PlaybackAdvanceStatus::WaitingForFrame,
@@ -2241,6 +2244,7 @@ mod tests {
             demand,
             0,
             0,
+            true,
             state.playback_observation_instant_anchor,
         ));
 
@@ -2650,7 +2654,7 @@ mod tests {
             Some(FrameDeliveryKind::Ready)
         );
         let demand = state.playback_engine.frame_demand().expect("warm seek demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, completed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, completed_at));
 
         let report = state.playback_evidence_report();
 
@@ -3231,7 +3235,7 @@ mod tests {
             .is_some());
         let priming_completed_at = observation_anchor + Duration::from_millis(17);
         let demand = state.playback_engine.frame_demand().expect("priming demand").identity();
-        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, priming_completed_at));
+        assert!(state.observe_video_preroll_at_wall(demand, 0, 0, true, priming_completed_at));
         assert_eq!(
             state.playback_engine.monotonic_high_water(),
             MonotonicTimestamp::from_duration(Duration::from_millis(17))

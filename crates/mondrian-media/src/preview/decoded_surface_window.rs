@@ -1,26 +1,28 @@
-//! Bounded session-local ownership for decoded reverse-playback candidates.
+//! Bounded session-local ownership for decoded temporal candidates.
 //!
-//! FFmpeg decodes inter-frame GOPs forward even when editorial transport moves
-//! backward. This window keeps a byte- and entry-bounded tail of that one
-//! forward scan so adjacent reverse requests replay already decoded pictures
-//! instead of seeking back to the same keyframe for every displayed frame.
+//! FFmpeg decodes inter-frame GOPs in presentation batches. Playback prefetch
+//! may therefore advance the codec beyond a visible request that is still in
+//! the scheduler, while reverse playback necessarily scans a GOP forward.
+//! This window retains a byte- and entry-bounded set of decoded surfaces so
+//! either access pattern can reuse those pictures without seeking the same GOP
+//! again.
 
 use std::collections::VecDeque;
 
-pub(super) struct ReverseDecodeWindow<T> {
+pub(super) struct DecodedSurfaceWindow<T> {
     capacity: usize,
     byte_budget: usize,
     reserved_bytes: usize,
-    entries: VecDeque<ReverseDecodeWindowEntry<T>>,
+    entries: VecDeque<DecodedSurfaceWindowEntry<T>>,
 }
 
-struct ReverseDecodeWindowEntry<T> {
+struct DecodedSurfaceWindowEntry<T> {
     pts: i64,
     reserved_bytes: usize,
     value: T,
 }
 
-impl<T> ReverseDecodeWindow<T> {
+impl<T> DecodedSurfaceWindow<T> {
     pub(super) fn new(capacity: usize, byte_budget: usize) -> Self {
         Self {
             capacity: capacity.max(1),
@@ -40,7 +42,7 @@ impl<T> ReverseDecodeWindow<T> {
             self.reserved_bytes = self.reserved_bytes.saturating_sub(replaced.reserved_bytes);
         }
         self.reserved_bytes = self.reserved_bytes.saturating_add(reserved_bytes);
-        self.entries.push_back(ReverseDecodeWindowEntry { pts, reserved_bytes, value });
+        self.entries.push_back(DecodedSurfaceWindowEntry { pts, reserved_bytes, value });
         while self.entries.len() > self.capacity || self.reserved_bytes > self.byte_budget {
             let Some(evicted) = self.entries.pop_front() else {
                 break;
@@ -67,11 +69,11 @@ impl<T> ReverseDecodeWindow<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::ReverseDecodeWindow;
+    use super::DecodedSurfaceWindow;
 
     #[test]
     fn window_evicts_oldest_entries_to_both_bounds() {
-        let mut window = ReverseDecodeWindow::new(3, 8);
+        let mut window = DecodedSurfaceWindow::new(3, 8);
         assert!(window.insert(10, 3, "a"));
         assert!(window.insert(20, 3, "b"));
         assert!(window.insert(30, 3, "c"));
@@ -88,7 +90,7 @@ mod tests {
 
     #[test]
     fn oversized_entry_never_displaces_a_usable_window() {
-        let mut window = ReverseDecodeWindow::new(2, 4);
+        let mut window = DecodedSurfaceWindow::new(2, 4);
         assert!(window.insert(10, 2, "a"));
         assert!(!window.insert(20, 5, "oversized"));
         assert_eq!(window.values().copied().collect::<Vec<_>>(), vec!["a"]);

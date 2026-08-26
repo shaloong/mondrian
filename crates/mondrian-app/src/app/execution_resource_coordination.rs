@@ -22,6 +22,8 @@ use mondrian_platform::{
     ExecutionMemoryProbe, PhysicalMemoryCapacityProbe, ProcessMemoryProbeResult,
     ProcessMemoryScope, SystemMemoryProbeResult, SystemPlatformService,
 };
+#[cfg(test)]
+use mondrian_playback::MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
 use mondrian_playback::{PreviewFrameStoreConfig, PreviewResolutionScale};
 use mondrian_renderer::{
     HeterogeneousCpuPrefixBatchGrant, HeterogeneousGpuResourceGrant,
@@ -40,7 +42,7 @@ use super::AppState;
 const MIB: usize = 1024 * 1024;
 
 /// Schema revision of the immutable execution-resource decision.
-pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 13;
+pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 14;
 const PROCESS_PRESSURE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_PRESSURE_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS: usize = 5;
@@ -1634,7 +1636,15 @@ fn preview_viewer_gpu_resource_grant(
             ViewerGpuExecutionResourceGrant::new(max_idle_per_contract, max_idle_bytes as u64)
         }
         ResourceTrimRequest::Speculative => {
-            ViewerGpuExecutionResourceGrant::new(1, (max_idle_bytes / 2).max(1) as u64)
+            // Speculative pressure may retire duplicate textures, but the
+            // byte grant must still hold one complete steady-state contract
+            // set. Halving this bound made UHD CPU-YUV playback evict its
+            // 126.6 MiB float working texture as the later 63.3 MiB display
+            // textures returned, forcing synchronous device allocations back
+            // into successor preparation. `max_per_contract = 1` removes the
+            // optional duplicates without turning frame-to-frame reuse into a
+            // disposable cache.
+            ViewerGpuExecutionResourceGrant::new(1, max_idle_bytes as u64)
         }
         ResourceTrimRequest::Aggressive => ViewerGpuExecutionResourceGrant::new(0, 0),
     };
@@ -1812,10 +1822,15 @@ fn preview_frame_store_config(
     let (media_entries, media_bytes, resource_units, viewer_entries, viewer_bytes) = match class {
         MachineResourceClass::BelowMinimum => (24, 96 * MIB, 4, 12, 48 * MIB),
         MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
-            (48, 192 * MIB, 6, 24, 96 * MIB)
+            (48, 256 * MIB, 6, 24, 96 * MIB)
         }
-        MachineResourceClass::Standard => (96, 384 * MIB, 8, 48, 192 * MIB),
-        MachineResourceClass::Professional => (128, 512 * MIB, 12, 64, 256 * MIB),
+        // Twenty compact 4K 10-bit 4:2:2 CPU frames fit in 640 MiB: the
+        // current frame, the complete bounded future horizon, and three
+        // physical decode reservations. This makes the temporal policy a
+        // realizable Standard-machine contract instead of an abstract count
+        // that byte admission silently shortens.
+        MachineResourceClass::Standard => (96, 640 * MIB, 8, 48, 192 * MIB),
+        MachineResourceClass::Professional => (128, 1024 * MIB, 12, 64, 256 * MIB),
     };
     let (current_entries, current_bytes, current_resource_units) = match class {
         MachineResourceClass::BelowMinimum => (4, 256 * MIB, 4),
@@ -2210,7 +2225,7 @@ mod tests {
         assert_eq!(decision.preview.viewer_gpu.grant.max_idle_per_contract(), 1);
         assert_eq!(
             decision.preview.viewer_gpu.grant.max_idle_bytes(),
-            64 * MIB as u64
+            128 * MIB as u64
         );
         assert!(!decision.preview.viewer_gpu.clear_idle);
     }
@@ -2678,6 +2693,25 @@ mod tests {
                 nominal.current_media_working_set_resource_unit_limit
             );
         }
+    }
+
+    #[test]
+    fn standard_preview_residency_physically_closes_the_4k_422_10_bit_horizon() {
+        const UHD_WIDTH: usize = 3840;
+        const UHD_HEIGHT: usize = 2160;
+        const YUV_422_10_BIT_BYTES_PER_PIXEL: usize = 4;
+        const STANDARD_DECODE_RESERVATIONS: usize = 3;
+
+        let compact_frame_bytes = UHD_WIDTH
+            .saturating_mul(UHD_HEIGHT)
+            .saturating_mul(YUV_422_10_BIT_BYTES_PER_PIXEL);
+        let required_owners = 1usize
+            .saturating_add(MAX_BOUNDED_VIDEO_PREROLL_FRAMES)
+            .saturating_add(STANDARD_DECODE_RESERVATIONS);
+        let standard =
+            preview_frame_store_config(MachineResourceClass::Standard, ResourceTrimRequest::None);
+
+        assert!(standard.media_byte_budget >= compact_frame_bytes.saturating_mul(required_owners));
     }
 
     #[test]

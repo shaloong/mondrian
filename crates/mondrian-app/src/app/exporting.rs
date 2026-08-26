@@ -279,6 +279,7 @@ impl AppState {
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn capture_timeline_export_snapshot(
     state: &AppState,
     sequence: mondrian_timeline::sequence::Sequence,

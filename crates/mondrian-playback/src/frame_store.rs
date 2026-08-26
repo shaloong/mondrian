@@ -46,7 +46,7 @@ impl Default for PreviewFrameStoreConfig {
     fn default() -> Self {
         Self {
             media_entry_capacity: 96,
-            media_byte_budget: 384 * MIB,
+            media_byte_budget: 640 * MIB,
             media_resource_unit_budget: 4,
             current_media_working_set_entry_limit: 16,
             current_media_working_set_byte_limit: 1024 * MIB,

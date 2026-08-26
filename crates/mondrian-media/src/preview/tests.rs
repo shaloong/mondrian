@@ -22,16 +22,16 @@ use super::{
     PreviewDecodeStageDurations, PreviewDecodeThreadingConfig, PreviewDecodeThreadingKind,
     PreviewDecodedFramePayload, PreviewHardwareDecodeBlocker,
     PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewNativeDecodeFallback,
-    PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
-    PreviewNativeDecodedFrameResource, PreviewPlaybackRing, PreviewScrubAdaptiveClass,
-    PreviewSeekIndex, PreviewSeekIndexCache, PreviewSeekIndexCachePolicy,
-    PreviewSeekIndexDiagnostics, PreviewSeekIndexSource, PreviewSeekResolution,
-    PreviewSourceColorContract, RgbaFrame, PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES, PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES,
-    PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES,
-    PREVIEW_SCRUB_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS,
-    PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
+    PreviewHardwareDecodePlan, PreviewHardwareDecodeRequest, PreviewIsolatedDemuxExecutionEvidence,
+    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
+    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewPlaybackRing,
+    PreviewScrubAdaptiveClass, PreviewSeekIndex, PreviewSeekIndexCache,
+    PreviewSeekIndexCachePolicy, PreviewSeekIndexDiagnostics, PreviewSeekIndexSource,
+    PreviewSeekResolution, PreviewSourceColorContract, RgbaFrame,
+    PREVIEW_EXACT_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_NATIVE_DECODE_EXTRA_HW_FRAMES,
+    PREVIEW_PLAYBACK_FORWARD_REUSE_FRAMES, PREVIEW_SCRUB_ANY_SEEK_WINDOW_MS,
+    PREVIEW_SCRUB_FORWARD_DECODE_BUDGET_FRAMES, PREVIEW_SCRUB_FORWARD_REUSE_FRAMES,
+    PREVIEW_SCRUB_HOT_ANY_SEEK_WINDOW_MS, PREVIEW_SCRUB_HOT_FORWARD_DECODE_BUDGET_FRAMES,
     PREVIEW_SCRUB_UNINDEXED_FORWARD_DECODE_BUDGET_FRAMES,
 };
 #[cfg(mondrian_ffmpeg_7_1)]
@@ -910,12 +910,12 @@ fn exr_decode_policy_disables_frame_thread_shutdown_deadlock() {
 }
 
 #[test]
-fn software_decode_threading_defaults_prefer_slice_for_uhd_playback() {
+fn software_decode_threading_defaults_to_frame_pipelining_for_every_access_mode() {
     let playback = super::PreviewDecodeAccessMode::PlaybackCursor;
     let scrub = super::PreviewDecodeAccessMode::ScrubCursor;
     assert_eq!(
         super::default_threading_kind_for_software_decode(playback, 3_840 * 2_160),
-        super::PreviewDecodeThreadingKind::Slice
+        super::PreviewDecodeThreadingKind::Frame
     );
     assert_eq!(
         super::default_threading_kind_for_software_decode(playback, 1_920 * 1_080),
@@ -3558,9 +3558,16 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         .ok()
         .and_then(|value| value.parse::<f64>().ok())
         .unwrap_or(0.0);
-    let frame_rate = std::env::var("MONDRIAN_PREVIEW_DECODE_FRAME_RATE")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
+    let frame_rate_spec =
+        std::env::var("MONDRIAN_PREVIEW_DECODE_FRAME_RATE").unwrap_or_else(|_| "25/1".to_owned());
+    let exact_frame_rate = frame_rate_spec.split_once('/').and_then(|(numerator, denominator)| {
+        let numerator = numerator.parse::<i64>().ok()?;
+        let denominator = denominator.parse::<i64>().ok()?;
+        (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+    });
+    let frame_rate = exact_frame_rate
+        .map(|(numerator, denominator)| numerator as f64 / denominator as f64)
+        .or_else(|| frame_rate_spec.parse::<f64>().ok())
         .unwrap_or(25.0)
         .max(1.0);
     let frame_count = std::env::var("MONDRIAN_PREVIEW_DECODE_SEQUENCE_FRAMES")
@@ -3577,8 +3584,29 @@ fn preview_decode_fixture_sequence_perf_smoke() {
     let p95_budget_us = std::env::var("MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US")
         .ok()
         .and_then(|value| value.parse::<u64>().ok());
+    let compact_yuv = std::env::var("MONDRIAN_PREVIEW_DECODE_COMPACT_YUV")
+        .ok()
+        .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
+    let demux_worker = std::env::var_os("MONDRIAN_PREVIEW_DEMUX_WORKER_PATH").map(PathBuf::from);
 
     clear_thread_local_preview_decode_session();
+    let (mut context, demux_mode, demux_observer) = if let Some(worker) = demux_worker {
+        let (bootstrap, observer) =
+            PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(worker);
+        (bootstrap.build(), "isolated_process", Some(observer))
+    } else {
+        (PreviewDecodeSessionContext::new(), "in_process", None)
+    };
+    let representation = if compact_yuv {
+        PreviewDecodeRepresentation::CompactCpuYuv
+    } else {
+        PreviewDecodeRepresentation::NativeCpu
+    };
+    let representation_name = if compact_yuv {
+        "compact_cpu_yuv"
+    } else {
+        "native_cpu"
+    };
     let access_mode = PreviewDecodeAccessMode::PlaybackCursor;
     let fingerprint = MediaFileFingerprint::capture(&path);
     let mut frames = Vec::with_capacity(frame_count);
@@ -3589,39 +3617,57 @@ fn preview_decode_fixture_sequence_perf_smoke() {
     let mut uncached_max_us = 0u64;
     let mut total_stage_durations = PreviewDecodeStageDurations::default();
     let mut max_frame_stage_durations = PreviewDecodeStageDurations::default();
+    let start_time = TimelineTime::from_f64_quantized(start_secs, 1_000_000)
+        .expect("quantized diagnostic start time");
     let started = Instant::now();
     for index in 0..frame_count {
-        let timestamp_secs = start_secs + index as f64 / frame_rate;
+        let source_time = if let Some((numerator, denominator)) = exact_frame_rate {
+            let frame_numerator = i64::try_from(index)
+                .expect("bounded diagnostic frame index")
+                .checked_mul(denominator)
+                .expect("bounded diagnostic frame offset");
+            start_time
+                .checked_add(
+                    TimelineTime::new(frame_numerator, numerator)
+                        .expect("exact diagnostic frame offset"),
+                )
+                .expect("bounded diagnostic source time")
+        } else {
+            TimelineTime::from_f64_quantized(start_secs + index as f64 / frame_rate, 1_000_000)
+                .expect("quantized diagnostic source time")
+        };
+        let timestamp_secs = source_time.to_f64();
         let frame_started = Instant::now();
-        let request = covering_decode_request(
+        let mut request = covering_decode_request(
             path.as_path(),
-            TimelineTime::from_f64_quantized(timestamp_secs, 1_000_000)
-                .expect("quantized diagnostic source time"),
+            source_time,
             PreviewDecodeAccessMode::PlaybackCursor,
             test_source_color().with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709),
         )
         .with_max_size(max_width, max_height)
         .with_fingerprint(fingerprint);
-        let (decoded_width, decoded_height, diagnostics) =
-            match decode_preview_frame_cancellable(request, || false)
-                .expect("decode preview fixture frame")
-            {
-                PreviewDecodeOutcome::Frame(frame) => {
-                    (frame.width, frame.height, frame.diagnostics)
-                }
-                PreviewDecodeOutcome::FloatFrame(frame) => {
-                    (frame.width, frame.height, frame.diagnostics)
-                }
-                PreviewDecodeOutcome::Canceled(_) => {
-                    panic!("playback sequence perf decode canceled")
-                }
-                PreviewDecodeOutcome::NativeGpuFrame(_) => {
-                    panic!("playback sequence perf decode requires CPU RGBA output")
-                }
-                PreviewDecodeOutcome::CpuYuvFrame(_) => {
-                    panic!("CPU-addressable playback perf decode returned compact GPU input")
-                }
-            };
+        request.representation = representation;
+        let (decoded_width, decoded_height, diagnostics) = match context
+            .decode_cancellable(request, || false)
+            .expect("decode preview fixture frame")
+        {
+            PreviewDecodeOutcome::Frame(frame) => (frame.width, frame.height, frame.diagnostics),
+            PreviewDecodeOutcome::FloatFrame(frame) => {
+                (frame.width, frame.height, frame.diagnostics)
+            }
+            PreviewDecodeOutcome::Canceled(_) => {
+                panic!("playback sequence perf decode canceled")
+            }
+            PreviewDecodeOutcome::NativeGpuFrame(_) => {
+                panic!("playback sequence perf decode requires CPU RGBA output")
+            }
+            PreviewDecodeOutcome::CpuYuvFrame(frame) if compact_yuv => {
+                (frame.width, frame.height, frame.diagnostics)
+            }
+            PreviewDecodeOutcome::CpuYuvFrame(_) => {
+                panic!("native CPU playback perf decode returned compact GPU input")
+            }
+        };
         let elapsed_us = duration_us(frame_started.elapsed());
         total_us = total_us.saturating_add(elapsed_us);
         max_us = max_us.max(elapsed_us);
@@ -3653,11 +3699,17 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         frames.iter().filter(|frame| !frame.cache_hit).map(|frame| frame.elapsed_us),
         95,
     );
+    context.clear();
+    let isolated_demux = demux_observer.map(|observer| observer.snapshot().isolated_demux);
     let report = PreviewDecodeSequencePerfReport {
         path: path.display().to_string(),
+        demux_mode,
+        representation: representation_name,
         access_mode: access_mode.as_str(),
         start_secs,
         frame_rate,
+        frame_rate_numerator: exact_frame_rate.map(|(numerator, _)| numerator),
+        frame_rate_denominator: exact_frame_rate.map(|(_, denominator)| denominator),
         frame_count,
         max_width,
         max_height,
@@ -3673,12 +3725,15 @@ fn preview_decode_fixture_sequence_perf_smoke() {
         p95_budget_us,
         total_stage_durations,
         max_frame_stage_durations,
+        isolated_demux,
         frames,
     };
     let json = serde_json::to_string(&report).expect("serialize sequence decode perf report");
     eprintln!(
-        "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={}",
+        "MONDRIAN_PREVIEW_DECODE_SEQUENCE_PERF_SUMMARY path=\"{}\" demux_mode={} representation={} access_mode={} frames={} avg_us={} p95_us={} max_us={} uncached_frames={} uncached_avg_us={} uncached_p95_us={} uncached_max_us={} p95_budget_us={:?} packet_decode_us={} hardware_transfer_us={} swscale_us={} rgba_copy_us={}",
         report.path,
+        report.demux_mode,
+        report.representation,
         report.access_mode,
         report.frame_count,
         report.avg_us,
@@ -3765,9 +3820,13 @@ struct PreviewDecodePerfReport {
 #[derive(Debug, Serialize)]
 struct PreviewDecodeSequencePerfReport {
     path: String,
+    demux_mode: &'static str,
+    representation: &'static str,
     access_mode: &'static str,
     start_secs: f64,
     frame_rate: f64,
+    frame_rate_numerator: Option<i64>,
+    frame_rate_denominator: Option<i64>,
     frame_count: usize,
     max_width: Option<u32>,
     max_height: Option<u32>,
@@ -3783,6 +3842,7 @@ struct PreviewDecodeSequencePerfReport {
     p95_budget_us: Option<u64>,
     total_stage_durations: PreviewDecodeStageDurations,
     max_frame_stage_durations: PreviewDecodeStageDurations,
+    isolated_demux: Option<PreviewIsolatedDemuxExecutionEvidence>,
     frames: Vec<PreviewDecodeSequenceFrameReport>,
 }
 

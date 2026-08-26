@@ -548,6 +548,13 @@ promotion from silently dropping a queued physical lease. If a newly acquired
 payload loses a later ordinary submit race, move/drop semantics release or
 replace that exact lease.
 
+The Broker, not an opaque Adapter payload timestamp, owns queue-wait authority.
+Every dequeued `FrameWorkExecution` carries the elapsed time since its latest
+compatible pending binding. A metadata-only prefetch-to-current promotion
+refreshes that binding timestamp while preserving the payload, so realtime
+Current evidence excludes time deliberately spent resident as speculative
+Prefetch work.
+
 Physical decoded-media capacity preemption is deliberately two-step. A Current
 reservation first cancels at most one queued Prefetch payload, whose move-only
 work lease is released by that removal, and retries admission. If no queued
@@ -820,10 +827,15 @@ wait for `Ready`. If preflight or completion consumes that demand as `Late`,
 the gate records a non-ready terminal sample and applies its unchanged quality
 threshold; it must not wait for an impossible no-ticket retry or relabel the
 sample as ready. Initial/preroll and paused-still probes still require an exact
-usable output. During startup priming, however, the Adapter must keep advancing
-the authoritative Clock: expiry of the bounded priming hold permits frame
-skips and a later exact-current output, rather than freezing the expired frame
-zero demand forever.
+usable output. During startup priming, expiry of the bounded hold may advance
+the authoritative Clock only when the current frame is not presentable or the
+Adapter never reported a future-media prefix. Once the current frame is
+presentable and a fresh Adapter observation proves that preservable future
+media still has a shorter ready prefix, the expired timer cannot bypass that
+explicit readiness fact. Preview result publication owns the next wake; the
+Engine returns no already-expired timer that could busy-spin the Window event
+loop. A failed or unavailable prefix must publish a changed observation or
+health fact rather than freeze an obsolete loading claim.
 
 Pressure recovery may advance the quality revision while a terminal Headless
 observation is closing the same Epoch and timeline frame. The observation then
@@ -866,6 +878,23 @@ future Frame Demand, extends a deadline, nor survives Preview-generation
 rotation. Only an exact current-coordinate request promotes semantic and
 physical ownership. Late cleanup is artifact/submission-scoped and cannot erase
 or revive a newer prepared result.
+
+The immediate-successor GPU slot is complemented by a four-entry,
+Adapter-owned CPU-complete staging horizon. Three entries cover coordinates
+`current+2` through `current+4` (or the reverse-direction equivalents); the
+fourth permits an immediate successor blocked on GPU admission without
+evicting that horizon. These entries own neither a GPU submission nor a
+physical/semantic publication. When a clock displacement lands directly on a
+staged coordinate, the Adapter may attach the freshly captured current
+presentation ticket only if Preview generation, Epoch, quality revision, and
+frame all match. Authoring, display, resolution, seek, or quality rotation
+therefore retires the entry through RAII. Heterogeneous effect work retains its
+original Broker purpose and is deliberately ineligible for this ticket
+transition; it re-enters the ordinary current-demand execution path.
+Adapters fill at most the nearest missing staged coordinate per coordinator
+turn. Repeated turns converge on the horizon; one turn may not burst three
+speculative evaluations into the media/visual scheduler and compete with the
+current Playback demand.
 
 `app::viewer_gpu_publication::ViewerGpuPublicationSlots` is the sole physical
 ownership Module for this contract. It retains one current and one prepared
@@ -1070,7 +1099,7 @@ magic constants embedded in UI code:
 | --- | ---: | --- |
 | audio preroll target | 120 ms | measured at output sample rate |
 | minimum video priming | one presented current frame plus the ready prefix of the bounded future media window (maximum 16 frames) | stale does not satisfy current presentation; pure audio/procedural/end-of-sequence playback has no media lookahead requirement |
-| normal play priming limit | 1,500 ms | bounded cold CPU/Long-GOP session establishment and future-media preroll; then start the clock if no correctness blocker |
+| normal play priming limit | 1,500 ms | bounded cold CPU/Long-GOP establishment; fallback may start only without an explicit presented-current + pending-media-prefix readiness obligation |
 | seek priming limit | 750 ms | exact current frame remains highest priority |
 | interactive control wake while priming | ≤100 ms | pause/seek/close remain responsive |
 | recovery pressure entry | at least 8 late/failed current deliveries in the latest 12 | excludes canceled old epochs |
@@ -1082,8 +1111,8 @@ Current-frame presentation and media lookahead are independent observations.
 The Engine records the terminal current Frame Delivery exactly once, while the
 Preview Adapter reports a bounded `VideoPrerollObservation` containing the
 exact current `FrameDemandIdentity` plus ready and physically preservable
-future media-frame counts. Neither
-signal can release `Priming` alone. The required lookahead is
+future media-frame counts. Neither signal can release `Priming` alone. The
+required media lookahead is
 `min(policy.minimum_video_preroll_frames, preservable_media_frames)`, where the
 second value is the complete immediate future media-bearing prefix proved able
 to coexist within the Adapter's physical resource and work-admission grants.
@@ -1102,12 +1131,15 @@ at the end of a sequence, a pure-audio sequence, or an immediate procedural
 frame does not acquire an artificial delay. A consumed current demand remains
 visible to Playback Evidence but cannot issue another Presentation Ticket.
 
-If the priming limit expires with no correctness blocker, the session enters
-Playing rather than freezing transport indefinitely. Audio Device Master starts
-when audio is ready; otherwise Synthetic Master starts. The Viewer retains a
-stale frame or explicit loading presentation until a current delivery arrives.
-Blocked color, unsupported required format, or invalid timeline contracts do not
-use this timeout escape.
+If the priming limit expires before a current presentation or before the
+Adapter supplies any future-media observation, the session enters Playing
+rather than freezing transport indefinitely. Audio Device Master starts when
+audio is ready; otherwise Synthetic Master starts. An explicit observation
+whose preservable media prefix is not yet ready is different: after current
+presentation it keeps the clock in Priming and waits on Preview's work
+revision, not the expired timer. Blocked color, unsupported required format,
+invalid timeline contracts, and a proved pending media prefix do not use the
+timeout escape.
 
 ### Production preview execution pump
 
@@ -1373,7 +1405,7 @@ current/stale Viewer raster. Adapters supply stable opaque keys, conservative
 pre-work reservations, measured post-work charges, and an equality-comparable
 Viewer presentation scope; the Module does not import media, renderer, UI, or
 clock types. The generic standalone `PreviewFrameStoreConfig::default` is
-96 optional media entries/384 MiB/four native resource units, one exact-current
+96 optional media entries/640 MiB/four native resource units, one exact-current
 demand grant of 16 entries/1 GiB/eight native resource units, 48 Viewer
 entries/192 MiB, and 192 remembered failures. Those values are
 fallback/reference defaults, not a fixed product budget.
@@ -1434,8 +1466,8 @@ decode failure, remembered in terminal decode-failure state, or retried as an
 Production Window and Headless Preview always apply the current immutable App
 resource decision. Before pressure trimming, the below-minimum, 8 GiB,
 16 GiB, and 32 GiB-or-larger classes respectively receive media
-entry/byte/native-unit limits of 24/96 MiB/4, 48/192 MiB/6,
-96/384 MiB/8, and 128/512 MiB/12, plus Viewer entry/byte limits of
+entry/byte/native-unit limits of 24/96 MiB/4, 48/256 MiB/6,
+96/640 MiB/8, and 128/1 GiB/12, plus Viewer entry/byte limits of
 12/48 MiB, 24/96 MiB, 48/192 MiB, and 64/256 MiB. Unknown capacity uses the
 conservative 8 GiB policy while remaining distinct evidence. Their exact-current
 per-demand grants are respectively 4/256 MiB/4, 8/512 MiB/8,
@@ -1443,12 +1475,21 @@ per-demand grants are respectively 4/256 MiB/4, 8/512 MiB/8,
 only optional cache counts, bytes, and native units. It never reduces an
 in-progress correctness grant or the 192-key failure bound.
 
-The maximum temporal prefetch candidate depth remains eight frames; byte and
-native-unit admission may shorten it. The 250 ms target is fully represented
-through 30 fps; at higher frame rates the speculative horizon is capped (about
-133 ms at 60 fps) to preserve decoder DPB/import headroom. A media reservation
-includes current linear-float pixels, encoded source pixels, and the possible
-lazy working-frame allocation, so a deferred
+The maximum temporal prefetch candidate depth is the Playback Engine's bounded
+16-frame preroll contract. The requested count represents up to 250 ms at the
+Sequence rate; exact Store byte, entry, and decoder-resource-unit admission may
+shorten it. Native decode therefore remains bounded by its machine-class
+surface-unit grant (eight on the Standard class), while a compact CPU-YUV
+source can use a longer 60 fps prefix when its actual retained planes fit. The
+Standard 640 MiB policy physically fits the current frame, all 16 compact 4K
+10-bit 4:2:2 future frames, and three in-flight decode reservations; the 250 ms
+software-decode promise therefore does not collapse to roughly 150 ms solely
+because each retained plane set is about 31.6 MiB. The App enforces this
+physical decomposition: Priming may fill the entire temporal prefix, but steady
+Running admits no more than three queued-plus-in-flight prefetch reservations
+and tops them up as work completes. A
+media reservation includes current linear-float pixels, encoded source pixels,
+and the possible lazy working-frame allocation, so a deferred
 color transform cannot silently grow beyond its admitted reservation. One
 payload larger than its budget remains usable for the current delivery through
 the bounded current-working-set overflow only when it fits both the exact-demand

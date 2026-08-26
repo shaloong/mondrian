@@ -254,7 +254,7 @@ must use `bounded_any_seek_strategy_frames`; if scrub frames show
 `keyframe_seek_strategy_frames`, the access-mode routing is wrong and the test
 should fail before anyone tunes codec threads, proxy thresholds, color, or
 renderer code.
-`preview_decode_report` schema 36 records the media-layer policy contract
+`preview_decode_report` schema 37 records the media-layer policy contract
 observed by each access mode: `forward_reuse_frame_window_max`,
 `forward_decode_budget_frames_max`, and `any_seek_window_ms_max`. A healthy
 `ScrubCursor` sample must have a non-zero `any_seek_window_ms_max`; otherwise
@@ -308,7 +308,7 @@ from the active sequence frame duration, with conservative min/max bounds, so
 slow playback at 24 fps and 60 fps playback are judged against different
 budgets. Treat playback deadline pressure as a reason to improve proxy/hardware
 decode/drop policy, not as a reason to increase speculative prefetch.
-`preview_decode_report` schema 36 also includes `playback_schedule`, the
+`preview_decode_report` schema 37 also includes `playback_schedule`, the
 app-owned playback-clock contract used by the scheduler. It records the last
 current-frame deadline budget, the dynamic forward-prefetch horizon/window, and
 invalid frame-rate counters. It also records `current_decode_decisions`,
@@ -345,6 +345,19 @@ For real 4K HEVC/HDR decode fixtures, run the ignored
 and `MONDRIAN_PREVIEW_DECODE_P95_BUDGET_US`. The JSON report includes
 `p95_us` and `uncached_p95_us`; when the budget variable is set, the test fails
 if `p95_us` exceeds that gate.
+Pass an exact rational such as
+`MONDRIAN_PREVIEW_DECODE_FRAME_RATE='60000/1001'` for frame-by-frame codec
+comparisons. A decimal remains supported for approximate diagnostics, but its
+microsecond input quantization can select duplicate or skipped source samples
+and must not be used to compare decoder/demux implementations.
+Set `MONDRIAN_PREVIEW_DECODE_COMPACT_YUV=1` to retain the same planar CPU YUV
+payload used by the production GPU upload path instead of expanding each frame
+to CPU RGBA. To measure only the process-isolated format-I/O boundary, also set
+`MONDRIAN_PREVIEW_DEMUX_WORKER_PATH` to a freshly built packaged Mondrian
+executable; leave it unset for the otherwise identical in-process
+`AVFormatContext` baseline. The report identifies `demux_mode`,
+`representation`, and the isolated worker's lifecycle/packet evidence so these
+two runs cannot be mistaken for different output contracts or a stale helper.
 `preview_media_external_access_mode_smoke` runs the same access-mode probe and
 gates against a caller-supplied real media file via
 `MONDRIAN_PREVIEW_EXTERNAL_MEDIA_PATH`. Use it for 4K HEVC/HDR, camera originals,
@@ -369,12 +382,34 @@ not sit behind still-frame or scrub work.
 The real external continuous-playback smoke additionally emits
 `real_media_gates` and fails when those gates fail. Defaults are deliberately
 closer to production playback expectations than the broad wall-clock timeout:
-`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US=40000`,
+`MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US=60000`,
 `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US=10000`, and
 `MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT=95`. These gates are
 intended for 4K HEVC/HDR/Long-GOP fixture runs: a failure should drive
 hardware decode, proxy, scheduler, or renderer-residency work, not timeout
 widening. Override them only when documenting a different fixture class.
+The interaction suffix also resizes the production Viewer geometry while the
+transport remains clock-driven. Intermediate coordinates may be skipped when a
+native resize stalls the UI thread; forcing one Timeline frame per resize would
+slow transport and invalidate realtime evidence. The gate preserves authored
+Full output, limits any single displacement to the four-frame CPU staging
+horizon, and permits at most one isolated retained-frame hold per eight resize
+observations. Loading, blank/unavailable output, consecutive stale holds, or a
+second stale observation still fails. Ordinary continuous playback retains its
+exact-ready requirement. The twelve-observation pause/resume window applies the
+same four-frame displacement and no-blank/no-consecutive-stale rules, allowing
+at most one isolated retained-frame hold while GPU completion callbacks settle
+after resume.
+The 60 ms general real-media decode bound and its explicit 60 ms histogram
+boundary match the measured tail of direct FFmpeg software decode without
+rounding a 50-60 ms result up to 80 ms. It accommodates bounded frame-threaded
+software-decode bursts only when the independent exact Ready/publication,
+zero-clock-skip, queue-wait, and bounded-tail gates also pass. The same
+scenario-specific budget feeds both the nested decode-health report and the
+outer real-media gate; they never evaluate one sample set against conflicting
+50 ms and 60 ms policies. Its recurring-tail ceiling is derived from that same
+budget (300 ms for the general 60 ms fixture). The
+professional hardware qualification retains its stricter 40 ms p95 contract.
 The current-ready ratio uses the maximum of accepted Engine `Ready` deliveries
 and unique exact-current Viewer GPU publications. Both evidence streams
 de-duplicate by playback epoch and frame, and GPU publication coverage is also

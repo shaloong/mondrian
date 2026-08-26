@@ -1458,6 +1458,11 @@ owner and exact queue callback, then infallibly commits the matching wgpu
 `SubmissionIndex` through the permit. The callback owns a separate cleanup
 ticket captured before submit.
 
+Exhausting that bounded progress capacity is ordinary retriable backpressure in
+both Adapters: Window ends the current preparation turn, while Headless returns
+the same typed Viewer backpressure used by presentation-capacity admission. It
+does not terminalize the device generation or fail an opportunistic successor.
+
 The dedicated non-UI worker first issues bounded eight-millisecond
 `PollType::Wait` calls for that exact index. A wait timeout means “continue
 driving this submission”; it is neither semantic completion nor a renewed
@@ -1488,6 +1493,28 @@ third submission is backpressured. Cancellation, Window cleanup, and a device
 generation terminal quarantine every active identity; cleanup remains deferred
 until each exact callback (or typed device-loss retirement proof) releases its
 owner.
+
+Headless realtime coordination may fill that second slot as soon as the exact
+current frame has been submitted, including while its completion is still
+`InFlight`; it need not serialize successor recording behind current-frame
+completion. The successor remains ticketless and cannot publish early, while
+the shared two-owner admission prevents speculation from running ahead.
+
+Window and Headless additionally share `PreviewGpuFrameStaging`, a bounded
+four-entry CPU-ready queue keyed by the complete playback intent. It warms the
+next three coordinates beyond the immediate successor without consuming GPU
+output capacity. Staging also invokes the Renderer command-free compact-YUV
+preflight, so the renderer-owned worker can fill its mapped transfer buffer
+several frame intervals before the exact candidate is submitted; this is
+preparation only and creates no GPU output or semantic `Prepared` authority. A
+clock jump can take an exact staged entry and bind the new
+current Frame Demand only through `PreviewProductionRuntime`, which validates
+the execution generation and intent before attaching the frame-local quality
+ticket. The queue never creates semantic `Prepared` state, and heterogeneous
+Broker work cannot change purpose through this path.
+The horizon is populated incrementally, one nearest missing entry per event or
+Headless coordinator turn, so its depth does not multiply per-frame decode
+admission pressure.
 
 A unique `set_device_lost_callback` is installed immediately after
 `request_device`, before any runtime or queue consumer. It can terminalize an

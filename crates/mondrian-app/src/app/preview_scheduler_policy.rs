@@ -8,7 +8,9 @@ use mondrian_media::{
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeDiagnostics,
     PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
 };
-use mondrian_playback::{FrameDeliveryKind, FramePresentationQuality};
+use mondrian_playback::{
+    FrameDeliveryKind, FramePresentationQuality, MAX_BOUNDED_VIDEO_PREROLL_FRAMES,
+};
 
 /// Wall-clock lookahead used to derive playback prefetch depth.
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 250_000;
@@ -16,11 +18,22 @@ pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_HORIZON_US: u64 = 250_000;
 pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES: usize = 1;
 /// Maximum playback prefetch depth regardless of frame rate.
 ///
-/// Native frames retain decoder surfaces. Eight frames preserve the complete
-/// 250 ms horizon through 30 fps while leaving explicit DPB/import headroom on
-/// hardware decoders whose advertised extra-frame pool is not a hard runtime
-/// guarantee. Higher-rate Timelines degrade the horizon, never correctness.
-pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize = 8;
+/// This is only a temporal/work-count guard. Exact Frame Store byte, entry,
+/// and decoder-resource-unit headroom remains the physical admission
+/// authority. In particular, a native decode is still bounded by its decoder
+/// surface-unit grant, while a compact CPU YUV source may use the complete
+/// 250 ms horizon when its actual retained plane bytes fit.
+pub(crate) const MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES: usize =
+    MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
+/// Maximum queued plus in-flight prefetch decodes after Priming completes.
+///
+/// The temporal window and the physical execution queue are separate
+/// resources. Keeping at most one executing and two queued decodes lets the
+/// Standard 640 MiB policy retain the complete compact 4K 4:2:2 10-bit
+/// lookahead instead of replacing ready frames with reservations for farther
+/// work. Priming may still admit the complete bounded prefix before the Clock
+/// Master starts.
+pub(crate) const MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT: usize = 3;
 /// Consecutive current-frame late results required to declare sustained pressure.
 pub(crate) const MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD: u64 = 2;
 pub(crate) const PREVIEW_SCRUB_HOT_REQUEST_WINDOW_US: u64 = 250_000;
@@ -262,6 +275,15 @@ pub(crate) fn media_preview_forward_prefetch_window_frames(frame_rate: Rational)
     ))
 }
 
+/// Bound speculative physical work independently of temporal lookahead depth.
+pub(crate) const fn media_preview_steady_prefetch_reservation_limit(window_frames: usize) -> usize {
+    if window_frames < MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT {
+        window_frames
+    } else {
+        MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT
+    }
+}
+
 /// Whether the request selected a hardware-decode preference rather than CPU-only Auto.
 pub(crate) fn playback_hardware_decode_requested(request: PreviewHardwareDecodeRequest) -> bool {
     matches!(
@@ -394,6 +416,18 @@ mod tests {
         assert_eq!(
             media_preview_forward_prefetch_window_frames(Rational::new(1, 1)),
             Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MIN_FRAMES)
+        );
+    }
+
+    #[test]
+    fn prefetch_window_preserves_the_wall_clock_horizon_at_standard_frame_rates() {
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::new(30, 1)),
+            Some(8)
+        );
+        assert_eq!(
+            media_preview_forward_prefetch_window_frames(Rational::new(60_000, 1_001)),
+            Some(15)
         );
     }
 

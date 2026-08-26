@@ -13,7 +13,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::app::preview_execution::{
-    PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
+    PreviewGpuFrame, PreviewGpuFrameStaging, PreviewGpuFrameState,
+    PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
 use crate::app::preview_gpu_output_blocker::{
     PreviewGpuOutputBlocker, PreviewGpuOutputBlockerBreakdown,
@@ -1174,6 +1175,10 @@ struct AppUiWindowSession {
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
     >,
+    /// Bounded CPU-complete ticketless horizon. It owns no GPU submission or
+    /// presentation lease; an exact entry may either become the immediate
+    /// successor or acquire the current Frame Demand after a clock jump.
+    staged_viewer_gpu_successors: PreviewGpuFrameStaging,
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
     program_scopes_refresh_requested: bool,
@@ -3708,7 +3713,11 @@ fn complete_window_viewer_gpu_submission(
         retire_window_viewer_gpu_registration(session, host, &mut owner);
         return;
     };
-    match host.finalize_heterogeneous_viewer_gpu(terminal, &completion) {
+    match host.finalize_heterogeneous_viewer_gpu(
+        terminal,
+        &completion,
+        owner.frame.is_successor_preparation(),
+    ) {
         Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
             if let Some(scopes) = owner.program_scopes.as_ref() {
                 if let Err(error) = register_program_scopes_textures(session, device, scopes) {
@@ -3723,6 +3732,14 @@ fn complete_window_viewer_gpu_submission(
             let _ =
                 publish_completed_window_viewer_gpu_owner(session, host, submission_id, &mut owner);
         }
+        Ok(PreviewVisualGpuCompletionDisposition::PrepareSuccessor) => {
+            let _ = retain_completed_window_viewer_gpu_successor(
+                session,
+                host,
+                submission_id,
+                &mut owner,
+            );
+        }
         Ok(
             PreviewVisualGpuCompletionDisposition::Release
             | PreviewVisualGpuCompletionDisposition::TerminalCandidate(_),
@@ -3736,6 +3753,70 @@ fn complete_window_viewer_gpu_submission(
             tracing::warn!("heterogeneous Viewer completion evidence rejected: {error}");
         }
     }
+}
+
+fn retain_completed_window_viewer_gpu_successor(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    submission_id: ViewerGpuSubmissionId,
+    owner: &mut WindowViewerGpuSubmissionOwner,
+) -> bool {
+    if !owner.frame.is_successor_preparation()
+        || owner.frame.presentation_ticket().is_some()
+        || !owner.texture_registered
+    {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed heterogeneous successor has an invalid publication contract"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    }
+    let Some(output_lease) = owner.output_lease.take() else {
+        tracing::error!(
+            submission_id = submission_id.get(),
+            "completed heterogeneous successor has no physical output lease"
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        return false;
+    };
+    let Some(visible_output) = mondrian_ui_widgets::ViewerExternalTextureFrame::new_spatial(
+        owner.texture_key.as_str().to_owned(),
+        owner.presentation,
+    ) else {
+        retire_window_viewer_gpu_registration(session, host, owner);
+        drop(output_lease);
+        return false;
+    };
+    host.register_prepared_viewer_gpu_successor(&owner.frame, visible_output);
+    if session.viewer_gpu_device_progress.generation_terminal().is_some() {
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            &owner.frame.output_key,
+            owner.texture_key.as_str(),
+        );
+        retire_window_viewer_gpu_registration(session, host, owner);
+        drop(output_lease);
+        return false;
+    }
+    owner.texture_registered = false;
+    if let Some(previous) = session.viewer_gpu_presentation.publications.publish_prepared(
+        submission_id,
+        owner.frame.output_key.clone(),
+        owner.texture_key.clone(),
+        output_lease,
+    ) {
+        session.frame_renderer.unregister_external_texture(previous.artifact());
+        let _ = host.clear_external_viewer_frame_for_artifact(
+            previous.output_key(),
+            previous.artifact().as_str(),
+        );
+        drop(previous);
+    }
+    session
+        .viewer_gpu_output_telemetry
+        .record_registered_frame(owner.stage_diagnostics);
+    let _ = host.observe_prepared_viewer_gpu_preroll();
+    true
 }
 
 fn drive_viewer_heterogeneous_completion(
@@ -3800,6 +3881,7 @@ fn prepare_viewer_gpu_preview(
     }
     let submission_in_flight = session.viewer_gpu_submissions.is_occupied();
     if session.viewer_gpu_submissions.is_at_capacity() {
+        stage_window_viewer_gpu_lookahead(session, host);
         session
             .viewer_gpu_output_telemetry
             .record_prepare_duration(prepare_started.elapsed());
@@ -3886,7 +3968,15 @@ fn prepare_viewer_gpu_preview(
         host.clear_external_viewer_frame();
         session.program_scopes_refresh_requested = true;
     }
-    let mut frame = match host.gpu_preview_frame_for_current_state() {
+    let staged_current = session
+        .staged_viewer_gpu_successors
+        .take_exact(host.viewer_gpu_current_intent())
+        .and_then(|frame| host.bind_staged_gpu_frame_for_current(frame));
+    let current_candidate = staged_current.map_or_else(
+        || host.gpu_preview_frame_for_current_state(),
+        PreviewGpuFrameState::Ready,
+    );
+    let mut frame = match current_candidate {
         PreviewGpuFrameState::Ready(frame) => frame,
         PreviewGpuFrameState::Current(candidate) => {
             let physical_slot_is_exact =
@@ -3930,13 +4020,25 @@ fn prepare_viewer_gpu_preview(
             if program_scopes_requested {
                 finish_prepare!();
             }
-            match host.gpu_preview_successor_for_current_state() {
-                PreviewGpuFrameState::Ready(frame) => frame,
+            let staged = host
+                .viewer_gpu_successor_intent()
+                .and_then(|intent| session.staged_viewer_gpu_successors.take_exact(intent));
+            match staged.map_or_else(
+                || host.gpu_preview_successor_for_current_state(),
+                PreviewGpuFrameState::Ready,
+            ) {
+                PreviewGpuFrameState::Ready(frame) => {
+                    stage_window_viewer_gpu_lookahead(session, host);
+                    frame
+                }
                 PreviewGpuFrameState::Prepared
                 | PreviewGpuFrameState::Current(_)
                 | PreviewGpuFrameState::Transparent(_)
                 | PreviewGpuFrameState::Loading
-                | PreviewGpuFrameState::Unavailable(_) => finish_prepare!(),
+                | PreviewGpuFrameState::Unavailable(_) => {
+                    stage_window_viewer_gpu_lookahead(session, host);
+                    finish_prepare!()
+                }
             }
         }
         PreviewGpuFrameState::Prepared => {
@@ -3988,10 +4090,6 @@ fn prepare_viewer_gpu_preview(
     if !frame.is_successor_preparation()
         && !host.preflight_viewer_gpu_presentation(frame.presentation_ticket())
     {
-        finish_prepare!();
-    }
-    if frame.is_successor_preparation() && frame.has_heterogeneous_gpu_execution() {
-        fail_viewer_gpu_frame(host, &mut frame);
         finish_prepare!();
     }
     let Some(texture_key_base) = ExternalTextureKey::new(format!(
@@ -4530,6 +4628,51 @@ fn prepare_viewer_gpu_preview(
         .record_prepare_duration(prepare_started.elapsed());
 }
 
+/// Warm a bounded CPU-side horizon beyond the immediate successor.
+///
+/// The staged frame is deliberately not registered with Preview semantics and
+/// owns no physical Viewer output. Transport rotation drops it through RAII.
+fn stage_window_viewer_gpu_lookahead(session: &mut AppUiWindowSession, host: &AppUiHost) {
+    const FIRST_LOOKAHEAD_OFFSET: usize = 2;
+    const LAST_LOOKAHEAD_OFFSET: usize = 4;
+    let expected = std::iter::once(host.viewer_gpu_successor_intent())
+        .chain(
+            (FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET)
+                .map(|offset| host.viewer_gpu_lookahead_intent(offset)),
+        )
+        .flatten()
+        .collect::<Vec<_>>();
+    session.staged_viewer_gpu_successors.retain_only(&expected);
+
+    for offset in FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET {
+        let Some(intent) = host.viewer_gpu_lookahead_intent(offset) else {
+            continue;
+        };
+        if session.staged_viewer_gpu_successors.contains(intent) {
+            continue;
+        }
+        if let PreviewGpuFrameState::Ready(frame) =
+            host.gpu_preview_lookahead_for_current_state(offset)
+            && frame.is_successor_preparation()
+            && frame.playback_intent() == intent
+        {
+            let PreviewGpuWorkingInput::GpuComposite { layers } = &frame.working_input;
+            if let Err(error) = session.viewer_gpu_execution.prepare_cpu_yuv_uploads(layers) {
+                tracing::warn!(
+                    %error,
+                    timeline_frame = frame.frame,
+                    "failed to prewarm compact CPU YUV Viewer lookahead"
+                );
+            }
+            session.staged_viewer_gpu_successors.stage(frame);
+        }
+        // Preserve current-frame priority: each event-loop turn may fill only
+        // the nearest missing speculative coordinate. Later turns extend the
+        // same bounded horizon without a three-request burst.
+        break;
+    }
+}
+
 fn register_ordinary_window_program_scopes(
     session: &mut AppUiWindowSession,
     device: &wgpu::Device,
@@ -4634,6 +4777,7 @@ fn publish_ordinary_window_viewer_gpu_submission(
                 .viewer_gpu_output_telemetry
                 .record_registered_frame(owner.stage_diagnostics);
         }
+        let _ = host.observe_prepared_viewer_gpu_preroll();
         return;
     }
     let disposition = {
@@ -5196,6 +5340,8 @@ impl AppUiWindowSession {
 
         let frame_renderer = AppUiFrameRenderer::new(device, config.format);
         let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
+        viewer_gpu_execution
+            .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
         let viewer_gpu_device_progress = match viewer_gpu_device_progress {
             Some(progress) => ViewerGpuDeviceGenerationMember::new(progress),
             None => ViewerGpuDeviceGenerationMember::empty(),
@@ -5221,6 +5367,7 @@ impl AppUiWindowSession {
             viewer_gpu_execution: ViewerGpuDeviceGenerationMember::new(viewer_gpu_execution),
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions,
+            staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
             program_scopes_refresh_requested: false,

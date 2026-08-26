@@ -2,7 +2,8 @@ use super::request_scheduler::MediaPreviewRequestAdmission;
 use super::*;
 use crate::app::preview_access_mode::MediaPreviewRequestIntent;
 use crate::app::preview_execution::{
-    PreviewOutputKey, PreviewSemanticIdentity, PreviewSemanticIdentityBuilder,
+    PreviewGpuFrameStaging, PreviewOutputKey, PreviewSemanticIdentity,
+    PreviewSemanticIdentityBuilder, PREVIEW_GPU_CPU_STAGING_CAPACITY,
 };
 use crate::app::preview_frame_store::MediaWorkReservationAdmission;
 use crate::app::preview_raster_frame::{
@@ -530,6 +531,7 @@ fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner(
     let decision = coordinator.decision();
 
     runtime.apply_resource_decision(&decision.preview);
+    runtime.apply_resource_decision(&decision.preview);
 
     assert_eq!(
         shared_owner.seek_index_cache().diagnostics().policy,
@@ -542,6 +544,11 @@ fn runtime_applies_one_resource_policy_to_the_shared_decode_worker_family_owner(
     assert_eq!(
         shared_owner.session_residency_config().max_interactive_sessions_per_worker(),
         decision.preview.frame_store.current_media_working_set_resource_unit_limit
+    );
+    assert_eq!(
+        runtime.diagnostics().resource_decision_applications,
+        1,
+        "an equal immutable policy must not reconfigure Preview twice"
     );
 }
 
@@ -1523,6 +1530,87 @@ fn playing_gpu_candidate_carries_exact_presentation_ticket() {
 }
 
 #[test]
+fn exact_staged_gpu_candidate_acquires_only_the_current_demand_ticket() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let current = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected priming current candidate"),
+    };
+    let current_ticket = current.presentation_ticket().expect("priming current ticket");
+    state
+        .complete_frame_presentation(current_ticket, Instant::now())
+        .expect("present priming current");
+    assert!(state.observe_video_preroll(0, 0));
+    let request = state
+        .preview_lookahead_execution_request(Instant::now(), 2)
+        .expect("lookahead request");
+    let staged_intent = request.snapshot().transport().playback_intent();
+    let staged = match service.gpu_preview_frame(request) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected CPU-complete speculative candidate"),
+    };
+    assert!(staged.is_successor_preparation());
+    assert!(staged.presentation_ticket().is_none());
+
+    let mut tick_at = Instant::now();
+    for _ in 0..4 {
+        if state.current_frame() == staged_intent.frame {
+            break;
+        }
+        tick_at += Duration::from_millis(45);
+        state.advance_playback_clock_at(tick_at);
+    }
+    let identity = state.pending_playback_frame_demand_identity().expect("current demand");
+    let snapshot = state.preview_execution_snapshot(Instant::now());
+    assert_eq!(snapshot.transport().playback_intent(), staged_intent);
+    let current = service
+        .bind_staged_gpu_frame_for_current(staged, &snapshot)
+        .expect("exact generation and intent bind");
+
+    assert!(!current.is_successor_preparation());
+    assert_eq!(
+        current.presentation_ticket().expect("fresh ticket").identity(),
+        identity
+    );
+    assert_eq!(
+        service.scheduler.diagnostics().active_playback_demand,
+        Some(identity),
+        "staged-current binding must synchronize demand even though it bypasses Timeline evaluation"
+    );
+}
+
+#[test]
+fn cpu_staging_is_bounded_and_retires_intents_outside_the_horizon() {
+    let service = WindowPreviewAdapter::new();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let mut staging = PreviewGpuFrameStaging::default();
+    let mut intents = Vec::new();
+
+    for frame in 0..=PREVIEW_GPU_CPU_STAGING_CAPACITY {
+        state.set_playback_frame_running(frame as i64);
+        let request = state
+            .preview_lookahead_execution_request(Instant::now(), 2)
+            .expect("lookahead request");
+        let intent = request.snapshot().transport().playback_intent();
+        let candidate = match service.gpu_preview_frame(request) {
+            PreviewGpuFrameState::Ready(candidate) => candidate,
+            _ => panic!("expected distinct speculative candidate"),
+        };
+        intents.push(intent);
+        staging.stage(candidate);
+    }
+
+    assert_eq!(staging.len(), PREVIEW_GPU_CPU_STAGING_CAPACITY);
+    assert!(!staging.contains(intents[0]));
+    assert!(staging.contains(*intents.last().expect("last intent")));
+    staging.retain_only(&intents[2..4]);
+    assert_eq!(staging.len(), 2);
+}
+
+#[test]
 fn running_transport_without_a_pending_demand_cannot_publish_a_retry() {
     let service = WindowPreviewAdapter::new();
     let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
@@ -2110,6 +2198,45 @@ fn identical_successor_pixels_still_create_an_exact_transport_preparation() {
             .map(|request| service.gpu_preview_frame(request)),
         Some(PreviewGpuFrameState::Prepared)
     ));
+}
+
+#[test]
+fn farther_lookahead_cannot_claim_the_immediate_successor_slot() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let mut state = state_with_solid_color_clip(Color::from_rgba8(24, 80, 160, 255));
+    state.play().expect("play");
+    let frame = match execute_gpu_preview_for_test_app(&service, &state) {
+        PreviewGpuFrameState::Ready(frame) => frame,
+        _ => panic!("expected ready current GPU preview candidate"),
+    };
+    assert!(register_test_window_preview_output(
+        &service,
+        &frame,
+        frame.external_texture_key(),
+        ViewerExternalTexturePresentation::full_frame(frame.width, frame.height)
+            .expect("full-frame presentation"),
+    ));
+
+    let lookahead = state
+        .preview_lookahead_execution_request(Instant::now(), 2)
+        .expect("playing state has a second future frame");
+    let lookahead_intent = lookahead.snapshot().transport().playback_intent();
+    assert!(matches!(
+        service.gpu_preview_frame(lookahead),
+        PreviewGpuFrameState::Prepared
+    ));
+    assert!(!service.has_prepared_successor_for_intent(lookahead_intent));
+
+    let successor = state
+        .preview_successor_execution_request(Instant::now())
+        .expect("playing state has an immediate successor");
+    let successor_intent = successor.snapshot().transport().playback_intent();
+    assert!(!service.has_prepared_successor_for_intent(successor_intent));
+    assert!(matches!(
+        service.gpu_preview_frame(successor),
+        PreviewGpuFrameState::Prepared
+    ));
+    assert!(service.has_prepared_successor_for_intent(successor_intent));
 }
 
 #[test]
@@ -2725,16 +2852,19 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
         MediaPreviewRequestPriority::Prefetch,
         PreviewDecodeAccessMode::PlaybackCursor,
         400,
+        false,
     );
     service.record_preview_decode_queue_wait(
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::ScrubCursor,
         1_200,
+        true,
     );
     service.record_preview_decode_queue_wait(
         MediaPreviewRequestPriority::Current,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         20,
+        true,
     );
     service.record_preview_decode_cancel(
         PreviewDecodeAccessMode::PlaybackCursor,
@@ -3110,6 +3240,26 @@ fn preview_diagnostics_count_decode_paths_and_duration() {
 }
 
 #[test]
+fn cache_only_current_decode_does_not_pollute_presentation_queue_wait() {
+    let service = WindowPreviewAdapter::new();
+
+    service.record_preview_decode_queue_wait(
+        MediaPreviewRequestPriority::Current,
+        PreviewDecodeAccessMode::PlaybackCursor,
+        850_000,
+        false,
+    );
+
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.decode_queue_wait_max_us, 850_000);
+    assert_eq!(diagnostics.decode_current_queue_wait_max_us, 0);
+    assert_eq!(
+        diagnostics.decode_access_mode_profiles.playback_cursor.queue_wait_max_us,
+        850_000
+    );
+}
+
+#[test]
 fn preview_diagnostics_count_decode_failures_by_access_mode() {
     let service = WindowPreviewAdapter::new();
 
@@ -3306,7 +3456,8 @@ fn test_decode_latency_buckets_at(duration_us: u64, samples: u64) -> PreviewDeco
         16_001..=25_000 => buckets.le_25ms = samples,
         25_001..=40_000 => buckets.le_40ms = samples,
         40_001..=50_000 => buckets.le_50ms = samples,
-        50_001..=80_000 => buckets.le_80ms = samples,
+        50_001..=60_000 => buckets.le_60ms = samples,
+        60_001..=80_000 => buckets.le_80ms = samples,
         _ => buckets.gt_80ms = samples,
     }
     buckets
@@ -3576,11 +3727,11 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
 
     assert_eq!(
         playback_video_preroll_for_state(&service, &state),
-        Some(PreviewVideoPreroll { ready_media_frames: 0, preservable_media_frames: 2 })
+        Some(PreviewVideoPreroll { ready_media_frames: 0, preservable_media_frames: 4 })
     );
     assert_eq!(
         service.jobs.diagnostics().queued_prefetch_jobs,
-        2,
+        4,
         "preroll observation must actively admit its bounded future prefix; residency is charged at the decode representation extent (source raster)"
     );
 
@@ -3634,7 +3785,7 @@ fn playback_video_preroll_requires_next_media_payload_and_observes_cache_residen
 
     assert_eq!(
         playback_video_preroll_for_state(&service, &state),
-        Some(PreviewVideoPreroll { ready_media_frames: 1, preservable_media_frames: 2 })
+        Some(PreviewVideoPreroll { ready_media_frames: 1, preservable_media_frames: 4 })
     );
 
     service.shutdown();
@@ -3751,7 +3902,7 @@ fn future_media_window_reuses_sliding_semantic_and_lowered_frame_contracts() {
         );
         assert_eq!(
             keys.len(),
-            2,
+            first.len(),
             "the physically admissible window is bounded by the decode representation extent (source raster), not the frame-rate window"
         );
     }
@@ -3819,7 +3970,7 @@ fn future_media_window_revalidates_each_physical_source_once_per_planning_turn()
     let window = MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES;
 
     let first = future_media_prefix_keys_for_state(&service, &state, 0, window, target_resolution);
-    assert_eq!(first.len(), 2);
+    assert_eq!(first.len(), 4);
     let populated = service.diagnostics().future_media_window;
     assert_eq!(
         populated.source_fingerprint_observations, 0,
@@ -5818,7 +5969,7 @@ fn preview_decode_performance_report_excludes_expired_queue_wait_from_ready_p95(
         json["schema_version"],
         PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION
     );
-    assert_eq!(json["schema_version"], 36);
+    assert_eq!(json["schema_version"], 37);
     assert_eq!(json["summary"]["expired_queue_wait"]["samples"], 64);
     assert_eq!(
         json["summary"]["access_mode_profiles"]["playback_cursor"]["expired_queue_wait"]["buckets"]
@@ -12798,7 +12949,7 @@ fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
     );
     assert_eq!(
         media_preview_forward_prefetch_window_frames(Rational::FPS_60),
-        Some(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES)
+        Some(15)
     );
     assert_eq!(
         media_preview_forward_prefetch_window_frames(Rational::new(240, 1)),
@@ -12815,6 +12966,20 @@ fn media_preview_forward_prefetch_window_uses_sequence_frame_rate() {
     assert_eq!(
         media_preview_forward_prefetch_window_frames(Rational::new(24, 0)),
         None
+    );
+}
+
+#[test]
+fn steady_prefetch_reservations_do_not_consume_the_temporal_frame_buffer() {
+    assert_eq!(media_preview_steady_prefetch_reservation_limit(1), 1);
+    assert_eq!(media_preview_steady_prefetch_reservation_limit(2), 2);
+    assert_eq!(
+        media_preview_steady_prefetch_reservation_limit(15),
+        MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT
+    );
+    assert_eq!(
+        media_preview_steady_prefetch_reservation_limit(MEDIA_PREVIEW_FORWARD_PREFETCH_MAX_FRAMES),
+        MEDIA_PREVIEW_STEADY_PREFETCH_RESERVATION_LIMIT
     );
 }
 

@@ -17,6 +17,14 @@ use mondrian_renderer::{
 use sha2::{Digest, Sha256};
 use std::hash::{Hash, Hasher};
 
+/// Maximum number of CPU-complete speculative Viewer frames retained without
+/// consuming GPU submission or presentation-output capacity.
+///
+/// Three lookahead coordinates cover a bounded 50 ms scheduler displacement
+/// at 60 fps; the fourth slot lets the exact immediate successor wait for GPU
+/// admission without evicting that horizon.
+pub(crate) const PREVIEW_GPU_CPU_STAGING_CAPACITY: usize = 4;
+
 /// Strong process-local semantic identity used by Preview cache and
 /// presentation-registration keys.
 ///
@@ -267,8 +275,10 @@ pub(crate) struct PreviewGpuFrame {
     pub(crate) program_output_boundary: RenderOutputColorBoundary,
     pub(crate) monitor_adaptation: RenderMonitorAdaptation,
     candidate_id: u64,
+    generation: u64,
     purpose: PreviewGpuFramePurpose,
     playback_intent: PreviewPlaybackIntent,
+    presentation_quality: FramePresentationQuality,
     presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
     heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
     // Intentionally unread: dropping the complete submitted frame releases
@@ -292,8 +302,10 @@ impl PreviewGpuFrame {
         program_output_boundary: RenderOutputColorBoundary,
         monitor_adaptation: RenderMonitorAdaptation,
         candidate_id: u64,
+        generation: u64,
         purpose: PreviewGpuFramePurpose,
         playback_intent: PreviewPlaybackIntent,
+        presentation_quality: FramePresentationQuality,
         presentation_ticket: Option<mondrian_playback::FramePresentationTicket>,
         decode_execution: PreviewDecodeExecutionSummary,
         heterogeneous_execution: Option<PreviewGpuHeterogeneousExecution>,
@@ -310,8 +322,10 @@ impl PreviewGpuFrame {
             program_output_boundary,
             monitor_adaptation,
             candidate_id,
+            generation,
             purpose,
             playback_intent,
+            presentation_quality,
             presentation_ticket,
             heterogeneous_execution,
             _media_residency_protections: media_residency_protections,
@@ -329,6 +343,11 @@ impl PreviewGpuFrame {
         self.candidate_id
     }
 
+    /// Preview execution generation that proved this complete CPU candidate.
+    pub(crate) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
     /// Whether this output is ticketless immediate-successor preparation.
     pub(crate) const fn is_successor_preparation(&self) -> bool {
         matches!(self.purpose, PreviewGpuFramePurpose::SuccessorPreparation)
@@ -344,6 +363,39 @@ impl PreviewGpuFrame {
         &self,
     ) -> Option<mondrian_playback::FramePresentationTicket> {
         self.presentation_ticket
+    }
+
+    /// Convert an exact CPU-complete speculative candidate into the current
+    /// presentation candidate under a freshly captured Frame Demand.
+    ///
+    /// Callers must first prove generation and playback-intent equality. This
+    /// transition preserves the frame-local quality result and cannot invent
+    /// authority when the current request carries no demand.
+    pub(crate) fn bind_current_presentation(
+        &mut self,
+        presentation_ticket: mondrian_playback::FramePresentationTicket,
+    ) {
+        debug_assert!(self.is_successor_preparation());
+        debug_assert_eq!(
+            presentation_ticket.identity().epoch,
+            self.playback_intent.epoch
+        );
+        debug_assert_eq!(
+            presentation_ticket.identity().quality_revision,
+            self.playback_intent.quality_revision
+        );
+        debug_assert_eq!(
+            presentation_ticket.identity().target_frame,
+            self.playback_intent.frame
+        );
+        self.purpose = PreviewGpuFramePurpose::Current;
+        self.presentation_ticket = Some(presentation_ticket);
+    }
+
+    /// Frame-local quality used when a speculative candidate later acquires
+    /// the exact current presentation authority.
+    pub(crate) const fn presentation_quality(&self) -> FramePresentationQuality {
+        self.presentation_quality
     }
 
     /// Move the exact CPU-prefix completions into Viewer command recording.
@@ -374,6 +426,67 @@ impl PreviewGpuFrame {
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn decode_execution(&self) -> PreviewDecodeExecutionSummary {
         self.decode_execution
+    }
+}
+
+/// Bounded Adapter-owned queue of CPU-complete speculative Viewer frames.
+///
+/// Entries are keyed by the complete playback intent. No entry is semantically
+/// prepared or physically published until an Adapter submits it. Replacing an
+/// exact intent and evicting the oldest excess entry both retire resources by
+/// ordinary RAII.
+pub(crate) struct PreviewGpuFrameStaging {
+    frames: Vec<PreviewGpuFrame>,
+}
+
+impl Default for PreviewGpuFrameStaging {
+    fn default() -> Self {
+        Self {
+            frames: Vec::with_capacity(PREVIEW_GPU_CPU_STAGING_CAPACITY),
+        }
+    }
+}
+
+impl PreviewGpuFrameStaging {
+    /// Retain one CPU-complete ticketless candidate inside the bounded horizon.
+    pub(crate) fn stage(&mut self, frame: Box<PreviewGpuFrame>) {
+        debug_assert!(frame.is_successor_preparation());
+        debug_assert!(frame.presentation_ticket().is_none());
+        let intent = frame.playback_intent();
+        if let Some(existing) =
+            self.frames.iter_mut().find(|existing| existing.playback_intent() == intent)
+        {
+            *existing = *frame;
+            return;
+        }
+        if self.frames.len() == PREVIEW_GPU_CPU_STAGING_CAPACITY {
+            self.frames.remove(0);
+        }
+        self.frames.push(*frame);
+    }
+
+    /// Take only the frame proved for this exact playback intent.
+    pub(crate) fn take_exact(
+        &mut self,
+        intent: PreviewPlaybackIntent,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        let index = self.frames.iter().position(|frame| frame.playback_intent() == intent)?;
+        Some(Box::new(self.frames.remove(index)))
+    }
+
+    /// Whether the queue already retains this complete intent.
+    pub(crate) fn contains(&self, intent: PreviewPlaybackIntent) -> bool {
+        self.frames.iter().any(|frame| frame.playback_intent() == intent)
+    }
+
+    /// Retire entries outside the current bounded playback horizon.
+    pub(crate) fn retain_only(&mut self, expected: &[PreviewPlaybackIntent]) {
+        self.frames.retain(|frame| expected.contains(&frame.playback_intent()));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.frames.len()
     }
 }
 

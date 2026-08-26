@@ -170,6 +170,9 @@ pub enum ViewerGpuExecutionRuntimeCreateError {
     /// Renderer bind-group cache identity allocation is exhausted.
     #[error(transparent)]
     BindGroupCacheKey(#[from] GpuColorFrameBindGroupCacheKeyAllocationError),
+    /// Renderer-owned compact CPU YUV upload worker could not start.
+    #[error("compact CPU YUV upload worker could not start")]
+    CpuYuvUploadWorker,
 }
 
 impl ViewerGpuExecutionRuntime {
@@ -210,7 +213,8 @@ impl ViewerGpuExecutionRuntime {
                     Arc::clone(&resource_pool),
                     native_import_gpu_timing_policy,
                 ),
-            cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime::new(),
+            cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime::new(device)
+                .map_err(|_| ViewerGpuExecutionRuntimeCreateError::CpuYuvUploadWorker)?,
             color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(
                 &resource_pool,
             ))?,
@@ -264,6 +268,64 @@ impl ViewerGpuExecutionRuntime {
     /// Native decoder import capability exposed to preview scheduling.
     pub fn native_import_support(&self) -> GpuNativeDecodedFrameImportSupport {
         self.native_video_import.support()
+    }
+
+    /// Install the payload-free wake edge emitted when a compact CPU YUV
+    /// transfer buffer becomes ready for candidate recording.
+    pub fn install_cpu_yuv_upload_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
+        self.cpu_yuv_upload.install_completion_waker(waker);
+    }
+
+    /// Start compact CPU YUV transfer preparation without recording or
+    /// reserving a GPU submission.
+    ///
+    /// The operation visits every contributing ordinary or Transition input,
+    /// schedules each distinct retained media frame, and leaves completed
+    /// preparations unconsumed for the later exact Viewer candidate. `true`
+    /// means every compact input is ready to record now; requests without such
+    /// inputs are trivially ready.
+    pub fn prepare_cpu_yuv_uploads(
+        &self,
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Result<bool, ViewerGpuExecutionError> {
+        let mut seen = Vec::with_capacity(layers.len().saturating_mul(2));
+        let mut all_ready = true;
+        for layer in layers {
+            match layer {
+                ViewerGpuExecutionLayer::Source(source) => {
+                    prepare_source_cpu_yuv_upload(
+                        source,
+                        &self.cpu_yuv_upload,
+                        &mut seen,
+                        &mut all_ready,
+                    )?;
+                }
+                ViewerGpuExecutionLayer::Adjustment { .. } => {}
+                ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+                    if !transition.progress.is_finite() {
+                        continue;
+                    }
+                    let progress = transition.progress.clamp(0.0, 1.0);
+                    for (input, weight) in [
+                        (&transition.left, 1.0 - progress),
+                        (&transition.right, progress),
+                    ] {
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        if let crate::ViewerGpuTransitionInput::Source(source) = input {
+                            prepare_source_cpu_yuv_upload(
+                                source,
+                                &self.cpu_yuv_upload,
+                                &mut seen,
+                                &mut all_ready,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(all_ready)
     }
 
     /// Collect native-import callbacks after the owner has polled the device.
@@ -361,6 +423,11 @@ impl ViewerGpuExecutionRuntime {
         let candidate_token = self.native_video_import.begin_viewer_candidate();
         let result =
             self.record_candidate_with_stage_marker(device, queue, encoder, request, stage_marker);
+        if result.is_ok() {
+            self.cpu_yuv_upload.finish_candidate(encoder);
+        } else {
+            self.cpu_yuv_upload.discard_candidate();
+        }
         let receipt =
             self.native_video_import.end_viewer_candidate(candidate_token, result.is_ok());
         match result {
@@ -392,6 +459,11 @@ impl ViewerGpuExecutionRuntime {
             request.monitor_adaptation,
         )?;
         validate_program_scopes_contract(request.program_output_boundary, request.program_scopes)?;
+        if !self.prepare_cpu_yuv_uploads(request.layers)? {
+            return Err(ViewerGpuExecutionError::Backpressure(
+                "compact CPU YUV transfer preparation is still running".to_owned(),
+            ));
+        }
         let mut active_working_set =
             estimate_viewer_gpu_active_working_set(&request).map_err(|error| match error {
                 ViewerGpuActiveWorkingSetEstimateError::InvalidHeterogeneousInput { reason } => {
@@ -1649,6 +1721,36 @@ fn source_layer_has_zero_contribution(layer: &crate::ViewerGpuSourceLayer) -> bo
     opacity.clamp(0.0, 1.0) == 0.0
 }
 
+fn prepare_source_cpu_yuv_upload(
+    layer: &crate::ViewerGpuSourceLayer,
+    uploads: &crate::cpu_yuv::CpuYuvUploadRuntime,
+    seen: &mut Vec<usize>,
+    all_ready: &mut bool,
+) -> Result<(), ViewerGpuExecutionError> {
+    if source_layer_has_zero_contribution(layer) {
+        return Ok(());
+    }
+    let crate::ViewerGpuSourceLayer::Media { cpu_yuv_source: Some(source), .. } = layer else {
+        return Ok(());
+    };
+    let identity = Arc::as_ptr(&source.frame) as usize;
+    if seen.contains(&identity) {
+        return Ok(());
+    }
+    seen.push(identity);
+    *all_ready &= uploads.prepare(&source.frame).map_err(|error| match error {
+        crate::cpu_yuv::CpuYuvMaterializationError::UploadPending => {
+            ViewerGpuExecutionError::Backpressure(
+                "compact CPU YUV transfer preparation is still running".to_owned(),
+            )
+        }
+        error => ViewerGpuExecutionError::InputPreparation(format!(
+            "compact CPU YUV upload preparation failed: {error}"
+        )),
+    })?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_prepared_composite_nodes<'a>(
     prepared: &mut PreparedComposite<'a>,
@@ -1875,10 +1977,15 @@ fn record_cpu_yuv_video_layer(
         queue,
         encoder,
     )
-    .map_err(|error| {
-        ViewerGpuExecutionError::InputPreparation(format!(
+    .map_err(|error| match error {
+        crate::cpu_yuv::CpuYuvMaterializationError::UploadPending => {
+            ViewerGpuExecutionError::Backpressure(
+                "compact CPU YUV transfer preparation is still running".to_owned(),
+            )
+        }
+        error => ViewerGpuExecutionError::InputPreparation(format!(
             "compact CPU YUV GPU materialization failed: {error}"
-        ))
+        )),
     })
 }
 

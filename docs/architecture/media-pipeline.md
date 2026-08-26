@@ -499,7 +499,8 @@ request-scoped interrupt protocol, typed CPU frames, one FFmpeg decode Session,
 the recoverable demux-process boundary,
 hardware admission/context state, frame materialization, native-frame resource
 lifetime, the probe/session seek index, the byte-bounded session-local playback
-ring, and the optional external still process. The FFmpeg Session
+output ring, the decoded-surface temporal window, and the optional external
+still process. The FFmpeg Session
 is the sole owner of open → stream-info → seek → packet/codec → materialize
 ordering; the other modules provide narrow stateful services and cannot publish
 a second decode outcome. The external process module always drains both pipes,
@@ -549,14 +550,26 @@ by an acquisition from this worker-family owner; it is never promoted into a
 process-wide success/failure memo.
 
 Session destruction has one non-negotiable native-resource order. Every
-session-local retained `AVFrame`, playback-ring entry, and native output surface
-is released before its `AVCodecContext`, hardware frames/device contexts, or
-device-root lease. `PreviewDecodeSession` encodes this in field ownership and
-declaration order so ordinary replacement, error unwinding, cancellation, and
-explicit worker-family retirement cannot diverge. A caller may request Session
-retirement only after externally published native-output leases are released;
-the Session itself additionally guarantees the correct order for its private
-DPB-adjacent frame residency.
+session-local retained `AVFrame`, decoded-surface window, playback-ring entry,
+and native output surface is released before its `AVCodecContext`, hardware
+frames/device contexts, or device-root lease. `PreviewDecodeSession` encodes
+this in field ownership and declaration order so ordinary replacement, error
+unwinding, cancellation, and explicit worker-family retirement cannot diverge.
+A caller may request Session retirement only after externally published
+native-output leases are released; the Session itself additionally guarantees
+the correct order for its private DPB-adjacent frame residency.
+
+Playback prefetch and visible-current work intentionally overlap, but they
+share one position-owning decoder Session. Prefetch may decode past a current
+request that is still queued; discarding those intermediate surfaces would
+force the later current request to seek backward through the same long GOP.
+The Session therefore retains a FIFO decoded-surface window bounded by both
+eight entries and 256 MiB, aligned with the bounded startup-preroll prefix. A
+request covered by that raw window materializes directly without seek. The raw
+window survives output-only Preview scale/geometry rebinding, but is cleared on
+seek, cancellation recovery, source/session replacement, and destruction. It
+does not replace the App-owned output Frame Store or the compact materialized
+playback ring; each owner remains independently byte bounded.
 
 `preview::demux_process`, `demux_protocol`, and `demux_worker` form one deep
 compressed-packet Source Seam. The packaged `mondrian` executable dispatches a
@@ -816,10 +829,12 @@ that already covers the configured window suppresses duplicate admission.
 coexistence observation; `prefetch_skipped_prefetch_backlog` remains the actual
 covered-window skip. The configured forward window is derived from a
 250 ms wall-clock horizon and the active sequence frame rate, then capped at
-eight frames before enqueueing. This preserves the full horizon through 30 fps;
-higher-rate playback degrades only the speculative horizon (eight frames are
-about 133 ms at 60 fps), not current-frame correctness. Eight frames is only a
-temporal ceiling. Before admitting prefetch or counting a preroll prefix, the
+16 frames before enqueueing. The temporal prefix and its physical decode queue
+are independent bounds: Priming may admit the complete prefix before starting
+the Clock Master, while Running retains at most three queued-plus-in-flight
+prefetch reservations and replenishes them on completion. This prevents farther
+reservations from evicting the ready 4K frame buffer they exist to maintain.
+Sixteen frames is only a temporal ceiling. Before admitting prefetch or counting a preroll prefix, the
 scheduler asks the Preview Frame Store for typed
 entry/host-byte/native-resource-unit speculative headroom. That snapshot comes
 from the Store's physical allocation ledger: queued, in-flight, unconsumed
@@ -856,10 +871,11 @@ Preview diagnostics expose this playback-clock contract as structured
 budget, the prefetch horizon/window, and invalid frame-rate counters. Invalid
 sequence frame-rate data must warn through diagnostics instead of silently
 removing playback deadlines or cache warming.
-When the prefetch backlog is below the forward window, scheduling must top up
-only the remaining queued-plus-in-flight prefetch job budget across the
+When the prefetch backlog is below the active physical reservation limit,
+scheduling must top up only the remaining queued-plus-in-flight prefetch job budget across the
 evaluated tracks and nested sequences, not enqueue a full new prefetch window
-for each future frame offset.
+for each future frame offset. During Running that limit is three jobs; it is the
+complete temporal window only while Priming builds the initial resident prefix.
 The app preview service owns worker thread lifetimes. Service shutdown must be
 non-blocking on the UI/event thread: it first closes the Frame Work Broker to
 establish the authoritative cancellation instant, sets the timestamp-free local
@@ -1662,10 +1678,23 @@ pending, the still-frame decode must cooperatively yield and report a structured
 still-preempted-by-realtime-current cancellation. Another still-frame request
 alone must not trigger that preemption.
 If an existing queued prefetch for the same media key becomes current-frame
-work, queue promotion must refresh the queued job's access mode, generation,
-source timing, and enqueue timestamp. The promoted job should be measured as
-current-frame queue wait from the promotion point, not from the earlier
-speculative prefetch enqueue.
+work, queue promotion refreshes the Broker binding's access mode, generation,
+source timing, and authoritative request timestamp while retaining the physical
+payload. `FrameWorkExecution::queue_wait` is derived from that latest binding at
+dequeue; the media Adapter projects it into its execution evidence. Current
+queue wait therefore starts at promotion, never at the earlier intentional
+speculative enqueue.
+The result pump records presentation-critical current queue wait only while the
+Broker completion still owns the current presentation binding. A physical job
+whose demand was already satisfied by an exact staged GPU frame remains in
+aggregate and per-access-mode queue-pressure evidence, but cannot contaminate
+the current-presentation latency gate after it has become cache-only.
+Active Playback demand synchronization is an execution-entry responsibility,
+not a Timeline resolver side effect. Every ordinary current GPU request and
+every exact staged-frame-to-current binding synchronizes the Broker before
+completion pumping or publication. Successor/lookahead requests never do. This
+ordering prunes superseded unstarted Current work even when the picture is an
+evaluation-cache hit and no Timeline or media interpretation runs.
 Scheduler diagnostics keep aggregate skip/drop/stale counters plus reason
 breakdowns for missing pending work, access-mode mismatch, obsolete generation,
 obsolete request generation, and pending-window backpressure. Access-mode
@@ -2510,24 +2539,24 @@ stage timings plus max queue wait, while aggregate stage totals remain trend
 evidence. This avoids blaming a cumulative stage total when an interactive stall
 came from one pathological seek, decode, software-scale/copy, composite,
 output-boundary frame, or current-frame job waiting behind other decode work.
-The in-process preview decoder uses bounded slice threading by default for
-continuous Playback of UHD software decode, and frame threading everywhere else
-(including non-playback access modes and sub-UHD playback). Measured on
-software H.264 High 4:2:2 10-bit 3840x2160@60000/1001 on a 12-thread machine,
-slice threading sustains the 16.7 ms frame budget under ordinary desktop load
-(60/60 exact presentations, decode p95 ~25 ms) while frame threading falls
-behind (53-55/60, decode p95 clamped at 40 ms); reducing slice threads below
-~8 collapses per-frame throughput (5 threads measured at ~125 ms/frame) and
-spawning a second concurrent Playback decoder for the same source costs more in
-seek/demux contention than it gains in parallelism. The default threading kind
-is therefore chosen per access mode and coded frame size
-(`MONDRIAN_PREVIEW_DECODE_THREADING` / `MONDRIAN_PREVIEW_DECODE_THREADS`
-override it), and frame threading remains the conservative general default for
-non-UHD and non-playback work. Software UHD decode is not real-time on a
-machine with sustained background load: at ~60% host utilization the same
-decode measures ~38 ms/frame (about 30 fps), so the playback gate's decode p95
-bound is load-sensitive by design and the pipeline degrades quality
-(Full -> Half -> Quarter) without changing time, color, or source semantics.
+The in-process preview decoder uses bounded frame threading by default for all
+software-decode access modes. Frame threading pipelines coded pictures and
+does not assume the source contains enough independent slices to use a declared
+slice-thread count. With the retained compact-YUV and explicit GPU staging
+paths active, real H.264 High 4:2:2 10-bit
+3840x2160@60000/1001 on a 12-thread machine measures about 9.4 ms mean steady
+work per frame and repeated 60/60 exact presentation with frame threading.
+Slice threading measures about 15 ms in successful runs and 25 ms under an
+ordinary load perturbation, draining the bounded preroll and exposing stale
+Viewer output. `MONDRIAN_PREVIEW_DECODE_THREADING` and
+`MONDRIAN_PREVIEW_DECODE_THREADS` remain explicit qualification overrides;
+they are not machine-local correctness state. Spawning a second concurrent
+Playback decoder for the same source remains invalid as a generic throughput
+fix because duplicated long-GOP seek/demux work destroys sequential locality.
+Output resolution pressure (Full -> Half -> Quarter) reduces renderer work but
+does not falsely claim to reduce codec work; a source that still cannot meet
+cadence requires hardware decode or a separately admitted proxy/optimized-media
+path without changing time, color, or source semantics.
 The app
 preview service runs a conservative decode worker pool from
 `PreviewDecodeCpuBudget`: one worker on small CPU budgets, two on common

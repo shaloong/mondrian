@@ -456,13 +456,14 @@ pub struct FrameDeliveryCandidate {
     kind: FrameDeliveryKind,
 }
 
-/// Media-frame lookahead observed by the preview Adapter during startup.
+/// Media lookahead observed by the Preview Adapter during startup.
 ///
 /// `preservable_media_frames` is the complete immediate future media-bearing
 /// prefix that the Adapter proves can coexist within its physical resource and
 /// work-admission grants. `ready_media_frames` is the prefix of those frames
 /// whose complete required media closures are already resident. The Engine
-/// combines this observation with actual current-frame presentation; neither
+/// combines this observation with actual current-frame presentation and the
+/// Adapter's exact immediate-successor presentation readiness; no individual
 /// signal can start the clock alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VideoPrerollObservation {
@@ -472,6 +473,9 @@ pub struct VideoPrerollObservation {
     pub ready_media_frames: usize,
     /// Complete future media-bearing prefix that can be preserved concurrently.
     pub preservable_media_frames: usize,
+    /// Whether the exact immediate successor is physically prepared, or no
+    /// successor exists for this transport coordinate.
+    pub presentation_successor_ready: bool,
 }
 
 impl FrameDeliveryCandidate {
@@ -1168,6 +1172,7 @@ impl PlaybackEngine {
                 .active_demand
                 .and_then(|demand| demand.deadline)
                 .filter(|deadline| now >= *deadline)
+            && !self.observed_video_preroll_pending()
         {
             self.state = TransportState::Playing;
             self.clock_master = Some(ClockMaster::Synthetic);
@@ -1210,6 +1215,12 @@ impl PlaybackEngine {
                 return Ok(None);
             };
             if now >= deadline {
+                if self.observed_video_preroll_pending() {
+                    // Preview result publication owns the next wake. Returning
+                    // an already-expired timer here would busy-spin the Window
+                    // event loop while the bounded decode prefix is pending.
+                    return Ok(None);
+                }
                 return Ok(Some(PlaybackWake {
                     after: Duration::ZERO,
                     reason: PlaybackWakeReason::PrimingDeadline,
@@ -1684,9 +1695,18 @@ impl PlaybackEngine {
         {
             return Err(PlaybackError::InvalidVideoPrerollObservation);
         }
-        if self.state != TransportState::Priming
-            || self.video_preroll_observation == Some(observation)
-        {
+        if self.state != TransportState::Priming {
+            return Ok(false);
+        }
+        let observation = self
+            .video_preroll_observation
+            .filter(|previous| previous.demand == observation.demand)
+            .map_or(observation, |previous| VideoPrerollObservation {
+                presentation_successor_ready: previous.presentation_successor_ready
+                    || observation.presentation_successor_ready,
+                ..observation
+            });
+        if self.video_preroll_observation == Some(observation) {
             return Ok(false);
         }
         self.accept_timestamp(observed_at)?;
@@ -2054,13 +2074,30 @@ impl PlaybackEngine {
                 observation.ready_media_frames >= required
             })
         };
-        if !preroll_satisfied {
+        let presentation_preroll_satisfied = self.policy.minimum_video_preroll_frames == 0
+            || self
+                .video_preroll_observation
+                .is_some_and(|observation| observation.presentation_successor_ready);
+        if !preroll_satisfied || !presentation_preroll_satisfied {
             return Ok(false);
         }
         self.state = TransportState::Playing;
         self.clock_master = Some(ClockMaster::Synthetic);
         self.reanchor_at_phase(observed_at, self.clock_anchor.phase_ns);
         Ok(true)
+    }
+
+    fn observed_video_preroll_pending(&self) -> bool {
+        self.priming_current_presentable
+            && self.policy.minimum_video_preroll_frames > 0
+            && self.video_preroll_observation.is_some_and(|observation| {
+                let required = self
+                    .policy
+                    .minimum_video_preroll_frames
+                    .min(observation.preservable_media_frames);
+                observation.ready_media_frames < required
+                    || !observation.presentation_successor_ready
+            })
     }
 
     fn refresh_frame_demand_if_target_changed(

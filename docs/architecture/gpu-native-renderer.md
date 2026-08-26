@@ -67,6 +67,16 @@ out; a heterogeneous sub-grant does not replace the enclosing Viewer grant;
 and returning an intermediate to the idle pool does not authorize the next
 frame.
 
+Software-decoded compact YUV follows that same ownership rule. Its encoded-RGB
+intermediate is acquired from the shared exact-contract pool and returned when
+the submitted candidate's frame resource table clears on the next record; it
+must not be removed and dropped immediately after input-color commands are
+recorded. A failed pre-submit candidate returns that resource directly. Only
+the compact plane transfer buffers use
+the separate bounded asynchronous upload pool. A frame-local intermediate must
+not bypass pooling with a direct device allocation, because deferred backend
+allocator growth would otherwise re-enter realtime candidate preparation.
+
 If bytes or resource count exceed the active grant, recording returns
 `ViewerGpuExecutionError::ActiveWorkingSet` before any texture creation.
 Renderer code cannot lower format precision, skip stages, or invoke a hidden
@@ -121,7 +131,25 @@ The same YUV shader is also the sole materializer for media-owned compact CPU
 YUV. This is not native decode or GPU zero-copy: the Renderer uploads retained
 CPU planes before recording the YUV pass. Native NV12/P010 binds interleaved
 luma/CbCr views; FFmpeg `YUV422P10LE` binds stride-preserving luma/Cb/Cr views
-directly, without a CPU repack. The explicit layout contract distinguishes
+without expanding or converting them into an RGB staging image. The compact
+plane textures survive ordinary Viewer candidate clears. A bounded
+renderer-owned upload worker copies visible plane rows into reusable mapped,
+256-byte-aligned transfer buffers before realtime candidate recording. The
+runtime exposes one command-free preflight over the complete layer/Transition
+stack; Window and Headless CPU-complete lookahead call it without reserving a
+submission or presentation output. Recording repeats the same preflight and
+does not encode any layer until every distinct contributing compact frame is
+ready, preventing a multi-layer candidate from partially recording and
+thrashing its bounded transfer pool. Until preparation completes, Viewer
+execution returns typed backpressure and its payload-free completion edge wakes
+the existing Preview retry loop. The realtime caller then records only
+`copy_buffer_to_texture` commands in the same command buffer as YUV sampling.
+Successful candidates bind buffer remap and pool return to GPU submission
+completion; abandoned candidates drop their unsubmitted buffer. This avoids
+both `Queue::write_texture`'s per-plane native staging allocation and a
+full-frame host memcpy on the transport/UI thread, while keeping upload
+ordering, cancellation, and memory ownership inside the Viewer runtime.
+The explicit layout contract distinguishes
 two-plane from three-plane storage, 4:2:0 from 4:2:2, and most-significant-bit
 P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layouts produce the same typed
 `Source + EncodedFloat` intermediate and therefore share color validation,

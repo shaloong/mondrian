@@ -2175,7 +2175,7 @@ fn push_preview_decode_root_causes_and_actions(
             PreviewDecodePerformanceArea::Scheduling,
             "preview_decode_prefetch_window_invalid_frame_rate",
             format!(
-                "forward_prefetch_invalid_frame_rate={} forward_prefetch_window_evaluations={} last_forward_prefetch_window_frames={:?} forward_prefetch_horizon_us={} forward_prefetch_min_frames={} forward_prefetch_max_frames={}",
+                "forward_prefetch_invalid_frame_rate={} forward_prefetch_window_evaluations={} last_forward_prefetch_window_frames={:?} forward_prefetch_horizon_us={} forward_prefetch_min_frames={} forward_prefetch_max_frames={} steady_prefetch_reservation_limit={}",
                 summary
                     .playback_schedule
                     .forward_prefetch_invalid_frame_rate,
@@ -2187,7 +2187,10 @@ fn push_preview_decode_root_causes_and_actions(
                     .last_forward_prefetch_window_frames,
                 summary.playback_schedule.forward_prefetch_horizon_us,
                 summary.playback_schedule.forward_prefetch_min_frames,
-                summary.playback_schedule.forward_prefetch_max_frames
+                summary.playback_schedule.forward_prefetch_max_frames,
+                summary
+                    .playback_schedule
+                    .steady_prefetch_reservation_limit
             ),
             "fix_sequence_prefetch_frame_rate_contract",
             "Ensure playback prefetch derives its window from a valid sequence frame rate instead of silently disabling cache warming.",

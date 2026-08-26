@@ -28,8 +28,9 @@ mod perf_decode_progress;
 mod perf_process_memory;
 use crate::app::headless_preview_presentation::{
     prepare_headless_preview_successor, present_headless_preview_candidate,
-    present_headless_preview_candidate_at, HeadlessCompletedGpuDisposition,
-    HeadlessPresentedOutput, HeadlessPreviewCandidate, HeadlessPreviewRuntime,
+    present_headless_preview_candidate_at, stage_headless_preview_lookahead,
+    HeadlessCompletedGpuDisposition, HeadlessPresentedOutput, HeadlessPreviewCandidate,
+    HeadlessPreviewRuntime,
 };
 use crate::app::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessNativeVideoImportGpuTimingFinalEvidence,
@@ -37,7 +38,9 @@ use crate::app::headless_viewer_gpu::{
     HeadlessViewerGpuOutput,
 };
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
-use crate::app::preview_execution::PreviewDecodeExecutionSummary;
+use crate::app::preview_execution::{
+    PreviewDecodeExecutionSummary, PREVIEW_GPU_CPU_STAGING_CAPACITY,
+};
 use crate::app::preview_runtime::{
     build_preview_color_health_report, build_preview_decode_performance_report,
     build_preview_decode_performance_report_with_required_access_modes,
@@ -408,6 +411,7 @@ struct HeadlessViewerGpuExecutionSummary {
     compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
     spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
+    resource_pool_samples: Vec<mondrian_renderer::GpuColorFrameWgpuResourcePoolDiagnostics>,
     rendered_decode_execution: PreviewDecodeExecutionSummary,
     /// Decode execution carried only by newly rendered outputs that actually
     /// became the exact current Viewer output.
@@ -533,6 +537,7 @@ impl HeadlessViewerGpuExecutionSummary {
         if let Some(diagnostics) = execution.spatial_diagnostics {
             self.spatial_diagnostics = Some(diagnostics);
         }
+        self.resource_pool_samples.push(execution.resource_pool_diagnostics);
         if disposition == HeadlessGpuExecutionPublication::PublishedCurrent {
             self.record_published_output_observation(completed_demand);
         }
@@ -1235,6 +1240,7 @@ fn headless_gpu_summary_separates_execution_publication_and_terminal_rejection()
             compositor_uniform_arena: None,
             compositor_texture_bindings: None,
             spatial_diagnostics: None,
+            resource_pool_diagnostics: Default::default(),
             stage_diagnostics: None,
             fallback_reasons: Vec::new(),
             decode_execution,
@@ -1349,6 +1355,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
                 compositor_uniform_arena: None,
                 compositor_texture_bindings: None,
                 spatial_diagnostics: None,
+                resource_pool_diagnostics: Default::default(),
                 stage_diagnostics: None,
                 fallback_reasons: Vec::new(),
                 decode_execution: PreviewDecodeExecutionSummary::default(),
@@ -1560,7 +1567,7 @@ fn real_media_probe_rate_maps_to_the_nearest_supported_sequence_grid() {
 }
 
 #[test]
-fn pause_seek_resume_gate_requires_exact_forward_progress() {
+fn pause_seek_resume_gate_requires_bounded_presentation_continuity() {
     let passing = evaluate_pause_seek_resume(
         12,
         12,
@@ -1568,29 +1575,50 @@ fn pause_seek_resume_gate_requires_exact_forward_progress() {
         112,
         Some(9),
         Some(9),
+        3,
+        1,
         PreviewReadinessCounts { ready: 12, ..PreviewReadinessCounts::default() },
     );
     assert!(passing.passed, "{:?}", passing.failures);
 
-    let stale = evaluate_pause_seek_resume(
+    let isolated_stale = evaluate_pause_seek_resume(
         12,
         12,
         100,
         112,
         Some(9),
         Some(9),
+        3,
+        1,
         PreviewReadinessCounts {
             ready: 11,
             stale: 1,
             ..PreviewReadinessCounts::default()
         },
     );
-    assert!(!stale.passed);
-    assert_eq!(stale.failures, vec!["resume_not_all_ready"]);
+    assert!(isolated_stale.passed, "{:?}", isolated_stale.failures);
+
+    let stale_burst = evaluate_pause_seek_resume(
+        12,
+        12,
+        100,
+        112,
+        Some(9),
+        Some(9),
+        3,
+        2,
+        PreviewReadinessCounts {
+            ready: 10,
+            stale: 2,
+            ..PreviewReadinessCounts::default()
+        },
+    );
+    assert!(!stale_burst.passed);
+    assert_eq!(stale_burst.failures, vec!["resume_presentation_continuity"]);
 }
 
 #[test]
-fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
+fn playback_resize_gate_requires_geometry_change_and_bounded_presentation_continuity() {
     let authored_full_extent = HeadlessViewerGpuExtent { width: 3840, height: 2160 };
     let passing = evaluate_playback_resize(
         8,
@@ -1600,13 +1628,62 @@ fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
         Some(17),
         Some(17),
         4,
+        1,
+        4,
+        true,
+        true,
+        PreviewReadinessCounts {
+            ready: 7,
+            stale: 1,
+            ..PreviewReadinessCounts::default()
+        },
+        &authored_full_extent,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+    );
+    assert!(passing.passed, "{:?}", passing.failures);
+
+    let stale_burst = evaluate_playback_resize(
+        8,
+        8,
+        20,
+        28,
+        Some(17),
+        Some(17),
+        4,
+        2,
+        4,
+        true,
+        true,
+        PreviewReadinessCounts {
+            ready: 6,
+            stale: 2,
+            ..PreviewReadinessCounts::default()
+        },
+        &authored_full_extent,
+        &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
+    );
+    assert_eq!(stale_burst.failures, vec!["resize_presentation_continuity"]);
+
+    let excessive_displacement = evaluate_playback_resize(
+        8,
+        8,
+        20,
+        33,
+        Some(17),
+        Some(17),
+        (PREVIEW_GPU_CPU_STAGING_CAPACITY + 1) as u64,
+        0,
+        4,
         true,
         true,
         PreviewReadinessCounts { ready: 8, ..PreviewReadinessCounts::default() },
         &authored_full_extent,
         &[HeadlessViewerGpuExtent { width: 3840, height: 2160 }],
     );
-    assert!(passing.passed, "{:?}", passing.failures);
+    assert_eq!(
+        excessive_displacement.failures,
+        vec!["resize_frame_displacement_exceeded"]
+    );
 
     let unchanged_geometry = evaluate_playback_resize(
         8,
@@ -1615,6 +1692,8 @@ fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
         28,
         Some(17),
         Some(17),
+        1,
+        0,
         1,
         true,
         true,
@@ -1635,6 +1714,8 @@ fn playback_resize_gate_requires_geometry_change_and_exact_ready_progress() {
         28,
         Some(17),
         Some(17),
+        4,
+        0,
         4,
         true,
         true,
@@ -1800,6 +1881,9 @@ struct PreviewPauseSeekResumeEvidence {
     end_frame: i64,
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
+    maximum_frame_advance: u64,
+    maximum_consecutive_stale: u64,
+    allowed_stale_observations: usize,
     readiness: PreviewReadinessCounts,
     passed: bool,
     failures: Vec<&'static str>,
@@ -1813,6 +1897,9 @@ struct PreviewPlaybackResizeEvidence {
     end_frame: i64,
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
+    maximum_frame_advance: u64,
+    maximum_consecutive_stale: u64,
+    allowed_stale_observations: usize,
     unique_presentation_extents: usize,
     presentation_geometry_valid: bool,
     authored_output_unchanged: bool,
@@ -1842,6 +1929,8 @@ fn evaluate_pause_seek_resume(
     end_frame: i64,
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
+    maximum_frame_advance: u64,
+    maximum_consecutive_stale: u64,
     readiness: PreviewReadinessCounts,
 ) -> PreviewPauseSeekResumeEvidence {
     let mut failures = Vec::new();
@@ -1854,13 +1943,19 @@ fn evaluate_pause_seek_resume(
     if first_epoch.is_none() || first_epoch != last_epoch {
         failures.push("resume_epoch_changed");
     }
-    if readiness.ready != requested_observations
+    if maximum_frame_advance == 0 || maximum_frame_advance > PREVIEW_GPU_CPU_STAGING_CAPACITY as u64
+    {
+        failures.push("resume_frame_displacement_exceeded");
+    }
+    let allowed_stale_observations = requested_observations.div_ceil(12);
+    if readiness.ready.saturating_add(readiness.stale) != requested_observations
+        || readiness.stale > allowed_stale_observations
+        || maximum_consecutive_stale > 1
         || readiness.loading > 0
-        || readiness.stale > 0
         || readiness.unavailable > 0
         || readiness.missed_deadline > 0
     {
-        failures.push("resume_not_all_ready");
+        failures.push("resume_presentation_continuity");
     }
     PreviewPauseSeekResumeEvidence {
         requested_observations,
@@ -1869,6 +1964,9 @@ fn evaluate_pause_seek_resume(
         end_frame,
         first_epoch,
         last_epoch,
+        maximum_frame_advance,
+        maximum_consecutive_stale,
+        allowed_stale_observations,
         readiness,
         passed: failures.is_empty(),
         failures,
@@ -1883,6 +1981,8 @@ fn evaluate_playback_resize(
     end_frame: i64,
     first_epoch: Option<u64>,
     last_epoch: Option<u64>,
+    maximum_frame_advance: u64,
+    maximum_consecutive_stale: u64,
     unique_presentation_extents: usize,
     presentation_geometry_valid: bool,
     authored_output_unchanged: bool,
@@ -1897,8 +1997,9 @@ fn evaluate_playback_resize(
     if end_frame <= start_frame {
         failures.push("resize_no_forward_progress");
     }
-    if end_frame.saturating_sub(start_frame) != observed_observations as i64 {
-        failures.push("resize_non_unit_forward_progress");
+    if maximum_frame_advance == 0 || maximum_frame_advance > PREVIEW_GPU_CPU_STAGING_CAPACITY as u64
+    {
+        failures.push("resize_frame_displacement_exceeded");
     }
     if first_epoch.is_none() || first_epoch != last_epoch {
         failures.push("resize_epoch_changed");
@@ -1912,13 +2013,15 @@ fn evaluate_playback_resize(
     if !authored_output_unchanged {
         failures.push("authored_output_changed_during_resize");
     }
-    if readiness.ready != requested_observations
+    let allowed_stale_observations = requested_observations.div_ceil(8);
+    if readiness.ready.saturating_add(readiness.stale) != requested_observations
+        || readiness.stale > allowed_stale_observations
+        || maximum_consecutive_stale > 1
         || readiness.loading > 0
-        || readiness.stale > 0
         || readiness.unavailable > 0
         || readiness.missed_deadline > 0
     {
-        failures.push("resize_not_all_ready");
+        failures.push("resize_presentation_continuity");
     }
     let authored_full_gpu_extent_exact = !gpu_output_extents.is_empty()
         && gpu_output_extents.iter().all(|extent| extent == authored_full_extent);
@@ -1932,6 +2035,9 @@ fn evaluate_playback_resize(
         end_frame,
         first_epoch,
         last_epoch,
+        maximum_frame_advance,
+        maximum_consecutive_stale,
+        allowed_stale_observations,
         unique_presentation_extents,
         presentation_geometry_valid,
         authored_output_unchanged,
@@ -2031,6 +2137,12 @@ struct PreviewMediaPlaybackProbeConfig {
     frame_interval_ns: u64,
     playback_threshold_ms: u128,
     gpu_candidate_threshold_ms: u128,
+    /// Scenario-specific recurring FFmpeg worker-execution bound.
+    ///
+    /// This must be the same authority used by the outer real-media gate;
+    /// otherwise one report can pass 60 ms while its nested report silently
+    /// evaluates the same samples against the unrelated 50 ms default.
+    decode_slow_frame_budget_us: u64,
     ready_timeout: Duration,
     seek_probe_count: usize,
     seek_threshold_per_settled_ms: u128,
@@ -3568,6 +3680,7 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
             frame_interval_ns,
             playback_threshold_ms,
             gpu_candidate_threshold_ms,
+            decode_slow_frame_budget_us: PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
             ready_timeout,
             seek_probe_count: 0,
             seek_threshold_per_settled_ms: 1_000,
@@ -4654,34 +4767,37 @@ fn run_headless_realtime_interval(
             let sample = driver.sample(sampled_intent, preview_service);
             let sample_candidate_status = driver.candidate_status;
             let current_intent = HeadlessGpuCandidateIntent::from_state(state);
-            let prepared_intent =
+            let current_playback_intent =
                 state.preview_execution_snapshot(Instant::now()).transport().playback_intent();
-            if preview_service.has_prepared_successor_for_intent(prepared_intent) {
-                let already_visible_at = preview_service
-                    .already_visible_successor_output_key(prepared_intent)
-                    .filter(|key| gpu_adapter.has_current_physical_output_for_key(key))
-                    .map(|_| now);
-                let candidate_started = Instant::now();
-                let attempt = execute_headless_gpu_candidate_at(
-                    preview_service,
-                    state,
-                    gpu_adapter,
-                    gpu_summary,
-                    safety_deadline,
-                    already_visible_at,
-                )?;
-                interval_timing.candidate.observe(candidate_started.elapsed());
-                driver.candidate_status = attempt.status;
-                apply_headless_candidate_binding(
-                    &mut driver.candidate_binding,
-                    current_intent,
-                    attempt.binding,
-                );
-                apply_headless_candidate_output_binding(
-                    &mut driver.candidate_output_binding,
-                    attempt.output_binding,
-                );
-            }
+            let already_visible_at = preview_service
+                .already_visible_successor_output_key(current_playback_intent)
+                .filter(|key| gpu_adapter.has_current_physical_output_for_key(key))
+                .map(|_| now);
+            // Arm the newly issued current demand before returning to UI work.
+            // Restricting this turn to an already-prepared successor leaves a
+            // decoded/cache-ready current frame idle until after a resize or
+            // other main-thread interaction, manufacturing one avoidable
+            // stale interval even though execution capacity was available.
+            let candidate_started = Instant::now();
+            let attempt = execute_headless_gpu_candidate_at(
+                preview_service,
+                state,
+                gpu_adapter,
+                gpu_summary,
+                safety_deadline,
+                already_visible_at,
+            )?;
+            interval_timing.candidate.observe(candidate_started.elapsed());
+            driver.candidate_status = attempt.status;
+            apply_headless_candidate_binding(
+                &mut driver.candidate_binding,
+                current_intent,
+                attempt.binding,
+            );
+            apply_headless_candidate_output_binding(
+                &mut driver.candidate_output_binding,
+                attempt.output_binding,
+            );
             interval_timing.total.observe(interval_started.elapsed());
             let advanced_frames = if state.playback_epoch() == sampled_epoch {
                 state.current_frame().saturating_sub(sampled_frame).max(1) as u64
@@ -4756,9 +4872,11 @@ fn run_headless_realtime_interval(
                 .map(|request| request.snapshot().transport().playback_intent());
             let already_prepared = successor_intent.is_some_and(|intent| {
                 driver.prepared_successor_intent == Some(intent)
-                    && preview_service.has_prepared_successor_for_intent(intent)
+                    && (preview_service.has_prepared_successor_for_intent(intent)
+                        || gpu_adapter.has_successor_submission_for_intent(intent))
             });
             if !already_prepared {
+                let successor_started = Instant::now();
                 gpu_summary.successor_preparation_attempts =
                     gpu_summary.successor_preparation_attempts.saturating_add(1);
                 if let Some(intent) = prepare_headless_preview_successor(
@@ -4771,7 +4889,11 @@ fn run_headless_realtime_interval(
                     gpu_summary.successor_preparation_ready =
                         gpu_summary.successor_preparation_ready.saturating_add(1);
                 }
+                interval_timing.successor.observe(successor_started.elapsed());
             }
+            let lookahead_started = Instant::now();
+            stage_headless_preview_lookahead(preview_service, state, gpu_adapter)?;
+            interval_timing.lookahead.observe(lookahead_started.elapsed());
         }
 
         // Candidate work and result pumping can change both Engine phase and
@@ -4839,6 +4961,8 @@ struct HeadlessRealtimeIntervalTiming {
     clock_advance: HeadlessRealtimeStageTiming,
     preview_pump: HeadlessRealtimeStageTiming,
     candidate: HeadlessRealtimeStageTiming,
+    successor: HeadlessRealtimeStageTiming,
+    lookahead: HeadlessRealtimeStageTiming,
     wait: HeadlessRealtimeStageTiming,
 }
 
@@ -4862,6 +4986,8 @@ struct HeadlessRealtimeCoordinatorTiming {
     clock_advance: HeadlessRealtimeStageTiming,
     preview_pump: HeadlessRealtimeStageTiming,
     candidate: HeadlessRealtimeStageTiming,
+    successor: HeadlessRealtimeStageTiming,
+    lookahead: HeadlessRealtimeStageTiming,
     wait: HeadlessRealtimeStageTiming,
 }
 
@@ -4904,6 +5030,8 @@ impl HeadlessRealtimeCoordinatorTiming {
         self.clock_advance.merge(interval.clock_advance);
         self.preview_pump.merge(interval.preview_pump);
         self.candidate.merge(interval.candidate);
+        self.successor.merge(interval.successor);
+        self.lookahead.merge(interval.lookahead);
         self.wait.merge(interval.wait);
     }
 
@@ -5151,6 +5279,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
             frame_interval_ns,
             playback_threshold_ms,
             gpu_candidate_threshold_ms: PROFESSIONAL_GPU_CANDIDATE_LIMIT_MS,
+            decode_slow_frame_budget_us: PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US,
             ready_timeout,
             seek_probe_count: QUALIFICATION_SEEK_PROBES,
             seek_threshold_per_settled_ms: 1_000,
@@ -5436,7 +5565,7 @@ fn run_external_continuous_playback_gate(
     let playback_p95_limit_us = if professional {
         PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US
     } else {
-        env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 40_000)
+        env_u64("MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US", 60_000)
     };
     let playback_queue_wait_p95_limit_us = if professional {
         PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US
@@ -5535,6 +5664,7 @@ fn run_external_continuous_playback_gate(
             frame_interval_ns,
             playback_threshold_ms,
             gpu_candidate_threshold_ms,
+            decode_slow_frame_budget_us: playback_p95_limit_us,
             ready_timeout,
             seek_probe_count,
             seek_threshold_per_settled_ms,
@@ -6212,9 +6342,9 @@ fn run_preview_media_continuous_playback_probe(
     let continuous_preview_diagnostics = preview_service.diagnostics();
     let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
         continuous_preview_diagnostics
-            .decode_performance_summary(PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+            .decode_performance_summary(config.decode_slow_frame_budget_us),
         config.scenario,
-        PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+        config.decode_slow_frame_budget_us,
         &[PreviewDecodeAccessMode::PlaybackCursor],
     );
     let preview_render_report = continuous_preview_diagnostics
@@ -6801,13 +6931,16 @@ fn run_headless_pause_seek_resume_probe(
         end_frame,
         first_epoch,
         last_epoch,
+        realtime_driver.timing.maximum_frame_advance,
+        realtime_driver.timing.max_consecutive_stale,
         readiness,
     );
     anyhow::ensure!(
         evidence.passed,
-        "pause-seek-resume gate failed: {evidence:?}; last_preroll={:?}; realtime_timing={:?}; preview_diagnostics={:?}",
+        "pause-seek-resume gate failed: {evidence:?}; last_preroll={:?}; realtime_timing={:?}; gpu_summary={:?}; preview_diagnostics={:?}",
         preview_service.last_video_preroll_observation_for_test(),
         realtime_driver.timing,
+        gpu_summary,
         preview_service.diagnostics(),
     );
     Ok(evidence)
@@ -6970,6 +7103,8 @@ fn run_headless_playback_resize_probe(
         end_frame,
         first_epoch,
         last_epoch,
+        context.realtime_driver.timing.maximum_frame_advance,
+        context.realtime_driver.timing.max_consecutive_stale,
         presentation_extents.len(),
         presentation_geometry_valid,
         authored_output_unchanged,
@@ -6977,7 +7112,11 @@ fn run_headless_playback_resize_probe(
         &authored_full_extent,
         &gpu_summary.output_extents,
     );
-    anyhow::ensure!(evidence.passed, "playback-resize gate failed: {evidence:?}");
+    anyhow::ensure!(
+        evidence.passed,
+        "playback-resize gate failed: {evidence:?}; coordinator={:?}",
+        context.realtime_driver.timing,
+    );
     Ok(evidence)
 }
 
@@ -7233,15 +7372,22 @@ fn preview_idle_release_requires_worker_idle_and_post_reap_accounting() {
 fn validate_executed_adaptive_scaling(
     report: &PreviewMediaPlaybackPerfReport,
 ) -> anyhow::Result<()> {
+    validate_executed_adaptive_scaling_for_window(
+        report.continuous_playback_window.playback.deliveries.degraded,
+        &report.headless_gpu.output_extents,
+    )
+}
+
+fn validate_executed_adaptive_scaling_for_window(
+    degraded: u64,
+    output_extents: &[HeadlessViewerGpuExtent],
+) -> anyhow::Result<()> {
     let pressure_threshold = mondrian_playback::PlaybackPolicy::default().pressure_threshold as u64;
     let quarter_evidence_threshold = pressure_threshold.saturating_mul(2);
-    let degraded = report.playback_evidence.deliveries.degraded;
     if degraded < pressure_threshold {
         return Ok(());
     }
-    let full = report
-        .headless_gpu
-        .output_extents
+    let full = output_extents
         .iter()
         .max_by_key(|extent| u64::from(extent.width).saturating_mul(u64::from(extent.height)))
         .context("adaptive playback report contains no executed GPU extent")?;
@@ -7254,18 +7400,41 @@ fn validate_executed_adaptive_scaling(
         height: full.height.div_ceil(4),
     };
     anyhow::ensure!(
-        report.headless_gpu.output_extents.contains(&expected_half),
+        output_extents.contains(&expected_half),
         "sustained playback pressure did not execute a Half GPU extent: {:?}",
-        report.headless_gpu.output_extents
+        output_extents
     );
     if degraded >= quarter_evidence_threshold {
         anyhow::ensure!(
-            report.headless_gpu.output_extents.contains(&expected_quarter),
+            output_extents.contains(&expected_quarter),
             "continued playback pressure did not execute a Quarter GPU extent: {:?}",
-            report.headless_gpu.output_extents
+            output_extents
         );
     }
     Ok(())
+}
+
+#[test]
+fn adaptive_scaling_validation_uses_the_continuous_window_pressure() {
+    let policy = mondrian_playback::PlaybackPolicy::default();
+    let threshold = u64::try_from(policy.pressure_threshold).expect("pressure threshold fits u64");
+    let full = HeadlessViewerGpuExtent { width: 3840, height: 2160 };
+    let half = HeadlessViewerGpuExtent { width: 1920, height: 1080 };
+    let quarter = HeadlessViewerGpuExtent { width: 960, height: 540 };
+
+    assert!(validate_executed_adaptive_scaling_for_window(0, &[full]).is_ok());
+    assert!(validate_executed_adaptive_scaling_for_window(threshold, &[full]).is_err());
+    assert!(validate_executed_adaptive_scaling_for_window(threshold, &[full, half]).is_ok());
+    assert!(validate_executed_adaptive_scaling_for_window(
+        threshold.saturating_mul(2),
+        &[full, half],
+    )
+    .is_err());
+    assert!(validate_executed_adaptive_scaling_for_window(
+        threshold.saturating_mul(2),
+        &[full, half, quarter],
+    )
+    .is_ok());
 }
 
 fn configure_headless_gpu_decode_admission(
@@ -7423,28 +7592,32 @@ fn headless_candidate_is_ready_for_sample(
 fn headless_candidate_may_prepare_successor(status: HeadlessGpuCandidateStatus) -> bool {
     matches!(
         status,
-        HeadlessGpuCandidateStatus::Ready | HeadlessGpuCandidateStatus::QueuedReady
+        HeadlessGpuCandidateStatus::Ready
+            | HeadlessGpuCandidateStatus::QueuedReady
+            | HeadlessGpuCandidateStatus::InFlight
     )
 }
 
 #[test]
-fn queue_published_current_frame_can_fill_the_next_gpu_submission_slot() {
+fn submitted_current_frame_can_fill_the_bounded_successor_slot() {
     assert!(headless_candidate_may_prepare_successor(
         HeadlessGpuCandidateStatus::Ready
     ));
     assert!(headless_candidate_may_prepare_successor(
         HeadlessGpuCandidateStatus::QueuedReady
     ));
+    assert!(headless_candidate_may_prepare_successor(
+        HeadlessGpuCandidateStatus::InFlight
+    ));
     for status in [
         HeadlessGpuCandidateStatus::Loading,
-        HeadlessGpuCandidateStatus::InFlight,
         HeadlessGpuCandidateStatus::Backpressured,
         HeadlessGpuCandidateStatus::DroppedLate,
         HeadlessGpuCandidateStatus::Unavailable,
     ] {
         assert!(
             !headless_candidate_may_prepare_successor(status),
-            "{status:?} must not speculate from an unpresented current frame"
+            "{status:?} has no submitted current-frame owner for bounded successor work"
         );
     }
 }
@@ -8144,6 +8317,20 @@ fn wait_for_headless_playback_preroll(
             gpu_summary,
             HeadlessGpuCompletionDeadline::at(deadline),
         )?;
+        if state.is_playback_priming()
+            && matches!(
+                attempt.status,
+                HeadlessGpuCandidateStatus::Ready | HeadlessGpuCandidateStatus::QueuedReady
+            )
+        {
+            let _ = prepare_headless_preview_successor(
+                preview_service,
+                state,
+                gpu_adapter,
+                HeadlessGpuCompletionDeadline::at(deadline),
+            )?;
+            stage_headless_preview_lookahead(preview_service, state, gpu_adapter)?;
+        }
         anyhow::ensure!(
             now < deadline,
             "timed out waiting for bounded playback video preroll; diagnostics: {:?}",

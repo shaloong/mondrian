@@ -1484,7 +1484,6 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     let promoted = test_media_key(1);
     let other_prefetch = test_media_key(2);
     let promoted_payload = test_media_job(promoted.clone(), MediaPreviewRequestPriority::Prefetch);
-    let original_enqueued_at = promoted_payload.enqueued_at;
 
     assert_eq!(
         sender.enqueue(promoted_payload),
@@ -1544,9 +1543,9 @@ fn media_preview_job_queue_promotes_existing_prefetch_to_current() {
     assert_eq!(promoted_job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(promoted_job.generation, 7);
     assert_eq!(promoted_job.key.source_sample(), promoted.source_sample());
-    assert_eq!(
-        promoted_job.enqueued_at, original_enqueued_at,
-        "metadata promotion must preserve the queued execution payload"
+    assert!(
+        promoted_job.enqueued_at >= promoted_at,
+        "queue evidence must begin at the promoted current binding"
     );
     assert_eq!(promoted_job.deadline_at, None);
     assert_eq!(promoted_job.demand_identity, Some(demand_identity));
@@ -1571,7 +1570,6 @@ fn media_preview_job_queue_promote_refreshes_current_generation_without_priority
     let key = test_media_key(1);
     let original_payload =
         test_media_job_with_generation(key.clone(), 2, MediaPreviewRequestPriority::Current);
-    let original_enqueued_at = original_payload.enqueued_at;
 
     assert_eq!(
         sender.enqueue(original_payload),
@@ -1607,7 +1605,10 @@ fn media_preview_job_queue_promote_refreshes_current_generation_without_priority
     assert_eq!(job.priority, MediaPreviewRequestPriority::Current);
     assert_eq!(job.access_mode, PreviewDecodeAccessMode::ScrubCursor);
     assert_eq!(job.generation, 5);
-    assert_eq!(job.enqueued_at, original_enqueued_at);
+    assert!(
+        job.enqueued_at >= refreshed_at,
+        "queue evidence must begin at the refreshed generation binding"
+    );
     assert_eq!(job.deadline_at, refreshed_deadline);
 }
 

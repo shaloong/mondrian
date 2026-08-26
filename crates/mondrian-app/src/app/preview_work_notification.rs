@@ -146,7 +146,6 @@ impl Drop for PreviewWorkerExitNotification {
 impl PreviewWorkWatch {
     /// Build a payload-free producer callback for an external asynchronous
     /// completion source that belongs to this Preview Runtime.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn completion_waker(&self) -> impl Fn() + Send + Sync + 'static {
         let notifier = PreviewWorkNotifier { shared: Arc::clone(&self.shared) };
         move || {

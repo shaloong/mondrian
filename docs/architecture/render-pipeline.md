@@ -513,8 +513,11 @@ authority. Pre-submit renderer backpressure converts the already-reserved
 progress permit into an explicit renderer-cleanup barrier; the device worker
 drives that unindexed internal work and wakes a retry without fabricating a
 Viewer submission completion. An ordinary complete-GPU output may publish after
-queue-ordered submission while its capacity-one owner remains retained for
-physical completion evidence. A heterogeneous output cannot publish before its
+queue-ordered submission while its bounded cleanup owner remains retained for
+physical completion evidence. Submitted cleanup-owner and progress-permit
+capacity matches the four-frame CPU staging horizon; this absorbs bounded queue
+callback latency without increasing physical publication beyond one current and
+one prepared output. A heterogeneous output cannot publish before its
 exact callback and completed-batch validation. Timeout, device-poll failure, or
 authority revocation quarantines the submitted owner without freeing its visual
 terminal authority or Frame Store media-protection leases; its exact late
@@ -535,11 +538,15 @@ surface changed.
 
 Headless resource coordination samples and applies the App/Preview policy on
 every turn, but renderer-pool reconfiguration occurs only after exact
-completion polling proves the capacity-one submission slot idle. If an ordinary
-queue-ordered output is already visible while its owner awaits callback
+completion polling proves every submitted cleanup-owner slot idle. If the
+bounded owner set is full while ordinary queue-ordered outputs await callback
 retirement, the turn reports bounded backpressure and retries; it never treats
 that normal owner lifetime as a fatal Adapter error or trims resources beneath
-the submission.
+the submissions. Preview's domain seam is value-idempotent: level-triggered
+candidate polling may resample the same immutable decision, but equal policy
+does not repeatedly reconfigure Frame Store, decoder residency, Effects, color,
+or seek-index ownership on the realtime thread. A changed decision still
+applies on its first observed turn.
 
 Adapter teardown closes admission and appends one FIFO retirement envelope to
 the existing progress worker; the Window/UI or Headless caller performs no
@@ -1025,7 +1032,23 @@ resources: one slot is retained per contributing compact layer in a candidate,
 reset between candidates, reused only through queue-ordered submissions, and
 retired by critical trim or device reset. Steady playback therefore performs
 bounded texture updates rather than allocating two device textures per layer
-and frame.
+and frame. Those updates use a bounded renderer upload worker and reusable
+mapped transfer-buffer pool rather than per-plane `Queue::write_texture`
+staging allocations. Source stride is
+validated independently from the 256-byte-aligned GPU transfer stride; only
+visible rows are copied, so row padding never becomes picture data. Upload
+preparation is an explicit asynchronous backpressure state and publishes only
+a payload-free retry wake after the worker result is pollable. A command-free
+request-wide preflight schedules every distinct contributing compact source,
+including both active Cross Dissolve endpoints. CPU-complete Viewer lookahead
+starts that preparation before the frame becomes an immediate successor; the
+record boundary rechecks the same fact and emits no partial layer commands
+until all inputs are ready. Once ready, all plane copies are encoded before the
+YUV pass in the same submission. The whole transfer buffer is remapped and
+returned to the bounded worker pool only after GPU completion; a
+failed/abandoned Viewer candidate drops its unsubmitted buffer. Ordinary 4K
+planar 4:2:2 packs luma, Cb, and Cr into one checked buffer; larger valid planes
+receive an exact larger buffer rather than being truncated.
 For a heterogeneous source, source preparation uses the wgpu Adapter's
 non-aliasing physical recording bytes and texture count, not the semantic
 plan's optimal live-set peak. All extent, count, and byte arithmetic is
@@ -2195,7 +2218,7 @@ User scrub/play
     → optional GPU ICC monitor calibration
     → queue.submit()
       → transfer the move-only presentation output lease
-      → install exact completion callback and retained capacity-one owner
+      → install exact completion callback and retained bounded cleanup owner
       → infallibly commit the exact wgpu SubmissionIndex through the permit
           → dedicated non-UI bounded PollType::Wait(exact index, 8 ms)
           → high-resolution remainder pacing on Windows; recheck exact callback
@@ -2656,12 +2679,13 @@ and entering permanent active-working-set refusal.
 More than one live detached output is bounded backpressure, not an input to
 that component-wise formula. An unordered count/byte aggregate cannot identify
 which lease publication will replace and therefore cannot prove the following
-steady state. Window and Headless lifecycle occupancy prevents another record
-while a candidate lease is awaiting publication; admission nevertheless
-checks the capacity-one invariant and fails closed if an Adapter bug, reset
-race, or future multi-slot owner exposes two leases. A future multi-slot design
-must provide explicit replaceable lease identity and ownership transitions
-instead of weakening this check or reviving aggregate approximation.
+steady state. Window and Headless may retain several submitted cleanup owners,
+but stale prepared publication is retired before an exact current candidate is
+recorded; admission independently checks the capacity-one detached-output
+invariant and fails closed if an Adapter bug or reset race exposes two leases.
+A future multi-output publication design must provide explicit replaceable
+lease identity and ownership transitions instead of weakening this check or
+reviving aggregate approximation.
 
 This ledger spans pool generations: reset invalidates return authority and idle
 storage but an old-generation lease remains charged until its actual backend

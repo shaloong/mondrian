@@ -798,6 +798,7 @@ fn video_preroll(
         demand: engine.frame_demand().expect("active frame demand").identity(),
         ready_media_frames,
         preservable_media_frames,
+        presentation_successor_ready: true,
     }
 }
 
@@ -884,6 +885,60 @@ fn presented_current_frame_waits_for_bounded_video_preroll() {
 }
 
 #[test]
+fn presented_current_frame_cannot_bypass_observed_preroll_at_fallback_deadline() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    assert!(!engine.observe_video_preroll(video_preroll(&engine, 0, 8), ts(17)).unwrap());
+
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Priming
+    );
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    assert!(engine.observe_video_preroll(video_preroll(&engine, 8, 8), ts(1600)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
+fn presented_current_frame_waits_for_physical_presentation_successor() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+    let mut observation = video_preroll(&engine, 8, 8);
+    observation.presentation_successor_ready = false;
+
+    assert!(!engine.observe_video_preroll(observation, ts(17)).unwrap());
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Priming
+    );
+    assert_eq!(engine.next_wake(ts(1500)).unwrap(), None);
+
+    observation.presentation_successor_ready = true;
+    assert!(engine.observe_video_preroll(observation, ts(1510)).unwrap());
+    assert_eq!(engine.snapshot().state, TransportState::Playing);
+}
+
+#[test]
+fn presented_current_without_a_preroll_observation_retains_deadline_fallback() {
+    let mut engine = engine();
+    engine.play(100, ts(0)).unwrap();
+
+    let delivery = current_delivery(&engine, FrameDeliveryKind::Ready, ts(5));
+    assert!(engine.observe_frame_delivery(delivery).unwrap().accepted());
+
+    assert_eq!(
+        engine.tick(ts(1500)).unwrap().state,
+        TransportState::Playing
+    );
+}
+
+#[test]
 fn video_preroll_cannot_start_before_current_frame_is_presented() {
     let mut engine = engine();
     engine.play(100, ts(0)).unwrap();
@@ -948,6 +1003,7 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: first_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                presentation_successor_ready: true,
             },
             ts(2)
         )
@@ -963,6 +1019,7 @@ fn invalid_or_stale_video_preroll_cannot_mutate_session() {
                 demand: wrong_demand,
                 ready_media_frames: 1,
                 preservable_media_frames: 1,
+                presentation_successor_ready: true,
             },
             ts(2)
         )

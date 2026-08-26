@@ -30,6 +30,7 @@ mod cancellation;
 mod decode_contract;
 mod decode_session;
 mod decoded_frame;
+mod decoded_surface_window;
 mod demux_process;
 mod demux_protocol;
 mod demux_protocol_ffi;
@@ -42,7 +43,6 @@ mod frame_materialization;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
-mod reverse_decode_window;
 mod seek_index;
 
 pub use decode_contract::{
@@ -160,6 +160,13 @@ const PREVIEW_PLAYBACK_SESSION_RING_CAPACITY: usize = 8;
 // residency authority. A byte limit prevents eight large CPU frames from
 // bypassing the App-owned Preview Frame Store budget.
 const PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET: usize = 96 * 1024 * 1024;
+// Prefetch is allowed to advance the one resident Playback decoder while an
+// older current-frame request is queued. Retain the same eight-frame bounded
+// temporal prefix as startup preroll so that scheduling overlap never turns
+// back into a long-GOP seek. At 256 MiB the window can hold eight 4K 4:2:2
+// 10-bit software surfaces while remaining independently byte bounded.
+const PREVIEW_PLAYBACK_DECODE_WINDOW_CAPACITY: usize = 8;
+const PREVIEW_PLAYBACK_DECODE_WINDOW_BYTE_BUDGET: usize = 256 * 1024 * 1024;
 // Reverse playback must replay a forward-decoded GOP tail instead of seeking
 // to the same keyframe for every descending frame. The window shares the same
 // conservative memory envelope as the output ring and independently caps
@@ -1039,7 +1046,6 @@ impl PreviewDecodeCpuBudget {
         let decoder_threads_per_worker = (usable_threads / preview_worker_count)
             .max(1)
             .min(max_decoder_threads_per_worker);
-
         Self {
             available_parallelism,
             reserved_interactive_threads,
@@ -1625,27 +1631,21 @@ fn preview_decode_threading_config(
     PreviewDecodeThreadingConfig { kind, count }
 }
 
-/// Default software-decode threading kind for one access mode and frame size.
+/// Default software-decode threading kind.
 ///
-/// Slice-level threading parallelizes each UHD frame across its slice rows,
-/// while frame threading pipelines frames but keeps each 4K frame's entropy
-/// decode sequential. Measured on software H.264 High 4:2:2 10-bit
-/// 3840x2160@60000/1001: slice threading sustains the 16.7 ms frame budget
-/// (60/60 exact presentations, decode p95 ~25 ms), frame threading falls
-/// behind (53-55/60, decode p95 clamped at 40 ms). Lower resolutions keep
-/// frame threading so slice-coordination overhead is not imposed where the
-/// frame pipeline already wins; an explicit
-/// `MONDRIAN_PREVIEW_DECODE_THREADING` override always wins.
+/// Frame threading pipelines coded pictures and therefore provides stable
+/// throughput independently of how many slices the bitstream author placed in
+/// each picture. A declared slice-thread count is not evidence that a camera
+/// stream contains enough independent slices to use it. Real H.264 High 4:2:2
+/// 10-bit 3840x2160@60000/1001 playback measured about 9.4 ms steady work per
+/// frame with frame threading versus 15-25 ms and load-sensitive underruns
+/// with slice threading. An explicit `MONDRIAN_PREVIEW_DECODE_THREADING`
+/// override remains available for codec/source qualification.
 fn default_threading_kind_for_software_decode(
-    access_mode: PreviewDecodeAccessMode,
-    decode_pixels: u64,
+    _access_mode: PreviewDecodeAccessMode,
+    _decode_pixels: u64,
 ) -> PreviewDecodeThreadingKind {
-    const UHD_PIXELS: u64 = 3_840 * 2_160;
-    if access_mode == PreviewDecodeAccessMode::PlaybackCursor && decode_pixels >= UHD_PIXELS {
-        PreviewDecodeThreadingKind::Slice
-    } else {
-        PreviewDecodeThreadingKind::Frame
-    }
+    PreviewDecodeThreadingKind::Frame
 }
 
 fn default_decoder_threads_for_access_mode(

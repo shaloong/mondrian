@@ -164,6 +164,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             result.priority,
                             result.access_mode,
                             result.queue_wait_us,
+                            presentation_current,
                         );
                     }
                     MediaPreviewQueueDisposition::Expired => {

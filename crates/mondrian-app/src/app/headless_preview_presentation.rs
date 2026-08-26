@@ -10,7 +10,10 @@ use super::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuCompletionPoll,
     HeadlessViewerGpuError, HeadlessViewerGpuExecution, HeadlessViewerGpuOutput,
 };
-use super::playback_preview::{observe_playback_video_preroll, pump_playback_preview};
+use super::playback_preview::{
+    observe_playback_video_preroll, observe_playback_video_preroll_with_presentation_readiness,
+    pump_playback_preview,
+};
 use super::preview_execution::{PreviewGpuFrameState, PreviewOutputKey};
 use super::preview_raster_frame::PreviewRasterFrame;
 use super::preview_runtime::{
@@ -227,7 +230,17 @@ pub(crate) fn present_headless_preview_candidate_at(
             return Ok(HeadlessPreviewCandidate::Loading);
         }
     }
-    match preview.gpu_preview_frame(state.preview_frame_execution_request(Instant::now())) {
+    let current_request = state.preview_frame_execution_request(Instant::now());
+    let candidate = gpu
+        .take_staged_successor_for_intent(current_playback_intent)
+        .and_then(|frame| {
+            preview.bind_staged_gpu_frame_for_current(frame, current_request.snapshot())
+        })
+        .map_or_else(
+            || preview.gpu_preview_frame(current_request),
+            PreviewGpuFrameState::Ready,
+        );
+    match candidate {
         PreviewGpuFrameState::Ready(frame) => {
             let presentation_ticket = frame.presentation_ticket();
             match state.preflight_frame_presentation(presentation_ticket, Instant::now()) {
@@ -420,13 +433,10 @@ fn advance_headless_execution_resource_policy(
 #[cfg(test)]
 pub(crate) fn prepare_headless_preview_successor(
     preview: &HeadlessPreviewRuntime,
-    state: &AppState,
+    state: &mut AppState,
     gpu: &mut HeadlessViewerGpuAdapter,
     gpu_completion_deadline: HeadlessGpuCompletionDeadline,
 ) -> anyhow::Result<Option<crate::app::preview_execution::PreviewPlaybackIntent>> {
-    if gpu.submission_capacity_is_full() {
-        return Ok(None);
-    }
     let Some(request) = state.preview_successor_execution_request(Instant::now()) else {
         return Ok(None);
     };
@@ -442,26 +452,30 @@ pub(crate) fn prepare_headless_preview_successor(
         return Ok(None);
     }
     let playback_intent = request.snapshot().transport().playback_intent();
-    match preview.gpu_preview_frame(request) {
+    let candidate = gpu.take_staged_successor_for_intent(playback_intent).map_or_else(
+        || preview.gpu_preview_frame(request),
+        PreviewGpuFrameState::Ready,
+    );
+    match candidate {
         PreviewGpuFrameState::Prepared => Ok(Some(playback_intent)),
-        PreviewGpuFrameState::Ready(mut frame) => {
+        PreviewGpuFrameState::Ready(frame) => {
             ensure!(
                 frame.is_successor_preparation() && frame.presentation_ticket().is_none(),
                 "successor Preview request produced current presentation authority"
             );
-            if let Some(execution) = frame.take_heterogeneous_gpu_execution() {
-                let _ = preview.fail_heterogeneous_gpu_execution(execution);
-                return Ok(None);
+            if gpu.submission_capacity_is_full() {
+                gpu.stage_successor(frame)
+                    .context("prewarm staged Headless successor uploads")?;
+                return Ok(Some(playback_intent));
             }
             let submitted = match gpu.submit(*frame, gpu_completion_deadline) {
                 Ok(submitted) => submitted,
                 Err(HeadlessViewerGpuError::Backpressure(_)) => return Ok(None),
                 Err(error) => return Err(error).context("submit Headless successor candidate"),
             };
-            ensure!(
-                !submitted.heterogeneous,
-                "ordinary successor submission unexpectedly retained heterogeneous execution"
-            );
+            if submitted.heterogeneous {
+                return Ok(Some(playback_intent));
+            }
             gpu.retain_ordinary_successor(submitted.submission_id, |frame, output| {
                 preview.register_prepared_gpu_successor(
                     frame.playback_intent(),
@@ -469,6 +483,7 @@ pub(crate) fn prepare_headless_preview_successor(
                     output.clone(),
                 );
             })?;
+            observe_playback_video_preroll_with_presentation_readiness(state, preview, true);
             Ok(Some(playback_intent))
         }
         PreviewGpuFrameState::Current(_)
@@ -476,6 +491,63 @@ pub(crate) fn prepare_headless_preview_successor(
         | PreviewGpuFrameState::Loading
         | PreviewGpuFrameState::Unavailable(_) => Ok(None),
     }
+}
+
+/// Warm a bounded CPU-complete horizon beyond the immediate successor without
+/// taking GPU submission or physical presentation capacity.
+#[cfg(test)]
+pub(crate) fn stage_headless_preview_lookahead(
+    preview: &HeadlessPreviewRuntime,
+    state: &AppState,
+    gpu: &mut HeadlessViewerGpuAdapter,
+) -> anyhow::Result<()> {
+    const FIRST_LOOKAHEAD_OFFSET: usize = 2;
+    const LAST_LOOKAHEAD_OFFSET: usize = 4;
+    let mut expected = Vec::with_capacity(LAST_LOOKAHEAD_OFFSET);
+    if let Some(request) = state.preview_successor_execution_request(Instant::now()) {
+        expected.push(request.snapshot().transport().playback_intent());
+    }
+    expected.extend(
+        (FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET).filter_map(|offset| {
+            state
+                .preview_lookahead_execution_request(Instant::now(), offset)
+                .map(|request| request.snapshot().transport().playback_intent())
+        }),
+    );
+    gpu.retain_staged_successor_intents(&expected);
+
+    for offset in FIRST_LOOKAHEAD_OFFSET..=LAST_LOOKAHEAD_OFFSET {
+        let Some(request) = state.preview_lookahead_execution_request(Instant::now(), offset)
+        else {
+            continue;
+        };
+        let intent = request.snapshot().transport().playback_intent();
+        if gpu.has_staged_successor_for_intent(intent) {
+            continue;
+        }
+        match preview.gpu_preview_frame(request) {
+            PreviewGpuFrameState::Ready(frame) => {
+                ensure!(
+                    frame.is_successor_preparation()
+                        && frame.presentation_ticket().is_none()
+                        && frame.playback_intent() == intent,
+                    "Headless lookahead produced current presentation authority"
+                );
+                gpu.stage_successor(frame)
+                    .context("prewarm staged Headless lookahead uploads")?;
+            }
+            PreviewGpuFrameState::Prepared
+            | PreviewGpuFrameState::Current(_)
+            | PreviewGpuFrameState::Transparent(_)
+            | PreviewGpuFrameState::Loading
+            | PreviewGpuFrameState::Unavailable(_) => {}
+        }
+        // One speculative evaluation per coordinator turn. Filling every
+        // missing coordinate at once competes with current Playback decode;
+        // repeated turns converge on the complete horizon without a burst.
+        break;
+    }
+    Ok(())
 }
 
 fn drive_headless_gpu_submission(
@@ -549,7 +621,7 @@ fn drive_headless_gpu_submission(
             if quarantined {
                 return Ok(Some(HeadlessPreviewCandidate::Loading));
             }
-            if gpu.has_prepared_successor_submission(submission_id) {
+            if gpu.has_successor_preparation_submission(submission_id) {
                 return Ok(None);
             }
             if gpu.has_queued_publication(submission_id) {
@@ -814,9 +886,11 @@ fn drive_headless_gpu_submission(
                     completed.execution.submission_id
                 );
             };
-            let disposition = match preview
-                .finalize_heterogeneous_gpu_completion(terminal, gpu_completion)
-            {
+            let disposition = match preview.finalize_heterogeneous_gpu_completion(
+                terminal,
+                gpu_completion,
+                completed.frame.is_successor_preparation(),
+            ) {
                 Ok(disposition) => disposition,
                 Err(error) => {
                     let _ = pump_playback_preview(state, preview);
@@ -824,6 +898,25 @@ fn drive_headless_gpu_submission(
                 }
             };
             match disposition {
+                PreviewVisualGpuCompletionDisposition::PrepareSuccessor => {
+                    gpu.retain_completed_heterogeneous_successor(
+                        &mut completed,
+                        |frame, output| {
+                            preview.register_prepared_gpu_successor(
+                                frame.playback_intent(),
+                                frame.output_key.clone(),
+                                output.clone(),
+                            );
+                        },
+                    )?;
+                    observe_playback_video_preroll_with_presentation_readiness(
+                        state, preview, true,
+                    );
+                    Ok(Some(HeadlessPreviewCandidate::CompletedGpu {
+                        execution: Box::new(completed.execution),
+                        disposition: HeadlessCompletedGpuDisposition::PreparedSuccessor,
+                    }))
+                }
                 PreviewVisualGpuCompletionDisposition::PublishCurrent => {
                     let presentation =
                         gpu.publish_completed_heterogeneous(&mut completed, |frame, output| {

@@ -100,6 +100,8 @@ pub struct PreviewPlaybackScheduleDiagnostics {
     pub forward_prefetch_min_frames: usize,
     /// Maximum allowed forward prefetch window.
     pub forward_prefetch_max_frames: usize,
+    /// Maximum queued plus in-flight prefetch decodes after Priming.
+    pub steady_prefetch_reservation_limit: usize,
     /// Playback prefetch passes whose frame rate produced a valid dynamic window.
     pub forward_prefetch_window_evaluations: u64,
     /// Playback prefetch passes skipped because frame rate could not produce a valid window.
@@ -723,7 +725,9 @@ pub struct PreviewDecodeLatencyBuckets {
     pub le_40ms: u64,
     /// Samples above 40 ms and at or below 50 ms.
     pub le_50ms: u64,
-    /// Samples above 50 ms and at or below 80 ms.
+    /// Samples above 50 ms and at or below 60 ms.
+    pub le_60ms: u64,
+    /// Samples above 60 ms and at or below 80 ms.
     pub le_80ms: u64,
     /// Samples above 80 ms.
     pub gt_80ms: u64,
@@ -737,7 +741,8 @@ impl PreviewDecodeLatencyBuckets {
             16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
             25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
             40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
-            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            50_001..=60_000 => self.le_60ms = self.le_60ms.saturating_add(1),
+            60_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
             _ => self.gt_80ms = self.gt_80ms.saturating_add(1),
         }
     }
@@ -748,6 +753,7 @@ impl PreviewDecodeLatencyBuckets {
             .saturating_add(self.le_25ms)
             .saturating_add(self.le_40ms)
             .saturating_add(self.le_50ms)
+            .saturating_add(self.le_60ms)
             .saturating_add(self.le_80ms)
             .saturating_add(self.gt_80ms)
     }
@@ -769,6 +775,7 @@ impl PreviewDecodeLatencyBuckets {
             (self.le_25ms, Some(25_000)),
             (self.le_40ms, Some(40_000)),
             (self.le_50ms, Some(50_000)),
+            (self.le_60ms, Some(60_000)),
             (self.le_80ms, Some(80_000)),
             (self.gt_80ms, None),
         ] {
@@ -872,7 +879,9 @@ pub struct PreviewDecodeWorkLatencyBuckets {
     pub le_40ms: u64,
     /// Samples above 40 ms and at or below 50 ms.
     pub le_50ms: u64,
-    /// Samples above 50 ms and at or below 80 ms.
+    /// Samples above 50 ms and at or below 60 ms.
+    pub le_60ms: u64,
+    /// Samples above 60 ms and at or below 80 ms.
     pub le_80ms: u64,
     /// Samples above 80 ms and at or below 120 ms.
     pub le_120ms: u64,
@@ -898,7 +907,8 @@ impl PreviewDecodeWorkLatencyBuckets {
             16_001..=25_000 => self.le_25ms = self.le_25ms.saturating_add(1),
             25_001..=40_000 => self.le_40ms = self.le_40ms.saturating_add(1),
             40_001..=50_000 => self.le_50ms = self.le_50ms.saturating_add(1),
-            50_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
+            50_001..=60_000 => self.le_60ms = self.le_60ms.saturating_add(1),
+            60_001..=80_000 => self.le_80ms = self.le_80ms.saturating_add(1),
             80_001..=120_000 => self.le_120ms = self.le_120ms.saturating_add(1),
             120_001..=250_000 => self.le_250ms = self.le_250ms.saturating_add(1),
             250_001..=500_000 => self.le_500ms = self.le_500ms.saturating_add(1),
@@ -916,6 +926,7 @@ impl PreviewDecodeWorkLatencyBuckets {
             self.le_25ms,
             self.le_40ms,
             self.le_50ms,
+            self.le_60ms,
             self.le_80ms,
             self.le_120ms,
             self.le_250ms,
@@ -942,6 +953,7 @@ impl PreviewDecodeWorkLatencyBuckets {
             (self.le_25ms, Some(25_000)),
             (self.le_40ms, Some(40_000)),
             (self.le_50ms, Some(50_000)),
+            (self.le_60ms, Some(60_000)),
             (self.le_80ms, Some(80_000)),
             (self.le_120ms, Some(120_000)),
             (self.le_250ms, Some(250_000)),
@@ -2049,7 +2061,7 @@ pub enum PreviewDecodeBottleneck {
 }
 
 /// Schema version for preview decode performance reports.
-pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 36;
+pub const PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION: u32 = 37;
 
 /// Default steady-state Preview decode budget.
 pub const PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US: u64 = 50_000;

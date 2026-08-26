@@ -28,9 +28,9 @@ use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::viewer_gpu_submission::ViewerGpuSubmissionId;
+use super::viewer_gpu_submission::{ViewerGpuSubmissionId, VIEWER_GPU_SUBMISSION_CAPACITY};
 
-const VIEWER_GPU_PROGRESS_SLOT_CAPACITY: usize = 2;
+const VIEWER_GPU_PROGRESS_SLOT_CAPACITY: usize = VIEWER_GPU_SUBMISSION_CAPACITY;
 const DEFAULT_VIEWER_GPU_WAIT_QUANTUM: Duration = Duration::from_millis(8);
 // Admission is acquired before a device-generation worker exists and stays in
 // that worker through retirement. Repeated rebuild/teardown therefore cannot
@@ -1940,15 +1940,15 @@ mod tests {
     #[test]
     fn progress_capacity_is_reserved_before_submit() {
         let (mut worker, _) = scripted_worker([]);
-        let first = worker.reserve_submission().expect("first permit");
-        let second = worker.reserve_submission().expect("second permit");
+        let permits = (0..VIEWER_GPU_PROGRESS_SLOT_CAPACITY)
+            .map(|_| worker.reserve_submission().expect("bounded permit"))
+            .collect::<Vec<_>>();
         assert!(matches!(
             worker.reserve_submission(),
             Err(ViewerGpuDeviceProgressReserveError::Backpressured)
         ));
-        drop(first);
+        drop(permits);
         assert!(worker.reserve_submission().is_ok());
-        drop(second);
         worker.shutdown().expect("shutdown worker");
     }
 

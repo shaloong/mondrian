@@ -24,7 +24,8 @@ use crate::app::execution_resource_coordination::{
 };
 use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::{
-    observe_playback_video_preroll as observe_preview_preroll, pump_playback_preview,
+    observe_playback_video_preroll as observe_preview_preroll,
+    observe_playback_video_preroll_with_presentation_readiness, pump_playback_preview,
     PlaybackPreviewPumpOutcome,
 };
 use crate::app::preview_execution::{
@@ -331,6 +332,17 @@ impl AppUiHost {
             .gpu_preview_frame(state.preview_frame_execution_request(std::time::Instant::now()))
     }
 
+    /// Bind an exact CPU-complete speculative candidate to the current Frame
+    /// Demand without repeating its Timeline/media/effect preparation.
+    pub(crate) fn bind_staged_gpu_frame_for_current(
+        &self,
+        frame: Box<PreviewGpuFrame>,
+    ) -> Option<Box<PreviewGpuFrame>> {
+        let state = self.app_state.borrow();
+        let snapshot = state.preview_execution_snapshot(std::time::Instant::now());
+        self.preview_service.bind_staged_gpu_frame_for_current(frame, &snapshot)
+    }
+
     /// Build ticketless immediate-successor work from the same Preview Runtime.
     pub(crate) fn gpu_preview_successor_for_current_state(&self) -> PreviewGpuFrameState {
         let state = self.app_state.borrow();
@@ -339,6 +351,52 @@ impl AppUiHost {
             .map_or(PreviewGpuFrameState::Loading, |request| {
                 self.preview_service.gpu_preview_frame(request)
             })
+    }
+
+    /// Build bounded ticketless CPU lookahead without touching the immediate
+    /// successor publication slot.
+    pub(crate) fn gpu_preview_lookahead_for_current_state(
+        &self,
+        offset: usize,
+    ) -> PreviewGpuFrameState {
+        let state = self.app_state.borrow();
+        state
+            .preview_lookahead_execution_request(std::time::Instant::now(), offset)
+            .map_or(PreviewGpuFrameState::Loading, |request| {
+                self.preview_service.gpu_preview_frame(request)
+            })
+    }
+
+    /// Exact intent of a bounded future playback frame.
+    pub(crate) fn viewer_gpu_lookahead_intent(
+        &self,
+        offset: usize,
+    ) -> Option<crate::app::preview_execution::PreviewPlaybackIntent> {
+        let state = self.app_state.borrow();
+        state
+            .preview_lookahead_execution_request(std::time::Instant::now(), offset)
+            .map(|request| request.snapshot().transport().playback_intent())
+    }
+
+    /// Exact immediate-successor intent for staged-candidate validation.
+    pub(crate) fn viewer_gpu_successor_intent(
+        &self,
+    ) -> Option<crate::app::preview_execution::PreviewPlaybackIntent> {
+        let state = self.app_state.borrow();
+        state
+            .preview_successor_execution_request(std::time::Instant::now())
+            .map(|request| request.snapshot().transport().playback_intent())
+    }
+
+    /// Exact current playback intent for CPU-staging lookup.
+    pub(crate) fn viewer_gpu_current_intent(
+        &self,
+    ) -> crate::app::preview_execution::PreviewPlaybackIntent {
+        self.app_state
+            .borrow()
+            .preview_execution_snapshot(std::time::Instant::now())
+            .transport()
+            .playback_intent()
     }
 
     /// Retain a completed successor without publishing it to the Viewer widget.
@@ -723,11 +781,13 @@ impl AppUiHost {
         &self,
         execution: PreviewGpuHeterogeneousExecution,
         completed: &mondrian_renderer::ViewerHeterogeneousGpuCompletedBatch,
+        successor_preparation: bool,
     ) -> Result<PreviewVisualGpuCompletionDisposition, String> {
-        let disposition = match self
-            .preview_service
-            .finalize_heterogeneous_gpu_completion(execution, completed)
-        {
+        let disposition = match self.preview_service.finalize_heterogeneous_gpu_completion(
+            execution,
+            completed,
+            successor_preparation,
+        ) {
             Ok(disposition) => disposition,
             Err(error) => {
                 // Evidence rejection queues an exact Failed delivery inside
@@ -764,6 +824,16 @@ impl AppUiHost {
 
     fn observe_playback_video_preroll(&self) -> bool {
         observe_preview_preroll(&mut self.app_state.borrow_mut(), &self.preview_service)
+    }
+
+    /// Re-observe exact media lookahead after the Window Adapter installed the
+    /// immediate successor's physical prepared-output lease.
+    pub(crate) fn observe_prepared_viewer_gpu_preroll(&self) -> bool {
+        observe_playback_video_preroll_with_presentation_readiness(
+            &mut self.app_state.borrow_mut(),
+            &self.preview_service,
+            true,
+        )
     }
 
     /// Clear any advertised GPU viewer frame.

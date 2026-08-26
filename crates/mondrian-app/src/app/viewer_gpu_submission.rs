@@ -1,7 +1,7 @@
 //! Bounded asynchronous lifecycle for Viewer GPU queue submissions.
 //!
 //! The lifecycle is deliberately presentation-Adapter agnostic. It owns a
-//! bounded pair of submitted resource envelopes from queue submission through exact
+//! bounded set of submitted resource envelopes from queue submission through exact
 //! completion callback, including timeout quarantine. Window and Headless
 //! Adapters may attach different physical publication artifacts while sharing
 //! the same completion, deadline, and resource-retirement semantics.
@@ -116,10 +116,11 @@ struct ViewerGpuInFlight<O> {
 
 /// Bounded asynchronous Viewer GPU submission owner.
 ///
-/// Capacity two lets an already queue-published current frame retain callback
-/// cleanup while its immediate successor enters the same GPU queue. This
-/// matches the renderer progress capacity and the current/prepared physical
-/// publication slots without permitting an unbounded queue. A quarantined slot remains occupied until its
+/// Capacity matches the bounded CPU staging horizon, so already queue-published
+/// frames may retain callback cleanup while an exact staged current frame still
+/// enters the same GPU queue. These additional slots are cleanup owners only:
+/// physical publication remains one current plus one prepared output. A
+/// quarantined slot remains occupied until its
 /// exact callback arrives, the owning Adapter/device is dropped, or the
 /// bounded [`QUARANTINE_RELEASE_GRACE`] after the completion deadline elapses.
 pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
@@ -130,8 +131,9 @@ pub(crate) struct ViewerGpuSubmissionLifecycle<O, C> {
     orphaned_completion_count: u64,
 }
 
-/// Current frame plus one exact immediate successor.
-pub(crate) const VIEWER_GPU_SUBMISSION_CAPACITY: usize = 2;
+/// Submitted cleanup-owner horizon, aligned with bounded CPU frame staging.
+pub(crate) const VIEWER_GPU_SUBMISSION_CAPACITY: usize =
+    super::preview_execution::PREVIEW_GPU_CPU_STAGING_CAPACITY;
 
 /// Bounded additional wait after quarantine for the exact completion callback
 /// before its bounded slot is force-released.
@@ -219,6 +221,12 @@ where
             .iter_mut()
             .find(|in_flight| in_flight.submission_id == submission_id)
             .map(|in_flight| &mut in_flight.owner)
+    }
+
+    /// Whether any bounded submitted owner satisfies an Adapter-local query.
+    #[cfg(test)]
+    pub(crate) fn any_owner(&self, mut predicate: impl FnMut(&O) -> bool) -> bool {
+        self.in_flight.iter().any(|in_flight| predicate(&in_flight.owner))
     }
 
     /// Observe callback, deadline, and quarantine state without blocking.
@@ -547,18 +555,23 @@ mod tests {
     fn delayed_completion_retains_the_owner_and_frees_exactly_one_slot() {
         let now = Instant::now();
         let first_callback = callback_slot();
-        let second_callback = callback_slot();
         let mut lifecycle = ViewerGpuSubmissionLifecycle::new();
         let submission_id = commit_test_submission(
             &mut lifecycle,
             now + Duration::from_secs(1),
             &first_callback,
         );
-        let second_submission_id = commit_test_submission(
-            &mut lifecycle,
-            now + Duration::from_secs(1),
-            &second_callback,
-        );
+        let mut retained_callbacks = Vec::new();
+        let mut retained_submission_ids = Vec::new();
+        for _ in 1..VIEWER_GPU_SUBMISSION_CAPACITY {
+            let callback = callback_slot();
+            retained_submission_ids.push(commit_test_submission(
+                &mut lifecycle,
+                now + Duration::from_secs(1),
+                &callback,
+            ));
+            retained_callbacks.push(callback);
+        }
 
         assert!(lifecycle.is_occupied());
         assert_eq!(
@@ -584,26 +597,28 @@ mod tests {
         assert_eq!(completed.completion, 7);
         assert_eq!(completed.quarantine_reason, None);
         assert!(lifecycle.is_occupied());
-        assert!(lifecycle.owner(second_submission_id).is_some());
+        assert!(retained_submission_ids
+            .iter()
+            .all(|submission_id| lifecycle.owner(*submission_id).is_some()));
+        assert_eq!(retained_callbacks.len(), VIEWER_GPU_SUBMISSION_CAPACITY - 1);
         assert!(lifecycle.reserve().is_ok());
     }
 
     #[test]
     fn generation_failure_quarantines_every_pipelined_owner() {
         let now = Instant::now();
-        let first_callback = callback_slot();
-        let second_callback = callback_slot();
         let mut lifecycle = ViewerGpuSubmissionLifecycle::new();
-        let first = commit_test_submission(
-            &mut lifecycle,
-            now + Duration::from_secs(1),
-            &first_callback,
-        );
-        let second = commit_test_submission(
-            &mut lifecycle,
-            now + Duration::from_secs(1),
-            &second_callback,
-        );
+        let mut callbacks = Vec::new();
+        let mut expected_submission_ids = Vec::new();
+        for _ in 0..VIEWER_GPU_SUBMISSION_CAPACITY {
+            let callback = callback_slot();
+            expected_submission_ids.push(commit_test_submission(
+                &mut lifecycle,
+                now + Duration::from_secs(1),
+                &callback,
+            ));
+            callbacks.push(callback);
+        }
 
         let quarantines = lifecycle.quarantine_all_after_device_failure("device lost".to_owned());
 
@@ -612,8 +627,9 @@ mod tests {
                 .iter()
                 .map(|quarantine| quarantine.submission_id)
                 .collect::<Vec<_>>(),
-            vec![first, second]
+            expected_submission_ids
         );
+        assert_eq!(callbacks.len(), VIEWER_GPU_SUBMISSION_CAPACITY);
         assert!(matches!(
             lifecycle.poll(now),
             ViewerGpuSubmissionPoll::Pending { quarantined: true, .. }

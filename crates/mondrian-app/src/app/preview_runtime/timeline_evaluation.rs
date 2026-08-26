@@ -213,12 +213,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         color_context: ProgramColorContext,
     ) -> PreviewTimelineResolution {
         self.synchronize_visual_program_authoring_session(snapshot);
-        let transport = snapshot.transport();
-        if transport.is_playing()
-            && let Some(active) = transport.demand().map(PreviewFrameDemandSnapshot::identity)
-        {
-            self.scheduler.synchronize_playback_current_demand(active);
-        }
         let mut media_frame = |request: PreviewTimelineMediaRequest| {
             self.media_frame_for_plan(snapshot, proxy_demands, request)
         };
