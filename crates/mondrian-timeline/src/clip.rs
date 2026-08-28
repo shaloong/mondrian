@@ -528,6 +528,14 @@ pub struct Clip {
     /// 蒙版列表（按顺序叠加渲染）
     #[serde(default)]
     pub masks: AuthoringList<MaskComponent>,
+    /// Optional Sequence-owned shared grade applied after the legacy linear
+    /// Clip effect stack. The strong reference is validated by `Sequence`.
+    #[serde(default)]
+    pub grade: Option<mondrian_core::GradeDefinitionId>,
+    /// Optional Resolve-style grade group. A Clip belongs to at most one group;
+    /// the group contributes pre-Clip and post-Clip shared grade scopes.
+    #[serde(default)]
+    pub grade_group: Option<mondrian_core::GradeGroupId>,
     /// Optional Sequence-local edit-synchronization group. Every member with
     /// the same identity participates in linked selection/edit operations.
     #[serde(default)]
@@ -559,6 +567,8 @@ impl AuthoringFootprint for Clip {
             transform,
             effects,
             masks,
+            grade: _,
+            grade_group: _,
             link_group: _,
             audio_components,
             is_disabled: _,
@@ -622,6 +632,8 @@ impl Clip {
             transform: Transform2D::identity(),
             effects: AuthoringList::new(),
             masks: AuthoringList::new(),
+            grade: None,
+            grade_group: None,
             link_group: None,
             audio_components: AuthoringList::new(),
             is_disabled: false,

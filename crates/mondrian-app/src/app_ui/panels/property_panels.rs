@@ -1177,6 +1177,66 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
         panel = panel.with_section(section);
     }
 
+    let grade = &model.grade;
+    let mut grade_section = PropertySection::new("Grade Graph").with_row(PropertyRow::new(
+        "Clip",
+        Box::new(
+            Button::new(grade.clip_grade.as_deref().unwrap_or("创建 Clip Grade"))
+                .enabled(grade.create_clip_grade_action.is_some())
+                .on_click(grade.create_clip_grade_action.clone()),
+        ),
+    ));
+    if let Some(group) = &grade.group {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Group",
+            Box::new(Label::new(group.clone()).muted()),
+        ));
+    }
+    if grade.group_pre_grade.is_some() || grade.group_post_grade.is_some() {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Group Pre/Post",
+            Box::new(
+                Label::new(format!(
+                    "{} → {}",
+                    grade.group_pre_grade.as_deref().unwrap_or("Identity"),
+                    grade.group_post_grade.as_deref().unwrap_or("Identity")
+                ))
+                .muted(),
+            ),
+        ));
+    }
+    if let Some(timeline_grade) = &grade.timeline_grade {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Timeline",
+            Box::new(Label::new(timeline_grade.clone()).muted()),
+        ));
+    }
+    if let Some(version) = &grade.active_version {
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Version / Nodes",
+            Box::new(
+                Label::new(format!(
+                    "{} · {} versions · {} nodes",
+                    version, grade.version_count, grade.node_count
+                ))
+                .muted(),
+            ),
+        ));
+    }
+    if grade.clip_definition_id.is_some() {
+        let items = grade
+            .add_node_actions
+            .iter()
+            .map(|item| MenuItem::new(item.label.clone(), item.action.clone()))
+            .collect();
+        let enabled = !grade.add_node_actions.is_empty();
+        grade_section = grade_section.with_row(PropertyRow::new(
+            "Add Node",
+            Box::new(Dropdown::new("添加调色节点…", items).enabled(enabled)),
+        ));
+    }
+    panel = panel.with_section(grade_section);
+
     if !model.effects.is_empty() {
         for (index, effect) in model.effects.iter().enumerate() {
             let effect_id = effect.effect_id;

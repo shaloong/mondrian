@@ -108,6 +108,23 @@ and the definition-owned Global/six-zone Inspector groups. Zone sample tables,
 working-space luminance coefficients, semantic fingerprints, GPU atlas slots,
 and uniforms are derived execution state and never enter `project.json`.
 
+Grade hierarchy author state follows the same author/execution split. A
+Sequence persists its Grade Definition catalog, named Versions, active Version
+references, bounded Core `GradeGraph` DAGs, Grade Groups, Clip assignments, and
+one optional Timeline Grade assignment. Shared Grade is represented only by
+repeated typed references to one Definition. Version creation forks graph,
+Effect, and automation identities once; active-Version switching does not copy
+the graph. Archive validation rejects missing references, duplicate identities,
+invalid topology, empty names, and configured size/fan-in/version-limit
+violations.
+
+Prepared Grade resources, compiled schedules, stage bindings, cache signatures,
+GPU resources, and retained-byte estimates are runtime evidence and are never
+serialized. `AuthoringFootprint` traverses Grade catalogs, graphs, Effects, and
+automation through their structurally shared collections, so bounded History
+charges shared roots once while conservatively accounting detached Version
+branches.
+
 Custom OCIO dynamic properties remain part of the persisted global
 `ProjectColorEnvironment`, not Sequence or monitor preference state. Their
 legacy-compatible `property`/`value` representation is accepted only after

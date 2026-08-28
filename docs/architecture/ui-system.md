@@ -85,6 +85,20 @@ Float and Vec3 editors, animation addresses, add/select/set-value actions, and
 Undo/Redo remain the ordinary Effect paths. The panel neither samples zone
 weights nor builds the 512×2 execution table.
 
+The Grade Graph Inspector is a projection of Sequence authority, not another
+graph model. It shows the selected Clip Definition, Group Pre/Post labels,
+Timeline Grade, active Version, Version count, and node count. Its Create Grade
+and Add Node commands are pre-admitted through `ProductActionAvailability` and
+then transported through the `ui.grade` external namespace; dispatch repeats
+the authoritative validation before one `commit_active_sequence_edit`.
+
+Creating and assigning a Clip Grade is one transaction and is unavailable when
+the owning video Track is locked. Editing the referenced Shared Definition is
+a Sequence-level catalog operation, so Track lock does not disable Add Node.
+The Inspector therefore does not apply its generic Clip-editable flag to all
+Grade controls. It owns no execution schedule, hierarchy ordering, graph
+validation, Version copy, or Effect preparation.
+
 Basic Title Inspector rows use the same definition-backed property projection
 and `ClipProductAction` parameter-write Interface as Transform/Opacity; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the

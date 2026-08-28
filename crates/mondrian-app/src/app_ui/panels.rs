@@ -90,6 +90,9 @@ use mondrian_ui_widgets::{
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
 use crate::app::preview_unavailability::{PreviewUnavailability, PreviewUnavailabilityDisposition};
+use crate::app::product_action::{
+    GradeAddEffectPayload, GradeCreateDefinitionPayload, GradeProductAction, ProductAction,
+};
 pub use crate::app::thumbnail_service::{
     ThumbnailFailure as AssetThumbnailFailure,
     ThumbnailFailureReason as AssetThumbnailFailureReason,
@@ -1738,6 +1741,8 @@ pub struct InspectorPanelModel {
     pub clip_properties: Vec<InspectorEffectPropertyModel>,
     /// Effects currently attached to the selected clip.
     pub effects: Vec<InspectorEffectModel>,
+    /// Sequence-owned clip/group/timeline Grade Graph hierarchy.
+    pub grade: InspectorGradeHierarchyModel,
     /// Masks currently attached to the selected video Clip.
     pub masks: Vec<InspectorMaskModel>,
 }
@@ -1823,6 +1828,31 @@ pub struct InspectorEffectModel {
     pub properties: Vec<InspectorEffectPropertyModel>,
 }
 
+/// Compact Inspector projection of the selected Clip's grading hierarchy.
+#[derive(Debug, Clone, Default)]
+pub struct InspectorGradeHierarchyModel {
+    pub clip_definition_id: Option<mondrian_core::GradeDefinitionId>,
+    pub clip_grade: Option<String>,
+    pub group: Option<String>,
+    pub group_pre_grade: Option<String>,
+    pub group_post_grade: Option<String>,
+    pub timeline_grade: Option<String>,
+    pub active_version: Option<String>,
+    pub version_count: usize,
+    pub node_count: usize,
+    /// Clip-grade creation command admitted against current Track authority.
+    pub create_clip_grade_action: Option<Action>,
+    /// Sequence-level shared-definition edits admitted independently of Clip lock state.
+    pub add_node_actions: Vec<InspectorGradeNodeActionModel>,
+}
+
+/// One admitted Grade Graph node command shown by the Inspector.
+#[derive(Debug, Clone)]
+pub struct InspectorGradeNodeActionModel {
+    pub label: String,
+    pub action: Action,
+}
+
 /// One Clip-local visual Mask projected into the Inspector.
 #[derive(Debug, Clone)]
 pub struct InspectorMaskModel {
@@ -1896,6 +1926,75 @@ fn inspector_property_model(
         hard_max: numeric.map(|contract| contract.hard_range.max),
         step: numeric.and_then(|contract| contract.step),
         is_animatable: property.descriptor.schema.is_animatable,
+    }
+}
+
+fn inspector_grade_hierarchy_model(
+    state: &AppState,
+    sequence: &Sequence,
+    clip: &Clip,
+) -> InspectorGradeHierarchyModel {
+    let definition_label =
+        |id| sequence.grade_definition(id).map(|definition| definition.name.clone());
+    let group = clip
+        .grade_group
+        .and_then(|id| sequence.grade_groups.iter().find(|group| group.id == id));
+    let clip_definition = clip.grade.and_then(|id| sequence.grade_definition(id));
+    let active = clip_definition.and_then(|definition| definition.active());
+    let create_clip_grade = ProductAction::Grade(GradeProductAction::CreateDefinition(
+        GradeCreateDefinitionPayload {
+            name: "Clip Grade".to_owned(),
+            assign_to: Some(mondrian_timeline::GradeScope::Clip(clip.id)),
+        },
+    ));
+    let create_clip_grade_action = (clip_definition.is_none()
+        && state.product_action_availability().allows(&create_clip_grade))
+    .then(|| create_clip_grade.into_external_action());
+    let add_node_actions = clip_definition.map_or_else(Vec::new, |definition| {
+        effect_library_types()
+            .iter()
+            .filter(|effect_type| {
+                matches!(
+                    effect_type,
+                    EffectType::BasicCorrection
+                        | EffectType::WhiteBalance
+                        | EffectType::Lut3D
+                        | EffectType::ColorWheel
+                        | EffectType::HdrGrading
+                        | EffectType::AscCdl
+                        | EffectType::Curves
+                        | EffectType::GamutCompression
+                        | EffectType::HighlightRecovery
+                        | EffectType::HueSaturationLightness
+                )
+            })
+            .filter_map(|effect_type| {
+                let action =
+                    ProductAction::Grade(GradeProductAction::AddEffect(GradeAddEffectPayload {
+                        definition_id: definition.id,
+                        effect_type: effect_type.clone(),
+                    }));
+                state.product_action_availability().allows(&action).then(|| {
+                    InspectorGradeNodeActionModel {
+                        label: effect_type.display_name().to_owned(),
+                        action: action.into_external_action(),
+                    }
+                })
+            })
+            .collect()
+    });
+    InspectorGradeHierarchyModel {
+        clip_definition_id: clip_definition.map(|definition| definition.id),
+        clip_grade: clip_definition.map(|definition| definition.name.clone()),
+        group: group.map(|group| group.name.clone()),
+        group_pre_grade: group.and_then(|group| group.pre_clip_grade).and_then(&definition_label),
+        group_post_grade: group.and_then(|group| group.post_clip_grade).and_then(&definition_label),
+        timeline_grade: sequence.timeline_grade.and_then(&definition_label),
+        active_version: active.map(|version| version.name.clone()),
+        version_count: clip_definition.map_or(0, |definition| definition.versions.len()),
+        node_count: active.map_or(0, |version| version.graph.nodes.len()),
+        create_clip_grade_action,
+        add_node_actions,
     }
 }
 
@@ -2030,6 +2129,7 @@ impl InspectorPanelModel {
                     },
                 })
                 .collect(),
+            grade: inspector_grade_hierarchy_model(state, sequence, clip),
             masks: clip
                 .masks
                 .iter()
@@ -2094,6 +2194,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            grade: InspectorGradeHierarchyModel::default(),
             masks: Vec::new(),
         }
     }
@@ -2130,6 +2231,7 @@ impl InspectorPanelModel {
             audio_processor_racks: Vec::new(),
             clip_properties: Vec::new(),
             effects: Vec::new(),
+            grade: InspectorGradeHierarchyModel::default(),
             masks: Vec::new(),
         }
     }

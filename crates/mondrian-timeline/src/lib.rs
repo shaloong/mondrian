@@ -19,6 +19,7 @@ pub mod clip;
 mod clip_fragment;
 pub mod clip_linking;
 mod cut_edit;
+pub mod grade;
 pub mod insert_edit;
 pub mod keyframe;
 pub mod overwrite_edit;
@@ -78,6 +79,7 @@ pub use cut_edit::{
     CutEditError, RollEditOutcome, RollEditRequest, SlideEditOutcome, SlideEditRequest,
     SlipEditOutcome, SlipEditRequest, SplitEditOutcome, SplitEditRequest,
 };
+pub use grade::{GradeGroup, GradeScope};
 pub use insert_edit::{
     apply_insert_edit, InsertAutomationPolicy, InsertEditError, InsertEditOutcome,
     InsertEditPlacement, InsertEditRequest, InsertSplitOutcome, InsertTimelineStatePolicy,

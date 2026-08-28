@@ -12,16 +12,16 @@ use mondrian_core::timeline_data::{
     TimelineClipExecutionRef,
 };
 use mondrian_core::{
-    AssetId, ClipId, FramePosition, FrameRounding, MondrianError, Rational, Resolution, Result,
-    SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
+    AssetId, ClipId, FramePosition, FrameRounding, GradeDefinitionId, MondrianError, Rational,
+    Resolution, Result, SequenceId, SequenceRevision, TimelineTime, VideoTransitionId,
 };
 use mondrian_effects::{
     effect_registry_revision, prepare_temporal_frame_execution, CompiledEffectGraph,
     EffectExecutionEnvelope, EffectExecutionSession, EffectTemporalExecutionRequest,
     EffectTemporalSpan, LutPreparationCache, LutPreparationCacheConfig, PreparedEffectProgram,
-    PreparedEffectTemporalExecution,
+    PreparedEffectTemporalExecution, PreparedGradeGraph,
 };
-use mondrian_timeline::{PreparedVisualSchedule, Sequence, VideoTransitionType};
+use mondrian_timeline::{Clip, PreparedVisualSchedule, Sequence, VideoTransitionType};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -32,6 +32,71 @@ pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY: usize = 64;
 /// Default conservative logical bytes retained by one visual-program cache.
 pub const DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_VISUAL_DEFINITION_BIND_RETRIES: usize = 32;
+
+type PreparedClipGradeSegments = (Vec<PreparedGradeGraph>, Vec<PreparedGradeGraph>);
+type PreparedGradeBlocker = (Arc<str>, PreparedVisualBlockerRetry);
+
+fn prepared_clip_grade_segments(
+    sequence: &Sequence,
+    clip: &Clip,
+    grades: &HashMap<GradeDefinitionId, PreparedSharedGrade>,
+) -> std::result::Result<PreparedClipGradeSegments, PreparedGradeBlocker> {
+    let group = clip
+        .grade_group
+        .and_then(|id| sequence.grade_groups.iter().find(|group| group.id == id));
+    let before_ids = group.into_iter().filter_map(|group| group.pre_clip_grade);
+    let after_ids = clip
+        .grade
+        .into_iter()
+        .chain(group.into_iter().filter_map(|group| group.post_clip_grade));
+    let resolve = |id| match grades.get(&id) {
+        Some(PreparedSharedGrade::Ready(grade)) => Ok(grade.clone()),
+        Some(PreparedSharedGrade::Blocked { reason, retry }) => Err((Arc::clone(reason), *retry)),
+        None => Err((
+            Arc::from(format!("missing grade definition {id}")),
+            PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+        )),
+    };
+    Ok((
+        before_ids.map(resolve).collect::<std::result::Result<Vec<_>, _>>()?,
+        after_ids.map(resolve).collect::<std::result::Result<Vec<_>, _>>()?,
+    ))
+}
+
+fn hierarchical_clip_author_fingerprint(
+    sequence: &Sequence,
+    clip: &Clip,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> std::result::Result<[u8; 32], String> {
+    let group = clip
+        .grade_group
+        .and_then(|id| sequence.grade_groups.iter().find(|group| group.id == id));
+    let definition_ids = group
+        .into_iter()
+        .filter_map(|group| group.pre_clip_grade)
+        .chain(clip.grade)
+        .chain(group.into_iter().filter_map(|group| group.post_clip_grade))
+        .collect::<Vec<_>>();
+    let definitions = definition_ids
+        .iter()
+        .filter_map(|id| sequence.grade_definition(*id))
+        .collect::<Vec<_>>();
+    let canonical = serde_json::to_vec(&(
+        &clip.effects,
+        &clip.masks,
+        clip.grade,
+        clip.grade_group,
+        group,
+        definitions,
+        working_color_space,
+    ))
+    .map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.hierarchical-clip-author-fingerprint.v1");
+    hasher.update((canonical.len() as u64).to_le_bytes());
+    hasher.update(canonical);
+    Ok(hasher.finalize().into())
+}
 
 fn visual_frame_seed(sequence_time: TimelineTime, rate: Rational) -> i64 {
     if let Ok(position) = sequence_time.to_frame_position(rate, FrameRounding::Nearest)
@@ -130,13 +195,16 @@ pub fn prepared_visual_author_fingerprint(
         sequence.settings.title_safe_margin,
         &sequence.video_tracks,
         &sequence.video_transitions,
+        &sequence.grade_definitions,
+        &sequence.grade_groups,
+        sequence.timeline_grade,
     ))
     .map_err(|error| PreparedVisualAuthorFingerprintError {
         sequence_id: sequence.id,
         reason: error.to_string(),
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v2");
+    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v3");
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical);
     Ok(hasher.finalize().into())
@@ -160,6 +228,25 @@ enum PreparedClipEffects {
         program: PreparedEffectProgram,
         author_fingerprint: [u8; 32],
     },
+    Blocked {
+        reason: Arc<str>,
+        retry: PreparedVisualBlockerRetry,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum PreparedSharedGrade {
+    Ready(PreparedGradeGraph),
+    Blocked {
+        reason: Arc<str>,
+        retry: PreparedVisualBlockerRetry,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum PreparedTimelineGrade {
+    None,
+    Ready(PreparedEffectProgram),
     Blocked {
         reason: Arc<str>,
         retry: PreparedVisualBlockerRetry,
@@ -323,6 +410,7 @@ pub struct PreparedVisualProgram {
     materialization: PreparedVisualMaterializationContract,
     schedule: Arc<PreparedVisualSchedule>,
     clip_effects: HashMap<ClipId, PreparedClipEffects>,
+    timeline_grade: PreparedTimelineGrade,
     transitions: HashMap<VideoTransitionId, PreparedVisualTransition>,
     diagnostics: PreparedVisualProgramDiagnostics,
     retained_bytes_estimate: usize,
@@ -387,6 +475,31 @@ impl PreparedVisualProgram {
         let mut prepared_transitions = 0;
         let mut blocked_transitions = 0;
         let working_color_space = sequence.settings.color.working_color_space;
+        let prepared_grades = sequence
+            .grade_definitions
+            .iter()
+            .map(|definition| {
+                let prepared = definition
+                    .active()
+                    .ok_or_else(|| "active grade version does not exist".to_owned())
+                    .and_then(|version| {
+                        PreparedGradeGraph::prepare_with_lut_cache(
+                            &version.graph,
+                            working_color_space,
+                            lut_cache,
+                        )
+                        .map_err(|error| error.to_string())
+                    });
+                let prepared = match prepared {
+                    Ok(grade) => PreparedSharedGrade::Ready(grade),
+                    Err(reason) => PreparedSharedGrade::Blocked {
+                        reason: Arc::from(reason),
+                        retry: PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+                    },
+                };
+                (definition.id, prepared)
+            })
+            .collect::<HashMap<_, _>>();
         let identity_author_fingerprint =
             clip_effect_author_fingerprint(&[], &[], working_color_space).map_err(|reason| {
                 PreparedVisualProgramError::IdentityProgram { sequence_id: sequence.id, reason }
@@ -398,14 +511,61 @@ impl PreparedVisualProgram {
                     reason: error.to_string(),
                 })?;
 
+        let timeline_grade = match sequence.timeline_grade {
+            None => PreparedTimelineGrade::None,
+            Some(definition_id) => match prepared_grades.get(&definition_id) {
+                Some(PreparedSharedGrade::Ready(grade)) => {
+                    match PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+                        &[],
+                        &[],
+                        &[],
+                        std::slice::from_ref(grade),
+                        working_color_space,
+                        lut_cache,
+                    ) {
+                        Ok(program) => PreparedTimelineGrade::Ready(program),
+                        Err(error) => PreparedTimelineGrade::Blocked {
+                            reason: Arc::from(error.to_string()),
+                            retry: if error.dependency_refresh_retryable() {
+                                PreparedVisualBlockerRetry::ExternalChange
+                            } else {
+                                PreparedVisualBlockerRetry::AuthorOrDefinitionChange
+                            },
+                        },
+                    }
+                }
+                Some(PreparedSharedGrade::Blocked { reason, retry }) => {
+                    PreparedTimelineGrade::Blocked { reason: Arc::clone(reason), retry: *retry }
+                }
+                None => PreparedTimelineGrade::Blocked {
+                    reason: Arc::from(format!(
+                        "timeline references missing grade definition {definition_id}"
+                    )),
+                    retry: PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+                },
+            },
+        };
+
         for track in
             sequence.video_tracks.iter().filter(|track| track.is_visible && !track.is_muted)
         {
             for clip in track.clips.iter().filter(|clip| !clip.is_disabled) {
+                let (grade_before, grade_after) =
+                    match prepared_clip_grade_segments(sequence, clip, &prepared_grades) {
+                        Ok(segments) => segments,
+                        Err((reason, retry)) => {
+                            blocked_clips += 1;
+                            clip_effects
+                                .insert(clip.id, PreparedClipEffects::Blocked { reason, retry });
+                            continue;
+                        }
+                    };
                 let has_processing = clip.effects.iter().any(|effect| effect.is_enabled)
-                    || clip.masks.iter().any(|mask| mask.enabled);
+                    || clip.masks.iter().any(|mask| mask.enabled)
+                    || !grade_before.is_empty()
+                    || !grade_after.is_empty();
                 let author_fingerprint = if has_processing {
-                    clip_effect_author_fingerprint(&clip.effects, &clip.masks, working_color_space)
+                    hierarchical_clip_author_fingerprint(sequence, clip, working_color_space)
                         .map_err(|reason| PreparedVisualProgramError::AuthorFingerprint {
                             sequence_id: sequence.id,
                             clip_id: clip.id,
@@ -433,9 +593,11 @@ impl PreparedVisualProgram {
                     reused_clips += 1;
                     Ok(program)
                 } else if has_processing {
-                    PreparedEffectProgram::prepare_with_lut_cache(
+                    PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
                         &clip.effects,
                         &clip.masks,
+                        &grade_before,
+                        &grade_after,
                         working_color_space,
                         lut_cache,
                     )
@@ -530,6 +692,7 @@ impl PreparedVisualProgram {
             },
             schedule,
             clip_effects,
+            timeline_grade,
             transitions,
             diagnostics: PreparedVisualProgramDiagnostics {
                 sequence_id: sequence.id,
@@ -753,6 +916,7 @@ impl PreparedVisualProgram {
     /// instead. This whole-Sequence diagnostic is retained for callers that
     /// deliberately need a conservative readiness summary.
     pub fn preflight(&self) -> Result<()> {
+        self.ensure_timeline_grade_ready()?;
         if let Some(blocker) = self.blockers().into_iter().next() {
             return Err(MondrianError::EffectGraphEvaluationFailed {
                 reason: format!(
@@ -786,6 +950,7 @@ impl PreparedVisualProgram {
 
     /// Preflight only visual work reachable at one exact Sequence-local time.
     pub fn preflight_time(&self, time: TimelineTime) -> Result<PreparedVisualFrameReachability> {
+        self.ensure_timeline_grade_ready()?;
         let items = self.schedule.flat_visual_items_at(time)?;
         let mut reachability = PreparedVisualFrameReachability::default();
         for item in &items {
@@ -942,6 +1107,58 @@ impl PreparedVisualProgram {
         }
     }
 
+    pub(crate) fn evaluate_timeline_grade(
+        &self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        match &self.timeline_grade {
+            PreparedTimelineGrade::None => Ok(None),
+            PreparedTimelineGrade::Ready(program) => program
+                .evaluate(sequence_time)
+                .map(Some)
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade evaluation failed: {error}"),
+                }),
+            PreparedTimelineGrade::Blocked { reason, .. } => {
+                Err(MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade preparation failed: {reason}"),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn evaluate_timeline_grade_with_session(
+        &self,
+        sequence_time: TimelineTime,
+        session: &mut EffectExecutionSession,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        match &self.timeline_grade {
+            PreparedTimelineGrade::None => Ok(None),
+            PreparedTimelineGrade::Ready(program) => program
+                .evaluate_with_session(sequence_time, session)
+                .map(Some)
+                .map_err(|error| MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade evaluation failed: {error}"),
+                }),
+            PreparedTimelineGrade::Blocked { reason, .. } => {
+                Err(MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade preparation failed: {reason}"),
+                })
+            }
+        }
+    }
+
+    fn ensure_timeline_grade_ready(&self) -> Result<()> {
+        match &self.timeline_grade {
+            PreparedTimelineGrade::None | PreparedTimelineGrade::Ready(_) => Ok(()),
+            PreparedTimelineGrade::Blocked { reason, .. } => {
+                Err(MondrianError::EffectGraphEvaluationFailed {
+                    reason: format!("Timeline Grade preparation failed: {reason}"),
+                })
+            }
+        }
+    }
+
     pub(crate) fn ensure_transition_ready(&self, transition_id: VideoTransitionId) -> Result<()> {
         match self.transitions.get(&transition_id) {
             Some(PreparedVisualTransition::Ready) => Ok(()),
@@ -1008,14 +1225,36 @@ impl PreparedVisualProgram {
         if effect_registry_revision() != self.key.effect_registry_revision {
             return Ok(true);
         }
+        match &self.timeline_grade {
+            PreparedTimelineGrade::Ready(program) => {
+                if !program.dependencies_are_current().map_err(|error| {
+                    PreparedVisualProgramDependencyError {
+                        sequence_id: self.key.sequence_id,
+                        clip_id: None,
+                        reason: format!("Timeline Grade: {error}"),
+                    }
+                })? {
+                    return Ok(true);
+                }
+            }
+            PreparedTimelineGrade::Blocked {
+                retry: PreparedVisualBlockerRetry::ExternalChange,
+                ..
+            } => return Ok(true),
+            PreparedTimelineGrade::None
+            | PreparedTimelineGrade::Blocked {
+                retry: PreparedVisualBlockerRetry::AuthorOrDefinitionChange,
+                ..
+            } => {}
+        }
         for (clip_id, effects) in &self.clip_effects {
             match effects {
                 PreparedClipEffects::Ready { program, .. } => {
                     if !program.dependencies_are_current().map_err(|error| {
                         PreparedVisualProgramDependencyError {
                             sequence_id: self.key.sequence_id,
-                            clip_id: *clip_id,
-                            reason: error.to_string(),
+                            clip_id: Some(*clip_id),
+                            reason: format!("Clip {clip_id}: {error}"),
                         }
                     })? {
                         return Ok(true);
@@ -1320,12 +1559,12 @@ pub enum PreparedVisualProgramBindError {
 
 /// Explicit low-frequency dependency revalidation failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Sequence {sequence_id} Clip {clip_id} dependency revalidation failed: {reason}")]
+#[error("Sequence {sequence_id} visual dependency revalidation failed: {reason}")]
 pub struct PreparedVisualProgramDependencyError {
     /// Prepared Sequence.
     pub sequence_id: SequenceId,
-    /// Clip that owns the resource.
-    pub clip_id: ClipId,
+    /// Clip that owns the resource, or `None` for the Timeline Grade.
+    pub clip_id: Option<ClipId>,
     /// Resource Adapter diagnostic.
     pub reason: String,
 }

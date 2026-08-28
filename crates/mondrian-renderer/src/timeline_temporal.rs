@@ -267,6 +267,9 @@ pub enum TimelineTemporalPreparationError {
         /// Adjustment Clip.
         clip_id: mondrian_core::ClipId,
     },
+    /// Timeline Grade also consumes the accumulated lower Timeline stack.
+    #[error("Timeline Grade temporal stack-input execution is not yet admitted")]
+    TimelineGradeUnsupported,
     /// The canonical no-op graph was unavailable while lowering prepared
     /// temporal output into ordinary compositing.
     #[error("the canonical identity Effect graph is unavailable")]
@@ -468,6 +471,11 @@ fn collect_timeline_temporal_demands_inner(
                     return Err(TimelineTemporalPreparationError::AdjustmentUnsupported {
                         clip_id: adjustment.placement.clip_id,
                     });
+                }
+            }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                if graph_requires_temporal(&grade.effect_graph) {
+                    return Err(TimelineTemporalPreparationError::TimelineGradeUnsupported);
                 }
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
@@ -810,6 +818,7 @@ fn replace_effect_graph(
             }
             TimelineRenderPlanElement::Media(_)
             | TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_)
             | TimelineRenderPlanElement::NestedSequence(_) => {}

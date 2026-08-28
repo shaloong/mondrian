@@ -14,7 +14,10 @@ use crate::{
     EffectExecutionSession, EffectGraphTopology, EffectResourceLifetime, EffectRoiPropagation,
     EffectStateModel, EffectTemporalInputExtent, LutPreparationCache,
 };
-use mondrian_core::{effect_data::EffectNode, TimelineTime, WorkingColorSpace};
+use mondrian_core::{
+    effect_data::EffectNode, EffectId, GradeGraph, GradeGraphNodeId, GradeGraphNodeKind,
+    TimelineTime, WorkingColorSpace,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
@@ -44,6 +47,7 @@ pub struct PreparedEffectStack {
     zero_stage_bindings: Arc<[CompiledEffectStageBinding]>,
 }
 
+#[derive(Debug, Clone)]
 struct EvaluatedEffectGraph {
     graph: EffectRenderGraph,
     stage_bindings: Arc<[CompiledEffectStageBinding]>,
@@ -390,72 +394,380 @@ fn evaluate_instances(
 ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
     let mut builder = EffectGraphBuilderState::new();
     let mut stage_bindings = Vec::with_capacity(instances.len());
-    let context = EffectEvalContext { time, working_color_space };
     for (stage_index, instance) in instances.iter().enumerate() {
-        let effect_key = instance.effect.effect_type.key();
-        let input_value = builder.current_output();
-        let mut staged = builder.clone();
-        let checkpoint = staged.checkpoint();
-        staged.set_active_domain_contract(instance.definition.color_domain_contract());
-        match catch_unwind(AssertUnwindSafe(|| {
-            (instance.evaluator.evaluator())(&instance.effect, context, &mut staged)
-        })) {
-            Ok(Ok(())) => {
-                staged.bind_custom_runtime_owner_since(
-                    checkpoint,
-                    instance.definition.key(),
-                    instance.definition.definition_registry_revision(),
-                    instance.definition.plugin_contract(),
-                );
-                if !staged.satisfies_topology_since(
-                    checkpoint,
-                    instance.definition.execution_contract().topology,
-                ) {
-                    return Err(EffectGraphBuildError::TopologyContractViolation {
-                        effect_key,
-                        effect_id: instance.effect.id,
-                    });
-                }
-                staged
-                    .validate_execution_contract_since(
-                        checkpoint,
-                        instance.definition.execution_contract(),
-                    )
-                    .map_err(
-                        |violation| EffectGraphBuildError::ExecutionContractViolation {
-                            effect_key: effect_key.clone(),
-                            effect_id: instance.effect.id,
-                            violation: Box::new(violation),
-                        },
-                    )?;
-                stage_bindings.push(CompiledEffectStageBinding::new(
-                    stage_index,
-                    instance.definition.execution_contract(),
-                    input_value,
-                    staged.current_output(),
-                    staged.node_ids_since(checkpoint),
-                ));
-                builder = staged;
-            }
-            Ok(Err(error)) => return Err(error),
-            Err(_) => {
-                crate::plugin_contract::record_plugin_runtime_failure(
-                    instance.definition.key(),
-                    instance.definition.definition_registry_revision(),
-                    instance.definition.plugin_contract(),
-                    "effect graph builder panicked",
-                );
-                return Err(EffectGraphBuildError::BuilderPanicked {
-                    effect_key,
-                    effect_id: instance.effect.id,
-                });
-            }
-        }
+        stage_bindings.push(evaluate_instance_into_builder(
+            instance,
+            stage_index,
+            working_color_space,
+            time,
+            &mut builder,
+        )?);
     }
     Ok(EvaluatedEffectGraph {
         graph: builder.finish(),
         stage_bindings: stage_bindings.into(),
     })
+}
+
+fn evaluate_instance_into_builder(
+    instance: &PreparedEffectInstance,
+    stage_index: usize,
+    working_color_space: WorkingColorSpace,
+    time: TimelineTime,
+    builder: &mut EffectGraphBuilderState,
+) -> Result<CompiledEffectStageBinding, EffectGraphBuildError> {
+    let effect_key = instance.effect.effect_type.key();
+    let input_value = builder.current_output();
+    let mut staged = builder.clone();
+    let checkpoint = staged.checkpoint();
+    staged.set_active_domain_contract(instance.definition.color_domain_contract());
+    let context = EffectEvalContext { time, working_color_space };
+    match catch_unwind(AssertUnwindSafe(|| {
+        (instance.evaluator.evaluator())(&instance.effect, context, &mut staged)
+    })) {
+        Ok(Ok(())) => {
+            staged.bind_custom_runtime_owner_since(
+                checkpoint,
+                instance.definition.key(),
+                instance.definition.definition_registry_revision(),
+                instance.definition.plugin_contract(),
+            );
+            if !staged.satisfies_topology_since(
+                checkpoint,
+                instance.definition.execution_contract().topology,
+            ) {
+                return Err(EffectGraphBuildError::TopologyContractViolation {
+                    effect_key,
+                    effect_id: instance.effect.id,
+                });
+            }
+            staged
+                .validate_execution_contract_since(
+                    checkpoint,
+                    instance.definition.execution_contract(),
+                )
+                .map_err(
+                    |violation| EffectGraphBuildError::ExecutionContractViolation {
+                        effect_key: effect_key.clone(),
+                        effect_id: instance.effect.id,
+                        violation: Box::new(violation),
+                    },
+                )?;
+            let binding = CompiledEffectStageBinding::new(
+                stage_index,
+                instance.definition.execution_contract(),
+                input_value,
+                staged.current_output(),
+                staged.node_ids_since(checkpoint),
+            );
+            *builder = staged;
+            Ok(binding)
+        }
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            crate::plugin_contract::record_plugin_runtime_failure(
+                instance.definition.key(),
+                instance.definition.definition_registry_revision(),
+                instance.definition.plugin_contract(),
+                "effect graph builder panicked",
+            );
+            Err(EffectGraphBuildError::BuilderPanicked {
+                effect_key,
+                effect_id: instance.effect.id,
+            })
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedGradeGraphInner {
+    author_graph: GradeGraph,
+    stack: PreparedEffectStack,
+    effect_instances: HashMap<EffectId, usize>,
+    execution_envelope: EffectExecutionEnvelope,
+    zero_evaluation: EvaluatedEffectGraph,
+}
+
+/// Definition-bound, resource-prepared grade authoring DAG.
+///
+/// Clones share the complete immutable preparation, allowing many Clip/group
+/// assignments to reference one shared grade without multiplying LUTs,
+/// evaluators, or zero-time topology state.
+#[derive(Clone, Debug)]
+pub struct PreparedGradeGraph {
+    inner: Arc<PreparedGradeGraphInner>,
+}
+
+impl PreparedGradeGraph {
+    /// Prepare one closed grade graph through an uncached LUT owner.
+    pub fn prepare(
+        graph: &GradeGraph,
+        working_color_space: WorkingColorSpace,
+    ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_with_lut_cache(graph, working_color_space, &LutPreparationCache::uncached())
+    }
+
+    /// Prepare one closed grade graph through the caller's bounded LUT cache.
+    pub fn prepare_with_lut_cache(
+        graph: &GradeGraph,
+        working_color_space: WorkingColorSpace,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
+        graph.validate_author_state().map_err(|error| {
+            EffectGraphBuildError::GradeGraphInvalidAuthorState {
+                output_node_id: graph.output,
+                reason: error.to_string(),
+            }
+        })?;
+        let effects = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                GradeGraphNodeKind::Effect { effect, .. } => Some(effect.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let stack =
+            PreparedEffectStack::prepare_with_lut_cache(&effects, working_color_space, lut_cache)?;
+        let effect_instances = stack
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(index, instance)| (instance.effect.id, index))
+            .collect::<HashMap<_, _>>();
+        let zero_evaluation = evaluate_grade_graph(
+            graph,
+            &stack,
+            &effect_instances,
+            working_color_space,
+            TimelineTime::ZERO,
+        )?;
+        prepare_effect_graph_topology(&zero_evaluation.graph)
+            .ok_or(EffectGraphBuildError::InvalidGraph)?;
+        let execution_envelope = execution_envelope_for_bindings(&zero_evaluation.stage_bindings)?;
+        Ok(Self {
+            inner: Arc::new(PreparedGradeGraphInner {
+                author_graph: graph.clone(),
+                stack,
+                effect_instances,
+                execution_envelope,
+                zero_evaluation,
+            }),
+        })
+    }
+
+    fn evaluate_with_stage_bindings(
+        &self,
+        time: TimelineTime,
+    ) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
+        if time == TimelineTime::ZERO {
+            return Ok(self.inner.zero_evaluation.clone());
+        }
+        evaluate_grade_graph(
+            &self.inner.author_graph,
+            &self.inner.stack,
+            &self.inner.effect_instances,
+            self.inner.stack.working_color_space,
+            time,
+        )
+    }
+
+    /// Definition-stage execution contract for this shared grade.
+    pub fn execution_envelope(&self) -> &EffectExecutionEnvelope {
+        &self.inner.execution_envelope
+    }
+
+    /// Process-local definition and immutable-resource cache identity.
+    pub fn dependency_identity(&self) -> EffectProgramDependencyIdentity {
+        dependency_identity(&self.inner.stack)
+    }
+
+    pub fn has_external_dependencies(&self) -> bool {
+        self.inner.stack.has_external_dependencies()
+    }
+
+    pub fn dependencies_are_current(&self) -> Result<bool, EffectDependencyCheckError> {
+        dependencies_are_current_for_stack(&self.inner.stack)
+    }
+
+    pub fn retained_bytes_estimate(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(std::mem::size_of::<PreparedGradeGraphInner>())
+            .saturating_add(self.inner.stack.retained_bytes_estimate())
+            .saturating_add(
+                serde_json::to_vec(&self.inner.author_graph)
+                    .map_or(4096, |bytes| bytes.len().max(4096)),
+            )
+            .saturating_add(self.inner.zero_evaluation.graph.retained_bytes_estimate())
+    }
+}
+
+fn evaluate_grade_graph(
+    graph: &GradeGraph,
+    stack: &PreparedEffectStack,
+    effect_instances: &HashMap<EffectId, usize>,
+    working_color_space: WorkingColorSpace,
+    time: TimelineTime,
+) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
+    let nodes = graph.nodes.iter().map(|node| (node.id, node)).collect::<HashMap<_, _>>();
+    let mut builder = EffectGraphBuilderState::new();
+    let mut outputs = HashMap::with_capacity(nodes.len());
+    let mut bindings = Vec::with_capacity(effect_instances.len());
+    let output = evaluate_grade_node(
+        graph.output,
+        &nodes,
+        stack,
+        effect_instances,
+        working_color_space,
+        time,
+        &mut builder,
+        &mut outputs,
+        &mut bindings,
+    )?;
+    builder.set_current_output(output);
+    Ok(EvaluatedEffectGraph {
+        graph: builder.finish(),
+        stage_bindings: bindings.into(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_grade_node(
+    node_id: GradeGraphNodeId,
+    nodes: &HashMap<GradeGraphNodeId, &mondrian_core::GradeGraphNode>,
+    stack: &PreparedEffectStack,
+    effect_instances: &HashMap<EffectId, usize>,
+    working_color_space: WorkingColorSpace,
+    time: TimelineTime,
+    builder: &mut EffectGraphBuilderState,
+    outputs: &mut HashMap<GradeGraphNodeId, EffectGraphNodeId>,
+    bindings: &mut Vec<CompiledEffectStageBinding>,
+) -> Result<EffectGraphNodeId, EffectGraphBuildError> {
+    if let Some(output) = outputs.get(&node_id) {
+        return Ok(*output);
+    }
+    let node = nodes.get(&node_id).ok_or(EffectGraphBuildError::InvalidGraph)?;
+    let output = match &node.kind {
+        GradeGraphNodeKind::Input => builder.source(),
+        GradeGraphNodeKind::Effect { input, effect } => {
+            let input = evaluate_grade_node(
+                *input,
+                nodes,
+                stack,
+                effect_instances,
+                working_color_space,
+                time,
+                builder,
+                outputs,
+                bindings,
+            )?;
+            let Some(instance_index) = effect_instances.get(&effect.id).copied() else {
+                outputs.insert(node_id, input);
+                return Ok(input);
+            };
+            builder.set_current_output(input);
+            let binding = evaluate_instance_into_builder(
+                &stack.instances[instance_index],
+                bindings.len(),
+                working_color_space,
+                time,
+                builder,
+            )?;
+            let output = binding.output_value();
+            bindings.push(binding);
+            output
+        }
+        GradeGraphNodeKind::Parallel { inputs, blend_mode, opacity } => {
+            let mut evaluated = Vec::with_capacity(inputs.len());
+            for input in inputs {
+                evaluated.push(evaluate_grade_node(
+                    *input,
+                    nodes,
+                    stack,
+                    effect_instances,
+                    working_color_space,
+                    time,
+                    builder,
+                    outputs,
+                    bindings,
+                )?);
+            }
+            let input = evaluated.first().copied().ok_or(EffectGraphBuildError::InvalidGraph)?;
+            let output = builder.add_multi_input(evaluated, *blend_mode, *opacity);
+            bindings.push(CompiledEffectStageBinding::new(
+                bindings.len(),
+                grade_graph_composite_contract(),
+                input,
+                output,
+                [output],
+            ));
+            output
+        }
+        GradeGraphNodeKind::Layer { base, overlay, blend_mode, opacity } => {
+            let base = evaluate_grade_node(
+                *base,
+                nodes,
+                stack,
+                effect_instances,
+                working_color_space,
+                time,
+                builder,
+                outputs,
+                bindings,
+            )?;
+            let overlay = evaluate_grade_node(
+                *overlay,
+                nodes,
+                stack,
+                effect_instances,
+                working_color_space,
+                time,
+                builder,
+                outputs,
+                bindings,
+            )?;
+            let output = builder.add_blend(base, overlay, *blend_mode, *opacity);
+            bindings.push(CompiledEffectStageBinding::new(
+                bindings.len(),
+                grade_graph_composite_contract(),
+                base,
+                output,
+                [output],
+            ));
+            output
+        }
+    };
+    outputs.insert(node_id, output);
+    Ok(output)
+}
+
+fn execution_envelope_for_bindings(
+    bindings: &[CompiledEffectStageBinding],
+) -> Result<EffectExecutionEnvelope, EffectGraphBuildError> {
+    let mut aggregate = EffectExecutionContract::IDENTITY;
+    let mut stages = Vec::with_capacity(bindings.len());
+    for binding in bindings {
+        let contract = binding.contract();
+        aggregate = aggregate.compose(contract).map_err(|error| {
+            EffectGraphBuildError::InvalidExecutionContract { reason: error.to_string() }
+        })?;
+        stages.push(contract);
+    }
+    Ok(EffectExecutionEnvelope::new(aggregate, stages))
+}
+
+fn grade_graph_composite_contract() -> EffectExecutionContract {
+    EffectExecutionContract {
+        execution_modes: EffectExecutionModes::CPU_U8
+            .union(EffectExecutionModes::CPU_F32)
+            .union(EffectExecutionModes::GPU_F32),
+        determinism: EffectDeterminism::Deterministic,
+        state_model: EffectStateModel::Stateless,
+        temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
+        roi_propagation: EffectRoiPropagation::PixelLocal,
+        resource_lifetime: EffectResourceLifetime::Frame,
+        topology: EffectGraphTopology::GeneralDag,
+    }
 }
 
 /// Cache identity beyond Sequence revision.
@@ -471,6 +783,8 @@ pub struct EffectProgramDependencyIdentity {
 struct PreparedEffectProgramInner {
     stack: PreparedEffectStack,
     masks: Arc<[MaskComponent]>,
+    grade_before: Arc<[PreparedGradeGraph]>,
+    grade_after: Arc<[PreparedGradeGraph]>,
     execution_envelope: EffectExecutionEnvelope,
     dependency_identity: EffectProgramDependencyIdentity,
     zero_topology: Arc<PreparedEffectGraphTopology>,
@@ -502,30 +816,45 @@ impl PreparedEffectProgram {
         working_color_space: WorkingColorSpace,
         lut_cache: &LutPreparationCache,
     ) -> Result<Self, EffectGraphBuildError> {
+        Self::prepare_hierarchical_with_lut_cache(
+            effects,
+            masks,
+            &[],
+            &[],
+            working_color_space,
+            lut_cache,
+        )
+    }
+
+    /// Prepare the canonical hierarchy around one Clip's legacy stack.
+    ///
+    /// `grade_before` contains group pre-Clip grades. `grade_after` contains
+    /// the Clip grade followed by group post-Clip grades. Each prepared grade
+    /// may be shared by arbitrarily many assignments.
+    pub fn prepare_hierarchical_with_lut_cache(
+        effects: &[EffectNode],
+        masks: &[MaskComponent],
+        grade_before: &[PreparedGradeGraph],
+        grade_after: &[PreparedGradeGraph],
+        working_color_space: WorkingColorSpace,
+        lut_cache: &LutPreparationCache,
+    ) -> Result<Self, EffectGraphBuildError> {
         let stack =
             PreparedEffectStack::prepare_with_lut_cache(effects, working_color_space, lut_cache)?;
         let masks = masks.iter().filter(|mask| mask.enabled).cloned().collect::<Vec<_>>();
-        let mut execution_contract = stack.execution_contract();
-        let mut stage_contracts = stack.execution_envelope().stages().to_vec();
-        if !masks.is_empty() {
-            let mask_contract = mask_execution_contract();
-            execution_contract = execution_contract.compose(mask_contract).map_err(|error| {
-                EffectGraphBuildError::InvalidExecutionContract { reason: error.to_string() }
-            })?;
-            stage_contracts.push(mask_contract);
-        }
-        let execution_envelope = EffectExecutionEnvelope::new(
-            execution_contract,
-            Arc::<[EffectExecutionContract]>::from(stage_contracts),
-        );
-
-        let zero_evaluation = inject_masks(
-            stack.evaluate_with_stage_bindings(TimelineTime::ZERO)?,
+        let grade_before: Arc<[PreparedGradeGraph]> = grade_before.to_vec().into();
+        let grade_after: Arc<[PreparedGradeGraph]> = grade_after.to_vec().into();
+        let zero_evaluation = evaluate_effect_pipeline(
+            &grade_before,
+            &stack,
             &masks,
+            &grade_after,
             TimelineTime::ZERO,
         );
+        let zero_evaluation = zero_evaluation?;
         let zero_graph = zero_evaluation.graph;
         let zero_stage_bindings = zero_evaluation.stage_bindings;
+        let execution_envelope = execution_envelope_for_bindings(&zero_stage_bindings)?;
         if zero_graph.is_identity() {
             let topology = Arc::new(
                 prepare_effect_graph_topology(&zero_graph)
@@ -542,11 +871,14 @@ impl PreparedEffectProgram {
                     )
                     .ok_or(EffectGraphBuildError::InvalidGraph)?
             };
-            let dependency_identity = dependency_identity(&stack);
+            let dependency_identity =
+                hierarchical_dependency_identity(&stack, &grade_before, &grade_after);
             return Ok(Self {
                 inner: Arc::new(PreparedEffectProgramInner {
                     stack,
                     masks: masks.into(),
+                    grade_before,
+                    grade_after,
                     execution_envelope,
                     dependency_identity,
                     zero_topology: topology,
@@ -566,11 +898,14 @@ impl PreparedEffectProgram {
                 zero_stage_bindings,
             )
             .ok_or(EffectGraphBuildError::InvalidGraph)?;
-        let dependency_identity = dependency_identity(&stack);
+        let dependency_identity =
+            hierarchical_dependency_identity(&stack, &grade_before, &grade_after);
         Ok(Self {
             inner: Arc::new(PreparedEffectProgramInner {
                 stack,
                 masks: masks.into(),
+                grade_before,
+                grade_after,
                 execution_envelope,
                 dependency_identity,
                 zero_topology: topology,
@@ -591,11 +926,13 @@ impl PreparedEffectProgram {
         if time == TimelineTime::ZERO {
             return Ok(Arc::clone(&self.inner.zero_compiled));
         }
-        let evaluation = inject_masks(
-            self.inner.stack.evaluate_with_stage_bindings(time)?,
+        let evaluation = evaluate_effect_pipeline(
+            &self.inner.grade_before,
+            &self.inner.stack,
             &self.inner.masks,
+            &self.inner.grade_after,
             time,
-        );
+        )?;
         let graph = evaluation.graph;
         if graph.is_identity() && self.inner.execution_envelope.stages().is_empty() {
             return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
@@ -630,11 +967,13 @@ impl PreparedEffectProgram {
         if time == TimelineTime::ZERO {
             return Ok(Arc::clone(&self.inner.zero_compiled));
         }
-        let evaluation = inject_masks(
-            self.inner.stack.evaluate_with_stage_bindings(time)?,
+        let evaluation = evaluate_effect_pipeline(
+            &self.inner.grade_before,
+            &self.inner.stack,
             &self.inner.masks,
+            &self.inner.grade_after,
             time,
-        );
+        )?;
         let graph = evaluation.graph;
         if graph.is_identity() && self.inner.execution_envelope.stages().is_empty() {
             return identity_compiled_effect_graph().ok_or(EffectGraphBuildError::InvalidGraph);
@@ -684,6 +1023,12 @@ impl PreparedEffectProgram {
     /// observation.
     pub fn has_external_dependencies(&self) -> bool {
         self.inner.stack.has_external_dependencies()
+            || self
+                .inner
+                .grade_before
+                .iter()
+                .chain(self.inner.grade_after.iter())
+                .any(PreparedGradeGraph::has_external_dependencies)
     }
 
     /// Conservative logical bytes retained by this Prepared Program.
@@ -711,6 +1056,14 @@ impl PreparedEffectProgram {
             .saturating_add(std::mem::size_of::<PreparedEffectProgramInner>())
             .saturating_add(self.inner.stack.retained_bytes_estimate())
             .saturating_add(
+                self.inner
+                    .grade_before
+                    .iter()
+                    .chain(self.inner.grade_after.iter())
+                    .map(PreparedGradeGraph::retained_bytes_estimate)
+                    .fold(0_usize, usize::saturating_add),
+            )
+            .saturating_add(
                 self.inner.masks.len().saturating_mul(std::mem::size_of::<MaskComponent>()),
             )
             .saturating_add(masks)
@@ -736,24 +1089,12 @@ impl PreparedEffectProgram {
     /// registry revision is unchanged; plugins must re-register when the
     /// identity they supplied during preparation changes.
     pub fn dependencies_are_current(&self) -> Result<bool, EffectDependencyCheckError> {
-        if effect_registry_revision() != self.inner.dependency_identity.definition_registry_revision
-        {
+        if !dependencies_are_current_for_stack(&self.inner.stack)? {
             return Ok(false);
         }
-        for dependency in self.inner.stack.dependencies() {
-            match dependency {
-                EffectResourceDependency::CubeLut { path, semantic_fingerprint } => {
-                    let current = crate::Lut3D::from_cube_file(path).map_err(|error| {
-                        EffectDependencyCheckError::Unreadable {
-                            path: path.clone(),
-                            reason: error.to_string(),
-                        }
-                    })?;
-                    if PreparedLut3D::new(current).semantic_fingerprint() != semantic_fingerprint {
-                        return Ok(false);
-                    }
-                }
-                EffectResourceDependency::PluginManaged { .. } => {}
+        for grade in self.inner.grade_before.iter().chain(self.inner.grade_after.iter()) {
+            if !grade.dependencies_are_current()? {
+                return Ok(false);
             }
         }
         Ok(true)
@@ -805,6 +1146,184 @@ fn dependency_identity(stack: &PreparedEffectStack) -> EffectProgramDependencyId
         definition_registry_revision: stack.definition_registry_revision(),
         resource_fingerprint: hasher.finalize().into(),
     }
+}
+
+fn hierarchical_dependency_identity(
+    stack: &PreparedEffectStack,
+    before: &[PreparedGradeGraph],
+    after: &[PreparedGradeGraph],
+) -> EffectProgramDependencyIdentity {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.hierarchical-effect-dependencies.v1");
+    let legacy = dependency_identity(stack);
+    hasher.update(legacy.resource_fingerprint);
+    for grade in before.iter().chain(after) {
+        hasher.update(grade.dependency_identity().resource_fingerprint);
+    }
+    EffectProgramDependencyIdentity {
+        definition_registry_revision: stack.definition_registry_revision(),
+        resource_fingerprint: hasher.finalize().into(),
+    }
+}
+
+fn evaluate_effect_pipeline(
+    before: &[PreparedGradeGraph],
+    stack: &PreparedEffectStack,
+    masks: &[MaskComponent],
+    after: &[PreparedGradeGraph],
+    time: TimelineTime,
+) -> Result<EvaluatedEffectGraph, EffectGraphBuildError> {
+    let mut combined = EvaluatedEffectGraph {
+        graph: EffectRenderGraph::identity(),
+        stage_bindings: Arc::from([]),
+    };
+    for grade in before {
+        let evaluation = grade.evaluate_with_stage_bindings(time)?;
+        append_evaluated_graph(&mut combined, evaluation)?;
+    }
+    append_evaluated_graph(
+        &mut combined,
+        inject_masks(stack.evaluate_with_stage_bindings(time)?, masks, time),
+    )?;
+    for grade in after {
+        let evaluation = grade.evaluate_with_stage_bindings(time)?;
+        append_evaluated_graph(&mut combined, evaluation)?;
+    }
+    Ok(combined)
+}
+
+fn append_evaluated_graph(
+    combined: &mut EvaluatedEffectGraph,
+    evaluation: EvaluatedEffectGraph,
+) -> Result<(), EffectGraphBuildError> {
+    let current = combined.graph.output.unwrap_or(EffectGraphNodeId(0));
+    let mut ids = HashMap::with_capacity(evaluation.graph.nodes.len());
+    ids.insert(EffectGraphNodeId(0), current);
+    let mut next_id = u32::try_from(combined.graph.nodes.len())
+        .map_err(|_| EffectGraphBuildError::InvalidGraph)?;
+    for node in evaluation.graph.nodes.iter().skip(1) {
+        let id = EffectGraphNodeId(next_id);
+        next_id = next_id.checked_add(1).ok_or(EffectGraphBuildError::InvalidGraph)?;
+        ids.insert(node.id, id);
+        combined
+            .graph
+            .nodes
+            .push(EffectGraphNode { id, kind: remap_graph_node_kind(&node.kind, &ids)? });
+    }
+    combined.graph.output = Some(remap_graph_id(
+        evaluation.graph.output.unwrap_or(EffectGraphNodeId(0)),
+        &ids,
+    )?);
+    let mut bindings = combined.stage_bindings.to_vec();
+    for binding in evaluation.stage_bindings.iter() {
+        bindings.push(CompiledEffectStageBinding::new(
+            bindings.len(),
+            binding.contract(),
+            remap_graph_id(binding.input_value(), &ids)?,
+            remap_graph_id(binding.output_value(), &ids)?,
+            binding
+                .emitted_nodes()
+                .iter()
+                .map(|id| remap_graph_id(*id, &ids))
+                .collect::<Result<Vec<_>, _>>()?,
+        ));
+    }
+    combined.stage_bindings = bindings.into();
+    Ok(())
+}
+
+fn remap_graph_node_kind(
+    kind: &EffectGraphNodeKind,
+    ids: &HashMap<EffectGraphNodeId, EffectGraphNodeId>,
+) -> Result<EffectGraphNodeKind, EffectGraphBuildError> {
+    let remap = |id| remap_graph_id(id, ids);
+    Ok(match kind {
+        EffectGraphNodeKind::Source => return Err(EffectGraphBuildError::InvalidGraph),
+        EffectGraphNodeKind::UnaryEffect { input, op } => {
+            EffectGraphNodeKind::UnaryEffect { input: remap(*input)?, op: op.clone() }
+        }
+        EffectGraphNodeKind::DomainEffect { input, op, domain_contract } => {
+            EffectGraphNodeKind::DomainEffect {
+                input: remap(*input)?,
+                op: op.clone(),
+                domain_contract: *domain_contract,
+            }
+        }
+        EffectGraphNodeKind::Blend { base, overlay, blend_mode, opacity } => {
+            EffectGraphNodeKind::Blend {
+                base: remap(*base)?,
+                overlay: remap(*overlay)?,
+                blend_mode: *blend_mode,
+                opacity: *opacity,
+            }
+        }
+        EffectGraphNodeKind::Mask { input, mask, invert, mask_op } => EffectGraphNodeKind::Mask {
+            input: remap(*input)?,
+            mask: remap(*mask)?,
+            invert: *invert,
+            mask_op: *mask_op,
+        },
+        EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
+            EffectGraphNodeKind::MaskSource {
+                shape: shape.clone(),
+                feather: *feather,
+                expansion: *expansion,
+                opacity: *opacity,
+                invert: *invert,
+            }
+        }
+        EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+            EffectGraphNodeKind::MaskCombine {
+                left: remap(*left)?,
+                right: remap(*right)?,
+                mask_op: *mask_op,
+            }
+        }
+        EffectGraphNodeKind::MatteMix { base, graded, matte } => EffectGraphNodeKind::MatteMix {
+            base: remap(*base)?,
+            graded: remap(*graded)?,
+            matte: remap(*matte)?,
+        },
+        EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
+            EffectGraphNodeKind::MultiInput {
+                inputs: inputs.iter().map(|id| remap(*id)).collect::<Result<Vec<_>, _>>()?,
+                blend_mode: *blend_mode,
+                opacity: *opacity,
+            }
+        }
+    })
+}
+
+fn remap_graph_id(
+    id: EffectGraphNodeId,
+    ids: &HashMap<EffectGraphNodeId, EffectGraphNodeId>,
+) -> Result<EffectGraphNodeId, EffectGraphBuildError> {
+    ids.get(&id).copied().ok_or(EffectGraphBuildError::InvalidGraph)
+}
+
+fn dependencies_are_current_for_stack(
+    stack: &PreparedEffectStack,
+) -> Result<bool, EffectDependencyCheckError> {
+    if effect_registry_revision() != stack.definition_registry_revision() {
+        return Ok(false);
+    }
+    for dependency in stack.dependencies() {
+        match dependency {
+            EffectResourceDependency::CubeLut { path, semantic_fingerprint } => {
+                let current = crate::Lut3D::from_cube_file(path).map_err(|error| {
+                    EffectDependencyCheckError::Unreadable {
+                        path: path.clone(),
+                        reason: error.to_string(),
+                    }
+                })?;
+                if PreparedLut3D::new(current).semantic_fingerprint() != semantic_fingerprint {
+                    return Ok(false);
+                }
+            }
+            EffectResourceDependency::PluginManaged { .. } => {}
+        }
+    }
+    Ok(true)
 }
 
 fn inject_masks(
@@ -1125,6 +1644,192 @@ mod tests {
             .set_static_value_by_parameter(&exposure_id, PropertyValue::Float(stops))
             .expect("set exposure");
         effect
+    }
+
+    fn serial_grade(effect: EffectNode) -> GradeGraph {
+        let input = GradeGraphNodeId::new();
+        let output = GradeGraphNodeId::new();
+        GradeGraph {
+            nodes: mondrian_core::AuthoringList::from([
+                mondrian_core::GradeGraphNode { id: input, kind: GradeGraphNodeKind::Input },
+                mondrian_core::GradeGraphNode {
+                    id: output,
+                    kind: GradeGraphNodeKind::Effect { input, effect },
+                },
+            ]),
+            output,
+        }
+    }
+
+    #[test]
+    fn prepared_grade_lowers_parallel_and_layer_to_shared_execution_ir() {
+        let input = GradeGraphNodeId::new();
+        let left = GradeGraphNodeId::new();
+        let right = GradeGraphNodeId::new();
+        let parallel = GradeGraphNodeId::new();
+        let output = GradeGraphNodeId::new();
+        let graph = GradeGraph {
+            nodes: mondrian_core::AuthoringList::from([
+                mondrian_core::GradeGraphNode { id: input, kind: GradeGraphNodeKind::Input },
+                mondrian_core::GradeGraphNode {
+                    id: left,
+                    kind: GradeGraphNodeKind::Effect { input, effect: exposure_effect(1.0) },
+                },
+                mondrian_core::GradeGraphNode {
+                    id: right,
+                    kind: GradeGraphNodeKind::Effect { input, effect: exposure_effect(-1.0) },
+                },
+                mondrian_core::GradeGraphNode {
+                    id: parallel,
+                    kind: GradeGraphNodeKind::Parallel {
+                        inputs: mondrian_core::AuthoringList::from([left, right]),
+                        blend_mode: BlendMode::Normal,
+                        opacity: 0.75,
+                    },
+                },
+                mondrian_core::GradeGraphNode {
+                    id: output,
+                    kind: GradeGraphNodeKind::Layer {
+                        base: input,
+                        overlay: parallel,
+                        blend_mode: BlendMode::Normal,
+                        opacity: 0.5,
+                    },
+                },
+            ]),
+            output,
+        };
+        let grade = PreparedGradeGraph::prepare(&graph, WorkingColorSpace::LinearRec709)
+            .expect("prepare grade DAG");
+        let program = PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+            &[],
+            &[],
+            &[grade],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("prepare hierarchical program");
+        let compiled = program.evaluate(TimelineTime::ZERO).expect("compile grade DAG");
+
+        assert!(compiled
+            .graph()
+            .nodes
+            .iter()
+            .any(|node| matches!(&node.kind, EffectGraphNodeKind::MultiInput { .. })));
+        assert!(compiled
+            .graph()
+            .nodes
+            .iter()
+            .any(|node| matches!(&node.kind, EffectGraphNodeKind::Blend { .. })));
+        assert_eq!(compiled.stage_bindings().len(), 4);
+    }
+
+    #[test]
+    fn hierarchical_program_orders_group_pre_clip_stack_and_clip_group_post() {
+        let before = PreparedGradeGraph::prepare(
+            &serial_grade(exposure_effect(1.0)),
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare before grade");
+        let after = PreparedGradeGraph::prepare(
+            &serial_grade(exposure_effect(-1.0)),
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare after grade");
+        let program = PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+            &[exposure_effect(0.5)],
+            &[],
+            &[before],
+            &[after],
+            WorkingColorSpace::LinearRec709,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("prepare hierarchy");
+        let compiled = program.evaluate(TimelineTime::ZERO).expect("compile hierarchy");
+        let bindings = compiled.stage_bindings();
+
+        assert_eq!(bindings.len(), 3);
+        assert_eq!(bindings[0].stage_index(), 0);
+        assert_eq!(bindings[1].stage_index(), 1);
+        assert_eq!(bindings[2].stage_index(), 2);
+        assert_eq!(bindings[1].input_value(), bindings[0].output_value());
+        assert_eq!(bindings[2].input_value(), bindings[1].output_value());
+        assert_eq!(compiled.graph().output, Some(bindings[2].output_value()));
+    }
+
+    #[test]
+    fn prepared_grade_clones_share_resources_and_animated_evaluation_changes_only_frame_graph() {
+        let mut effect = EffectNode::with_defaults(EffectType::BasicCorrection);
+        let exposure_id = EffectType::BasicCorrection
+            .parameter_id("exposure")
+            .expect("exposure parameter ID");
+        let path = effect
+            .properties
+            .iter()
+            .find(|(_, property)| property.descriptor.parameter_id() == &exposure_id)
+            .map(|(_, property)| property.descriptor.path.clone())
+            .expect("exposure property");
+        effect
+            .properties
+            .set_keyframe(&path, Keyframe::linear(tt(0), PropertyValue::Float(0.0)))
+            .expect("first key");
+        effect
+            .properties
+            .set_keyframe(&path, Keyframe::linear(tt(10), PropertyValue::Float(2.0)))
+            .expect("second key");
+        let prepared =
+            PreparedGradeGraph::prepare(&serial_grade(effect), WorkingColorSpace::LinearRec709)
+                .expect("prepare animated grade");
+        let shared = prepared.clone();
+        assert!(Arc::ptr_eq(&prepared.inner, &shared.inner));
+
+        let program = PreparedEffectProgram::prepare_hierarchical_with_lut_cache(
+            &[],
+            &[],
+            &[prepared],
+            &[],
+            WorkingColorSpace::LinearRec709,
+            &LutPreparationCache::uncached(),
+        )
+        .expect("prepare animated hierarchy");
+        let retained = program.retained_bytes_estimate();
+        let early = program.evaluate(tt(2)).expect("early frame");
+        let late = program.evaluate(tt(8)).expect("late frame");
+        assert_ne!(early.signature_hash(), late.signature_hash());
+        assert_eq!(program.retained_bytes_estimate(), retained);
+    }
+
+    #[test]
+    fn prepared_grade_reports_stable_graph_identity_and_external_lut_dependency() {
+        let missing_output = GradeGraphNodeId::new();
+        let invalid = GradeGraph {
+            nodes: mondrian_core::AuthoringList::from([mondrian_core::GradeGraphNode {
+                id: GradeGraphNodeId::new(),
+                kind: GradeGraphNodeKind::Input,
+            }]),
+            output: missing_output,
+        };
+        for _ in 0..2 {
+            assert!(matches!(
+                PreparedGradeGraph::prepare(&invalid, WorkingColorSpace::LinearRec709),
+                Err(EffectGraphBuildError::GradeGraphInvalidAuthorState {
+                    output_node_id,
+                    ..
+                }) if output_node_id == missing_output
+            ));
+        }
+
+        let path = temporary_cube("mondrian-prepared-grade-lut");
+        let grade = PreparedGradeGraph::prepare(
+            &serial_grade(bound_lut_effect(&path)),
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare grade LUT");
+        assert!(grade.has_external_dependencies());
+        assert!(grade.dependencies_are_current().expect("check grade LUT"));
+        assert!(grade.retained_bytes_estimate() > std::mem::size_of::<PreparedGradeGraph>());
+        let _ = std::fs::remove_file(path);
     }
 
     fn execute_window(shape: MaskShape, invert: bool) -> Vec<[f32; 4]> {

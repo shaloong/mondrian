@@ -685,6 +685,16 @@ pub(super) fn prepare_export_effect_frame_plan(
                     )
                     .map_err(|error| error.to_string())?;
             }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                let extent = EffectFrameExtent::new(resolution.width, resolution.height);
+                visual_session
+                    .select_heterogeneous_route(
+                        &grade.effect_graph,
+                        ExportHeterogeneousPlacement::Adjustment,
+                        extent,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 validate_export_transition_heterogeneous_placement(
                     program.sequence_id(),

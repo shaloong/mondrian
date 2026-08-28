@@ -127,6 +127,34 @@ bytes, graph signature, cost, temporal and heterogeneous diagnostics all belong
 to the ordinary compiled Effect graph; no Preview-, Export-, or UI-owned grade
 interpretation exists.
 
+## Grade Graph Lowering
+
+Core owns the persistable `GradeGraph` algebra; Effects owns its only
+production lowering and dynamic evaluation. `PreparedGradeGraph` binds one
+active Version to Definition registry state and immutable prepared resources,
+then lowers serial Effect nodes plus Parallel/Layer nodes to the existing
+`MultiInput`/`Blend` execution IR. Composition nodes receive explicit stage
+ownership and execution contracts, so CPU/GPU admission never infers their
+capabilities from topology alone. Invalid author state returns the stable
+Grade-output identity and reason; diagnostics never fabricate an unrelated
+Effect identity.
+
+Hierarchy preparation combines Group Pre, ordinary Clip Effects/Masks, Clip
+Grade, and Group Post into one compiled Clip program without creating a second
+interpreter. Timeline Grade is prepared separately as the full-composite final
+program. Preview and Export receive the same `Arc<CompiledEffectGraph>` for a
+given prepared program; scheduling policy may differ, but topology, evaluated
+values, color-domain transitions, dependencies, blockers, and pixels may not.
+
+Prepared resources are shared by `Arc`. Dependency, subtree-cache, and
+retained-byte evidence includes every reachable Grade node and resource;
+accounting is conservative and may overcharge shared execution allocations but
+must never undercharge them. Definition identity, active Version identity,
+complete graph/evaluated-value signature, working space, registry revision,
+and external resource fingerprints participate in cache/program identity. A
+change to one referenced Definition invalidates only prepared programs whose
+hierarchy closure references it.
+
 Clip instantiation preserves definition-owned property groups. It only assigns
 the effect display name as a fallback group for older ungrouped properties,
 while HDR Global and zone groups survive path namespacing unchanged.

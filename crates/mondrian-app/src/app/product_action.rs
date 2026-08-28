@@ -18,7 +18,8 @@ use mondrian_core::types::{
     KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, ProjectColorEnvironment, ProjectSettings, TimeScale, TimelineTime, TimelineTimeRange,
+    Color, GradeDefinitionId, GradeGraph, GradeVersionId, ProjectColorEnvironment, ProjectSettings,
+    TimeScale, TimelineTime, TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
@@ -26,8 +27,8 @@ use mondrian_timeline::{
     clip::Clip,
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement, RangeEditKind,
-    TrackRelativePlacement,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement, GradeScope,
+    RangeEditKind, TrackRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -167,6 +168,16 @@ pub const VISUAL_EFFECT_REORDER: &str = "reorder";
 /// External action name for writing one stable-address visual Effect parameter.
 pub const VISUAL_EFFECT_SET_PARAMETER_VALUE: &str = "set_parameter_value";
 
+/// External custom-action namespace for Sequence grading hierarchy.
+pub const GRADE_NAMESPACE: &str = "ui.grade";
+pub const GRADE_CREATE_DEFINITION: &str = "create_definition";
+pub const GRADE_ASSIGN: &str = "assign";
+pub const GRADE_CREATE_GROUP: &str = "create_group";
+pub const GRADE_ADD_VERSION: &str = "add_version";
+pub const GRADE_ACTIVATE_VERSION: &str = "activate_version";
+pub const GRADE_REPLACE_ACTIVE_GRAPH: &str = "replace_active_graph";
+pub const GRADE_ADD_EFFECT: &str = "add_effect";
+
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
@@ -243,6 +254,8 @@ pub enum ProductAction {
     Export(ExportProductAction),
     /// An operation owned by Clip-local visual Effect authoring or selection.
     VisualEffect(VisualEffectProductAction),
+    /// An operation owned by Sequence grading hierarchy authoring.
+    Grade(GradeProductAction),
     /// An operation owned by Clip-local visual Mask authoring or selection.
     VisualMask(VisualMaskProductAction),
 }
@@ -340,6 +353,18 @@ pub enum VisualEffectProductAction {
     Reorder(VisualEffectReorderPayload),
     /// Write one parameter value through its stable author instance address.
     SetParameterValue(Box<VisualEffectSetParameterValuePayload>),
+}
+
+/// Closed Sequence grading hierarchy operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GradeProductAction {
+    CreateDefinition(GradeCreateDefinitionPayload),
+    Assign(GradeAssignPayload),
+    CreateGroup(GradeCreateGroupPayload),
+    AddVersion(GradeAddVersionPayload),
+    ActivateVersion(GradeActivateVersionPayload),
+    ReplaceActiveGraph(Box<GradeReplaceActiveGraphPayload>),
+    AddEffect(GradeAddEffectPayload),
 }
 
 /// Closed authoring operations owned by one Timeline Clip.
@@ -499,6 +524,7 @@ fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
         SEQUENCE_NAMESPACE => Some("sequence_action"),
         EXPORT_NAMESPACE => Some("export_action"),
         VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
+        GRADE_NAMESPACE => Some("grade_action"),
         VISUAL_MASK_NAMESPACE => Some("visual_mask_action"),
         _ => None,
     }
@@ -820,6 +846,32 @@ impl ProductAction {
                         namespace, name, payload,
                     )?)),
                 ))),
+                _ => Ok(None),
+            },
+            GRADE_NAMESPACE => match name.as_str() {
+                GRADE_CREATE_DEFINITION => Ok(Some(Self::Grade(
+                    GradeProductAction::CreateDefinition(decode_payload(namespace, name, payload)?),
+                ))),
+                GRADE_ASSIGN => Ok(Some(Self::Grade(GradeProductAction::Assign(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_CREATE_GROUP => Ok(Some(Self::Grade(GradeProductAction::CreateGroup(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_ADD_VERSION => Ok(Some(Self::Grade(GradeProductAction::AddVersion(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GRADE_ACTIVATE_VERSION => Ok(Some(Self::Grade(
+                    GradeProductAction::ActivateVersion(decode_payload(namespace, name, payload)?),
+                ))),
+                GRADE_REPLACE_ACTIVE_GRAPH => {
+                    Ok(Some(Self::Grade(GradeProductAction::ReplaceActiveGraph(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                GRADE_ADD_EFFECT => Ok(Some(Self::Grade(GradeProductAction::AddEffect(
+                    decode_payload(namespace, name, payload)?,
+                )))),
                 _ => Ok(None),
             },
             VISUAL_MASK_NAMESPACE => match name.as_str() {
@@ -1208,6 +1260,39 @@ impl ProductAction {
             Self::VisualEffect(VisualEffectProductAction::SetParameterValue(payload)) => (
                 VISUAL_EFFECT_NAMESPACE,
                 VISUAL_EFFECT_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::CreateDefinition(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_CREATE_DEFINITION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::Assign(payload)) => {
+                (GRADE_NAMESPACE, GRADE_ASSIGN, serde_json::json!(payload))
+            }
+            Self::Grade(GradeProductAction::CreateGroup(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_CREATE_GROUP,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::AddVersion(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ADD_VERSION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::ActivateVersion(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ACTIVATE_VERSION,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::ReplaceActiveGraph(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_REPLACE_ACTIVE_GRAPH,
+                serde_json::json!(payload),
+            ),
+            Self::Grade(GradeProductAction::AddEffect(payload)) => (
+                GRADE_NAMESPACE,
+                GRADE_ADD_EFFECT,
                 serde_json::json!(payload),
             ),
             Self::VisualMask(VisualMaskProductAction::AddToClip(payload)) => (
@@ -1876,6 +1961,56 @@ pub struct VisualEffectSetParameterValuePayload {
     pub value: PropertyValue,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeCreateDefinitionPayload {
+    pub name: String,
+    pub assign_to: Option<GradeScope>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAssignPayload {
+    pub scope: GradeScope,
+    pub definition_id: Option<GradeDefinitionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeCreateGroupPayload {
+    pub name: String,
+    pub clip_id: Option<ClipId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAddVersionPayload {
+    pub definition_id: GradeDefinitionId,
+    pub name: String,
+    pub activate: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeActivateVersionPayload {
+    pub definition_id: GradeDefinitionId,
+    pub version_id: GradeVersionId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeReplaceActiveGraphPayload {
+    pub definition_id: GradeDefinitionId,
+    pub graph: GradeGraph,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GradeAddEffectPayload {
+    pub definition_id: GradeDefinitionId,
+    pub effect_type: EffectType,
+}
+
 /// Explicit author policy when real endpoint handles cannot satisfy a visual
 /// Transition range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2061,6 +2196,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Sequence(action) => self.allows_sequence(action),
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
+            ProductAction::Grade(action) => self.allows_grade(action),
             ProductAction::VisualMask(action) => self.allows_visual_mask(action),
         }
     }
@@ -2455,8 +2591,81 @@ impl<'a> ProductActionAvailability<'a> {
         }
     }
 
+    fn allows_grade(&self, action: &GradeProductAction) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        let scope_exists = |scope: GradeScope| match scope {
+            GradeScope::Clip(_) => {
+                super::grade_authoring::validate_grade_scope_write(sequence, scope).is_ok()
+            }
+            GradeScope::GroupPre(group_id) | GradeScope::GroupPost(group_id) => {
+                sequence.grade_groups.iter().any(|group| group.id == group_id)
+            }
+            GradeScope::Timeline => true,
+        };
+        let definition = |definition_id| sequence.grade_definition(definition_id);
+        match action {
+            GradeProductAction::CreateDefinition(payload) => {
+                !payload.name.trim().is_empty() && payload.assign_to.is_none_or(scope_exists)
+            }
+            GradeProductAction::Assign(payload) => {
+                scope_exists(payload.scope)
+                    && payload.definition_id.is_none_or(|id| definition(id).is_some())
+                    && grade_scope_assignment(sequence, payload.scope) != payload.definition_id
+            }
+            GradeProductAction::CreateGroup(payload) => {
+                !payload.name.trim().is_empty()
+                    && payload.clip_id.is_none_or(|clip_id| scope_exists(GradeScope::Clip(clip_id)))
+            }
+            GradeProductAction::AddVersion(payload) => definition(payload.definition_id)
+                .is_some_and(|definition| {
+                    !payload.name.trim().is_empty()
+                        && definition.versions.len() < mondrian_core::MAX_GRADE_VERSIONS
+                        && definition.active().is_some()
+                }),
+            GradeProductAction::ActivateVersion(payload) => definition(payload.definition_id)
+                .is_some_and(|definition| {
+                    definition.active_version != payload.version_id
+                        && definition
+                            .versions
+                            .iter()
+                            .any(|version| version.id == payload.version_id)
+                }),
+            GradeProductAction::ReplaceActiveGraph(payload) => definition(payload.definition_id)
+                .and_then(|definition| definition.active())
+                .is_some_and(|version| {
+                    version.graph != payload.graph && payload.graph.validate_author_state().is_ok()
+                }),
+            GradeProductAction::AddEffect(payload) => definition(payload.definition_id)
+                .and_then(|definition| definition.active())
+                .is_some_and(|version| {
+                    version.graph.nodes.len() < mondrian_core::MAX_GRADE_GRAPH_NODES
+                        && mondrian_effects::effect_definition(&payload.effect_type)
+                            .is_some_and(|effect| effect.supports_visual_evaluation())
+                }),
+        }
+    }
+
     fn allows_visual_mask(&self, action: &VisualMaskProductAction) -> bool {
         visual_mask_action_available(self.state, action)
+    }
+}
+
+fn grade_scope_assignment(sequence: &Sequence, scope: GradeScope) -> Option<GradeDefinitionId> {
+    match scope {
+        GradeScope::Clip(clip_id) => sequence.find_clip(clip_id).and_then(|clip| clip.grade),
+        GradeScope::GroupPre(group_id) => sequence
+            .grade_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.pre_clip_grade),
+        GradeScope::GroupPost(group_id) => sequence
+            .grade_groups
+            .iter()
+            .find(|group| group.id == group_id)
+            .and_then(|group| group.post_clip_grade),
+        GradeScope::Timeline => sequence.timeline_grade,
     }
 }
 

@@ -1340,6 +1340,16 @@ pub struct Sequence {
     /// Explicit two-input visual Transitions. Endpoint Track membership is
     /// derived from their strong Clip references.
     pub video_transitions: AuthoringList<crate::video_transition::VideoTransition>,
+    /// Sequence-owned shared grades. Clip, group, and timeline scopes only
+    /// retain strong typed references into this catalog.
+    #[serde(default)]
+    pub grade_definitions: AuthoringList<mondrian_core::GradeDefinition>,
+    /// Ordered group catalog. Each Clip may reference at most one group.
+    #[serde(default)]
+    pub grade_groups: AuthoringList<crate::grade::GradeGroup>,
+    /// Optional full-composite grade evaluated once after track compositing.
+    #[serde(default)]
+    pub timeline_grade: Option<mondrian_core::GradeDefinitionId>,
     pub audio_tracks: AuthoringList<Track>,
     /// Sequence semantic catalog for audio classification and output projection.
     pub audio_roles: AuthoringList<crate::audio::AudioRole>,
@@ -1363,6 +1373,9 @@ impl AuthoringFootprint for Sequence {
             settings,
             video_tracks,
             video_transitions,
+            grade_definitions,
+            grade_groups,
+            timeline_grade: _,
             audio_tracks,
             audio_roles,
             audio_program,
@@ -1375,6 +1388,8 @@ impl AuthoringFootprint for Sequence {
         collector.collect(settings)?;
         collector.collect(video_tracks)?;
         collector.collect(video_transitions)?;
+        collector.collect(grade_definitions)?;
+        collector.collect(grade_groups)?;
         collector.collect(audio_tracks)?;
         collector.collect(audio_roles)?;
         collector.collect(audio_program)
@@ -1510,6 +1525,7 @@ impl Sequence {
             });
         }
         self.settings.validate_with_color_environment(color_environment)?;
+        self.validate_grade_hierarchy()?;
         for (tracks, expected_type, role) in [
             (&self.video_tracks, TrackType::Video, "video"),
             (&self.audio_tracks, TrackType::Audio, "audio"),
@@ -1566,6 +1582,9 @@ impl Sequence {
             settings,
             video_tracks,
             video_transitions,
+            grade_definitions,
+            grade_groups,
+            timeline_grade,
             audio_tracks,
             audio_roles,
             audio_program,
@@ -1581,6 +1600,9 @@ impl Sequence {
             settings: other_settings,
             video_tracks: other_video_tracks,
             video_transitions: other_video_transitions,
+            grade_definitions: other_grade_definitions,
+            grade_groups: other_grade_groups,
+            timeline_grade: other_timeline_grade,
             audio_tracks: other_audio_tracks,
             audio_roles: other_audio_roles,
             audio_program: other_audio_program,
@@ -1595,6 +1617,9 @@ impl Sequence {
             && settings == other_settings
             && video_tracks == other_video_tracks
             && video_transitions == other_video_transitions
+            && grade_definitions == other_grade_definitions
+            && grade_groups == other_grade_groups
+            && timeline_grade == other_timeline_grade
             && audio_tracks == other_audio_tracks
             && audio_roles == other_audio_roles
             && audio_program == other_audio_program
@@ -1623,6 +1648,9 @@ impl Sequence {
                 Track::new_video("V3"),
             ]),
             video_transitions: AuthoringList::new(),
+            grade_definitions: AuthoringList::new(),
+            grade_groups: AuthoringList::new(),
+            timeline_grade: None,
             audio_tracks,
             audio_roles: AuthoringList::new(),
             audio_program,
@@ -2140,6 +2168,77 @@ impl Sequence {
         }
     }
 
+    /// Fork every Sequence-owned grade identity while preserving internal
+    /// shared-definition and hierarchy references.
+    fn fork_grade_hierarchy_for_sequence_duplicate(&mut self) {
+        let definition_ids = self
+            .grade_definitions
+            .iter()
+            .map(|definition| (definition.id, mondrian_core::GradeDefinitionId::new()))
+            .collect::<HashMap<_, _>>();
+        let group_ids = self
+            .grade_groups
+            .iter()
+            .map(|group| (group.id, mondrian_core::GradeGroupId::new()))
+            .collect::<HashMap<_, _>>();
+
+        for definition in &mut self.grade_definitions {
+            definition.id = definition_ids[&definition.id];
+            let old_active_version = definition.active_version;
+            let version_ids = definition
+                .versions
+                .iter()
+                .map(|version| (version.id, mondrian_core::GradeVersionId::new()))
+                .collect::<HashMap<_, _>>();
+            for version in &mut definition.versions {
+                version.id = version_ids[&version.id];
+                let node_ids = version
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|node| (node.id, mondrian_core::GradeGraphNodeId::new()))
+                    .collect::<HashMap<_, _>>();
+                version.graph.output = node_ids[&version.graph.output];
+                for node in &mut version.graph.nodes {
+                    node.id = node_ids[&node.id];
+                    match &mut node.kind {
+                        mondrian_core::GradeGraphNodeKind::Input => {}
+                        mondrian_core::GradeGraphNodeKind::Effect { input, effect } => {
+                            *input = node_ids[input];
+                            effect.id = EffectId::new();
+                            effect.properties.fork_author_identities();
+                        }
+                        mondrian_core::GradeGraphNodeKind::Parallel { inputs, .. } => {
+                            for input in inputs {
+                                *input = node_ids[input];
+                            }
+                        }
+                        mondrian_core::GradeGraphNodeKind::Layer { base, overlay, .. } => {
+                            *base = node_ids[base];
+                            *overlay = node_ids[overlay];
+                        }
+                    }
+                }
+            }
+            definition.active_version = version_ids[&old_active_version];
+        }
+        for group in &mut self.grade_groups {
+            group.id = group_ids[&group.id];
+            group.pre_clip_grade = group.pre_clip_grade.map(|id| definition_ids[&id]);
+            group.post_clip_grade = group.post_clip_grade.map(|id| definition_ids[&id]);
+        }
+        self.timeline_grade = self.timeline_grade.map(|id| definition_ids[&id]);
+        for clip in self
+            .video_tracks
+            .iter_mut()
+            .chain(&mut self.audio_tracks)
+            .flat_map(|track| &mut track.clips)
+        {
+            clip.grade = clip.grade.map(|id| definition_ids[&id]);
+            clip.grade_group = clip.grade_group.map(|id| group_ids[&id]);
+        }
+    }
+
     /// Fork the identity graph of a cloned Sequence into an independent author
     /// aggregate while preserving its authored values and external references.
     pub fn fork_author_identities_for_sequence_duplicate(&mut self) {
@@ -2192,6 +2291,7 @@ impl Sequence {
 
         self.fork_audio_identities_for_sequence_duplicate();
         self.fork_clip_link_groups_for_sequence_duplicate();
+        self.fork_grade_hierarchy_for_sequence_duplicate();
     }
 
     /// Remove meaningless singleton link groups after structural edits.
@@ -2439,6 +2539,18 @@ impl Sequence {
                 for mask in &clip.masks {
                     if !mask_ids.insert(mask.id) {
                         return Err(duplicate_author_identity("Mask", mask.id));
+                    }
+                }
+            }
+        }
+
+        for definition in &self.grade_definitions {
+            for version in &definition.versions {
+                for node in &version.graph.nodes {
+                    if let mondrian_core::GradeGraphNodeKind::Effect { effect, .. } = &node.kind
+                        && !effect_ids.insert(effect.id)
+                    {
+                        return Err(duplicate_author_identity("Effect", effect.id));
                     }
                 }
             }

@@ -123,7 +123,7 @@ pub use plugin_contract::{
 pub use plugin_sdk::{EffectGraphDsl, EffectPluginDefinitionBuilder};
 pub use prepared::{
     EffectDependencyCheckError, EffectProgramDependencyIdentity, PreparedEffectProgram,
-    PreparedEffectStack,
+    PreparedEffectStack, PreparedGradeGraph,
 };
 pub use primary_grade::{AscCdlGrade, PrimariesGrade, PrimaryGradeError, WhiteBalanceGrade};
 pub use qualifier::{

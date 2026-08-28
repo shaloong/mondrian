@@ -63,6 +63,29 @@ TimelineEvaluationRequest
   -> Display or Export Encode
 ```
 
+Grade hierarchy is materialized in that shared path with the exact order
+`Group Pre -> Clip Effects/Masks -> Clip Grade -> Group Post -> Track
+Composite -> Timeline Grade`. The first four scopes compile into each selected
+Clip program. `TimelineRenderPlanElement::TimelineGrade` is a distinct
+full-composite element appended exactly once and last; it is not represented as
+a generated or adjustment Clip in Timeline author state. Export lowers that
+same element to its full-composite adjustment execution shape while retaining
+the exact same compiled `Arc` used by Preview.
+
+Timeline Grade executes over Float32 working pixels after all Track layers.
+An empty transparent Timeline still retains the explicit plan element for
+identity and diagnostics, but an alpha-preserving contract may prove pixel
+execution is a no-op. A temporal Timeline Grade currently fails closed: correct
+evaluation requires historical complete lower-composite frames, and Clip-local
+history cannot be substituted. This restriction is explicit admission evidence
+rather than a silent spatial approximation.
+
+Preview/Export parity tests compare hierarchy order, exact compiled-IR sharing,
+Float32 end-to-end pixels, Definition-scoped invalidation, blocker propagation,
+temporal rejection, and empty-transparent semantics. Prepared closures include
+Grade dependencies and cache signatures, so a Definition edit cannot reuse a
+stale composite even when Clip placement is unchanged.
+
 Timeline evaluation consumes exact Timeline Time in a declared Sequence domain
 and an explicit video Evaluation Grid. `TimelineEvaluationRequest` carries one
 `FramePosition`; its frame and time base cannot be separated or supplied

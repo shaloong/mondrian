@@ -71,6 +71,10 @@ define_id!(AudioRoleId, "音频角色 ID");
 define_id!(JobId, "渲染任务 ID");
 define_id!(MaskId, "蒙版 ID");
 define_id!(TrackingId, "跟踪分析 ID");
+define_id!(GradeGraphNodeId, "调色图节点 ID");
+define_id!(GradeDefinitionId, "共享调色定义 ID");
+define_id!(GradeVersionId, "调色版本 ID");
+define_id!(GradeGroupId, "调色组 ID");
 
 /// Monotonic authoring revision of one stable Sequence identity.
 ///

@@ -210,6 +210,13 @@ pub struct TimelineAdjustmentPlan {
     pub frame_seed: i64,
 }
 
+/// Full-composite Sequence grade evaluated once after every visual item.
+#[derive(Debug, Clone)]
+pub struct TimelineGradePlan {
+    pub effect_graph: Arc<CompiledEffectGraph>,
+    pub frame_seed: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimelineSolidColorPlan {
     /// Exact prepared placement and endpoint identity.
@@ -294,6 +301,8 @@ pub enum TimelineRenderPlanElement {
     NestedSequence(TimelineNestedSequencePlan),
     /// A two-input operation occupying one position in the Track stack.
     CrossDissolve(Box<TimelineCrossDissolvePlan>),
+    /// Explicit full-composite grade; never masquerades as a Clip placement.
+    TimelineGrade(TimelineGradePlan),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -377,6 +386,7 @@ pub(crate) fn collect_timeline_color_diagnostics_with_display_view(
                 }
             }
             TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_)
             | TimelineRenderPlanElement::NestedSequence(_) => {}
@@ -455,6 +465,11 @@ pub fn evaluate_prepared_visual_program_with_session(
 trait ClipEffectResolver {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>>;
 
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>>;
+
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()>;
 }
 
@@ -475,6 +490,13 @@ impl ClipEffectResolver for DirectClipEffectResolver {
         .map_err(|error| MondrianError::EffectGraphEvaluationFailed { reason: error.to_string() })
     }
 
+    fn evaluate_timeline_grade(
+        &mut self,
+        _sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        Ok(None)
+    }
+
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
         validate_flat_transition_definition(transition)
     }
@@ -487,6 +509,13 @@ struct PreparedClipEffectResolver<'a> {
 impl ClipEffectResolver for PreparedClipEffectResolver<'_> {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program.evaluate_clip_effects(clip.clip_id, clip.clip_time)
+    }
+
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        self.program.evaluate_timeline_grade(sequence_time)
     }
 
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
@@ -503,6 +532,13 @@ impl ClipEffectResolver for SessionPreparedClipEffectResolver<'_> {
     fn evaluate(&mut self, clip: &FlatActiveClip) -> Result<Arc<CompiledEffectGraph>> {
         self.program
             .evaluate_clip_effects_with_session(clip.clip_id, clip.clip_time, self.session)
+    }
+
+    fn evaluate_timeline_grade(
+        &mut self,
+        sequence_time: TimelineTime,
+    ) -> Result<Option<Arc<CompiledEffectGraph>>> {
+        self.program.evaluate_timeline_grade_with_session(sequence_time, self.session)
     }
 
     fn admit_transition(&mut self, transition: &FlatVideoTransition) -> Result<()> {
@@ -569,6 +605,12 @@ fn evaluate_timeline_render_plan_with_effects(
                 )?);
             }
         }
+    }
+
+    if let Some(effect_graph) = effects.evaluate_timeline_grade(current_time)? {
+        elements.push(TimelineRenderPlanElement::TimelineGrade(
+            TimelineGradePlan { effect_graph, frame_seed: request.position.frame },
+        ));
     }
 
     diagnostics.emitted_elements = elements.len();
@@ -706,6 +748,9 @@ fn compile_transition_input(
             reason: "Adjustment Layer cannot be a Transition endpoint".to_owned(),
         }),
         TimelineRenderPlanElement::CrossDissolve(_) => unreachable!("a Clip cannot lower itself"),
+        TimelineRenderPlanElement::TimelineGrade(_) => {
+            unreachable!("a Clip cannot lower itself into the Timeline Grade")
+        }
     }
 }
 
@@ -1550,6 +1595,10 @@ mod tests {
             right: RenderPlanSemanticTransitionInput,
             progress: f32,
         },
+        TimelineGrade {
+            graph_signature: u64,
+            frame_seed: i64,
+        },
     }
 
     #[derive(Debug, PartialEq)]
@@ -1629,6 +1678,12 @@ mod tests {
                         left: transition_input_signature(&transition.left),
                         right: transition_input_signature(&transition.right),
                         progress: transition.progress,
+                    }
+                }
+                TimelineRenderPlanElement::TimelineGrade(grade) => {
+                    RenderPlanSemanticElement::TimelineGrade {
+                        graph_signature: grade.effect_graph.signature_hash(),
+                        frame_seed: grade.frame_seed,
                     }
                 }
             })

@@ -858,6 +858,7 @@ fn collect_nested_demands(
             }
             TimelineRenderPlanElement::Media(_)
             | TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::BasicTitle(_) => {}
         }

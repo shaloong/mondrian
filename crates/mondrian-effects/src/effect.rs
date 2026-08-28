@@ -115,6 +115,13 @@ pub enum EffectGraphBuildError {
         effect_id: EffectId,
         reason: String,
     },
+    /// The closed grade authoring DAG is invalid before Definition binding.
+    #[error("grade graph rooted at {output_node_id} has invalid author state: {reason}")]
+    GradeGraphInvalidAuthorState {
+        /// Stable selected output identity from the authored graph.
+        output_node_id: mondrian_core::GradeGraphNodeId,
+        reason: String,
+    },
     /// A frame evaluator emitted topology beyond its declared contract.
     #[error("effect `{effect_key}` ({effect_id}) violated its graph topology contract")]
     TopologyContractViolation {

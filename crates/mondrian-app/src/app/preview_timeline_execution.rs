@@ -1337,7 +1337,8 @@ fn collect_prepared_visual_media_demands(
                 TimelineRenderPlanElement::NestedSequence(_) => {}
                 TimelineRenderPlanElement::SolidColor(_)
                 | TimelineRenderPlanElement::BasicTitle(_)
-                | TimelineRenderPlanElement::Adjustment(_) => {}
+                | TimelineRenderPlanElement::Adjustment(_)
+                | TimelineRenderPlanElement::TimelineGrade(_) => {}
                 TimelineRenderPlanElement::CrossDissolve(transition) => {
                     collect_prepared_transition_input_media_demand(
                         &transition.left,
@@ -1537,6 +1538,16 @@ where
                         opacity: adjustment.opacity,
                         blend_mode: Some(adjustment.blend_mode),
                         frame_seed: adjustment.frame_seed,
+                    },
+                ));
+            }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                resolved.push(ResolvedPreviewElement::Adjustment(
+                    TimelineAdjustmentLayer {
+                        effect_graph: grade.effect_graph,
+                        opacity: 1.0,
+                        blend_mode: None,
+                        frame_seed: grade.frame_seed,
                     },
                 ));
             }

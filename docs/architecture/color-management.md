@@ -114,6 +114,16 @@ project's selected Standard, ACES, or Custom OCIO configuration; they must not
 be approximated with native transfer functions, an ACES-specific side engine,
 or a baked RGBA8 fallback.
 
+Creative Grade Graphs remain inside the same working-domain contract. Core
+persists their bounded author DAG and Timeline persists typed hierarchy
+references; Effects alone lowers the active Versions to compiled execution IR.
+The fixed hierarchy ends with one full-composite Timeline Grade before Program
+Output. Program Output, rendering View, display calibration, and carrier
+encoding remain color-management boundaries and can never be inserted into or
+relabelled as a creative Grade scope. Preview and Export consume the same
+compiled graph and explicit working/output contexts, so a hierarchy edit cannot
+select different color science by consumer.
+
 The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
 adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
 semantics, but they must preserve node order and the exact endpoint identities.

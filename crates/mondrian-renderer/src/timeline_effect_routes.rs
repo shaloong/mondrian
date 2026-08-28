@@ -285,6 +285,7 @@ fn visit_plan_graphs(
                 visit_transition_graph(&transition.left, visitor)?;
                 visit_transition_graph(&transition.right, visitor)?;
             }
+            TimelineRenderPlanElement::TimelineGrade(_) => {}
         }
     }
     Ok(())

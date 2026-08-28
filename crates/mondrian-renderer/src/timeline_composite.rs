@@ -1821,6 +1821,14 @@ fn visit_render_plan_effect_graphs<'plan>(
                     });
                 }
             }
+            crate::TimelineRenderPlanElement::TimelineGrade(layer) => {
+                if has_composited_layer {
+                    visit(TimelineEffectGraphRef {
+                        graph: &layer.effect_graph,
+                        kind: TimelineEffectGraphKind::Adjustment,
+                    });
+                }
+            }
             crate::TimelineRenderPlanElement::SolidColor(layer) => {
                 visit(TimelineEffectGraphRef {
                     graph: &layer.effect_graph,

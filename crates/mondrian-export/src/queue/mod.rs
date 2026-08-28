@@ -4171,6 +4171,7 @@ pub fn export_input_color_resolution_counts_for_frame(
                     }
                 }
                 TimelineRenderPlanElement::Adjustment(_)
+                | TimelineRenderPlanElement::TimelineGrade(_)
                 | TimelineRenderPlanElement::SolidColor(_)
                 | TimelineRenderPlanElement::BasicTitle(_)
                 | TimelineRenderPlanElement::NestedSequence(_) => {}
@@ -4560,6 +4561,7 @@ fn render_prepared_visual_node_into(
                 transition_inputs[index] = Some((left, right));
             }
             TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::SolidColor(_)
             | TimelineRenderPlanElement::NestedSequence(_) => {}
         }
@@ -4636,6 +4638,7 @@ fn render_prepared_visual_node_into(
                 HeterogeneousCpuPrefixSource::solid_color(route.route.frame_extent(), solid.color)
             }
             TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
             | TimelineRenderPlanElement::CrossDissolve(_) => {
                 return Err(format!(
                     "unsupported heterogeneous route escaped preflight at {}",
@@ -4671,6 +4674,16 @@ fn render_prepared_visual_node_into(
                         opacity: adjustment.opacity,
                         blend_mode: Some(adjustment.blend_mode),
                         frame_seed: adjustment.frame_seed,
+                    },
+                ));
+            }
+            TimelineRenderPlanElement::TimelineGrade(grade) => {
+                composite_elements.push(TimelineCompositeElement::Adjustment(
+                    TimelineAdjustmentLayer {
+                        effect_graph: grade.effect_graph.clone(),
+                        opacity: 1.0,
+                        blend_mode: None,
+                        frame_seed: grade.frame_seed,
                     },
                 ));
             }

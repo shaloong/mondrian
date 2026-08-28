@@ -5886,6 +5886,7 @@ fn inspector_panel_locked_target_controls_do_not_dispatch() {
         audio_processor_racks: Vec::new(),
         clip_properties: Vec::new(),
         effects: Vec::new(),
+        grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
     let mut panel = inspector_panel(&model);
@@ -6138,6 +6139,7 @@ fn inspector_effect_section_header_selects_effect_for_graph_sync() {
             enabled: true,
             properties: Vec::new(),
         }],
+        grade: InspectorGradeHierarchyModel::default(),
         masks: Vec::new(),
     };
     let mut panel = inspector_panel(&model);

@@ -308,7 +308,7 @@ pub use timeline_render_plan::{
     evaluate_prepared_visual_program, evaluate_prepared_visual_program_with_session,
     mat3_to_affine, project_affine_to_sampled_extents, TimelineAdjustmentPlan,
     TimelineBasicTitlePlan, TimelineColorDiagnostic, TimelineCrossDissolvePlan,
-    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineMediaPlan,
+    TimelineEvaluationDiagnostics, TimelineEvaluationRequest, TimelineGradePlan, TimelineMediaPlan,
     TimelineNestedSequencePlan, TimelineRenderColorTarget, TimelineRenderIntent,
     TimelineRenderPlan, TimelineRenderPlanElement, TimelineRenderQuality, TimelineRenderSettings,
     TimelineSolidColorPlan, TimelineTransitionInputPlan,

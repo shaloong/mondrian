@@ -109,6 +109,7 @@ pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
+mod grade_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]

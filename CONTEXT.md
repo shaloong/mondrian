@@ -120,6 +120,25 @@ _Avoid_: Output-gamut clamp presented as ACES compression, monitor-dependent gra
 The Definition-backed `builtin.hdr_grading` point grade evaluated in scene-linear stops relative to 18% grey. Global controls plus Blacks, Dark, Shadows, Light, Highlights, and Specular each author exposure, saturation, and chroma balance; zone center and width remain explicit. Effects compiles one immutable 512-sample, two-row Float32 table per evaluated author state and working space. CPU and GPU sample that same table, preserve straight Alpha and extended values, and never interpret the grade in monitor/output code space.
 _Avoid_: Display-nit sliders inside working-space math, six per-pixel zone branches, backend-specific zone formulas, clipping negative or HDR values, serializing the derived sample table
 
+**Grade Graph Author State**:
+The Core-owned, persistable, bounded creative-grading DAG containing one Input,
+one selected Output, ordinary Effect nodes, and explicit Parallel or Layer
+composition. Each graph belongs to one named Grade Version inside a
+Sequence-owned Grade Definition. Creating a Version copies values once while
+forking node, Effect, and automation identities; activating a Version changes
+only the active strong reference. Effects is the sole Module that lowers this
+author state into a `CompiledEffectGraph`.
+_Avoid_: Persisted execution schedule, renderer-owned grading graph, copied graph on version switch, cross-version node identity aliasing
+
+**Grade Hierarchy**:
+The exact Sequence picture order `Group Pre -> Clip Effects/Masks -> Clip Grade
+-> Group Post -> Track Composite -> Timeline Grade`. Clip, Group Pre/Post, and
+Timeline scopes retain typed references to Sequence-owned Grade Definitions;
+referencing one Definition from several scopes is Shared Grade. Timeline Grade
+is one explicit full-composite element evaluated after all Track compositing,
+never a synthetic Clip.
+_Avoid_: UI-defined ordering, Timeline Grade per Clip, copied Shared Grade state, output/display transform treated as creative grade
+
 **Custom OCIO Dynamic Properties**:
 The canonical, persisted Project-engine overrides for OCIO Exposure, Contrast, Gamma, Grading Primary, Grading Tone, Grading RGB Curve, and all eight Grading Hue Curve families. Values are strictly typed and validated against the selected executable route. Static config/processor/shader/LUT identity excludes only the changing payload; CPU applies it on the processor owner thread and GPU updates the resident uniform buffer without rebuilding static backend objects. Result/cache identities still include the complete evaluated values.
 _Avoid_: Free-form vendor properties, duplicate property kinds, dynamic values folded into config reload identity, stale resident uniforms, route-missing properties silently ignored

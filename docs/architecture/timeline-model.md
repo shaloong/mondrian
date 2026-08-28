@@ -39,6 +39,7 @@ A `Sequence` contains:
 - `settings`
 - ordered video and audio tracks
 - Sequence-owned explicit video Transitions
+- Sequence-owned Grade Definitions, Grade Groups, and one optional Timeline Grade reference
 - playhead
 - optional exact in/out range
 - a Sequence-owned `AudioProgram`
@@ -47,6 +48,41 @@ Default sequences create `V1..V3` and `A1..A3`. `SequenceSettings` validates
 resolution, frame rate, audio sample rate/layout, preview settings, and
 color-management constraints. Audio layout is the sole persisted channel
 authority; no parallel channel-count field can diverge from it.
+
+### Grade Hierarchy
+
+Creative grading uses one Sequence-owned catalog of `GradeDefinition` values.
+Clips retain optional `GradeDefinitionId` and `GradeGroupId` references; each
+`GradeGroup` retains optional pre-Clip and post-Clip Definition references; the
+Sequence retains one optional full-composite Timeline Grade reference. Reusing
+one Definition identity from several scopes is Shared Grade and never copies
+author state.
+
+Every Definition owns one to 128 named `GradeVersion` values and one active
+Version identity. A Version owns a Core `GradeGraph` bounded to 256 nodes and
+32 inputs per Parallel node. Graph validation requires exactly one Input, one
+selected Output, closed references, acyclicity, complete output reachability,
+finite blend opacity, and unique node/Effect identities inside the graph.
+Sequence validation additionally prevents node or Effect identity aliasing
+across Versions. Creating a Version copies the current graph once and forks
+node, Effect, and automation identities while preserving topology; switching
+active Version is an identity change and performs no graph copy. Sequence
+duplication independently rekeys the complete catalog and hierarchy while
+preserving its internal sharing.
+
+The semantic order is fixed and author-independent:
+
+```text
+Group Pre -> Clip Effects/Masks -> Clip Grade -> Group Post
+          -> Track Composite -> Timeline Grade
+```
+
+Clip-scope assignment and group attachment are placement edits: the Clip must
+exist on an unlocked video Track. Group/Timeline assignment and Definition
+content edits are Sequence-level operations and do not inherit one referencing
+Clip's Track lock. Every App mutation still commits through one Authoring
+Transaction, advances Sequence revision/generation once, and participates in
+bounded Undo/Redo.
 
 Sequence Program Output currently admits only progressive scan and a known
 pixel-aspect preset. Clip-local media interpretation similarly rejects an
