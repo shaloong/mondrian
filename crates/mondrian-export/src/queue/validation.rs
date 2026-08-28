@@ -77,12 +77,24 @@ pub fn export_visual_frame_validation(
         visual_session: &mut visual_session,
         cancellation: &cancellation,
     };
-    render_prepared_visual_node_into(
-        &mut context,
-        &closure,
-        closure.root(),
-        SequenceRenderTarget::Working(&mut working_frame),
-    )?;
+    let mut adapter = ExportPreparedVisualAdapter {
+        context: &mut context,
+        root_target: Some(SequenceRenderTarget::Working(&mut working_frame)),
+    };
+    match execute_prepared_visual_closure(&closure, &mut adapter) {
+        Ok(PreparedExportVisualOutput::Root) => {}
+        Ok(PreparedExportVisualOutput::Nested(_)) => {
+            return Err(
+                "prepared Export validation returned a nested frame for the root".to_owned(),
+            );
+        }
+        Err(PreparedVisualExecutionError::Structure(error)) => {
+            return Err(format!(
+                "prepared Export validation execution failed closed: {error}"
+            ));
+        }
+        Err(PreparedVisualExecutionError::Adapter(error)) => return Err(error),
+    }
     let working_frame = working_frame
         .ok_or_else(|| "Export visual frame did not produce a root working composite".to_owned())?;
     Ok(ExportVisualFrameValidation { working_frame, semantic_trace })

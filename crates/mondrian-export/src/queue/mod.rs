@@ -55,27 +55,29 @@ use mondrian_media::{
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
-    execute_cpu_working_transform_with_session, prepare_decoded_cpu_source_frame,
-    prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
-    BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, GpuColorFrameReadbackPlan,
-    GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
-    GpuColorFrameWgpuResourcePoolOptions, GpuContext, HeterogeneousCpuPrefixSource,
-    HeterogeneousGpuCompletedEvidence, HeterogeneousGpuCompletedFrame,
-    HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
-    HeterogeneousGpuContinuationRuntime, PreparedSourceFrame, PreparedVisualChildCanvasPolicy,
-    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
-    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
-    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
-    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
-    RenderInputTransform, RenderOutputColorBoundary, SourceFramePreparationIntent,
-    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeColorPathSummary,
-    TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
-    TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCrossDissolveLayer,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineFrameExecutionRequest,
-    TimelineMediaLayer, TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
+    execute_cpu_working_transform_with_session, execute_prepared_visual_closure,
+    prepare_decoded_cpu_source_frame, prepare_visual_frame_closure,
+    project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterizer,
+    ColorFrameResidency, CpuColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
+    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
+    HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
+    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
+    HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime, PreparedSourceFrame,
+    PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
+    PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
+    PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
+    PreparedVisualProgram, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
+    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
+    SourceFramePreparationIntent, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
+    TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaLayer,
+    TimelineMediaPlan, TimelineRenderPlanElement, TimelineSolidColorLayer,
     TimelineTemporalDemandBatch, TimelineTemporalSource, TimelineTransitionInput,
     TimelineTransitionInputPlan,
 };
@@ -4343,6 +4345,95 @@ fn record_export_media_input_color_count(
 type PreparedExportVisualClosure =
     PreparedVisualFrameClosure<Vec<PreparedExportHeterogeneousElement>>;
 
+enum PreparedExportVisualOutput {
+    Root,
+    Nested(CpuColorFrame),
+}
+
+type ExportNodeInputs<'a> = PreparedVisualExecutionNodeInputs<
+    'a,
+    Vec<PreparedExportHeterogeneousElement>,
+    PreparedExportVisualOutput,
+>;
+
+struct ExportPreparedVisualAdapter<'context, 'resources, 'target> {
+    context: &'context mut ExportFrameRenderContext<'resources>,
+    root_target: Option<SequenceRenderTarget<'target>>,
+}
+
+impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
+    for ExportPreparedVisualAdapter<'_, '_, '_>
+{
+    type Output = PreparedExportVisualOutput;
+    type Error = String;
+
+    fn materialize_node(
+        &mut self,
+        inputs: ExportNodeInputs<'_>,
+    ) -> Result<Self::Output, Self::Error> {
+        if inputs.is_root() {
+            let target = self
+                .root_target
+                .take()
+                .ok_or_else(|| "prepared export root target was already consumed".to_owned())?;
+            render_prepared_visual_node_into(self.context, &inputs, target)?;
+            return Ok(PreparedExportVisualOutput::Root);
+        }
+
+        let inbound = inputs.inbound_binding().ok_or_else(|| {
+            format!(
+                "prepared export nested node {} has no inbound binding",
+                inputs.node().id().index()
+            )
+        })?;
+        let mut output = None;
+        render_prepared_visual_node_into(
+            self.context,
+            &inputs,
+            SequenceRenderTarget::Working(&mut output),
+        )?;
+        let mut frame = output.ok_or_else(|| {
+            format!(
+                "nested sequence produced no working frame: {}",
+                inputs.node().sequence_id()
+            )
+        })?;
+        let parent_working = inbound.parent_working_color_space();
+        if frame.descriptor().color_space.working() != Some(parent_working) {
+            let converted = execute_cpu_working_transform_with_session(
+                &frame,
+                parent_working,
+                inputs.node().color_context().engine().clone(),
+                self.context.visual_session.composite_scratch.color_execution_mut(),
+            )
+            .map_err(|error| format!("nested working-space transform failed: {error}"))?;
+            if let Some(diagnostics) = self.context.stage_diagnostics.as_deref_mut() {
+                diagnostics.accumulate(converted.stage_diagnostics);
+            }
+            frame = converted.result.frame;
+        }
+        Ok(PreparedExportVisualOutput::Nested(frame))
+    }
+}
+
+fn prepared_export_nested_output<'a>(
+    inputs: &'a ExportNodeInputs<'_>,
+    placement: TimelineClipExecutionRef,
+    sample: PreparedVisualNestedSample,
+) -> Result<&'a CpuColorFrame, String> {
+    match inputs.nested_output(placement, sample) {
+        Some(PreparedExportVisualOutput::Nested(frame)) => Ok(frame),
+        Some(PreparedExportVisualOutput::Root) => Err(format!(
+            "prepared export child for Clip {} returned the root output",
+            placement.clip_id
+        )),
+        None => Err(format!(
+            "prepared export child output is unavailable for Clip {} ({sample:?})",
+            placement.clip_id
+        )),
+    }
+}
+
 fn export_visual_node(
     closure: &PreparedExportVisualClosure,
     node_id: PreparedVisualFrameNodeId,
@@ -4485,19 +4576,30 @@ fn render_sequence_frame_into(
         .map_err(|error| {
             format!("export visual closure exceeds its CPU working-set grant: {error}")
         })?;
-    render_prepared_visual_node_into(context, &closure, closure.root(), target)
+    let mut adapter = ExportPreparedVisualAdapter { context, root_target: Some(target) };
+    match execute_prepared_visual_closure(&closure, &mut adapter) {
+        Ok(PreparedExportVisualOutput::Root) => Ok(()),
+        Ok(PreparedExportVisualOutput::Nested(_)) => {
+            Err("prepared export execution returned a nested frame for the root".to_owned())
+        }
+        Err(PreparedVisualExecutionError::Structure(error)) => Err(format!(
+            "prepared export visual execution failed closed: {error}"
+        )),
+        Err(PreparedVisualExecutionError::Adapter(error)) => Err(error),
+    }
 }
 
 fn render_prepared_visual_node_into(
     context: &mut ExportFrameRenderContext<'_>,
-    closure: &PreparedExportVisualClosure,
-    node_id: PreparedVisualFrameNodeId,
+    inputs: &ExportNodeInputs<'_>,
     mut target: SequenceRenderTarget<'_>,
 ) -> Result<(), String> {
     if context.cancellation.is_canceled() {
         return Err("export visual execution canceled".to_owned());
     }
-    let node = export_visual_node(closure, node_id)?;
+    let closure = inputs.closure();
+    let node = inputs.node();
+    let node_id = node.id();
     let materialization = node.materialization_contract();
     let author_resolution = materialization.author_resolution();
     let resolution = node.execution_resolution();
@@ -4536,13 +4638,8 @@ fn render_prepared_visual_node_into(
         .visual_session
         .composite_scratch
         .bind_effect_execution_generation(temporal_generation);
-    let temporal_layers = resolve_export_temporal_batches(
-        context,
-        closure,
-        node_id,
-        temporal_batches,
-        &mut decode_cache,
-    )?;
+    let temporal_layers =
+        resolve_export_temporal_batches(context, inputs, temporal_batches, &mut decode_cache)?;
     let mut decoded_media =
         std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
     let mut nested_media = std::iter::repeat_with(|| None)
@@ -4586,8 +4683,7 @@ fn render_prepared_visual_node_into(
             TimelineRenderPlanElement::CrossDissolve(transition) => {
                 let left = resolve_export_transition_input(
                     context,
-                    closure,
-                    node_id,
+                    inputs,
                     materialization,
                     &transition.left,
                     resolution,
@@ -4597,8 +4693,7 @@ fn render_prepared_visual_node_into(
                 )?;
                 let right = resolve_export_transition_input(
                     context,
-                    closure,
-                    node_id,
+                    inputs,
                     materialization,
                     &transition.right,
                     resolution,
@@ -4620,14 +4715,14 @@ fn render_prepared_visual_node_into(
             continue;
         };
         if !temporal_layers.contains_key(&nested.placement) {
-            nested_media[index] = Some(materialize_export_nested_node(
-                context,
-                closure,
-                node_id,
-                nested.placement,
-                PreparedVisualNestedSample::Current,
-                &color_context,
-            )?);
+            nested_media[index] = Some(
+                prepared_export_nested_output(
+                    inputs,
+                    nested.placement,
+                    PreparedVisualNestedSample::Current,
+                )?
+                .clone(),
+            );
         }
     }
 
@@ -5289,47 +5384,6 @@ fn resolve_export_source_preparation(
     })
 }
 
-fn materialize_export_nested_node(
-    context: &mut ExportFrameRenderContext<'_>,
-    closure: &PreparedExportVisualClosure,
-    parent_node_id: PreparedVisualFrameNodeId,
-    placement: TimelineClipExecutionRef,
-    sample: PreparedVisualNestedSample,
-    parent_color_context: &ProgramColorContext,
-) -> Result<CpuColorFrame, String> {
-    let child_id = export_nested_child(closure, parent_node_id, placement, sample)?;
-    let child_node = export_visual_node(closure, child_id)?;
-    let child_sequence_id = child_node.sequence_id();
-    let mut output = None;
-    render_prepared_visual_node_into(
-        context,
-        closure,
-        child_id,
-        SequenceRenderTarget::Working(&mut output),
-    )?;
-    let mut frame = output.ok_or_else(|| {
-        format!(
-            "nested sequence produced no working frame: {}",
-            child_sequence_id
-        )
-    })?;
-    if frame.descriptor().color_space.working() != Some(parent_color_context.working_color_space())
-    {
-        let converted = execute_cpu_working_transform_with_session(
-            &frame,
-            parent_color_context.working_color_space(),
-            parent_color_context.engine().clone(),
-            context.visual_session.composite_scratch.color_execution_mut(),
-        )
-        .map_err(|error| format!("nested working-space transform failed: {error}"))?;
-        if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
-            diagnostics.accumulate(converted.stage_diagnostics);
-        }
-        frame = converted.result.frame;
-    }
-    Ok(frame)
-}
-
 fn render_export_basic_title_plan(
     visual_session: &mut ExportVisualRenderSession,
     materialization: PreparedVisualMaterializationContract,
@@ -5362,12 +5416,11 @@ fn render_export_basic_title_plan(
 
 fn resolve_export_temporal_batches(
     context: &mut ExportFrameRenderContext<'_>,
-    closure: &PreparedExportVisualClosure,
-    node_id: PreparedVisualFrameNodeId,
+    inputs: &ExportNodeInputs<'_>,
     batches: &[TimelineTemporalDemandBatch],
     decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
 ) -> Result<HashMap<TimelineClipExecutionRef, PreparedExportTemporalLayer>, String> {
-    let node = export_visual_node(closure, node_id)?;
+    let node = inputs.node();
     let materialization = node.materialization_contract();
     let color_context = node.color_context().clone();
     let resolution = node.execution_resolution();
@@ -5383,8 +5436,7 @@ fn resolve_export_temporal_batches(
             let (frame, current_source_resolution, current_source_to_display_affine) =
                 resolve_export_temporal_source(
                     context,
-                    closure,
-                    node_id,
+                    inputs,
                     materialization,
                     &color_context,
                     resolution,
@@ -5416,7 +5468,7 @@ fn resolve_export_temporal_batches(
             ));
         }
         let source_identity =
-            export_temporal_source_identity(context, closure, batch, &color_context)?;
+            export_temporal_source_identity(context, inputs.closure(), batch, &color_context)?;
         let mut prepared = PreparedTemporalFrameSet::prepare(
             source_identity,
             batch.effect_demands().clone(),
@@ -5460,8 +5512,7 @@ fn resolve_export_temporal_batches(
 #[allow(clippy::too_many_arguments)]
 fn resolve_export_temporal_source(
     context: &mut ExportFrameRenderContext<'_>,
-    closure: &PreparedExportVisualClosure,
-    parent_node_id: PreparedVisualFrameNodeId,
+    inputs: &ExportNodeInputs<'_>,
     materialization: PreparedVisualMaterializationContract,
     color_context: &ProgramColorContext,
     resolution: Resolution,
@@ -5519,12 +5570,12 @@ fn resolve_export_temporal_source(
         }
         TimelineTemporalSource::NestedSequence { sequence_id, .. } => {
             let child_id = export_nested_child(
-                closure,
-                parent_node_id,
+                inputs.closure(),
+                inputs.node().id(),
                 demand.placement,
                 PreparedVisualNestedSample::Temporal(demand.effect_request),
             )?;
-            let child_node = export_visual_node(closure, child_id)?;
+            let child_node = export_visual_node(inputs.closure(), child_id)?;
             if child_node.sequence_id() != *sequence_id {
                 return Err(format!(
                     "prepared temporal binding for Clip {} resolved Sequence {}, expected {sequence_id}",
@@ -5541,14 +5592,12 @@ fn resolve_export_temporal_source(
                 ));
             }
             (
-                materialize_export_nested_node(
-                    context,
-                    closure,
-                    parent_node_id,
+                prepared_export_nested_output(
+                    inputs,
                     demand.placement,
                     PreparedVisualNestedSample::Temporal(demand.effect_request),
-                    color_context,
-                )?,
+                )?
+                .clone(),
                 child_author_resolution,
                 [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             )
@@ -5750,8 +5799,7 @@ fn export_temporal_source_identity(
 
 fn resolve_export_transition_input(
     context: &mut ExportFrameRenderContext<'_>,
-    closure: &PreparedExportVisualClosure,
-    parent_node_id: PreparedVisualFrameNodeId,
+    inputs: &ExportNodeInputs<'_>,
     materialization: PreparedVisualMaterializationContract,
     input: &TimelineTransitionInputPlan,
     resolution: Resolution,
@@ -5793,14 +5841,14 @@ fn resolve_export_transition_input(
             )?)
         }
         TimelineTransitionInputPlan::NestedSequence(nested) => {
-            ResolvedExportTransitionInput::Nested(materialize_export_nested_node(
-                context,
-                closure,
-                parent_node_id,
-                nested.placement,
-                PreparedVisualNestedSample::Current,
-                color_context,
-            )?)
+            ResolvedExportTransitionInput::Nested(
+                prepared_export_nested_output(
+                    inputs,
+                    nested.placement,
+                    PreparedVisualNestedSample::Current,
+                )?
+                .clone(),
+            )
         }
     })
 }

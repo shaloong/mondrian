@@ -41,6 +41,10 @@ impl PreparedVisualFrameNodeId {
     pub const fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub(crate) const fn from_raw_for_execution(index: u32) -> Self {
+        Self(index)
+    }
 }
 
 /// Whether one child sample is the placement's current value or a historical
@@ -1253,8 +1257,10 @@ impl std::error::Error for PreparedVisualFrameClosureError {}
 mod tests {
     use super::*;
     use crate::{
-        evaluate_prepared_visual_program, PreparedVisualProgram, TimelineCompositeScratch,
-        TimelineCpuCompositePrecision, TimelineCpuWorkingSetError, TimelineCpuWorkingSetGrant,
+        evaluate_prepared_visual_program, execute_prepared_visual_closure,
+        PreparedVisualExecutionAdapter, PreparedVisualExecutionNodeInputs, PreparedVisualProgram,
+        TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineCpuWorkingSetError,
+        TimelineCpuWorkingSetGrant,
     };
     use mondrian_core::timeline_data::TimelineClipEndpointContext;
     use mondrian_core::{
@@ -1609,7 +1615,7 @@ mod tests {
     }
 
     #[test]
-    fn equal_child_samples_from_distinct_placements_keep_distinct_instance_paths() {
+    fn distinct_sibling_instances_keep_paths_and_execute_once_in_binding_order() {
         let mut child = Sequence::new("child");
         child.settings.resolution = Resolution { width: 2, height: 1 };
 
@@ -1669,6 +1675,52 @@ mod tests {
         assert_ne!(
             closure.node(first_child).expect("first child").instance_path(),
             closure.node(second_child).expect("second child").instance_path()
+        );
+
+        struct RecordingAdapter {
+            order: Vec<PreparedVisualFrameNodeId>,
+            first_sibling: PreparedVisualFrameNodeId,
+            second_sibling: PreparedVisualFrameNodeId,
+        }
+
+        impl PreparedVisualExecutionAdapter<()> for RecordingAdapter {
+            type Output = PreparedVisualFrameNodeId;
+            type Error = std::convert::Infallible;
+
+            fn materialize_node(
+                &mut self,
+                inputs: PreparedVisualExecutionNodeInputs<'_, (), Self::Output>,
+            ) -> Result<Self::Output, Self::Error> {
+                if inputs.node().id() == self.second_sibling {
+                    assert!(
+                        inputs.child_output(self.first_sibling).is_none(),
+                        "an Adapter must not observe a completed sibling output"
+                    );
+                }
+                for binding in inputs.node().bindings() {
+                    assert_eq!(
+                        inputs.child_output(binding.child()),
+                        Some(&binding.child()),
+                        "every direct child must finish before its parent Adapter call"
+                    );
+                }
+                assert_eq!(inputs.is_root(), inputs.inbound_binding().is_none());
+                self.order.push(inputs.node().id());
+                Ok(inputs.node().id())
+            }
+        }
+
+        let mut adapter = RecordingAdapter {
+            order: Vec::new(),
+            first_sibling: first_child,
+            second_sibling: second_child,
+        };
+        let output = execute_prepared_visual_closure(&closure, &mut adapter)
+            .expect("shared execution driver");
+        assert_eq!(output, closure.root());
+        assert_eq!(
+            adapter.order,
+            vec![first_child, second_child, closure.root()]
         );
     }
 

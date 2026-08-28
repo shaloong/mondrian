@@ -362,6 +362,14 @@ cannot accumulate unbounded host outputs outside the compositor grant.
 Decoded media, Effect-session residency, and OCIO processor residency remain
 separately governed.
 
+The renderer's Prepared Visual Execution Module consumes that admitted closure
+with one iterative child-before-parent schedule. It retains at most the one
+Adapter output already counted for each prepared instance and calls each node
+exactly once; Preview and Export no longer own recursive stacks or hidden
+nested-output pools. The schedule is request-local metadata proportional to the
+already bounded closure node/binding count. It does not create another worker,
+cache, GPU grant, or decoder residency owner.
+
 Preview heterogeneous execution freezes two correlated grants before any CPU
 prefix starts. The CPU grant bounds one atomic addressed batch, Effect Session,
 graph steps/materializations, and retained input-plus-all-frontier pixels. The

@@ -25,6 +25,7 @@ mod heterogeneous_cpu;
 pub mod heterogeneous_gpu;
 pub mod native_video;
 pub mod ocio_gpu;
+pub mod prepared_visual_execution;
 pub mod prepared_visual_frame_closure;
 pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
@@ -256,6 +257,10 @@ pub use ocio_gpu::{
     OcioGpuWgpuWrapperShaderModuleArtifactError, OcioGpuWgpuWrapperShaderModuleCache,
     OcioGpuWgpuWrapperShaderModuleCacheDiagnostics, OcioGpuWgpuWrapperShaderModules,
     OcioGpuWgpuWrapperShaderSourceArtifact,
+};
+pub use prepared_visual_execution::{
+    execute_prepared_visual_closure, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
+    PreparedVisualExecutionNodeInputs, PreparedVisualExecutionStructureError,
 };
 pub use prepared_visual_frame_closure::{
     prepare_bound_visual_frame_closure, prepare_visual_frame_closure,

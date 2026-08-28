@@ -55,6 +55,9 @@ TimelineEvaluationRequest
   -> transient PreparedVisualFrameClosure
        -> exact nested instance/time/canvas/color/temporal bindings
        -> consumer-owned route evidence, no pixels
+  -> Prepared Visual Execution Module
+       -> validated iterative child-before-parent schedule
+       -> Preview or Export materialization Adapter
   -> TimelineRenderPlanElement materialization
   -> Clip Sampling / Generated Source
   -> Effect Graph Evaluation
@@ -182,6 +185,32 @@ any frame work. The separately named root role may alias the exact same
 borrowed object already present in the canonical collection; another object
 with the same identity is still ambiguous and rejected. Nested lookup is
 constant-time and the index cannot outlive the request snapshots it references.
+
+`execute_prepared_visual_closure` is the sole recursive-materialization driver
+after that closure is frozen. It validates the closure as one rooted instance
+tree, derives deterministic post-order with an explicit bounded stack, and
+invokes one `PreparedVisualExecutionAdapter` call per reachable node. Each call
+can inspect its immutable node, exact inbound binding, and already-finished
+direct-child outputs; it cannot select a different child, reopen Sequence
+author state, or recursively enter another node. The driver retains outputs
+under the closure's already-admitted conservative CPU active-byte bound and
+returns only the exact root result. Its Interface is intentionally small:
+Preview and Export are the two real Adapters, while decode, title rasterization,
+compositing, Pending/Unavailable semantics, Viewer presentation, delivery
+encoding, and publication stay in those owning Modules.
+
+This replaces both consumer-private recursive walkers. Temporal-vs-current
+nested selection is still decided earlier by the Frame Closure: a placement
+with a finite temporal batch binds only its exact temporal child requests and
+does not also bind the ordinary current child. The execution driver therefore
+materializes the selected closure without a second fallback interpretation.
+Structural corruption (missing node/output, wrong binding parent, multiple
+parents, cycle, unreachable node, or absent root output) fails before a parent
+Adapter can consume incomplete pixels. The iterative schedule also removes a
+consumer call stack proportional to nesting depth and creates the explicit
+execution Seam needed by later GPU-nested and pass-fusion work without
+prematurely implementing those COL-024/COL-026 policies.
+
 Before lowering each distinct Sequence, the closure resolves exactly one
 `PreparedVisualProgramBinding` from the consumer-owned cache or frozen Export
 snapshot and retains its exact `Arc<PreparedVisualProgram>` on every instance
