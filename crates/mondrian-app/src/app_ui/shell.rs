@@ -593,6 +593,26 @@ fn apply_viewer_canvas_background(
     models.viewer.canvas_background = background;
 }
 
+fn apply_video_scopes_preferences(
+    models: &mut AppUiPanelModels,
+    state: &AppState,
+    preferences: &AppUiPreferences,
+) {
+    let program_output = state
+        .active_sequence()
+        .map(|sequence| sequence.settings.color.program_output.color_space)
+        .unwrap_or(state.new_sequence_defaults().color.program_output.color_space);
+    let signal_color_space = match preferences.video_scopes.tap {
+        mondrian_core::ProgramScopesTap::ProgramOutput => program_output,
+        mondrian_core::ProgramScopesTap::MonitorOutput => preferences
+            .display_management
+            .resolve_output_color_space(state.project_color_environment().engine(), program_output)
+            .unwrap_or(program_output),
+    };
+    models.scopes.settings = preferences.video_scopes;
+    models.scopes.signal_color_space = signal_color_space;
+}
+
 fn project_sequence_color_contracts(state: &AppState) -> Vec<(WorkingColorSpace, ColorSpace)> {
     let defaults = state.new_sequence_defaults();
     let mut contracts = vec![(
@@ -683,6 +703,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, viewer_zoom_mode);
         let mut root = Self::new_with_preferences(
@@ -950,6 +971,7 @@ impl AppUiAppRoot {
             custom_workspace_layout: self.custom_workspace_layout.clone(),
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: self.models.viewer.canvas_background,
+            video_scopes: self.models.scopes.settings,
             audio_output_device: Default::default(),
             display_management: self.preferences_model.display_management.clone(),
         };
@@ -970,7 +992,11 @@ impl AppUiAppRoot {
         }
         apply_viewer_zoom_mode_to_model(&mut viewer, self.viewer_zoom_mode);
         let preview_waiting = viewer.preview_waiting;
-        self.models.scopes = ScopesPanelModel::from_viewer(&viewer);
+        self.models.scopes = ScopesPanelModel::from_viewer_with_settings(
+            &viewer,
+            self.models.scopes.settings,
+            self.models.scopes.signal_color_space,
+        );
         self.models.viewer = viewer;
         self.models.timeline.playhead_frame = frame;
         update_viewer_widgets(&mut self.dock, &self.models.viewer);
@@ -1049,6 +1075,7 @@ impl AppUiAppRoot {
         );
         models.timeline.waveform_display = preferences.waveform_display;
         models.timeline.waveform_source = waveform_source;
+        apply_video_scopes_preferences(&mut models, state, preferences);
         apply_viewer_canvas_background(&mut models, preferences.viewer_canvas_background);
         apply_viewer_zoom_mode(&mut models, self.viewer_zoom_mode);
         self.set_models(models);
@@ -1759,6 +1786,7 @@ fn update_scopes_widgets(widget: &mut dyn Widget, model: &ScopesPanelModel) -> b
         widget.as_any_mut().and_then(|any| any.downcast_mut::<VideoScopesSurface>())
     {
         scopes.set_textures(model.textures.clone());
+        scopes.set_settings(model.settings, model.signal_color_space);
         return true;
     }
     (0..widget.child_count()).fold(false, |updated, index| {

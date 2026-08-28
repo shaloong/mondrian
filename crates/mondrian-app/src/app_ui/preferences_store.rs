@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_ui_theme::ThemePreference;
-use mondrian_ui_widgets::ViewerCanvasBackground;
-use mondrian_ui_widgets::WaveformDisplay;
+use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 
 use crate::app::app_data_dir;
@@ -46,6 +45,9 @@ pub struct AppUiPreferences {
     /// Presentation-only background visible through transparent Viewer pixels.
     #[serde(default)]
     pub viewer_canvas_background: ViewerCanvasBackground,
+    /// Machine-local professional Scopes analysis and presentation controls.
+    #[serde(default)]
+    pub video_scopes: VideoScopesSettings,
     /// Runtime output-device intent. This is a user preference, never Project state.
     #[serde(default)]
     pub audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection,
@@ -66,6 +68,7 @@ impl Default for AppUiPreferences {
             custom_workspace_layout: None,
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+            video_scopes: VideoScopesSettings::default(),
             audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
             display_management: mondrian_core::DisplayManagementPolicy::default(),
         }
@@ -212,6 +215,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             })
@@ -240,6 +244,14 @@ mod tests {
             }],
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: ViewerCanvasBackground::Black,
+            video_scopes: VideoScopesSettings {
+                waveform_mode: mondrian_core::WaveformMode::RgbParade,
+                scale: mondrian_core::ProgramScopeScale::Nits1000,
+                tap: mondrian_core::ProgramScopesTap::MonitorOutput,
+                layout: mondrian_ui_widgets::VideoScopesLayout::Grid,
+                show_skin_tone_line: false,
+                show_color_targets: true,
+            },
             audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::Specific {
                 device_id: mondrian_media::RealtimeAudioOutputDeviceId::new(
                     "wasapi:round-trip-device",
@@ -302,6 +314,24 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preferences_without_scopes_controls_restore_professional_defaults() {
+        let path = temp_preferences_path("legacy-scopes-controls");
+        let mut value = serde_json::to_value(AppUiPreferences::default())
+            .expect("serialize current preferences");
+        value.as_object_mut().expect("preferences object").remove("video_scopes");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("serialize legacy preferences"),
+        )
+        .expect("write legacy preferences");
+
+        let loaded = load_app_ui_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(loaded.video_scopes, VideoScopesSettings::default());
+    }
+
+    #[test]
     fn loading_preferences_sanitizes_custom_workspace_layout() {
         let path = temp_preferences_path("custom-layout-filter");
         fs::write(
@@ -314,6 +344,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
@@ -377,6 +408,7 @@ mod tests {
                 shortcut_overrides: Vec::new(),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
@@ -447,6 +479,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             })
@@ -479,6 +512,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             })

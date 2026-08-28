@@ -504,12 +504,63 @@ pub struct WorkingRgbaF32Frame {
     pub color_space: crate::WorkingColorSpace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum WaveformMode {
     /// One encoded-signal luma trace.
+    #[default]
     Luma,
     /// Separate encoded red, green, and blue traces.
     RgbParade,
+}
+
+/// Exact Viewer color boundary sampled by professional video scopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ProgramScopesTap {
+    /// Sequence Program Output before machine-local monitor adaptation.
+    #[default]
+    ProgramOutput,
+    /// Monitor-color-space output before device-specific ICC calibration.
+    MonitorOutput,
+}
+
+/// Vertical signal scale used by waveform and histogram aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum ProgramScopeScale {
+    /// Encoded signal level where normalized 0..=1 maps to 0..=100 IRE.
+    #[default]
+    Ire,
+    /// Absolute display luminance from 0 through 100 cd/m².
+    Nits100,
+    /// Absolute display luminance from 0 through 1000 cd/m².
+    Nits1000,
+    /// Absolute display luminance from 0 through 4000 cd/m².
+    Nits4000,
+    /// Absolute display luminance from 0 through 10000 cd/m².
+    Nits10000,
+}
+
+impl ProgramScopeScale {
+    /// Maximum display luminance represented by this scale, when applicable.
+    pub const fn maximum_nits(self) -> Option<u32> {
+        match self {
+            Self::Ire => None,
+            Self::Nits100 => Some(100),
+            Self::Nits1000 => Some(1_000),
+            Self::Nits4000 => Some(4_000),
+            Self::Nits10000 => Some(10_000),
+        }
+    }
+
+    /// Cycle through the bounded product presets.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Ire => Self::Nits100,
+            Self::Nits100 => Self::Nits1000,
+            Self::Nits1000 => Self::Nits4000,
+            Self::Nits4000 => Self::Nits10000,
+            Self::Nits10000 => Self::Ire,
+        }
+    }
 }
 
 /// Horizontal program-signal waveform density.
@@ -588,6 +639,9 @@ pub struct ProgramSignalExcursions {
 pub struct ColorScopes {
     /// Exact standardized signal color space used for luma/chroma math.
     pub signal_color_space: ColorSpace,
+    /// Exact vertical aggregation scale used for histogram and waveform bins.
+    #[serde(default)]
+    pub scale: ProgramScopeScale,
     /// Number of RGBA pixels measured.
     pub sample_count: u64,
     /// Counts hidden by endpoint binning, including negative signal and superwhite.
@@ -690,6 +744,15 @@ impl ProgramSignalColorimetry {
         self.kb
     }
 
+    /// Map one encoded RGB signal to normalized vectorscope `(u, v)` axes.
+    ///
+    /// The returned values use the same non-constant-luminance matrix as the
+    /// CPU and GPU scope aggregators and normally occupy `-0.5..=0.5`.
+    pub fn vectorscope_uv(self, rgb: [f32; 3]) -> (f32, f32) {
+        let y = self.luma(rgb[0], rgb[1], rgb[2]);
+        self.chroma(rgb[0], rgb[2], y)
+    }
+
     fn luma(self, r: f32, g: f32, b: f32) -> f32 {
         let kg = 1.0 - self.kr - self.kb;
         self.kr * r + kg * g + self.kb * b
@@ -716,6 +779,27 @@ pub fn compute_program_color_scopes_rgba8(
     waveform_mode: WaveformMode,
     bins: usize,
 ) -> Result<ColorScopes, ProgramColorScopeError> {
+    compute_program_color_scopes_rgba8_with_scale(
+        rgba,
+        width,
+        height,
+        signal_color_space,
+        waveform_mode,
+        ProgramScopeScale::Ire,
+        bins,
+    )
+}
+
+/// Measure display-encoded RGBA8 pixels using an explicit IRE or nits scale.
+pub fn compute_program_color_scopes_rgba8_with_scale(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    signal_color_space: ColorSpace,
+    waveform_mode: WaveformMode,
+    scale: ProgramScopeScale,
+    bins: usize,
+) -> Result<ColorScopes, ProgramColorScopeError> {
     let expected = expected_program_scope_pixels(width, height)?
         .checked_mul(4)
         .ok_or(ProgramColorScopeError::DimensionsOverflow { width, height })?;
@@ -737,6 +821,7 @@ pub fn compute_program_color_scopes_rgba8(
         height,
         signal_color_space,
         waveform_mode,
+        scale,
         bins,
     )
 }
@@ -752,6 +837,27 @@ pub fn compute_program_color_scopes_rgba_f32(
     height: u32,
     signal_color_space: ColorSpace,
     waveform_mode: WaveformMode,
+    bins: usize,
+) -> Result<ColorScopes, ProgramColorScopeError> {
+    compute_program_color_scopes_rgba_f32_with_scale(
+        rgba,
+        width,
+        height,
+        signal_color_space,
+        waveform_mode,
+        ProgramScopeScale::Ire,
+        bins,
+    )
+}
+
+/// Measure float display-encoded pixels using an explicit IRE or nits scale.
+pub fn compute_program_color_scopes_rgba_f32_with_scale(
+    rgba: &[[f32; 4]],
+    width: u32,
+    height: u32,
+    signal_color_space: ColorSpace,
+    waveform_mode: WaveformMode,
+    scale: ProgramScopeScale,
     bins: usize,
 ) -> Result<ColorScopes, ProgramColorScopeError> {
     let expected = expected_program_scope_pixels(width, height)?;
@@ -777,6 +883,7 @@ pub fn compute_program_color_scopes_rgba_f32(
         height,
         signal_color_space,
         waveform_mode,
+        scale,
         bins,
     )
 }
@@ -797,6 +904,7 @@ fn compute_program_color_scopes_rgb(
     height: u32,
     signal_color_space: ColorSpace,
     waveform_mode: WaveformMode,
+    scale: ProgramScopeScale,
     bins: usize,
 ) -> Result<ColorScopes, ProgramColorScopeError> {
     let colorimetry = ProgramSignalColorimetry::for_color_space(signal_color_space)?;
@@ -831,10 +939,11 @@ fn compute_program_color_scopes_rgb(
         excursions.blue.observe(b);
         excursions.luma.observe(y_signal);
         let y = y_signal.clamp(0.0, 1.0);
-        let rb = scope_bin(r, bins);
-        let gb = scope_bin(g, bins);
-        let bb = scope_bin(b, bins);
-        let yb = scope_bin(y, bins);
+        let scaled = scope_scaled_components([r, g, b], signal_color_space, colorimetry, scale);
+        let rb = scope_bin(scaled[0], bins);
+        let gb = scope_bin(scaled[1], bins);
+        let bb = scope_bin(scaled[2], bins);
+        let yb = scope_bin(scaled[3], bins);
         histogram.red[rb] = histogram.red[rb].saturating_add(1);
         histogram.green[gb] = histogram.green[gb].saturating_add(1);
         histogram.blue[bb] = histogram.blue[bb].saturating_add(1);
@@ -868,12 +977,66 @@ fn compute_program_color_scopes_rgb(
 
     Ok(ColorScopes {
         signal_color_space,
+        scale,
         sample_count: expected_pixels as u64,
         excursions,
         histogram,
         waveform,
         vectorscope: vectors.into_iter().filter(|sample| sample.weight > 0).collect(),
     })
+}
+
+fn scope_scaled_components(
+    rgb: [f32; 3],
+    signal_color_space: ColorSpace,
+    colorimetry: ProgramSignalColorimetry,
+    scale: ProgramScopeScale,
+) -> [f32; 4] {
+    let encoded_luma = colorimetry.luma(rgb[0], rgb[1], rgb[2]);
+    let Some(maximum_nits) = scale.maximum_nits() else {
+        return [rgb[0], rgb[1], rgb[2], encoded_luma];
+    };
+    let clamped = rgb.map(|value| value.clamp(0.0, 1.0));
+    let display_nits = display_linear_nits(clamped, signal_color_space);
+    let luma_nits = colorimetry.luma(display_nits[0], display_nits[1], display_nits[2]);
+    let divisor = maximum_nits as f32;
+    [
+        display_nits[0] / divisor,
+        display_nits[1] / divisor,
+        display_nits[2] / divisor,
+        luma_nits / divisor,
+    ]
+}
+
+fn display_linear_nits(rgb: [f32; 3], signal_color_space: ColorSpace) -> [f32; 3] {
+    match signal_color_space {
+        ColorSpace::Rec2100Pq => {
+            let decoded = crate::bt2100_pq_to_display_linear_rgb(rgb.map(f64::from))
+                .map_or([0.0; 3], |value| value.components_nits());
+            decoded.map(|value| value as f32)
+        }
+        ColorSpace::Rec2100Hlg => {
+            let decoded = crate::bt2100_hlg_1000_nit_to_display_linear_rgb(rgb.map(f64::from))
+                .map_or([0.0; 3], |value| value.components_nits());
+            decoded.map(|value| value as f32)
+        }
+        ColorSpace::Srgb | ColorSpace::DisplayP3 => {
+            rgb.map(|value| decode_scope_srgb(value) * 100.0)
+        }
+        ColorSpace::Rec601Pal => rgb.map(|value| value.powf(2.8) * 100.0),
+        ColorSpace::Rec601Ntsc | ColorSpace::Rec709 | ColorSpace::Rec2020 => {
+            rgb.map(|value| value.powf(2.4) * 100.0)
+        }
+        _ => [0.0; 3],
+    }
+}
+
+fn decode_scope_srgb(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 impl ColorSpace {
@@ -1531,6 +1694,41 @@ mod tests {
         assert_eq!(rec709.histogram.luma[21], 1);
         assert_eq!(rec2020.histogram.luma[26], 1);
         assert_ne!(rec709.histogram.luma, rec2020.histogram.luma);
+    }
+
+    #[test]
+    fn program_scope_nits_scale_decodes_sdr_pq_and_hlg_transfer_functions() {
+        let sdr = compute_program_color_scopes_rgba_f32_with_scale(
+            &[[0.5, 0.5, 0.5, 1.0], [1.0, 1.0, 1.0, 1.0]],
+            2,
+            1,
+            ColorSpace::Srgb,
+            WaveformMode::Luma,
+            ProgramScopeScale::Nits100,
+            101,
+        )
+        .expect("sRGB nits scopes");
+        assert_eq!(sdr.scale, ProgramScopeScale::Nits100);
+        assert_eq!(sdr.histogram.luma[21], 1, "0.5 sRGB is about 21.4 nits");
+        assert_eq!(sdr.histogram.luma[100], 1);
+
+        for (space, scale) in [
+            (ColorSpace::Rec2100Pq, ProgramScopeScale::Nits10000),
+            (ColorSpace::Rec2100Hlg, ProgramScopeScale::Nits1000),
+        ] {
+            let hdr = compute_program_color_scopes_rgba_f32_with_scale(
+                &[[1.0, 1.0, 1.0, 1.0]],
+                1,
+                1,
+                space,
+                WaveformMode::Luma,
+                scale,
+                101,
+            )
+            .expect("HDR nits scopes");
+            assert_eq!(hdr.scale, scale);
+            assert_eq!(hdr.histogram.luma[100], 1);
+        }
     }
 
     #[test]

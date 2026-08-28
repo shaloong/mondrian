@@ -83,10 +83,10 @@ use mondrian_ui_widgets::{
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
-    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground,
-    ViewerComparisonLayout, ViewerComparisonReference, ViewerControl, ViewerFrameContent,
-    ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerStatusTone,
-    ViewerSurface, WaveformDisplay,
+    TimelineView, VideoScopesSettings, VideoScopesSurface, VideoScopesTextureSet,
+    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
+    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -102,11 +102,11 @@ use crate::app::ui_actions::{
     app_shell_export_output_dialog_action, app_shell_import_media_dialog_action_with_target,
     app_shell_interpret_asset_dialog_action, app_shell_relink_asset_dialog_action,
     app_shell_relocate_panel_action, app_shell_reveal_in_file_manager_action,
-    assets_create_adjustment_layer_action, assets_create_folder_action,
-    assets_create_solid_color_action, assets_delete_asset_action, assets_delete_folder_action,
-    assets_delete_selection_action, assets_import_files_action, assets_move_asset_action,
-    assets_move_folder_action, assets_move_selection_action, assets_open_folder_action,
-    assets_prepare_drag_action, assets_rebind_audio_component_action,
+    app_shell_scopes_settings_changed_action, assets_create_adjustment_layer_action,
+    assets_create_folder_action, assets_create_solid_color_action, assets_delete_asset_action,
+    assets_delete_folder_action, assets_delete_selection_action, assets_import_files_action,
+    assets_move_asset_action, assets_move_folder_action, assets_move_selection_action,
+    assets_open_folder_action, assets_prepare_drag_action, assets_rebind_audio_component_action,
     assets_refresh_audio_components_action, assets_rename_asset_action,
     assets_rename_folder_action, assets_set_proxy_mode_action, clip_edit_numeric_curve_action,
     clip_set_enabled_action, clip_set_solid_color_action, clip_write_parameter_values_action,
@@ -743,16 +743,28 @@ pub struct ViewerPowerWindowModel {
 pub struct ScopesPanelModel {
     /// Stable registry keys become available only with a current external GPU frame.
     pub textures: Option<VideoScopesTextureSet>,
+    /// Machine-local controls shared by the widget and GPU request adapter.
+    pub settings: VideoScopesSettings,
+    /// Exact encoded signal identity used for guide geometry and labels.
+    pub signal_color_space: ColorSpace,
 }
 
 impl ScopesPanelModel {
     pub(crate) fn from_viewer(viewer: &ViewerPanelModel) -> Self {
+        Self::from_viewer_with_settings(viewer, VideoScopesSettings::default(), ColorSpace::Rec709)
+    }
+
+    pub(crate) fn from_viewer_with_settings(
+        viewer: &ViewerPanelModel,
+        settings: VideoScopesSettings,
+        signal_color_space: ColorSpace,
+    ) -> Self {
         let textures = matches!(
             viewer.frame_content.as_ref(),
             Some(ViewerFrameContent::ExternalTexture(_))
         )
         .then(crate::app_ui::scopes::texture_set);
-        Self { textures }
+        Self { textures, settings, signal_color_space }
     }
 }
 
@@ -2826,7 +2838,9 @@ fn panel_content_for_slot(kind: PanelKind, models: &AppUiPanelModels) -> Box<dyn
 }
 
 fn scopes_panel(model: &ScopesPanelModel) -> VideoScopesSurface {
-    let surface = VideoScopesSurface::new();
+    let surface = VideoScopesSurface::new()
+        .with_settings(model.settings, model.signal_color_space)
+        .on_settings_changed(app_shell_scopes_settings_changed_action);
     match model.textures.clone() {
         Some(textures) => surface.with_textures(textures),
         None => surface,

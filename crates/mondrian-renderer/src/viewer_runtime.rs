@@ -37,7 +37,7 @@ use crate::{
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
-use mondrian_core::WorkingColorSpace;
+use mondrian_core::{ProgramScopesTap, WorkingColorSpace};
 use mondrian_effects::EffectColorDomain;
 use mondrian_media::{DecodedFrameResidency, DecodedGpuFrameHandleKind};
 
@@ -123,10 +123,10 @@ pub enum ViewerGpuExecutionGpuStage {
     Spatial,
     /// Program Output boundary commands are complete.
     ProgramOutputBoundary,
-    /// Optional Program Output scopes commands are complete.
-    ProgramScopes,
     /// Preview-only monitor-adaptation commands are complete.
     MonitorAdaptation,
+    /// Optional Program/Monitor scopes commands are complete.
+    ProgramScopes,
 }
 
 /// Adapter hook for writing GPU markers without coupling execution to a profiler.
@@ -463,7 +463,11 @@ impl ViewerGpuExecutionRuntime {
             request.program_output_boundary,
             request.monitor_adaptation,
         )?;
-        validate_program_scopes_contract(request.program_output_boundary, request.program_scopes)?;
+        validate_program_scopes_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+            request.program_scopes,
+        )?;
         if !self.prepare_cpu_yuv_uploads(request.layers)? {
             return Err(ViewerGpuExecutionError::Backpressure(
                 "compact CPU YUV transfer preparation is still running".to_owned(),
@@ -629,40 +633,6 @@ impl ViewerGpuExecutionRuntime {
         )?;
         stage_diagnostics.accumulate(program_output_record.stage_diagnostics);
         let program_output = program_output_record.materialized.output;
-        let program_scopes_started = Instant::now();
-        let program_scopes = if let Some(scopes_request) = request.program_scopes {
-            let program_output_view = self
-                .color_output
-                .frame_table()
-                .get(&program_output)
-                .map_err(|error| {
-                    ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}"))
-                })?
-                .resource()
-                .texture_view
-                .clone();
-            Some(
-                self.program_scopes
-                    .record(
-                        device,
-                        queue,
-                        encoder,
-                        &program_output_view,
-                        request.output_width,
-                        request.output_height,
-                        scopes_request,
-                    )
-                    .map_err(|error| ViewerGpuExecutionError::ProgramScopes(Box::new(error)))?,
-            )
-        } else {
-            None
-        };
-        let program_scopes_us = elapsed_us(program_scopes_started);
-        mark_gpu_stage(
-            &mut stage_marker,
-            encoder,
-            ViewerGpuExecutionGpuStage::ProgramScopes,
-        )?;
         let monitor_adaptation_started = Instant::now();
         let output = if let Some(transform) = request.monitor_adaptation.gpu_transform() {
             let monitor_record = self
@@ -691,6 +661,44 @@ impl ViewerGpuExecutionRuntime {
             &mut stage_marker,
             encoder,
             ViewerGpuExecutionGpuStage::MonitorAdaptation,
+        )?;
+        let program_scopes_started = Instant::now();
+        let program_scopes = if let Some(scopes_request) = request.program_scopes {
+            let scope_input = match scopes_request.tap() {
+                ProgramScopesTap::ProgramOutput => &program_output,
+                ProgramScopesTap::MonitorOutput => &output,
+            };
+            let scope_input_view = self
+                .color_output
+                .frame_table()
+                .get(scope_input)
+                .map_err(|error| {
+                    ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}"))
+                })?
+                .resource()
+                .texture_view
+                .clone();
+            Some(
+                self.program_scopes
+                    .record(
+                        device,
+                        queue,
+                        encoder,
+                        &scope_input_view,
+                        request.output_width,
+                        request.output_height,
+                        scopes_request,
+                    )
+                    .map_err(|error| ViewerGpuExecutionError::ProgramScopes(Box::new(error)))?,
+            )
+        } else {
+            None
+        };
+        let program_scopes_us = elapsed_us(program_scopes_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::ProgramScopes,
         )?;
         let calibration_started = Instant::now();
         let (output, output_owner) = if let Some(calibration) = request.display_calibration {
@@ -866,13 +874,20 @@ fn validate_program_monitor_contract(
 
 fn validate_program_scopes_contract(
     boundary: &RenderOutputColorBoundary,
+    adaptation: &RenderMonitorAdaptation,
     request: Option<GpuProgramScopesRequest>,
 ) -> Result<(), ViewerGpuExecutionError> {
-    if let Some(request) = request
-        && boundary.output_color_space != request.signal_color_space()
-    {
+    let Some(request) = request else {
+        return Ok(());
+    };
+    let expected = match request.tap() {
+        ProgramScopesTap::ProgramOutput => boundary.output_color_space,
+        ProgramScopesTap::MonitorOutput => adaptation.monitor_color_space(),
+    };
+    if expected != request.signal_color_space() {
         return Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
-            program_boundary: boundary.output_color_space,
+            tap: request.tap(),
+            expected_signal: expected,
             scopes_signal: request.signal_color_space(),
         });
     }
@@ -1130,12 +1145,11 @@ pub enum ViewerGpuExecutionError {
         /// Identity expected by monitor adaptation.
         adaptation_input: mondrian_core::types::ColorSpace,
     },
-    /// Scope signal identity did not match the measured Program Output.
-    #[error(
-        "Viewer Program Output boundary {program_boundary:?} does not match scope signal {scopes_signal:?}"
-    )]
+    /// Scope signal identity did not match the selected Viewer tap.
+    #[error("Viewer scopes tap {tap:?} expects {expected_signal:?}, not {scopes_signal:?}")]
     ProgramScopesBoundaryMismatch {
-        program_boundary: mondrian_core::types::ColorSpace,
+        tap: ProgramScopesTap,
+        expected_signal: mondrian_core::types::ColorSpace,
         scopes_signal: mondrian_core::types::ColorSpace,
     },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
@@ -2403,14 +2417,65 @@ mod tests {
             GpuProgramScopesRequest::new(ColorSpace::DisplayP3, WaveformMode::Luma, 256, 512)
                 .expect("valid standalone P3 scopes");
 
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("valid monitor adaptation");
+
         assert!(matches!(
-            validate_program_scopes_contract(&boundary, Some(scopes)),
+            validate_program_scopes_contract(&boundary, &adaptation, Some(scopes)),
             Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
-                program_boundary: ColorSpace::Rec709,
+                tap: ProgramScopesTap::ProgramOutput,
+                expected_signal: ColorSpace::Rec709,
                 scopes_signal: ColorSpace::DisplayP3,
             })
         ));
-        assert!(validate_program_scopes_contract(&boundary, None).is_ok());
+        assert!(validate_program_scopes_contract(&boundary, &adaptation, None).is_ok());
+    }
+
+    #[test]
+    fn viewer_monitor_scopes_require_the_monitor_boundary() {
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("valid monitor adaptation");
+        let valid = GpuProgramScopesRequest::with_controls(
+            ColorSpace::DisplayP3,
+            WaveformMode::Luma,
+            mondrian_core::ProgramScopeScale::Ire,
+            ProgramScopesTap::MonitorOutput,
+            256,
+            512,
+        )
+        .expect("monitor scopes");
+        assert!(validate_program_scopes_contract(&boundary, &adaptation, Some(valid)).is_ok());
+
+        let invalid = GpuProgramScopesRequest::with_controls(
+            ColorSpace::Rec709,
+            WaveformMode::Luma,
+            mondrian_core::ProgramScopeScale::Ire,
+            ProgramScopesTap::MonitorOutput,
+            256,
+            512,
+        )
+        .expect("mismatched monitor scopes");
+        assert!(matches!(
+            validate_program_scopes_contract(&boundary, &adaptation, Some(invalid)),
+            Err(ViewerGpuExecutionError::ProgramScopesBoundaryMismatch {
+                tap: ProgramScopesTap::MonitorOutput,
+                expected_signal: ColorSpace::DisplayP3,
+                scopes_signal: ColorSpace::Rec709,
+            })
+        ));
     }
 
     #[tokio::test]
@@ -2809,6 +2874,61 @@ mod tests {
             .program_output_texture_view(&record)
             .expect("retained Program Output texture");
         runtime.output_texture_view(&record).expect("retained monitor output texture");
+
+        let mut monitor_scopes_encoder =
+            context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("viewer-monitor-scopes-integration"),
+            });
+        let monitor_scopes_record = runtime
+            .record(
+                &context.device,
+                &context.queue,
+                &mut monitor_scopes_encoder,
+                ViewerGpuExecutionRequest {
+                    sequence_id: SequenceId::new(),
+                    timeline_frame: 1,
+                    width: 4,
+                    height: 4,
+                    working_color_space: WorkingColorSpace::LinearRec709,
+                    layers: &[],
+                    heterogeneous_inputs: Vec::new(),
+                    program_output_boundary: &program_output_boundary,
+                    monitor_adaptation: &monitor_adaptation,
+                    source_rect: ViewerSourceRect::FULL,
+                    output_width: 4,
+                    output_height: 4,
+                    output_precision: ViewerGpuOutputPrecision::Encoded8,
+                    display_calibration: None,
+                    program_scopes: Some(
+                        GpuProgramScopesRequest::with_controls(
+                            ColorSpace::DisplayP3,
+                            WaveformMode::RgbParade,
+                            mondrian_core::ProgramScopeScale::Nits100,
+                            ProgramScopesTap::MonitorOutput,
+                            256,
+                            512,
+                        )
+                        .expect("monitor scope request"),
+                    ),
+                },
+            )
+            .expect("Viewer GPU Monitor Output scopes frame");
+        context.queue.submit(std::iter::once(monitor_scopes_encoder.finish()));
+        let monitor_scopes =
+            monitor_scopes_record.program_scopes.as_ref().expect("Monitor Output scopes");
+        assert_eq!(
+            monitor_scopes.request.signal_color_space(),
+            ColorSpace::DisplayP3
+        );
+        assert_eq!(
+            monitor_scopes.request.tap(),
+            ProgramScopesTap::MonitorOutput
+        );
+        assert_eq!(
+            monitor_scopes.request.scale(),
+            mondrian_core::ProgramScopeScale::Nits100
+        );
+        assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 2);
     }
 
     #[tokio::test]

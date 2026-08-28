@@ -1010,8 +1010,15 @@ panel. Expensive analysis is demand-driven by the live dock tree's active tab,
 without allocating a persisted layout snapshot on each frame. Mere panel
 presence is insufficient: a hidden or background Scopes tab schedules no
 renderer aggregation, buffer clearing, readback, or scope repaint work. Scope
-input is the retained Program Output boundary before local monitor adaptation,
-so moving the window between monitors cannot change measured program values.
+input defaults to retained Program Output. Operators may explicitly select the
+typed Monitor Output tap after local color-space adaptation and before ICC
+calibration; the UI never silently changes taps when a window moves. The panel
+owns Luma/RGB Parade, IRE/100/1000/4000/10000-nit scale, skin-line, 75% color
+targets, and overview/grid/single-scope layout controls. These are versioned
+machine-local `AppUiPreferences`, never `.mdp` author state. Skin line, targets,
+axis labels, and pane layout are presentation-only. Changing only those fields
+repaints the widget without invalidating GPU analysis; waveform mode, scale, or
+tap changes reissue exactly one current Viewer scope result.
 The window registers GPU-generated waveform, histogram, and vectorscope
 textures with stable UI keys using the linear external-texture contract, and
 unregisters all three when Scopes is hidden or Viewer presentation is reset.

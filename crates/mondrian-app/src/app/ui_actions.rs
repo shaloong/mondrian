@@ -22,7 +22,7 @@ use mondrian_timeline::{
     PixelAspectRatio, PreviewRenderFormat,
 };
 use mondrian_ui_theme::ThemePreference;
-use mondrian_ui_widgets::{ViewerCanvasBackground, WaveformDisplay};
+use mondrian_ui_widgets::{VideoScopesSettings, ViewerCanvasBackground, WaveformDisplay};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -161,6 +161,8 @@ pub const APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED: &str =
 /// App-shell request to switch the presentation-only Viewer canvas background.
 pub const APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED: &str =
     "preferences_viewer_background_changed";
+/// App-shell request to persist the professional Scopes control contract.
+pub const APP_SHELL_SCOPES_SETTINGS_CHANGED: &str = "scopes_settings_changed";
 /// App-shell request to switch the runtime audio output-device intent.
 pub const APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED: &str =
     "preferences_audio_output_device_changed";
@@ -235,6 +237,12 @@ pub struct PreferencesWaveformDisplayPayload {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreferencesViewerBackgroundPayload {
     pub background: ViewerCanvasBackground,
+}
+
+/// Professional Scopes settings selected directly in the Scopes panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopesSettingsPayload {
+    pub settings: VideoScopesSettings,
 }
 
 /// Runtime audio output-device intent selected by the preferences UI.
@@ -1413,6 +1421,14 @@ pub fn app_shell_preferences_viewer_background_changed_action(
     custom_app_shell_action_with_payload(
         APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
         PreferencesViewerBackgroundPayload { background },
+    )
+}
+
+/// Build an app-shell request for changing professional Scopes controls.
+pub fn app_shell_scopes_settings_changed_action(settings: VideoScopesSettings) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_SCOPES_SETTINGS_CHANGED,
+        ScopesSettingsPayload { settings },
     )
 }
 

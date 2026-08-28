@@ -66,7 +66,7 @@ use crate::app_ui::runtime::{
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
-use mondrian_core::WaveformMode;
+use mondrian_core::{ProgramScopeScale, ProgramScopesTap, WaveformMode};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_platform::SystemPlatformService;
 #[cfg(test)]
@@ -89,7 +89,7 @@ use mondrian_ui_events::EventRouter;
 use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey, ExternalTextureTransfer};
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
-use mondrian_ui_widgets::ViewerExternalTexturePresentation;
+use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation};
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -1208,6 +1208,7 @@ struct AppUiWindowSession {
     viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup,
     program_scopes_registered: bool,
     program_scopes_refresh_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
     viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry,
     render_diagnostic_reporter: AppUiRenderDiagnosticReporter,
     router: EventRouter,
@@ -1262,6 +1263,7 @@ struct WindowViewerGpuSubmissionOwner {
     stage_diagnostics: RenderColorStageDiagnostics,
     program_scopes: Option<mondrian_renderer::GpuProgramScopesRecord>,
     program_scopes_requested: bool,
+    program_scopes_analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -3813,7 +3815,12 @@ fn complete_window_viewer_gpu_submission(
     ) {
         Ok(PreviewVisualGpuCompletionDisposition::PublishCurrent) => {
             if let Some(scopes) = owner.program_scopes.as_ref() {
-                if let Err(error) = register_program_scopes_textures(session, device, scopes) {
+                if let Err(error) = register_program_scopes_textures(
+                    session,
+                    device,
+                    scopes,
+                    owner.program_scopes_analysis_identity,
+                ) {
                     unregister_program_scopes_textures(session);
                     session.program_scopes_refresh_requested = true;
                     tracing::warn!(%error, "heterogeneous GPU scope registration failed");
@@ -4033,9 +4040,19 @@ fn prepare_viewer_gpu_preview(
         finish_prepare!();
     }
     let program_scopes_requested = host.is_panel_active(PanelKind::Scopes);
+    let scopes_settings = host.video_scopes_settings();
+    let program_scopes_analysis_identity =
+        program_scopes_requested.then_some(scopes_settings.analysis_identity());
     if !program_scopes_requested {
         unregister_program_scopes_textures(session);
         session.program_scopes_refresh_requested = false;
+    }
+    if session.program_scopes_registered
+        && session.program_scopes_analysis_identity != program_scopes_analysis_identity
+    {
+        unregister_program_scopes_textures(session);
+        host.clear_external_viewer_frame();
+        session.program_scopes_refresh_requested = true;
     }
     if host.should_defer_gpu_preview_prepare_for_interaction() {
         session.viewer_gpu_output_telemetry.record_preview_candidate_state(
@@ -4424,6 +4441,8 @@ fn prepare_viewer_gpu_preview(
             program_scopes: viewer_program_scopes_request(
                 program_scopes_requested,
                 frame.program_output_boundary.output_color_space,
+                frame.monitor_adaptation.monitor_color_space(),
+                scopes_settings,
             )
             .unwrap_or_else(|error| {
                 tracing::warn!(
@@ -4587,6 +4606,7 @@ fn prepare_viewer_gpu_preview(
                 stage_diagnostics: record.stage_diagnostics,
                 program_scopes: record.program_scopes.take(),
                 program_scopes_requested,
+                program_scopes_analysis_identity,
             };
             reservation.commit(
                 owner,
@@ -4642,6 +4662,7 @@ fn prepare_viewer_gpu_preview(
         stage_diagnostics,
         program_scopes: record.program_scopes.take(),
         program_scopes_requested,
+        program_scopes_analysis_identity,
     };
     reservation.commit(
         owner,
@@ -4784,7 +4805,11 @@ fn register_ordinary_window_program_scopes(
         .owner_mut(submission_id)
         .and_then(|owner| owner.program_scopes.take());
     if let Some(scopes) = scopes {
-        if let Err(error) = register_program_scopes_textures(session, device, &scopes) {
+        let identity = session
+            .viewer_gpu_submissions
+            .owner(submission_id)
+            .and_then(|owner| owner.program_scopes_analysis_identity);
+        if let Err(error) = register_program_scopes_textures(session, device, &scopes, identity) {
             unregister_program_scopes_textures(session);
             session.program_scopes_refresh_requested = true;
             tracing::warn!(%error, "ordinary GPU Program Output scope registration failed");
@@ -4971,10 +4996,23 @@ fn publish_ordinary_window_viewer_gpu_submission(
 fn viewer_program_scopes_request(
     active: bool,
     program_output_color_space: ColorSpace,
+    monitor_output_color_space: ColorSpace,
+    settings: VideoScopesSettings,
 ) -> Result<Option<GpuProgramScopesRequest>, mondrian_core::ProgramColorScopeError> {
     active
         .then(|| {
-            GpuProgramScopesRequest::new(program_output_color_space, WaveformMode::Luma, 256, 512)
+            let signal_color_space = match settings.tap {
+                ProgramScopesTap::ProgramOutput => program_output_color_space,
+                ProgramScopesTap::MonitorOutput => monitor_output_color_space,
+            };
+            GpuProgramScopesRequest::with_controls(
+                signal_color_space,
+                settings.waveform_mode,
+                settings.scale,
+                settings.tap,
+                256,
+                512,
+            )
         })
         .transpose()
 }
@@ -5032,6 +5070,7 @@ fn register_program_scopes_textures(
     session: &mut AppUiWindowSession,
     device: &wgpu::Device,
     scopes: &mondrian_renderer::GpuProgramScopesRecord,
+    analysis_identity: Option<(WaveformMode, ProgramScopeScale, ProgramScopesTap)>,
 ) -> Result<(), String> {
     // Claim all stable keys before the first fallible insertion so callers can
     // roll back a partially registered texture set transactionally.
@@ -5058,10 +5097,12 @@ fn register_program_scopes_textures(
             .map_err(|error| error.to_string())?;
     }
     session.program_scopes_refresh_requested = false;
+    session.program_scopes_analysis_identity = analysis_identity;
     Ok(())
 }
 
 fn unregister_program_scopes_textures(session: &mut AppUiWindowSession) {
+    session.program_scopes_analysis_identity = None;
     if !session.program_scopes_registered {
         return;
     }
@@ -5500,6 +5541,7 @@ impl AppUiWindowSession {
             viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
             program_scopes_registered: false,
             program_scopes_refresh_requested: false,
+            program_scopes_analysis_identity: None,
             viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
             render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
             router: build_event_router(
@@ -6124,14 +6166,43 @@ mod tests {
     #[test]
     fn hidden_scopes_create_no_viewer_gpu_request() {
         assert_eq!(
-            viewer_program_scopes_request(false, ColorSpace::Rec709),
+            viewer_program_scopes_request(
+                false,
+                ColorSpace::Rec709,
+                ColorSpace::DisplayP3,
+                VideoScopesSettings::default(),
+            ),
             Ok(None)
         );
-        let visible = viewer_program_scopes_request(true, ColorSpace::Rec709)
-            .expect("supported Program Output")
-            .expect("visible request");
+        let visible = viewer_program_scopes_request(
+            true,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            VideoScopesSettings::default(),
+        )
+        .expect("supported Program Output")
+        .expect("visible request");
         assert_eq!(visible.signal_color_space(), ColorSpace::Rec709);
         assert_eq!(visible.waveform_mode(), WaveformMode::Luma);
+
+        let monitor_settings = VideoScopesSettings {
+            waveform_mode: WaveformMode::RgbParade,
+            scale: ProgramScopeScale::Nits1000,
+            tap: ProgramScopesTap::MonitorOutput,
+            ..VideoScopesSettings::default()
+        };
+        let monitor = viewer_program_scopes_request(
+            true,
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            monitor_settings,
+        )
+        .expect("supported Monitor Output")
+        .expect("visible monitor request");
+        assert_eq!(monitor.signal_color_space(), ColorSpace::DisplayP3);
+        assert_eq!(monitor.waveform_mode(), WaveformMode::RgbParade);
+        assert_eq!(monitor.scale(), ProgramScopeScale::Nits1000);
+        assert_eq!(monitor.tap(), ProgramScopesTap::MonitorOutput);
     }
 
     #[test]

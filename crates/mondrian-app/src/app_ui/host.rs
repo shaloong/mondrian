@@ -40,7 +40,7 @@ use crate::app::ui_actions::{
     AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload,
     PreferencesDisplayManagementPayload, PreferencesShortcutPayload,
     PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
-    PreferencesWaveformDisplayPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
+    PreferencesWaveformDisplayPayload, ScopesSettingsPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
     APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG,
     APP_SHELL_GALLERY_CAPTURE_CURRENT, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
@@ -52,8 +52,8 @@ use crate::app::ui_actions::{
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
     APP_SHELL_PREFERENCES_WAVEFORM_DISPLAY_CHANGED, APP_SHELL_QUIT, APP_SHELL_RECOVERY_DIALOG,
-    APP_SHELL_RECOVER_PROJECT, APP_SHELL_WINDOW_DRAG, APP_SHELL_WINDOW_MINIMIZE,
-    APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_SCOPES_SETTINGS_CHANGED, APP_SHELL_WINDOW_DRAG,
+    APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
 use crate::app::waveform_service::AudioWaveformService;
 use crate::app::{
@@ -937,6 +937,11 @@ impl AppUiHost {
         &self.preferences
     }
 
+    /// Current machine-local professional Scopes controls.
+    pub(crate) const fn video_scopes_settings(&self) -> mondrian_ui_widgets::VideoScopesSettings {
+        self.preferences.video_scopes
+    }
+
     /// Mark the root as needing a model refresh from `AppState`.
     pub fn mark_dirty(&self) {
         self.ui_dirty.set(true);
@@ -1628,6 +1633,9 @@ impl AppUiHost {
                     PreferencesUpdate::ViewerBackground(payload) => {
                         self.preferences.viewer_canvas_background = payload.background;
                     }
+                    PreferencesUpdate::VideoScopes(payload) => {
+                        self.preferences.video_scopes = payload.settings;
+                    }
                     PreferencesUpdate::AudioOutputDevice(payload) => {
                         self.preferences.audio_output_device = payload.selection.clone();
                         self.app_state
@@ -2275,6 +2283,7 @@ enum PreferencesUpdate {
     Theme(PreferencesThemePayload),
     WaveformDisplay(PreferencesWaveformDisplayPayload),
     ViewerBackground(PreferencesViewerBackgroundPayload),
+    VideoScopes(ScopesSettingsPayload),
     AudioOutputDevice(PreferencesAudioOutputDevicePayload),
     DisplayManagement(PreferencesDisplayManagementPayload),
     RefreshAudioOutputDevices,
@@ -2303,6 +2312,11 @@ fn parse_preferences_update(
                 && name == APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::ViewerBackground))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_SCOPES_SETTINGS_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::VideoScopes))
         }
         Action::Custom { namespace, name, payload }
             if namespace == APP_SHELL_NAMESPACE
@@ -3918,6 +3932,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             },
@@ -3964,6 +3979,38 @@ mod tests {
     }
 
     #[test]
+    fn host_persists_professional_scopes_controls_without_authoring_state() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("professional-scopes-controls");
+        let mut host = AppUiHost::new_with_preferences_path(
+            workspace_app_state(),
+            AppUiPreferences::default(),
+            path.clone(),
+        );
+        let settings = mondrian_ui_widgets::VideoScopesSettings {
+            waveform_mode: mondrian_core::WaveformMode::RgbParade,
+            scale: mondrian_core::ProgramScopeScale::Nits4000,
+            tap: mondrian_core::ProgramScopesTap::MonitorOutput,
+            layout: mondrian_ui_widgets::VideoScopesLayout::Vectorscope,
+            show_skin_tone_line: false,
+            show_color_targets: true,
+        };
+        let pending = PendingUiActions::default();
+        pending.push(crate::app::ui_actions::app_shell_scopes_settings_changed_action(settings));
+
+        let commands = host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(commands, AppUiShellCommands::default());
+        assert_eq!(host.preferences().video_scopes, settings);
+        assert_eq!(load_app_ui_preferences_from(&path).video_scopes, settings);
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_builds_root_from_persisted_custom_workspace_layout() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let layout = AppUiWorkspaceLayout::Split {
@@ -3993,6 +4040,7 @@ mod tests {
                 custom_workspace_layout: Some(layout.clone()),
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             },
@@ -4554,6 +4602,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             },
@@ -4657,6 +4706,7 @@ mod tests {
                 custom_workspace_layout: None,
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
+                video_scopes: Default::default(),
                 audio_output_device: Default::default(),
                 display_management: Default::default(),
             },

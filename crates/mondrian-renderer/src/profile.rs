@@ -207,10 +207,10 @@ pub enum GpuTimestampStageMarker {
     AfterSpatial,
     /// Program Output boundary commands have been recorded.
     AfterProgramOutputBoundary,
-    /// Optional Program Output scopes commands have been recorded.
-    AfterProgramScopes,
     /// Preview-only monitor-adaptation commands have been recorded.
     AfterMonitorAdaptation,
+    /// Optional Program/Monitor scopes commands have been recorded.
+    AfterProgramScopes,
 }
 
 impl GpuTimestampStageMarker {
@@ -219,8 +219,8 @@ impl GpuTimestampStageMarker {
             Self::AfterWorkingComposite => 1,
             Self::AfterSpatial => 2,
             Self::AfterProgramOutputBoundary => 3,
-            Self::AfterProgramScopes => 4,
-            Self::AfterMonitorAdaptation => 5,
+            Self::AfterMonitorAdaptation => 4,
+            Self::AfterProgramScopes => 5,
         }
     }
 }
@@ -234,7 +234,7 @@ pub struct GpuTimestampStageDurations {
     pub spatial_us: u64,
     /// Program Output color boundary after spatial processing.
     pub program_output_boundary_us: u64,
-    /// Demand-driven Program Output scopes after the color boundary.
+    /// Demand-driven Program/Monitor scopes after monitor adaptation.
     pub program_scopes_us: u64,
     /// Preview-only monitor adaptation after Program Output.
     pub monitor_adaptation_us: u64,
@@ -347,8 +347,8 @@ impl GpuTimestampStageTimer {
             through_working_composite_us: segment(0, 1)?,
             spatial_us: segment(1, 2)?,
             program_output_boundary_us: segment(2, 3)?,
-            program_scopes_us: segment(3, 4)?,
-            monitor_adaptation_us: segment(4, 5)?,
+            monitor_adaptation_us: segment(3, 4)?,
+            program_scopes_us: segment(4, 5)?,
             display_calibration_us: segment(5, 6)?,
         };
         Ok((segment(0, 6)?, stages))
@@ -690,8 +690,8 @@ mod tests {
             GpuTimestampStageMarker::AfterWorkingComposite,
             GpuTimestampStageMarker::AfterSpatial,
             GpuTimestampStageMarker::AfterProgramOutputBoundary,
-            GpuTimestampStageMarker::AfterProgramScopes,
             GpuTimestampStageMarker::AfterMonitorAdaptation,
+            GpuTimestampStageMarker::AfterProgramScopes,
         ] {
             ring.mark_stage(&mut encoder, token, marker).expect("ordered stage marker");
         }

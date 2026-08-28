@@ -1391,24 +1391,31 @@ when `$OCIO` is not configured.
 Preview cache keys include the complete typed output intent. An intent change
 invalidates cached viewer frames even when the output `ColorSpace` is unchanged.
 
-Program video scopes are measured from the exact float display/export-encoded
-Program Output, before any monitor/ICC adaptation or UI raster conversion.
+Program video scopes default to the exact float display/export-encoded Program
+Output. The professional Viewer control contract can instead select Monitor
+Output, meaning the result after machine-local monitor color-space adaptation
+but still before device-specific ICC calibration or UI raster conversion. A
+typed tap and exact signal color-space identity travel together; Viewer
+validation rejects any mismatch before recording GPU work.
 `mondrian-core::compute_program_color_scopes_rgba_f32` requires an explicit
 standardized output identity and selects Rec.601, Rec.709/sRGB, Display P3, or
 Rec.2020 luma/chroma coefficients accordingly. Working-linear and camera-log
 identities, malformed buffers, and non-finite RGB fail closed. The RGBA8 helper
 exists for already-quantized SDR boundaries, but HDR/10-bit scope paths must use
-the float helper. Negative and above-nominal RGB/luma values remain visible as
+the float helper. IRE aggregation bins encoded signal. An explicit nits scale
+instead decodes sRGB/SDR through its declared display EOTF, PQ through ST 2084,
+and HLG through the 1000-nit BT.2100 reference OOTF before binning absolute
+display luminance; nits are never a relabelled encoded-signal axis. Negative and
+above-nominal RGB/luma values remain visible as
 explicit `ProgramSignalExcursions` even though the density plots group them into
 their endpoint bins. A final renderer float boundary exposes this contract through
 `RenderOutputColorBoundaryFloat::program_scopes`, so callers cannot accidentally
 measure working pixels or a monitor-adapted `ViewerFrameImage`. GPU scopes must
 use the shared `ProgramSignalColorimetry` coefficients and a compute/reduction
-path over the Program Output texture; they must not introduce a per-frame
+path over the selected retained tap texture; they must not introduce a per-frame
 GPU-to-CPU readback. The production GPU runtime uses exact atomic-u32 counts and
-generates display density textures on-device. Viewer validation rejects a scope
-request whose signal identity differs from the Program Output boundary before
-recording any GPU work.
+generates display density textures on-device. CPU/GPU tests compare exact bin
+counts for both encoded-signal and nits execution.
 
 GPU preview should use OCIO shader extraction instead of CPU processor execution
 for real-time playback. `mondrian-core::extract_ocio_gpu_shader_bundle` and

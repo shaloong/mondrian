@@ -1347,7 +1347,9 @@ the full output texture back to the CPU.
 
 `GpuProgramScopesRuntime` is that real-time path. A demand-driven request
 records atomic-u32 histogram, waveform, vectorscope, and signal-excursion counts
-directly against the retained display-encoded Program Output texture. A second
+directly against an explicitly validated Program Output or pre-ICC Monitor
+Output texture. It bins either encoded IRE or transfer-decoded absolute nits;
+PQ and HLG share the Core reference semantics and GPU/CPU parity tests. A second
 compute pass materializes three RGBA8 linear display textures for the UI. The
 count buffer, pipelines, display textures, uniforms, and display bind group are
 retained by request shape; normal playback performs no scope readback. The only
@@ -2379,12 +2381,13 @@ User scrub/play
     → RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_gpu_frame_owned_backend()
         → Program Output GPU transform (the same OCIO display/view intent as delivery)
         → retain the typed Program Output texture for scopes/cache diagnostics
-    → optional GpuProgramScopesRuntime::record()
-        → exact atomic aggregation from Program Output
-        → GPU-only histogram/waveform/vectorscope display textures
     → optional RenderGpuOutputBoundaryRuntime::record_wgpu_intermediate_color_transform_owned_backend()
         → stock-OCIO colorimetric Program Output → monitor adaptation
         → no pass when both display identities match
+    → optional GpuProgramScopesRuntime::record()
+        → exact atomic aggregation from the selected Program/Monitor tap
+        → encoded IRE or transfer-decoded absolute nits bins
+        → GPU-only histogram/waveform/vectorscope display textures
     → optional GPU ICC monitor calibration
     → queue.submit()
       → transfer the move-only presentation output lease
@@ -2426,7 +2429,8 @@ it permits same-class SDR-to-SDR or HDR-to-HDR colorimetric conversion and
 fails closed on SDR/HDR class changes because those require an explicit
 rendering/tone-mapping policy. The Viewer record retains both Program Output
 and final monitor handles in one pooled GPU resource table. Scopes consume the
-former; presentation and optional ICC calibration consume the latter. Neither
+operator-selected one; presentation and optional ICC calibration consume the
+monitor handle. ICC-calibrated device pixels are deliberately not a scope tap. Neither
 route performs upload/readback between these stages.
 
 Display invalidation likewise uses the full `DisplayOutputIdentity`, covering
@@ -2439,9 +2443,9 @@ diagnostic projections may be logged, but never authorize frame, LUT, or
 display-dependent resource reuse.
 
 Viewer GPU hardware timestamps and CPU command-recording attribution expose
-Program Output and Monitor Adaptation as separate stages. Identical identities
-still emit the ordered zero-duration monitor marker so profiling remains
-structurally comparable without adding a render pass.
+Program Output, Monitor Adaptation, and Program Scopes as separate stages.
+Identical monitor identities still emit the ordered zero-duration marker so
+profiling remains structurally comparable without adding a render pass.
 
 Active-texture admission is not a scheduling-quality decision inside the
 renderer. Preview may respond to a typed rejection by issuing a later,
