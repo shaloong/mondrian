@@ -14,25 +14,26 @@
 //! 4. **Environment** — explicit `$OCIO` env var
 
 use crate::types::{
-    ColorEngine, ColorSpace, CustomOcioLookIdentity, CustomOcioOutputIdentity,
+    ColorEngine, ColorSpace, CustomOcioDynamicPropertyIdentity, CustomOcioDynamicPropertyKind,
+    CustomOcioDynamicPropertyValue, CustomOcioLookIdentity, CustomOcioOutputIdentity,
     CustomOcioProjectIdentity, CustomOcioRoleIdentity, MondrianStandardPackageIdentity,
     MondrianStandardVersion, OcioColorSpaceIdentity, OcioConfigSource, WorkingColorSpace,
 };
 use lru::LruCache;
 pub use ocio_rs::GpuLanguage;
 use ocio_rs::{
-    grading::GradingCurvePoint,
+    grading::{GradingCurvePoint, GradingPrimary, GradingRGBM, GradingRGBMSW, GradingTone},
     transform::{
         AllocationTransform, BuiltinTransform, ColorSpaceTransform, FixedFunctionTransform,
         GradingRGBCurveTransform, GroupTransform, Lut1DTransform, Lut3DTransform, MatrixTransform,
         RangeTransform,
     },
-    Allocation, BuiltinConfigRegistry, CPUProcessor, Config, FixedFunctionStyle, GpuShaderDesc,
-    GpuTextureChannel as OcioRsGpuTextureChannel,
+    Allocation, BuiltinConfigRegistry, CPUProcessor, Config, DynamicProperty, DynamicPropertyType,
+    FixedFunctionStyle, GpuShaderDesc, GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
-    GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, Interpolation as OcioRsInterpolation,
-    RGBCurveType, RangeStyle, ReferenceSpaceType, TransformDirection, ViewTransform,
-    ViewTransformDirection,
+    GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, HueCurveType,
+    Interpolation as OcioRsInterpolation, RGBCurveType, RangeStyle, ReferenceSpaceType,
+    TransformDirection, ViewTransform, ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
 use std::num::NonZeroUsize;
@@ -61,7 +62,7 @@ struct OcioGlobalState {
     path: Option<PathBuf>,
     /// Source identity that loaded the current config.
     source: Option<OcioConfigSource>,
-    /// Full Custom project identity last validated against the loaded config.
+    /// Static Custom config/processor identity last validated against the loaded config.
     validated_custom_identity: Option<CustomOcioProjectIdentity>,
     /// OCIO's opaque cache identity for the currently validated Custom config.
     ///
@@ -161,7 +162,7 @@ pub(crate) fn ocio_engine_is_validated(engine: &ColorEngine) -> bool {
     }
     match engine {
         ColorEngine::CustomOcio { identity } => {
-            state.validated_custom_identity.as_ref() == Some(identity.as_ref())
+            state.validated_custom_identity.as_ref() == Some(&identity.static_processor_identity())
         }
         ColorEngine::MondrianStandard { .. } | ColorEngine::Aces { .. } => true,
     }
@@ -2275,12 +2276,6 @@ fn validate_custom_ocio_identity(
     identity: &CustomOcioProjectIdentity,
     config: &Config,
 ) -> Result<String, String> {
-    if !identity.dynamic_properties().is_empty() {
-        return Err(format!(
-            "Custom OCIO project contains {} dynamic-property override(s), but this build does not support applying project-level dynamic properties",
-            identity.dynamic_properties().len()
-        ));
-    }
     let actual_sha256 = primary_config_sha256(identity.source(), config)?;
     if actual_sha256 != identity.config_sha256() {
         return Err(format!(
@@ -2339,12 +2334,13 @@ fn ensure_custom_ocio_identity_loaded_locked(
     identity: &CustomOcioProjectIdentity,
     force_reload: bool,
 ) -> Result<(), String> {
+    let static_identity = identity.static_processor_identity();
     let already_validated = OCIO_STATE
         .lock()
         .map_err(|_| "OCIO global state lock is poisoned".to_owned())?
         .validated_custom_identity
         .as_ref()
-        == Some(identity);
+        == Some(&static_identity);
     if already_validated && !force_reload {
         return Ok(());
     }
@@ -2386,7 +2382,7 @@ fn ensure_custom_ocio_identity_loaded_locked(
     let runtime_cache_id = validate_custom_ocio_identity(identity, &config)?;
     let mut state =
         OCIO_STATE.lock().map_err(|_| "OCIO global state lock is poisoned".to_owned())?;
-    state.validated_custom_identity = Some(identity.clone());
+    state.validated_custom_identity = Some(static_identity);
     state.validated_custom_runtime_cache_id = Some(runtime_cache_id);
     Ok(())
 }
@@ -2978,6 +2974,191 @@ fn ocio_uniform_value(value: OcioRsGpuUniformValue) -> OcioGpuUniformValue {
     }
 }
 
+fn ocio_dynamic_property_type(kind: CustomOcioDynamicPropertyKind) -> DynamicPropertyType {
+    match kind {
+        CustomOcioDynamicPropertyKind::Exposure => DynamicPropertyType::Exposure,
+        CustomOcioDynamicPropertyKind::Contrast => DynamicPropertyType::Contrast,
+        CustomOcioDynamicPropertyKind::Gamma => DynamicPropertyType::Gamma,
+        CustomOcioDynamicPropertyKind::GradingPrimary => DynamicPropertyType::GradingPrimary,
+        CustomOcioDynamicPropertyKind::GradingRgbCurve => DynamicPropertyType::GradingRgbCurve,
+        CustomOcioDynamicPropertyKind::GradingTone => DynamicPropertyType::GradingTone,
+        CustomOcioDynamicPropertyKind::GradingHueCurve => DynamicPropertyType::GradingHueCurve,
+    }
+}
+
+fn grading_rgbm(values: &[f64], offset: usize) -> GradingRGBM {
+    GradingRGBM::new(
+        values[offset],
+        values[offset + 1],
+        values[offset + 2],
+        values[offset + 3],
+    )
+}
+
+fn grading_rgbmsw(values: &[f64], offset: usize) -> GradingRGBMSW {
+    GradingRGBMSW::new(
+        values[offset],
+        values[offset + 1],
+        values[offset + 2],
+        values[offset + 3],
+        values[offset + 4],
+        values[offset + 5],
+    )
+}
+
+fn grading_primary(values: &[f64]) -> GradingPrimary {
+    GradingPrimary {
+        brightness: grading_rgbm(values, 0),
+        contrast: grading_rgbm(values, 4),
+        gamma: grading_rgbm(values, 8),
+        offset: grading_rgbm(values, 12),
+        exposure: grading_rgbm(values, 16),
+        lift: grading_rgbm(values, 20),
+        gain: grading_rgbm(values, 24),
+        saturation: values[28],
+        pivot: values[29],
+        pivot_black: values[30],
+        pivot_white: values[31],
+        clamp_black: values[32],
+        clamp_white: values[33],
+    }
+}
+
+fn grading_tone(values: &[f64]) -> GradingTone {
+    GradingTone {
+        blacks: grading_rgbmsw(values, 0),
+        shadows: grading_rgbmsw(values, 6),
+        midtones: grading_rgbmsw(values, 12),
+        highlights: grading_rgbmsw(values, 18),
+        whites: grading_rgbmsw(values, 24),
+        scontrast: values[30],
+    }
+}
+
+fn apply_rgb_curves(
+    property: &DynamicProperty,
+    curves: &[Vec<crate::CustomOcioGradingCurvePoint>],
+) -> Result<(), String> {
+    let curve_types = [
+        RGBCurveType::Red,
+        RGBCurveType::Green,
+        RGBCurveType::Blue,
+        RGBCurveType::Master,
+    ];
+    for (curve_type, points) in curve_types.into_iter().zip(curves) {
+        let count = i32::try_from(points.len())
+            .map_err(|_| "Custom OCIO RGB curve point count exceeds i32".to_owned())?;
+        property
+            .grading_rgb_curve_set_num_control_points(curve_type, count)
+            .map_err(|err| format!("set RGB curve point count: {err}"))?;
+        for (index, point) in points.iter().enumerate() {
+            let index = i32::try_from(index)
+                .map_err(|_| "Custom OCIO RGB curve point index exceeds i32".to_owned())?;
+            property
+                .grading_rgb_curve_set_control_point(curve_type, index, point.x, point.y)
+                .map_err(|err| format!("set RGB curve control point: {err}"))?;
+            property
+                .grading_rgb_curve_set_slope(curve_type, index, point.slope)
+                .map_err(|err| format!("set RGB curve slope: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_hue_curves(
+    property: &DynamicProperty,
+    curves: &[Vec<crate::CustomOcioGradingCurvePoint>],
+) -> Result<(), String> {
+    let curve_types = [
+        HueCurveType::HueHue,
+        HueCurveType::HueSat,
+        HueCurveType::HueLum,
+        HueCurveType::LumSat,
+        HueCurveType::SatSat,
+        HueCurveType::LumLum,
+        HueCurveType::SatLum,
+        HueCurveType::HueFx,
+    ];
+    for (curve_type, points) in curve_types.into_iter().zip(curves) {
+        let count = i32::try_from(points.len())
+            .map_err(|_| "Custom OCIO hue curve point count exceeds i32".to_owned())?;
+        property
+            .grading_hue_curve_set_num_control_points(curve_type, count)
+            .map_err(|err| format!("set hue curve point count: {err}"))?;
+        for (index, point) in points.iter().enumerate() {
+            let index = i32::try_from(index)
+                .map_err(|_| "Custom OCIO hue curve point index exceeds i32".to_owned())?;
+            property
+                .grading_hue_curve_set_control_point(curve_type, index, point.x, point.y)
+                .map_err(|err| format!("set hue curve control point: {err}"))?;
+            property
+                .grading_hue_curve_set_slope(curve_type, index, point.slope)
+                .map_err(|err| format!("set hue curve slope: {err}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_custom_ocio_dynamic_properties(
+    properties: &[CustomOcioDynamicPropertyIdentity],
+    mut resolve: impl FnMut(DynamicPropertyType) -> Result<DynamicProperty, String>,
+) -> Result<(), String> {
+    for authored in properties {
+        let kind = authored.kind();
+        let property_type = ocio_dynamic_property_type(kind);
+        let property = resolve(property_type).map_err(|reason| {
+            format!(
+                "Custom OCIO route does not expose required dynamic property '{}': {reason}",
+                kind.as_str()
+            )
+        })?;
+        match authored.parsed_value() {
+            CustomOcioDynamicPropertyValue::Scalar(value) => property
+                .set_double_value(value)
+                .map_err(|err| format!("apply Custom OCIO {}: {err}", kind.as_str()))?,
+            CustomOcioDynamicPropertyValue::GradingPrimary(values) => property
+                .set_grading_primary_value(&grading_primary(&values))
+                .map_err(|err| format!("apply Custom OCIO grading_primary: {err}"))?,
+            CustomOcioDynamicPropertyValue::GradingRgbCurve(curves) => {
+                apply_rgb_curves(&property, &curves)?
+            }
+            CustomOcioDynamicPropertyValue::GradingTone(values) => property
+                .set_grading_tone_value(&grading_tone(&values))
+                .map_err(|err| format!("apply Custom OCIO grading_tone: {err}"))?,
+            CustomOcioDynamicPropertyValue::GradingHueCurve(curves) => {
+                apply_hue_curves(&property, &curves)?
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_engine_dynamic_properties_to_cpu(
+    engine: &ColorEngine,
+    processor: &CPUProcessor,
+) -> Result<(), String> {
+    let Some(identity) = engine.custom_ocio_identity() else {
+        return Ok(());
+    };
+    apply_custom_ocio_dynamic_properties(identity.dynamic_properties(), |property_type| {
+        processor.dynamic_property(property_type).map_err(|err| err.to_string())
+    })
+}
+
+fn apply_engine_dynamic_properties_to_gpu_desc(
+    engine: &ColorEngine,
+    desc: &GpuShaderDesc,
+) -> Result<(), String> {
+    let Some(identity) = engine.custom_ocio_identity() else {
+        return Ok(());
+    };
+    apply_custom_ocio_dynamic_properties(identity.dynamic_properties(), |property_type| {
+        desc.try_dynamic_property(property_type)
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| "property is absent from the extracted GPU descriptor".to_owned())
+    })
+}
+
 // ── CPU transform helpers ──────────────────────────────────────────────────────
 
 fn ocio_cpu_processor_from_config(
@@ -3215,17 +3396,18 @@ impl OcioCpuProcessorSession {
         request: OcioCpuProcessorRequest,
         data: &mut [f32],
     ) -> Result<(), String> {
-        // ColorEngine is the complete canonical config identity, including a
-        // Custom OCIO digest. A processor baked for that key remains valid
-        // when another Sequence temporarily selects a different process-global
-        // config; only a miss needs to acquire/select the corresponding config.
+        // Dynamic-property payloads mutate the owner-thread CPUProcessor and do
+        // not alter the config or processor graph. Excluding them from this key
+        // preserves the expensive processor while still applying the current
+        // authored values immediately before every pixel invocation.
         let key = OcioCpuProcessorCacheKey {
-            engine: engine.clone(),
+            engine: engine.static_processor_identity(),
             revision: 0,
             request: request.clone(),
         };
         if let Some(processor) = self.cache.as_mut().and_then(|cache| cache.get(&key)) {
             self.hits = self.hits.saturating_add(1);
+            apply_engine_dynamic_properties_to_cpu(engine, processor)?;
             apply_cpu_processor_float(processor, data);
             return Ok(());
         }
@@ -3235,6 +3417,7 @@ impl OcioCpuProcessorSession {
         })?;
         self.misses = self.misses.saturating_add(1);
         let Some(cache) = &mut self.cache else {
+            apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
             apply_cpu_processor_float(&processor, data);
             return Ok(());
         };
@@ -3245,6 +3428,7 @@ impl OcioCpuProcessorSession {
         let processor = cache
             .get(&key)
             .ok_or_else(|| "OCIO CPU processor Session lost a selected processor".to_owned())?;
+        apply_engine_dynamic_properties_to_cpu(engine, processor)?;
         apply_cpu_processor_float(processor, data);
         Ok(())
     }
@@ -3258,6 +3442,7 @@ fn apply_uncached_cpu_processor(
     let processor = with_ocio_config_for_engine(engine, |config, _generation| {
         build_cpu_processor(config, &request)
     })?;
+    apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
     apply_cpu_processor_float(&processor, data);
     Ok(())
 }
@@ -3405,12 +3590,13 @@ pub fn extract_ocio_identity_gpu_shader_bundle(
 ) -> Result<OcioGpuShaderBundle, String> {
     validate_engine_working_identities(engine, &[src, dst])?;
     with_ocio_config_for_engine(engine, |config, _generation| {
-        extract_ocio_identity_gpu_shader_bundle_from_config(config, src, dst, language)
+        extract_ocio_identity_gpu_shader_bundle_from_config(config, engine, src, dst, language)
     })
 }
 
 fn extract_ocio_identity_gpu_shader_bundle_from_config(
     config: &Config,
+    engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
     language: GpuLanguage,
@@ -3432,6 +3618,7 @@ fn extract_ocio_identity_gpu_shader_bundle_from_config(
             ocio_color_space_identity_name(dst)
         )
     })?;
+    apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
     Ok(OcioGpuShaderBundle::for_color_space(
@@ -3456,13 +3643,14 @@ pub fn extract_ocio_display_identity_gpu_shader_bundle(
     validate_engine_working_identities(engine, &[src])?;
     with_ocio_config_for_engine(engine, |config, _generation| {
         extract_ocio_display_identity_gpu_shader_bundle_from_config(
-            config, src, display, view, language,
+            config, engine, src, display, view, language,
         )
     })
 }
 
 fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
     config: &Config,
+    engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
@@ -3483,6 +3671,7 @@ fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
             ocio_color_space_identity_name(src)
         )
     })?;
+    apply_engine_dynamic_properties_to_gpu_desc(engine, &desc)?;
     let shader_text = extracted_shader_text(&desc)?;
 
     Ok(OcioGpuShaderBundle::for_display(
@@ -5308,6 +5497,84 @@ colorspaces:
             })
             .expect("ACES revision"),
             0
+        );
+    }
+
+    #[test]
+    fn dynamic_exposure_override_updates_cpu_and_gpu_property_state() {
+        let Ok(config) = Config::raw() else {
+            return;
+        };
+        let Ok(transform) = ocio_rs::transform::ExposureContrastTransform::create() else {
+            return;
+        };
+        transform.set_style(ocio_rs::ExposureContrastStyle::Linear);
+        transform.set_exposure(0.0);
+        transform.set_contrast(1.0);
+        transform.set_gamma(1.0);
+        transform.make_exposure_dynamic();
+        let Ok(processor) =
+            config.processor_from_transform(&transform, TransformDirection::Forward)
+        else {
+            return;
+        };
+        let property = CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::Exposure,
+            CustomOcioDynamicPropertyValue::Scalar(1.0),
+        )
+        .expect("dynamic exposure identity");
+
+        let cpu = processor.default_cpu_processor().expect("dynamic CPU processor");
+        apply_custom_ocio_dynamic_properties(std::slice::from_ref(&property), |property_type| {
+            cpu.dynamic_property(property_type).map_err(|err| err.to_string())
+        })
+        .expect("apply CPU dynamic exposure");
+        let mut pixel = [0.25f32, 0.5, 0.125, 1.0];
+        cpu.apply_rgba(&mut pixel);
+        assert!((pixel[0] - 0.5).abs() < 1e-6, "pixel={pixel:?}");
+        assert!((pixel[1] - 1.0).abs() < 1e-6, "pixel={pixel:?}");
+        assert_eq!(pixel[3], 1.0);
+
+        let gpu = processor.default_gpu_processor().expect("dynamic GPU processor");
+        let mut desc =
+            configured_gpu_shader_desc(GpuLanguage::Glsl4_0).expect("configured GPU descriptor");
+        gpu.try_extract_shader_info(&mut desc).expect("extract GPU dynamic property");
+        apply_custom_ocio_dynamic_properties(&[property], |property_type| {
+            desc.try_dynamic_property(property_type)
+                .map_err(|err| err.to_string())?
+                .ok_or_else(|| "missing descriptor property".to_owned())
+        })
+        .expect("apply GPU dynamic exposure");
+        let gpu_exposure = desc
+            .try_dynamic_property(DynamicPropertyType::Exposure)
+            .expect("query GPU exposure")
+            .expect("GPU exposure property")
+            .double_value()
+            .expect("GPU exposure value");
+        assert!((gpu_exposure - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn dynamic_override_fails_closed_when_route_does_not_expose_property() {
+        let Ok(config) = Config::raw() else {
+            return;
+        };
+        let Ok(processor) = config.processor("raw", "raw") else {
+            return;
+        };
+        let cpu = processor.default_cpu_processor().expect("identity CPU processor");
+        let property = CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::Exposure,
+            CustomOcioDynamicPropertyValue::Scalar(1.0),
+        )
+        .expect("dynamic exposure identity");
+        let error = apply_custom_ocio_dynamic_properties(&[property], |property_type| {
+            cpu.dynamic_property(property_type).map_err(|err| err.to_string())
+        })
+        .expect_err("identity route must reject absent exposure property");
+        assert!(
+            error.contains("does not expose required dynamic property"),
+            "{error}"
         );
     }
 }

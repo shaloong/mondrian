@@ -2264,6 +2264,7 @@ fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
         crate::EffectRenderOp::ColorAdjust { .. } => "color_adjust",
         crate::EffectRenderOp::WhiteBalance { .. } => "white_balance",
         crate::EffectRenderOp::Primaries { .. } => "primaries",
+        crate::EffectRenderOp::HdrGrading { .. } => "hdr_grading",
         crate::EffectRenderOp::AscCdl { .. } => "asc_cdl",
         crate::EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         crate::EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",

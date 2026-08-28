@@ -114,6 +114,23 @@ retain alpha and extended Float32 RGB, validate all authored values before graph
 publication, require no scratch frame, and share one `EffectRenderOp` contract
 across Preview and Export.
 
+`builtin.hdr_grading` is the scene-linear HDR palette. It exposes three Global
+controls and five controls for each of Blacks, Dark, Shadows, Light,
+Highlights, and Specular: explicit center/width in stops relative to 18% grey,
+exposure, saturation, and working-space chroma balance. All 33 properties use
+definition-stable, typed, animatable schemas. Effect preparation validates the
+evaluated frame state and compiles the overlapping smooth zone windows into an
+immutable 512×2 RGBA32F table. CPU Float32 and GPU execution sample this exact
+table, use the same working-space CIE-Y coefficients, preserve straight Alpha,
+and do not clamp extended scene-linear RGB. The table fingerprint, retained
+bytes, graph signature, cost, temporal and heterogeneous diagnostics all belong
+to the ordinary compiled Effect graph; no Preview-, Export-, or UI-owned grade
+interpretation exists.
+
+Clip instantiation preserves definition-owned property groups. It only assigns
+the effect display name as a fallback group for older ungrouped properties,
+while HDR Global and zone groups survive path namespacing unchanged.
+
 Parameter cache impact describes whether a value changes output, selects a
 resource, or changes topology. Processor capabilities are not copied into every
 parameter: color/alpha domain, CPU/GPU implementation, determinism, temporal

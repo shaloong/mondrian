@@ -252,10 +252,27 @@ Mondrian `ColorSpace`, exact display/view, the resolved OCIO display color-space
 endpoint (including resolution of `<USE_DISPLAY_NAME>`), and effective look
 expression. The same target cannot appear twice and one display/view cannot
 claim multiple output labels. The identity also pins the sorted role map and an
-explicit dynamic-property override list. Current projects save no dynamic
-overrides and reject non-empty override lists until typed execution exists.
-Missing fields, semantic mismatches, config edits, role/view/endpoint changes,
-and external LUT changes fail closed during deserialization or config validation.
+explicit, canonical dynamic-property override list. Supported properties are
+OCIO Exposure, Contrast, Gamma, Grading Primary, Grading Tone, Grading RGB
+Curve, and Grading Hue Curve. Primary and Tone require their complete OCIO
+component sets; RGB curves require four families and Hue curves all eight
+families. Every curve contains 2..=4096 finite points with strictly increasing
+x. Duplicate, unknown, malformed, or route-unavailable properties fail closed
+during author validation or processor preparation. Missing fields, semantic
+mismatches, config edits, role/view/endpoint changes, and external LUT changes
+fail closed during deserialization or config validation.
+
+Dynamic payload values are author semantics but not static OCIO object
+identity. Config validation, CPU processor lookup, GPU shader/layout/pipeline,
+LUT textures, and bind-group identity use
+`ColorEngine::static_processor_identity()`; changing only a dynamic value does
+not reload the config or rebuild those objects. CPU execution applies the
+current values to the owner-thread processor before processing. GPU extraction
+applies them before reading OCIO's current uniform bytes; a warm backend-object
+hit repacks the current payload and performs `queue.write_buffer` only when its
+resident hash changed. Diagnostics distinguish uniform update, reuse, and
+failure. Frame/result identities continue to include the complete dynamic
+values, so static-object reuse cannot authorize stale pixels.
 
 > **Identity stability rule (completed for Standard and Custom at M2):** a persisted identity
 > may cover only contractual bytes — config text, assembly manifest, and

@@ -8,8 +8,9 @@
 //! pixel semantics.
 
 use mondrian_effects::{
-    CompiledEffectGpuPlan, EffectGpuPointOp, PreparedColorCurves, PreparedLut3D,
-    COLOR_CURVE_SAMPLE_COUNT, COLOR_CURVE_SAMPLE_ROWS,
+    CompiledEffectGpuPlan, EffectGpuPointOp, PreparedColorCurves, PreparedHdrGrading,
+    PreparedLut3D, COLOR_CURVE_SAMPLE_COUNT, COLOR_CURVE_SAMPLE_ROWS, HDR_GRADING_SAMPLE_COUNT,
+    HDR_GRADING_SAMPLE_ROWS,
 };
 use parking_lot::Mutex;
 use std::{
@@ -74,6 +75,12 @@ pub enum GpuCreativeLutError {
     /// A prepared plan binding omitted one active color-curve resource.
     #[error("prepared color-curve binding is missing fingerprint {fingerprint:02x?}")]
     PreparedCurveBindingMissing { fingerprint: [u8; 32] },
+    /// Two different HDR grading tables claimed the same semantic fingerprint.
+    #[error("different HDR grading tables share semantic fingerprint {fingerprint:02x?}")]
+    HdrGradingSemanticFingerprintCollision { fingerprint: [u8; 32] },
+    /// A prepared plan binding omitted one active HDR grading table.
+    #[error("prepared HDR grading binding is missing fingerprint {fingerprint:02x?}")]
+    PreparedHdrGradingBindingMissing { fingerprint: [u8; 32] },
     /// Packed texture dimensions exceed the active device contract.
     #[error(
         "creative LUT atlas {width}x{height}x{depth} exceeds max 3D texture dimension {maximum}"
@@ -96,6 +103,7 @@ pub enum GpuCreativeLutError {
 struct GpuCreativeLutSetIdentity {
     lut_fingerprints: Arc<[[u8; 32]]>,
     curve_fingerprints: Arc<[[u8; 32]]>,
+    hdr_grading_fingerprints: Arc<[[u8; 32]]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +114,12 @@ pub(crate) struct GpuCreativeLutLocation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GpuColorCurveLocation {
+    pub(crate) base_layer: u32,
+    pub(crate) sample_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GpuHdrGradingLocation {
     pub(crate) base_layer: u32,
     pub(crate) sample_count: u32,
 }
@@ -129,6 +143,13 @@ impl GpuCreativeLutPreparedBinding {
     ) -> Option<GpuColorCurveLocation> {
         self.resident.curve_locations.get(curves.semantic_fingerprint()).copied()
     }
+
+    pub(crate) fn hdr_grading_location(
+        &self,
+        grade: &PreparedHdrGrading,
+    ) -> Option<GpuHdrGradingLocation> {
+        self.resident.hdr_grading_locations.get(grade.semantic_fingerprint()).copied()
+    }
 }
 
 struct GpuCreativeLutResidentSet {
@@ -136,6 +157,7 @@ struct GpuCreativeLutResidentSet {
     bind_group: wgpu::BindGroup,
     locations: HashMap<[u8; 32], GpuCreativeLutLocation>,
     curve_locations: HashMap<[u8; 32], GpuColorCurveLocation>,
+    hdr_grading_locations: HashMap<[u8; 32], GpuHdrGradingLocation>,
     texture_bytes: usize,
 }
 
@@ -193,7 +215,8 @@ impl GpuCreativeLutRuntime {
     ) -> Result<GpuCreativeLutPreparedBinding, GpuCreativeLutError> {
         let luts = collect_active_luts(plan)?;
         let curves = collect_active_curves(plan)?;
-        if luts.is_empty() && curves.is_empty() {
+        let hdr_gradings = collect_active_hdr_gradings(plan)?;
+        if luts.is_empty() && curves.is_empty() && hdr_gradings.is_empty() {
             return Ok(GpuCreativeLutPreparedBinding { resident: Arc::clone(&self.dummy) });
         }
         let key = GpuCreativeLutSetIdentity {
@@ -205,6 +228,11 @@ impl GpuCreativeLutRuntime {
             curve_fingerprints: curves
                 .iter()
                 .map(|curve| *curve.semantic_fingerprint())
+                .collect::<Vec<_>>()
+                .into(),
+            hdr_grading_fingerprints: hdr_gradings
+                .iter()
+                .map(|grade| *grade.semantic_fingerprint())
                 .collect::<Vec<_>>()
                 .into(),
         };
@@ -221,6 +249,7 @@ impl GpuCreativeLutRuntime {
             &self.layout,
             &luts,
             &curves,
+            &hdr_gradings,
         )?);
         state.diagnostics.texture_uploads = state.diagnostics.texture_uploads.saturating_add(1);
         if self.config.max_entries == 0 || resident.texture_bytes > self.config.max_texture_bytes {
@@ -252,6 +281,28 @@ impl GpuCreativeLutRuntime {
     pub(crate) fn diagnostics(&self) -> GpuCreativeLutCacheDiagnostics {
         self.state.lock().diagnostics
     }
+}
+
+fn collect_active_hdr_gradings(
+    plan: Option<&CompiledEffectGpuPlan>,
+) -> Result<Vec<Arc<PreparedHdrGrading>>, GpuCreativeLutError> {
+    let mut unique = BTreeMap::<[u8; 32], Arc<PreparedHdrGrading>>::new();
+    for operation in plan.into_iter().flat_map(CompiledEffectGpuPlan::operations) {
+        let EffectGpuPointOp::HdrGrading { grade } = operation else {
+            continue;
+        };
+        let fingerprint = *grade.semantic_fingerprint();
+        if let Some(existing) = unique.get(&fingerprint) {
+            if existing.as_ref() != grade.as_ref() {
+                return Err(
+                    GpuCreativeLutError::HdrGradingSemanticFingerprintCollision { fingerprint },
+                );
+            }
+        } else {
+            unique.insert(fingerprint, Arc::clone(grade));
+        }
+    }
+    Ok(unique.into_values().collect())
 }
 
 fn collect_active_curves(
@@ -303,6 +354,7 @@ fn upload_resident_set(
     layout: &wgpu::BindGroupLayout,
     luts: &[Arc<PreparedLut3D>],
     curves: &[Arc<PreparedColorCurves>],
+    hdr_gradings: &[Arc<PreparedHdrGrading>],
 ) -> Result<GpuCreativeLutResidentSet, GpuCreativeLutError> {
     let curve_width = u32::try_from(COLOR_CURVE_SAMPLE_COUNT).map_err(|_| {
         GpuCreativeLutError::TextureExtentUnsupported {
@@ -316,12 +368,14 @@ fn upload_resident_set(
         .iter()
         .map(|lut| lut.size)
         .chain((!curves.is_empty()).then_some(curve_width))
+        .chain((!hdr_gradings.is_empty()).then_some(HDR_GRADING_SAMPLE_COUNT as u32))
         .max()
         .unwrap_or(1);
     let height = luts
         .iter()
         .map(|lut| lut.size)
         .chain((!curves.is_empty()).then_some(COLOR_CURVE_SAMPLE_ROWS as u32))
+        .chain((!hdr_gradings.is_empty()).then_some(HDR_GRADING_SAMPLE_ROWS as u32))
         .max()
         .unwrap_or(1);
     let depth = luts
@@ -330,6 +384,7 @@ fn upload_resident_set(
             total.checked_add(lut.size).ok_or(GpuCreativeLutError::TextureByteSizeOverflow)
         })?
         .checked_add(curves.len() as u32)
+        .and_then(|total| total.checked_add(hdr_gradings.len() as u32))
         .ok_or(GpuCreativeLutError::TextureByteSizeOverflow)?;
     let maximum = device.limits().max_texture_dimension_3d;
     if width > maximum || height > maximum || depth > maximum {
@@ -358,6 +413,7 @@ fn upload_resident_set(
     });
     let mut locations = HashMap::with_capacity(luts.len());
     let mut curve_locations = HashMap::with_capacity(curves.len());
+    let mut hdr_grading_locations = HashMap::with_capacity(hdr_gradings.len());
     let mut base_layer = 0_u32;
     for lut in luts {
         let (bytes, bytes_per_row) = pack_lut_slab(lut)?;
@@ -419,6 +475,37 @@ fn upload_resident_set(
         base_layer =
             base_layer.checked_add(1).ok_or(GpuCreativeLutError::TextureByteSizeOverflow)?;
     }
+    for grade in hdr_gradings {
+        let (bytes, bytes_per_row) = pack_hdr_grading_slab(grade)?;
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y: 0, z: base_layer },
+                aspect: wgpu::TextureAspect::All,
+            },
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(bytes_per_row),
+                rows_per_image: Some(HDR_GRADING_SAMPLE_ROWS as u32),
+            },
+            wgpu::Extent3d {
+                width: HDR_GRADING_SAMPLE_COUNT as u32,
+                height: HDR_GRADING_SAMPLE_ROWS as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+        hdr_grading_locations.insert(
+            *grade.semantic_fingerprint(),
+            GpuHdrGradingLocation {
+                base_layer,
+                sample_count: HDR_GRADING_SAMPLE_COUNT as u32,
+            },
+        );
+        base_layer =
+            base_layer.checked_add(1).ok_or(GpuCreativeLutError::TextureByteSizeOverflow)?;
+    }
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
         label: Some("mondrian.creative-lut.atlas-view"),
         dimension: Some(wgpu::TextureViewDimension::D3),
@@ -438,6 +525,7 @@ fn upload_resident_set(
         bind_group,
         locations,
         curve_locations,
+        hdr_grading_locations,
         texture_bytes,
     })
 }
@@ -475,8 +563,37 @@ fn create_dummy_resident_set(
         bind_group,
         locations: HashMap::new(),
         curve_locations: HashMap::new(),
+        hdr_grading_locations: HashMap::new(),
         texture_bytes: 0,
     }
+}
+
+fn pack_hdr_grading_slab(
+    grade: &PreparedHdrGrading,
+) -> Result<(Vec<u8>, u32), GpuCreativeLutError> {
+    let source_row_bytes = HDR_GRADING_SAMPLE_COUNT
+        .checked_mul(RGBA32F_TEXEL_BYTES)
+        .ok_or(GpuCreativeLutError::UploadLayoutOverflow)?;
+    let bytes_per_row = source_row_bytes
+        .div_ceil(COPY_BYTES_PER_ROW_ALIGNMENT)
+        .checked_mul(COPY_BYTES_PER_ROW_ALIGNMENT)
+        .ok_or(GpuCreativeLutError::UploadLayoutOverflow)?;
+    let mut bytes = vec![0_u8; bytes_per_row * HDR_GRADING_SAMPLE_ROWS];
+    for row in 0..HDR_GRADING_SAMPLE_ROWS {
+        for sample_index in 0..HDR_GRADING_SAMPLE_COUNT {
+            let source = grade.samples()[row * HDR_GRADING_SAMPLE_COUNT + sample_index];
+            let destination_texel = row * bytes_per_row + sample_index * RGBA32F_TEXEL_BYTES;
+            for (component, value) in source.iter().enumerate() {
+                let destination = destination_texel + component * size_of::<f32>();
+                bytes[destination..destination + size_of::<f32>()]
+                    .copy_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
+    Ok((
+        bytes,
+        u32::try_from(bytes_per_row).map_err(|_| GpuCreativeLutError::UploadLayoutOverflow)?,
+    ))
 }
 
 fn pack_curve_slab(curves: &PreparedColorCurves) -> Result<(Vec<u8>, u32), GpuCreativeLutError> {
@@ -549,7 +666,7 @@ mod tests {
     use super::*;
     use mondrian_effects::{
         compile_reference_render_graph, lower_effect_graph_to_gpu_plan, EffectGraphBuilderState,
-        EffectRenderOp, Lut3D,
+        EffectRenderOp, HdrGradingAuthoring, HdrGradingZone, Lut3D, PreparedHdrGrading,
     };
 
     #[test]
@@ -621,6 +738,60 @@ mod tests {
             .prepare_plan(&context.device, &context.queue, Some(&noop_plan))
             .expect("no-op LUT binding");
         assert_eq!(noop.location(&lut), None);
+
+        let diagnostics = runtime.diagnostics();
+        assert_eq!(diagnostics.cache_misses, 1);
+        assert_eq!(diagnostics.cache_hits, 1);
+        assert_eq!(diagnostics.texture_uploads, 1);
+        assert_eq!(diagnostics.resident_entries, 1);
+        assert!(diagnostics.resident_texture_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn device_residency_reuses_hdr_table_across_unrelated_animated_parameters() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping HDR grading residency test: no GPU adapter available");
+            return;
+        };
+        let mut authoring = HdrGradingAuthoring::default();
+        authoring.zones[HdrGradingZone::Specular as usize].exposure_stops = 0.75;
+        authoring.zones[HdrGradingZone::Specular as usize].saturation = 0.8;
+        let grade = Arc::new(
+            PreparedHdrGrading::new(authoring, mondrian_core::WorkingColorSpace::LinearRec2020)
+                .expect("valid HDR grade"),
+        );
+        let plan = |exposure| {
+            let mut builder = EffectGraphBuilderState::new();
+            builder.append_unary(EffectRenderOp::ColorAdjust {
+                exposure,
+                contrast: 1.0,
+                saturation: 1.0,
+                working_color_space: mondrian_core::WorkingColorSpace::LinearRec2020,
+            });
+            builder.append_unary(EffectRenderOp::HdrGrading { grade: Arc::clone(&grade) });
+            let graph = compile_reference_render_graph(builder.finish()).expect("HDR grade graph");
+            lower_effect_graph_to_gpu_plan(&graph).expect("GPU HDR grade plan")
+        };
+        let first_plan = plan(0.1);
+        let second_plan = plan(0.4);
+        let runtime = GpuCreativeLutRuntime::new(
+            &context.device,
+            GpuCreativeLutCacheConfig { max_entries: 2, max_texture_bytes: 1024 * 1024 },
+        );
+
+        let first = runtime
+            .prepare_plan(&context.device, &context.queue, Some(&first_plan))
+            .expect("first HDR table binding");
+        let location = first.hdr_grading_location(&grade).expect("HDR table location");
+        assert_eq!(location.base_layer, 0);
+        assert_eq!(
+            location.sample_count,
+            mondrian_effects::HDR_GRADING_SAMPLE_COUNT as u32
+        );
+        let second = runtime
+            .prepare_plan(&context.device, &context.queue, Some(&second_plan))
+            .expect("reused HDR table binding");
+        assert_eq!(second.hdr_grading_location(&grade), Some(location));
 
         let diagnostics = runtime.diagnostics();
         assert_eq!(diagnostics.cache_misses, 1);

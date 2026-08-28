@@ -4382,6 +4382,80 @@ fn inspector_exposes_gamut_compression_and_highlight_recovery_schema() {
 }
 
 #[test]
+fn inspector_exposes_grouped_typed_hdr_grading_and_supports_undo() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("hdr-grading-inspector");
+    let tb = sequence.time_base();
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+    let clip_id = clip.id;
+    let track_id = sequence.video_tracks[0].id;
+    sequence.video_tracks[0].add_clip(clip).expect("add clip");
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips.push(selection);
+
+    state
+        .dispatch_action(visual_effect_add_to_clip_action(
+            VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::HdrGrading },
+        ))
+        .expect("add HDR grading effect");
+
+    let models = AppUiPanelModels::from_app_state(&state);
+    let hdr = &models.inspector.effects[0];
+    assert_eq!(hdr.label, "HDR Grading");
+    assert_eq!(hdr.properties.len(), 33);
+    let groups = hdr
+        .properties
+        .iter()
+        .filter_map(|property| property.group_name.as_deref())
+        .fold(Vec::<&str>::new(), |mut groups, group| {
+            if groups.last().copied() != Some(group) {
+                groups.push(group);
+            }
+            groups
+        });
+    assert_eq!(
+        groups,
+        [
+            "HDR · Global",
+            "HDR · Blacks",
+            "HDR · Dark",
+            "HDR · Shadows",
+            "HDR · Light",
+            "HDR · Highlights",
+            "HDR · Specular",
+        ]
+    );
+    assert!(hdr.properties.iter().all(|property| property.is_animatable));
+    assert!(matches!(hdr.properties[2].value, PropertyValue::Vec3(_)));
+
+    let exposure = &hdr.properties[0];
+    let effect_id = hdr.effect_id;
+    let action = inspector_effect_property_action(
+        Some(selection),
+        effect_id,
+        exposure.address.clone(),
+        PropertyValue::Float(1.5),
+    )
+    .expect("typed HDR exposure action");
+    state.dispatch_action(action).expect("edit HDR exposure");
+    let edited = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(
+        edited.inspector.effects[0].properties[0].value,
+        PropertyValue::Float(1.5)
+    );
+
+    state
+        .dispatch_action(mondrian_editor_state::Action::Undo)
+        .expect("undo HDR exposure edit");
+    let undone = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(
+        undone.inspector.effects[0].properties[0].value,
+        PropertyValue::Float(0.0)
+    );
+}
+
+#[test]
 fn node_graph_model_falls_back_to_source_after_selected_effect_removal() {
     let mut state = AppState::new();
     let mut sequence = Sequence::new("edit");
@@ -4533,6 +4607,7 @@ fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity
         address: parameter.clone(),
         path: path.clone(),
         label: "Samples".to_owned(),
+        group_name: None,
         value: PropertyValue::QualifierSamples(samples.clone()),
         min: None,
         max: None,
@@ -4620,6 +4695,7 @@ fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
         address: test_parameter_address("mondrian.test.curves.master"),
         path: "curves.master".to_string(),
         label: "Master".to_string(),
+        group_name: None,
         value: PropertyValue::Curve(NormalizedCurve::identity()),
         min: None,
         max: None,
@@ -4699,6 +4775,7 @@ fn inspector_effect_vec3_property_widget_dispatches_component_change() {
         address: test_parameter_address("mondrian.test.lighting_direction"),
         path: "lighting.direction".to_string(),
         label: "Direction".to_string(),
+        group_name: None,
         value: PropertyValue::Vec3(glam::Vec3::new(0.1, 0.2, 0.3)),
         min: Some(0.0),
         max: Some(1.0),
@@ -4779,6 +4856,7 @@ fn inspector_effect_float_property_number_input_honors_descriptor_step() {
         address: test_parameter_address("mondrian.test.color_exposure"),
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
+        group_name: None,
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
@@ -4864,6 +4942,7 @@ fn inspector_disabled_effect_property_row_remains_editable_for_unlocked_clip() {
         address: test_parameter_address("mondrian.test.blur_radius"),
         path: "blur.radius".to_string(),
         label: "Radius".to_string(),
+        group_name: None,
         value: PropertyValue::Float(0.2),
         min: Some(0.0),
         max: Some(1.0),
@@ -4954,6 +5033,7 @@ fn inspector_effect_float_property_keyboard_nudge_sanitizes_descriptor_bounds() 
         address: test_parameter_address("mondrian.test.color_exposure"),
         path: "color.exposure".to_string(),
         label: "Exposure".to_string(),
+        group_name: None,
         value: PropertyValue::Float(0.2),
         min: Some(f64::NAN),
         max: Some(f64::INFINITY),
@@ -5036,6 +5116,7 @@ fn inspector_effect_int_property_number_input_defaults_to_unit_step() {
         address: test_parameter_address("mondrian.test.level_iterations"),
         path: "levels.iterations".to_string(),
         label: "Iterations".to_string(),
+        group_name: None,
         value: PropertyValue::Int(10),
         min: Some(0.0),
         max: Some(1000.0),

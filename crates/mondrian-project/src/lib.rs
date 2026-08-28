@@ -2472,16 +2472,17 @@ mod tests {
     }
 
     #[test]
-    fn gamut_and_highlight_effect_schema_round_trips_through_project_archive() {
-        let root = unique_temp_dir("gamut-highlight-round-trip");
+    fn advanced_color_effect_schema_round_trips_through_project_archive() {
+        let root = unique_temp_dir("advanced-color-round-trip");
         let db_path = root.join("index.db");
         fs::write(&db_path, b"sqlite placeholder").expect("write db");
-        let project_path = root.join("gamut-highlight.mdp");
+        let project_path = root.join("advanced-color.mdp");
         let mut document = test_document();
 
         let authored = [
             (EffectType::GamutCompression, "amount", 0.72),
             (EffectType::HighlightRecovery, "strength", 0.63),
+            (EffectType::HdrGrading, "global_exposure", 1.25),
         ];
         let mut clip = Clip::new(
             AssetId::new(),

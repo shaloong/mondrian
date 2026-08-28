@@ -34,6 +34,10 @@ pub enum EffectGpuPointOp {
     WhiteBalance { grade: crate::WhiteBalanceGrade },
     /// Lift/Gamma/Gain/Offset primary correction.
     Primaries { grade: crate::PrimariesGrade },
+    /// Sampled six-zone scene-linear HDR correction.
+    HdrGrading {
+        grade: Arc<crate::PreparedHdrGrading>,
+    },
     /// ASC CDL v1.2 no-clamp correction.
     AscCdl { grade: crate::AscCdlGrade },
     /// ACES 1.3 Reference Gamut Compression.
@@ -673,6 +677,7 @@ fn gpu_plan_cache_entry_bytes(
             .saturating_add(plan.operations.iter().fold(0_usize, |total, operation| {
                 let retained = match operation {
                     EffectGpuPointOp::Lut3D { lut, .. } => lut.retained_bytes_estimate(),
+                    EffectGpuPointOp::HdrGrading { grade } => grade.retained_bytes_estimate(),
                     _ => 0,
                 };
                 total.saturating_add(retained)
@@ -705,6 +710,9 @@ fn lower_point_op(
             Ok(EffectGpuPointOp::WhiteBalance { grade: *grade })
         }
         EffectRenderOp::Primaries { grade } => Ok(EffectGpuPointOp::Primaries { grade: *grade }),
+        EffectRenderOp::HdrGrading { grade } => {
+            Ok(EffectGpuPointOp::HdrGrading { grade: Arc::clone(grade) })
+        }
         EffectRenderOp::AscCdl { grade } => Ok(EffectGpuPointOp::AscCdl { grade: *grade }),
         EffectRenderOp::GamutCompression { grade } => {
             Ok(EffectGpuPointOp::GamutCompression { grade: *grade })
@@ -754,6 +762,7 @@ fn operation_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
         EffectRenderOp::WhiteBalance { .. } => "white_balance",
         EffectRenderOp::Primaries { .. } => "primaries",
+        EffectRenderOp::HdrGrading { .. } => "hdr_grading",
         EffectRenderOp::AscCdl { .. } => "asc_cdl",
         EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",

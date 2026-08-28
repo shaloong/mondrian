@@ -542,6 +542,10 @@ pub enum EffectRenderOp {
     Primaries {
         grade: crate::PrimariesGrade,
     },
+    /// Sampled six-zone scene-linear HDR correction.
+    HdrGrading {
+        grade: Arc<crate::PreparedHdrGrading>,
+    },
     /// ASC CDL v1.2 no-clamp SOP/Saturation correction.
     AscCdl {
         grade: crate::AscCdlGrade,
@@ -649,6 +653,10 @@ impl std::fmt::Debug for EffectRenderOp {
             Self::Primaries { grade } => {
                 formatter.debug_struct("Primaries").field("grade", grade).finish()
             }
+            Self::HdrGrading { grade } => formatter
+                .debug_struct("HdrGrading")
+                .field("semantic_fingerprint", grade.semantic_fingerprint())
+                .finish(),
             Self::AscCdl { grade } => {
                 formatter.debug_struct("AscCdl").field("grade", grade).finish()
             }
@@ -854,6 +862,10 @@ impl EffectRenderOp {
                     value.to_bits().hash(state);
                 }
             }
+            EffectRenderOp::HdrGrading { grade } => {
+                18u8.hash(state);
+                grade.semantic_fingerprint().hash(state);
+            }
             EffectRenderOp::AscCdl { grade } => {
                 12u8.hash(state);
                 for value in grade
@@ -970,6 +982,7 @@ impl EffectRenderOp {
             | EffectRenderOp::AscCdl { .. }
             | EffectRenderOp::GamutCompression { .. }
             | EffectRenderOp::HighlightRecovery { .. } => 1,
+            EffectRenderOp::HdrGrading { .. } => 2,
             EffectRenderOp::ColorCurves { .. } => 3,
             EffectRenderOp::Qualifier { qualifier } => {
                 4 + qualifier.denoise_radius() + qualifier.input_halo()
@@ -1360,12 +1373,13 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 18] {
+fn builtin_effect_types() -> [EffectType; 19] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
         EffectType::Lut3D,
         EffectType::ColorWheel,
+        EffectType::HdrGrading,
         EffectType::AscCdl,
         EffectType::Curves,
         EffectType::GamutCompression,
@@ -1748,6 +1762,75 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 Some(4.0),
                 Some(0.01),
             );
+        }
+        EffectType::HdrGrading => {
+            for (parameter, label, value, minimum, maximum, step) in [
+                ("global_exposure", "曝光", 0.0, -8.0, 8.0, 0.01),
+                ("global_saturation", "饱和度", 1.0, 0.0, 4.0, 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "HDR · Global",
+                    label,
+                    PropertyValue::Float(value),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "global_balance",
+                "HDR · Global",
+                "色彩平衡",
+                PropertyValue::Vec3(glam::Vec3::ZERO),
+                Some(-1.0),
+                Some(1.0),
+                Some(0.001),
+            );
+            for zone in crate::HdrGradingZone::ALL {
+                let prefix = zone.parameter_prefix();
+                let group = format!("HDR · {}", hdr_zone_display_name(zone));
+                for (suffix, label, value, minimum, maximum, step) in [
+                    (
+                        "center",
+                        "中心",
+                        zone.default_center_stops(),
+                        -16.0,
+                        16.0,
+                        0.1,
+                    ),
+                    ("width", "范围", zone.default_width_stops(), 0.25, 12.0, 0.1),
+                    ("exposure", "曝光", 0.0, -8.0, 8.0, 0.01),
+                    ("saturation", "饱和度", 1.0, 0.0, 4.0, 0.01),
+                ] {
+                    define_builtin_property(
+                        &mut properties,
+                        &effect_type,
+                        &format!("{prefix}_{suffix}"),
+                        &group,
+                        label,
+                        PropertyValue::Float(value),
+                        Some(minimum),
+                        Some(maximum),
+                        Some(step),
+                    );
+                }
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    &format!("{prefix}_balance"),
+                    &group,
+                    "色彩平衡",
+                    PropertyValue::Vec3(glam::Vec3::ZERO),
+                    Some(-1.0),
+                    Some(1.0),
+                    Some(0.001),
+                );
+            }
         }
         EffectType::AscCdl => {
             for (parameter, label, default, min, max) in [
@@ -2302,6 +2385,14 @@ fn lut_processing_domain(key: &str) -> Option<EffectColorDomain> {
 fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> ParameterUnit {
     match (effect_type, parameter) {
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
+        (EffectType::HdrGrading, parameter)
+            if parameter == "global_exposure"
+                || parameter.ends_with("_center")
+                || parameter.ends_with("_width")
+                || parameter.ends_with("_exposure") =>
+        {
+            ParameterUnit::Stops
+        }
         (EffectType::HueSaturationLightness, "hue") => ParameterUnit::Degrees,
         (EffectType::Qualifier, "hue_center" | "hue_width" | "hue_softness") => {
             ParameterUnit::Degrees
@@ -2327,6 +2418,7 @@ fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
         EffectType::BasicCorrection
         | EffectType::WhiteBalance
         | EffectType::ColorWheel
+        | EffectType::HdrGrading
         | EffectType::AscCdl
         | EffectType::Curves
         | EffectType::GamutCompression
@@ -2386,6 +2478,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         EffectType::BasicCorrection
         | EffectType::WhiteBalance
         | EffectType::ColorWheel
+        | EffectType::HdrGrading
         | EffectType::AscCdl
         | EffectType::Curves
         | EffectType::GamutCompression
@@ -2586,6 +2679,72 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                     })?;
                 if !grade.is_identity() {
                     graph.append_unary(EffectRenderOp::Primaries { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::HdrGrading => {
+            let global_exposure_id = builtin_parameter_id(effect_type, "global_exposure");
+            let global_saturation_id = builtin_parameter_id(effect_type, "global_saturation");
+            let global_balance_id = builtin_parameter_id(effect_type, "global_balance");
+            let zone_ids = crate::HdrGradingZone::ALL.map(|zone| {
+                let prefix = zone.parameter_prefix();
+                [
+                    builtin_parameter_id(effect_type, &format!("{prefix}_center")),
+                    builtin_parameter_id(effect_type, &format!("{prefix}_width")),
+                    builtin_parameter_id(effect_type, &format!("{prefix}_exposure")),
+                    builtin_parameter_id(effect_type, &format!("{prefix}_saturation")),
+                    builtin_parameter_id(effect_type, &format!("{prefix}_balance")),
+                ]
+            });
+            Some(Arc::new(move |effect, context, graph| {
+                let zones = std::array::from_fn(|index| {
+                    let zone = crate::HdrGradingZone::ALL[index];
+                    let ids = &zone_ids[index];
+                    crate::HdrZoneControl {
+                        center_stops: effect.evaluate_f32_parameter(
+                            &ids[0],
+                            context.time,
+                            zone.default_center_stops(),
+                        ),
+                        width_stops: effect.evaluate_f32_parameter(
+                            &ids[1],
+                            context.time,
+                            zone.default_width_stops(),
+                        ),
+                        exposure_stops: effect.evaluate_f32_parameter(&ids[2], context.time, 0.0),
+                        saturation: effect.evaluate_f32_parameter(&ids[3], context.time, 1.0),
+                        balance: effect
+                            .evaluate_vec3_parameter(&ids[4], context.time, glam::Vec3::ZERO)
+                            .to_array(),
+                    }
+                });
+                let authoring = crate::HdrGradingAuthoring {
+                    global_exposure_stops: effect.evaluate_f32_parameter(
+                        &global_exposure_id,
+                        context.time,
+                        0.0,
+                    ),
+                    global_saturation: effect.evaluate_f32_parameter(
+                        &global_saturation_id,
+                        context.time,
+                        1.0,
+                    ),
+                    global_balance: effect
+                        .evaluate_vec3_parameter(&global_balance_id, context.time, glam::Vec3::ZERO)
+                        .to_array(),
+                    zones,
+                };
+                let grade = Arc::new(
+                    crate::PreparedHdrGrading::new(authoring, context.working_color_space)
+                        .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: error.to_string(),
+                        })?,
+                );
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::HdrGrading { grade });
                 }
                 Ok(())
             }))
@@ -2949,6 +3108,7 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::WhiteBalance => "白平衡",
         EffectType::Lut3D => "LUT",
         EffectType::ColorWheel => "Primaries",
+        EffectType::HdrGrading => "HDR Grading",
         EffectType::AscCdl => "ASC CDL",
         EffectType::Curves => "曲线",
         EffectType::GamutCompression => "色域压缩",
@@ -2964,6 +3124,17 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::ChromaKey => "色度抠像",
         EffectType::LumaKey => "亮度键",
         EffectType::Plugin(_) => "插件特效",
+    }
+}
+
+fn hdr_zone_display_name(zone: crate::HdrGradingZone) -> &'static str {
+    match zone {
+        crate::HdrGradingZone::Blacks => "Blacks",
+        crate::HdrGradingZone::Dark => "Dark",
+        crate::HdrGradingZone::Shadows => "Shadows",
+        crate::HdrGradingZone::Light => "Light",
+        crate::HdrGradingZone::Highlights => "Highlights",
+        crate::HdrGradingZone::Specular => "Specular",
     }
 }
 
@@ -3167,6 +3338,7 @@ mod tests {
             EffectType::ColorWheel,
             EffectType::AscCdl,
             EffectType::Curves,
+            EffectType::HdrGrading,
             EffectType::GamutCompression,
             EffectType::HighlightRecovery,
             EffectType::Qualifier,

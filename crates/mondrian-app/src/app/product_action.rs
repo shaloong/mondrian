@@ -3211,6 +3211,9 @@ mod tests {
                     effect_type: EffectType::HighlightRecovery,
                 },
             )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::HdrGrading },
+            )),
             ProductAction::VisualEffect(VisualEffectProductAction::Select(
                 VisualEffectTargetPayload { clip_id, effect_id },
             )),

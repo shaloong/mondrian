@@ -1859,6 +1859,8 @@ pub struct InspectorEffectPropertyModel {
     pub path: String,
     /// Human-readable property name from the descriptor.
     pub label: String,
+    /// Definition-owned Inspector group; adjacent equal values form one visual subgroup.
+    pub group_name: Option<String>,
     /// The evaluated value at the current playback time.
     pub value: PropertyValue,
     /// UI min/max bounds extracted from the descriptor.
@@ -1886,6 +1888,7 @@ fn inspector_property_model(
         },
         path: path.to_owned(),
         label: property.descriptor.display_name.clone(),
+        group_name: property.descriptor.ui_metadata.group_name.clone(),
         value: property.evaluate(author_time),
         min: numeric.map(|contract| contract.soft_range.min),
         max: numeric.map(|contract| contract.soft_range.max),

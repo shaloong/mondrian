@@ -13,6 +13,7 @@ mod execution_session;
 pub mod gamut_mapping;
 pub mod gpu_plan;
 pub mod graph;
+pub mod hdr_grading;
 pub mod heterogeneous_execution;
 pub mod lut;
 pub mod mask;
@@ -88,6 +89,11 @@ pub use graph::{
     EffectDomainBlockerKind, EffectDomainTransition, EffectGraphBuilderState, EffectGraphNode,
     EffectGraphNodeId, EffectGraphNodeKind, EffectGraphValue, EffectRenderGraph,
     PreparedEffectGraphTopology,
+};
+pub use hdr_grading::{
+    HdrGradingAuthoring, HdrGradingError, HdrGradingZone, HdrZoneControl, PreparedHdrGrading,
+    HDR_GRADING_MAX_STOPS, HDR_GRADING_MIN_STOPS, HDR_GRADING_SAMPLE_COUNT,
+    HDR_GRADING_SAMPLE_ROWS, HDR_GRADING_ZONE_COUNT,
 };
 pub use heterogeneous_execution::{
     plan_effect_graph_value_execution, CompiledEffectValueExecutionPlan, EffectCompletionToken,

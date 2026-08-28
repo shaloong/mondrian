@@ -19,6 +19,7 @@ pub enum EffectType {
     WhiteBalance,
     Lut3D,
     ColorWheel,
+    HdrGrading,
     AscCdl,
     Curves,
     GamutCompression,
@@ -43,6 +44,7 @@ impl EffectType {
             Self::WhiteBalance => "builtin.white_balance".to_string(),
             Self::Lut3D => "builtin.lut_3d".to_string(),
             Self::ColorWheel => "builtin.color_wheel".to_string(),
+            Self::HdrGrading => "builtin.hdr_grading".to_string(),
             Self::AscCdl => "builtin.asc_cdl".to_string(),
             Self::Curves => "builtin.curves".to_string(),
             Self::GamutCompression => "builtin.gamut_compression".to_string(),
@@ -67,6 +69,7 @@ impl EffectType {
             "builtin.white_balance" => Self::WhiteBalance,
             "builtin.lut_3d" => Self::Lut3D,
             "builtin.color_wheel" => Self::ColorWheel,
+            "builtin.hdr_grading" => Self::HdrGrading,
             "builtin.asc_cdl" => Self::AscCdl,
             "builtin.curves" => Self::Curves,
             "builtin.gamut_compression" => Self::GamutCompression,
@@ -91,6 +94,7 @@ impl EffectType {
             Self::WhiteBalance => "白平衡",
             Self::Lut3D => "3D LUT",
             Self::ColorWheel => "Primaries",
+            Self::HdrGrading => "HDR Grading",
             Self::AscCdl => "ASC CDL",
             Self::Curves => "曲线",
             Self::GamutCompression => "色域压缩",
@@ -115,6 +119,7 @@ impl EffectType {
             | Self::WhiteBalance
             | Self::Lut3D
             | Self::ColorWheel
+            | Self::HdrGrading
             | Self::AscCdl
             | Self::Curves
             | Self::GamutCompression
@@ -134,6 +139,7 @@ impl EffectType {
             Self::WhiteBalance => "white_balance".to_string(),
             Self::Lut3D => "lut_3d".to_string(),
             Self::ColorWheel => "color_wheel".to_string(),
+            Self::HdrGrading => "hdr_grading".to_string(),
             Self::AscCdl => "asc_cdl".to_string(),
             Self::Curves => "curves".to_string(),
             Self::GamutCompression => "gamut_compression".to_string(),
@@ -282,16 +288,23 @@ impl EffectNode {
     }
 
     /// Namespace all property paths with an effect instance prefix.
+    ///
+    /// Definition-owned Inspector groups are preserved. `fallback_group_name`
+    /// is assigned only to older properties that do not define a group.
     /// Called when an effect is placed on a clip to avoid path collisions.
     ///
     /// Not idempotent: calling twice double-prefixes property paths.
     /// Callers must ensure this is called exactly once per clip placement.
-    pub fn instantiate_for_clip(&mut self, group_name: String) {
+    pub fn instantiate_for_clip(&mut self, fallback_group_name: String) {
         let mut namespaced = PropertyBag::default();
         for (_, property) in self.properties.iter() {
             let mut property = property.clone();
             property.descriptor.path = namespaced_effect_path(self.id, &property.descriptor.path);
-            property.descriptor.ui_metadata.group_name = Some(group_name.clone());
+            property
+                .descriptor
+                .ui_metadata
+                .group_name
+                .get_or_insert_with(|| fallback_group_name.clone());
             namespaced.upsert(property);
         }
         self.properties = namespaced;
@@ -411,6 +424,7 @@ impl crate::AuthoringFootprint for EffectType {
             | Self::WhiteBalance
             | Self::Lut3D
             | Self::ColorWheel
+            | Self::HdrGrading
             | Self::AscCdl
             | Self::Curves
             | Self::GamutCompression
@@ -504,5 +518,32 @@ mod tests {
 
         assert_eq!(reopened, effect);
         assert_eq!(reopened.effect_type.key(), "builtin.crop");
+    }
+
+    #[test]
+    fn clip_instantiation_preserves_definition_owned_property_groups() {
+        let mut effect = EffectNode::new(EffectType::HdrGrading);
+        let mut grouped = PropertyDescriptor::new(
+            EffectType::HdrGrading.property_path("global_exposure"),
+            "Exposure",
+            PropertyValue::Float(0.0),
+        );
+        grouped.ui_metadata.group_name = Some("HDR · Global".to_owned());
+        effect.define_property(grouped);
+        effect.define_property(PropertyDescriptor::new(
+            EffectType::HdrGrading.property_path("legacy"),
+            "Legacy",
+            PropertyValue::Float(0.0),
+        ));
+
+        effect.instantiate_for_clip("HDR Grading".to_owned());
+
+        let groups = effect
+            .properties
+            .iter()
+            .map(|(_, property)| property.descriptor.ui_metadata.group_name.as_deref())
+            .collect::<Vec<_>>();
+        assert!(groups.contains(&Some("HDR · Global")));
+        assert!(groups.contains(&Some("HDR Grading")));
     }
 }

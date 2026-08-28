@@ -1268,7 +1268,7 @@ materialize a CPU frame or schedule GPU readback; readback is reserved for an
 explicit presentation, debug, or encoder boundary.
 The point-grade subset includes ColorAdjust, creative LUT, working-space
 Bradford White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color Curves,
-Vignette, deterministic Grain, and Crop. Effects owns validation and mathematical compilation; Renderer owns the
+HDR Grading, Vignette, deterministic Grain, and Crop. Effects owns validation and mathematical compilation; Renderer owns the
 bounded sixteen-operation uniform/WGSL execution. CPU Float32 and real-wgpu
 readback parity are gated at a `3e-5` maximum per-channel budget, including HDR
 values above one and the complete ordered primary-grade chain.
@@ -1278,6 +1278,13 @@ creative LUTs instead of copying samples into every point-operation uniform.
 The CPU and WGSL paths share master/channel ordering, working-space luminance,
 secondary HSV math, neutral-secondary bypass, and unbounded RGB endpoint
 extrapolation.
+HDR Grading compiles Global plus six scene-linear luminance zones to one
+512×2 RGBA32F table. Renderer stores it in the same bounded grade-resource
+atlas family as creative LUT/curve resources and keys residency by the complete
+prepared semantic fingerprint. Unrelated animated point parameters therefore
+reuse the resident HDR table; diagnostics prove one upload, exact sample count,
+cache hits, evictions, and retained bytes. Its WGSL and CPU paths share the
+log2-relative-to-18%-grey sampling coordinate and interpolation rule.
 Creative LUT diagnostics separately prove immutable texture uploads, warm
 cache hits, evictions, oversized one-shot execution, and current resident GPU
 bytes. They are projected through Viewer product JSONL and headless performance
@@ -1380,6 +1387,15 @@ submitted to wgpu and validates row/length metadata; a caller-supplied or stale
 compact hash can never stand in for payload identity. Bind and record seams
 compare the full identities, so even an intentionally forced compact-key
 collision cannot authorize cross-contract reuse.
+Custom OCIO dynamic values are intentionally excluded from static backend
+object identities while remaining present in the extraction request and output
+semantics. On a backend-object cache hit, Renderer repacks the currently
+extracted uniform payload, compares its full resident payload hash, and writes
+only a changed buffer. Shader modules, LUTs, bind groups, pipeline layout,
+render pipeline, and pass node remain resident. `uniform_updates`,
+`uniform_reuses`, and `uniform_failures` expose that distinction; a reused
+static pipeline with a stale uniform payload is never reported as a successful
+record.
 For native GPU OCIO execution, `RenderGpuColorPassSchedule` is the bridge
 between the stage plan and backend recorder: it requires GPU-resident source and
 target frame handles, a blocker-free `RenderColorTransformGpuPlan`, and a

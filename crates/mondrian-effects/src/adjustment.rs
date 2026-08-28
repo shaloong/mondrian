@@ -164,6 +164,9 @@ pub(crate) fn apply_render_op(
         EffectRenderOp::Primaries { grade } => {
             apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
         }
+        EffectRenderOp::HdrGrading { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
         EffectRenderOp::AscCdl { grade } => {
             apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
         }
@@ -311,6 +314,7 @@ pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
         EffectRenderOp::ColorAdjust { .. }
         | EffectRenderOp::WhiteBalance { .. }
         | EffectRenderOp::Primaries { .. }
+        | EffectRenderOp::HdrGrading { .. }
         | EffectRenderOp::AscCdl { .. }
         | EffectRenderOp::GamutCompression { .. }
         | EffectRenderOp::HighlightRecovery { .. }
@@ -461,6 +465,10 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
             Ok(true)
         }
         EffectRenderOp::Primaries { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::HdrGrading { grade } => {
             apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
             Ok(true)
         }

@@ -101,6 +101,21 @@ definition-stable ParameterId, and values; working/AP1 matrices, luminance
 coefficients, compiled grades, GPU uniforms, and shader programs are rebuilt
 from the validated Sequence working-space context.
 
+HDR Grading persists only `builtin.hdr_grading`, its 33 stable Parameter
+Schemas, typed property values, and automation. Archive save/reopen preserves
+EffectId, owner-local AnimationTrackId, definition-stable ParameterId, values,
+and the definition-owned Global/six-zone Inspector groups. Zone sample tables,
+working-space luminance coefficients, semantic fingerprints, GPU atlas slots,
+and uniforms are derived execution state and never enter `project.json`.
+
+Custom OCIO dynamic properties remain part of the persisted global
+`ProjectColorEnvironment`, not Sequence or monitor preference state. Their
+legacy-compatible `property`/`value` representation is accepted only after
+strict typed canonicalization, unique-kind ordering, complete OCIO component
+counts, and curve validation. Static processor identity is a derived runtime
+projection that removes the changing payload; it is never persisted in place
+of the complete author identity.
+
 Clip Mask author state follows the same persistence boundary. `.mdp`
 save/reopen retains the ordered masks, stable `MaskId`, shape-animation
 `KeyframeId`, exact `TimelineTime`, Rectangle/Ellipse geometry, every Bezier

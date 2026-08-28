@@ -324,6 +324,7 @@ fn render_op_retained_bytes_estimate(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::Lut3D { lut, .. } => lut.retained_bytes_estimate(),
         EffectRenderOp::Qualifier { qualifier } => qualifier.retained_bytes_estimate(),
+        EffectRenderOp::HdrGrading { grade } => grade.retained_bytes_estimate(),
         EffectRenderOp::Custom { key, params, cache_key, processor, .. } => {
             let params_bytes = serde_json::to_vec(params).map_or(512, |bytes| bytes.len().max(512));
             std::mem::size_of::<EffectRenderOp>()
@@ -1487,6 +1488,7 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
         EffectRenderOp::ColorAdjust { .. }
         | EffectRenderOp::WhiteBalance { .. }
         | EffectRenderOp::Primaries { .. }
+        | EffectRenderOp::HdrGrading { .. }
         | EffectRenderOp::AscCdl { .. }
         | EffectRenderOp::GamutCompression { .. }
         | EffectRenderOp::HighlightRecovery { .. }

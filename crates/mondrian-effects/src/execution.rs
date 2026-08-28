@@ -1532,6 +1532,7 @@ fn effect_render_op_name(op: &EffectRenderOp) -> &'static str {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
         EffectRenderOp::WhiteBalance { .. } => "white_balance",
         EffectRenderOp::Primaries { .. } => "primaries",
+        EffectRenderOp::HdrGrading { .. } => "hdr_grading",
         EffectRenderOp::AscCdl { .. } => "asc_cdl",
         EffectRenderOp::GamutCompression { .. } => "gamut_compression",
         EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",

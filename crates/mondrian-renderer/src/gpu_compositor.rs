@@ -814,6 +814,29 @@ fn aces_gamut_compress(rgb: vec3<f32>) -> vec3<f32> {
     );
 }
 
+fn apply_hdr_grading(effect: EffectUniform, rgb: vec3<f32>) -> vec3<f32> {
+    let luminance = max(dot(rgb, effect.params.xyz), 1.0e-12);
+    let stops = log2(luminance / 0.18);
+    let normalized = clamp((stops + 12.0) / 24.0, 0.0, 1.0);
+    let maximum_index = max(effect.header.z, 1u) - 1u;
+    let coordinate = normalized * f32(maximum_index);
+    let lower = u32(floor(coordinate));
+    let upper = min(lower + 1u, maximum_index);
+    let fraction = coordinate - f32(lower);
+    let base_layer = i32(effect.header.y);
+    let lower0 = textureLoad(creative_lut_tex, vec3<i32>(i32(lower), 0, base_layer), 0);
+    let upper0 = textureLoad(creative_lut_tex, vec3<i32>(i32(upper), 0, base_layer), 0);
+    let lower1 = textureLoad(creative_lut_tex, vec3<i32>(i32(lower), 1, base_layer), 0);
+    let upper1 = textureLoad(creative_lut_tex, vec3<i32>(i32(upper), 1, base_layer), 0);
+    let primary = mix(lower0, upper0, fraction);
+    let secondary = mix(lower1, upper1, fraction);
+    let balanced = rgb * vec3<f32>(primary.z, primary.w, secondary.x);
+    let exposed = balanced * primary.x;
+    let exposed_luma = dot(exposed, effect.params.xyz);
+    return vec3<f32>(exposed_luma) +
+        (exposed - vec3<f32>(exposed_luma)) * primary.y;
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
     if (input.a <= 0.0) { return input; }
     var pixel = input;
@@ -904,6 +927,8 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 let luminance = dot(pixel.rgb, effect.color.xyz);
                 pixel = vec4<f32>(mix(pixel.rgb, vec3<f32>(luminance), weight), pixel.a);
             }
+        } else if (effect.header.x == 12u) {
+            pixel = vec4<f32>(apply_hdr_grading(effect, pixel.rgb), pixel.a);
         }
     }
     return pixel;
@@ -3056,6 +3081,25 @@ fn effect_uniforms(
                     extra1: [gain[0], gain[1], gain[2], 0.0],
                 }
             }
+            EffectGpuPointOp::HdrGrading { grade } => {
+                let location = creative_luts
+                    .and_then(|binding| binding.hdr_grading_location(grade))
+                    .ok_or_else(|| {
+                        GpuCompositeError::CreativeLut(
+                            crate::GpuCreativeLutError::PreparedHdrGradingBindingMissing {
+                                fingerprint: *grade.semantic_fingerprint(),
+                            },
+                        )
+                    })?;
+                let luminance = grade.luminance_coefficients();
+                GpuEffectUniform {
+                    header: [12, location.base_layer, location.sample_count, 0],
+                    params: [luminance[0], luminance[1], luminance[2], 0.0],
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::AscCdl { grade } => {
                 let slope = grade.slope();
                 let offset = grade.offset();
@@ -3735,8 +3779,9 @@ mod tests {
             apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
             compile_reference_render_graph, lower_effect_graph_to_gpu_plan, AscCdlGrade,
             ColorCurvesAuthoring, ColorCurvesMode, EffectGraphBuilderState, EffectRenderOp,
-            GamutCompressionGrade, HighlightRecoveryGrade, Lut3D, PreparedColorCurves,
-            PreparedLut3D, PrimariesGrade, WhiteBalanceGrade,
+            GamutCompressionGrade, HdrGradingAuthoring, HdrGradingZone, HighlightRecoveryGrade,
+            Lut3D, PreparedColorCurves, PreparedHdrGrading, PreparedLut3D, PrimariesGrade,
+            WhiteBalanceGrade,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -3796,6 +3841,20 @@ mod tests {
         builder.append_unary(EffectRenderOp::HighlightRecovery {
             grade: HighlightRecoveryGrade::new(0.72, 0.9, 0.65, WorkingColorSpace::LinearRec709)
                 .expect("valid highlight recovery"),
+        });
+        let mut hdr_authoring = HdrGradingAuthoring {
+            global_exposure_stops: 0.18,
+            global_saturation: 0.94,
+            ..HdrGradingAuthoring::default()
+        };
+        hdr_authoring.zones[HdrGradingZone::Highlights as usize].exposure_stops = 0.42;
+        hdr_authoring.zones[HdrGradingZone::Highlights as usize].saturation = 0.82;
+        hdr_authoring.zones[HdrGradingZone::Highlights as usize].balance = [0.08, -0.03, -0.05];
+        builder.append_unary(EffectRenderOp::HdrGrading {
+            grade: std::sync::Arc::new(
+                PreparedHdrGrading::new(hdr_authoring, WorkingColorSpace::LinearRec709)
+                    .expect("valid HDR grade"),
+            ),
         });
         let identity_curve = NormalizedCurve::identity();
         let neutral_secondary = NormalizedCurve::flat(0.5).expect("neutral secondary curve");

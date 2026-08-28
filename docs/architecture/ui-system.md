@@ -77,6 +77,14 @@ ordinary add/select/set-value/undo Product Actions. The Inspector neither
 duplicates ACES constants, decides a working space, owns a private parameter
 pack, nor creates an alternate animation model.
 
+HDR Grading uses that same generic projection for all 33 controls. The
+definition-owned `HDR · Global`, Blacks, Dark, Shadows, Light, Highlights, and
+Specular groups are preserved when Clip placement namespaces property paths;
+the Inspector inserts subgroup rows only when the projected group changes.
+Float and Vec3 editors, animation addresses, add/select/set-value actions, and
+Undo/Redo remain the ordinary Effect paths. The panel neither samples zone
+weights nor builds the 512×2 execution table.
+
 Basic Title Inspector rows use the same definition-backed property projection
 and `ClipProductAction` parameter-write Interface as Transform/Opacity; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the

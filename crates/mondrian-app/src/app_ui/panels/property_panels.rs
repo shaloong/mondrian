@@ -1248,7 +1248,17 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         .with_gap(8.0),
                     ),
                 ));
+            let mut previous_group = None;
             for property in &effect.properties {
+                if property.group_name.as_deref() != previous_group {
+                    if let Some(group_name) = &property.group_name {
+                        section = section.with_row(PropertyRow::new(
+                            group_name.clone(),
+                            Box::new(Label::new("")),
+                        ));
+                    }
+                    previous_group = property.group_name.as_deref();
+                }
                 section = section.with_row(effect_property_row(
                     property,
                     can_edit,

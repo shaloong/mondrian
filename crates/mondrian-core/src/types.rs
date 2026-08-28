@@ -789,12 +789,90 @@ impl CustomOcioOutputIdentity {
     }
 }
 
+/// Stable OCIO dynamic-property kind persisted by a Custom OCIO project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomOcioDynamicPropertyKind {
+    /// Exposure scalar.
+    Exposure,
+    /// Contrast scalar.
+    Contrast,
+    /// Gamma scalar.
+    Gamma,
+    /// Full 34-value OCIO grading-primary state.
+    GradingPrimary,
+    /// Four RGB/master grading curves.
+    GradingRgbCurve,
+    /// Full 31-value OCIO grading-tone state.
+    GradingTone,
+    /// Eight hue-family grading curves.
+    GradingHueCurve,
+}
+
+impl CustomOcioDynamicPropertyKind {
+    /// Canonical persisted property name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Exposure => "exposure",
+            Self::Contrast => "contrast",
+            Self::Gamma => "gamma",
+            Self::GradingPrimary => "grading_primary",
+            Self::GradingRgbCurve => "grading_rgb_curve",
+            Self::GradingTone => "grading_tone",
+            Self::GradingHueCurve => "grading_hue_curve",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "exposure" => Ok(Self::Exposure),
+            "contrast" => Ok(Self::Contrast),
+            "gamma" => Ok(Self::Gamma),
+            "grading_primary" => Ok(Self::GradingPrimary),
+            "grading_rgb_curve" => Ok(Self::GradingRgbCurve),
+            "grading_tone" => Ok(Self::GradingTone),
+            "grading_hue_curve" => Ok(Self::GradingHueCurve),
+            _ => Err(format!(
+                "unsupported Custom OCIO dynamic property '{value}'"
+            )),
+        }
+    }
+}
+
+/// One explicitly sloped point in a persisted OCIO grading curve.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CustomOcioGradingCurvePoint {
+    /// Curve-domain coordinate.
+    pub x: f32,
+    /// Curve-range coordinate.
+    pub y: f32,
+    /// Explicit outgoing slope.
+    pub slope: f32,
+}
+
+/// Parsed, validated value of a Custom OCIO dynamic-property override.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CustomOcioDynamicPropertyValue {
+    /// Exposure, contrast, or gamma scalar.
+    Scalar(f64),
+    /// OCIO grading-primary values in the bridge's stable field order.
+    GradingPrimary(Vec<f64>),
+    /// Red, green, blue, and master curves in that order.
+    GradingRgbCurve(Vec<Vec<CustomOcioGradingCurvePoint>>),
+    /// OCIO grading-tone values in the bridge's stable field order.
+    GradingTone(Vec<f64>),
+    /// All eight OCIO hue-curve families in enum order.
+    GradingHueCurve(Vec<Vec<CustomOcioGradingCurvePoint>>),
+}
+
 /// A project-authored OCIO dynamic-property override.
 ///
-/// Values are canonical strings because OCIO dynamic properties include both
-/// scalar and structured grading values. Mondrian currently persists an empty
-/// list and fails closed on non-empty values until the corresponding typed
-/// editing/execution contract is implemented.
+/// `property` retains the original on-disk field shape for schema compatibility,
+/// while construction/deserialization accepts only the seven OCIO 2.5 dynamic
+/// kinds and rewrites `value` to one canonical JSON representation. Structured
+/// grading values therefore remain exact, deterministic author identity rather
+/// than engine-build-local OCIO state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CustomOcioDynamicPropertyIdentity {
@@ -803,6 +881,24 @@ pub struct CustomOcioDynamicPropertyIdentity {
 }
 
 impl CustomOcioDynamicPropertyIdentity {
+    /// Construct and canonicalize a dynamic-property override.
+    pub fn new(
+        kind: CustomOcioDynamicPropertyKind,
+        value: CustomOcioDynamicPropertyValue,
+    ) -> Result<Self, String> {
+        let canonical = canonical_custom_ocio_dynamic_value(kind, value)?;
+        Ok(Self {
+            property: kind.as_str().to_owned(),
+            value: canonical,
+        })
+    }
+
+    /// Stable typed property kind.
+    pub fn kind(&self) -> CustomOcioDynamicPropertyKind {
+        CustomOcioDynamicPropertyKind::parse(&self.property)
+            .expect("validated Custom OCIO property kind")
+    }
+
     /// Exact OCIO dynamic-property name.
     pub fn property(&self) -> &str {
         &self.property
@@ -811,6 +907,191 @@ impl CustomOcioDynamicPropertyIdentity {
     /// Canonical serialized property value.
     pub fn value(&self) -> &str {
         &self.value
+    }
+
+    /// Parse the canonical value into its typed execution representation.
+    pub fn parsed_value(&self) -> CustomOcioDynamicPropertyValue {
+        parse_custom_ocio_dynamic_value(self.kind(), &self.value)
+            .expect("validated Custom OCIO dynamic-property value")
+    }
+
+    fn canonicalized(mut self) -> Result<Self, String> {
+        let kind = CustomOcioDynamicPropertyKind::parse(self.property.trim())?;
+        let parsed = parse_custom_ocio_dynamic_value(kind, self.value.trim())?;
+        self.property = kind.as_str().to_owned();
+        self.value = canonical_custom_ocio_dynamic_value(kind, parsed)?;
+        Ok(self)
+    }
+}
+
+fn validate_custom_ocio_f64_values(
+    kind: CustomOcioDynamicPropertyKind,
+    values: &[f64],
+    expected: usize,
+) -> Result<(), String> {
+    if values.len() != expected {
+        return Err(format!(
+            "Custom OCIO {} requires exactly {expected} values, got {}",
+            kind.as_str(),
+            values.len()
+        ));
+    }
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "Custom OCIO {} values must all be finite",
+            kind.as_str()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_custom_ocio_curves(
+    kind: CustomOcioDynamicPropertyKind,
+    curves: &[Vec<CustomOcioGradingCurvePoint>],
+) -> Result<(), String> {
+    let expected = match kind {
+        CustomOcioDynamicPropertyKind::GradingRgbCurve => 4,
+        CustomOcioDynamicPropertyKind::GradingHueCurve => 8,
+        _ => {
+            return Err(format!(
+                "Custom OCIO {} is not a curve property",
+                kind.as_str()
+            ));
+        }
+    };
+    if curves.len() != expected {
+        return Err(format!(
+            "Custom OCIO {} requires exactly {expected} curves, got {}",
+            kind.as_str(),
+            curves.len()
+        ));
+    }
+    for (curve_index, points) in curves.iter().enumerate() {
+        if !(2..=4096).contains(&points.len()) {
+            return Err(format!(
+                "Custom OCIO {} curve {curve_index} requires 2..=4096 points, got {}",
+                kind.as_str(),
+                points.len()
+            ));
+        }
+        if points
+            .iter()
+            .any(|point| !point.x.is_finite() || !point.y.is_finite() || !point.slope.is_finite())
+        {
+            return Err(format!(
+                "Custom OCIO {} curve {curve_index} points must be finite",
+                kind.as_str()
+            ));
+        }
+        if points.windows(2).any(|pair| pair[0].x >= pair[1].x) {
+            return Err(format!(
+                "Custom OCIO {} curve {curve_index} x coordinates must be strictly increasing",
+                kind.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn parse_custom_ocio_dynamic_value(
+    kind: CustomOcioDynamicPropertyKind,
+    value: &str,
+) -> Result<CustomOcioDynamicPropertyValue, String> {
+    match kind {
+        CustomOcioDynamicPropertyKind::Exposure
+        | CustomOcioDynamicPropertyKind::Contrast
+        | CustomOcioDynamicPropertyKind::Gamma => {
+            let scalar = serde_json::from_str::<f64>(value).map_err(|err| {
+                format!(
+                    "Custom OCIO {} scalar is invalid JSON: {err}",
+                    kind.as_str()
+                )
+            })?;
+            if !scalar.is_finite() {
+                return Err(format!(
+                    "Custom OCIO {} scalar must be finite",
+                    kind.as_str()
+                ));
+            }
+            Ok(CustomOcioDynamicPropertyValue::Scalar(scalar))
+        }
+        CustomOcioDynamicPropertyKind::GradingPrimary => {
+            let values = serde_json::from_str::<Vec<f64>>(value).map_err(|err| {
+                format!("Custom OCIO grading_primary value is invalid JSON: {err}")
+            })?;
+            validate_custom_ocio_f64_values(kind, &values, 34)?;
+            Ok(CustomOcioDynamicPropertyValue::GradingPrimary(values))
+        }
+        CustomOcioDynamicPropertyKind::GradingTone => {
+            let values = serde_json::from_str::<Vec<f64>>(value)
+                .map_err(|err| format!("Custom OCIO grading_tone value is invalid JSON: {err}"))?;
+            validate_custom_ocio_f64_values(kind, &values, 31)?;
+            Ok(CustomOcioDynamicPropertyValue::GradingTone(values))
+        }
+        CustomOcioDynamicPropertyKind::GradingRgbCurve
+        | CustomOcioDynamicPropertyKind::GradingHueCurve => {
+            let curves = serde_json::from_str::<Vec<Vec<CustomOcioGradingCurvePoint>>>(value)
+                .map_err(|err| {
+                    format!("Custom OCIO {} value is invalid JSON: {err}", kind.as_str())
+                })?;
+            validate_custom_ocio_curves(kind, &curves)?;
+            if kind == CustomOcioDynamicPropertyKind::GradingRgbCurve {
+                Ok(CustomOcioDynamicPropertyValue::GradingRgbCurve(curves))
+            } else {
+                Ok(CustomOcioDynamicPropertyValue::GradingHueCurve(curves))
+            }
+        }
+    }
+}
+
+fn canonical_custom_ocio_dynamic_value(
+    kind: CustomOcioDynamicPropertyKind,
+    value: CustomOcioDynamicPropertyValue,
+) -> Result<String, String> {
+    match (kind, value) {
+        (
+            CustomOcioDynamicPropertyKind::Exposure
+            | CustomOcioDynamicPropertyKind::Contrast
+            | CustomOcioDynamicPropertyKind::Gamma,
+            CustomOcioDynamicPropertyValue::Scalar(value),
+        ) => {
+            if !value.is_finite() {
+                return Err(format!(
+                    "Custom OCIO {} scalar must be finite",
+                    kind.as_str()
+                ));
+            }
+            serde_json::to_string(&value).map_err(|err| err.to_string())
+        }
+        (
+            CustomOcioDynamicPropertyKind::GradingPrimary,
+            CustomOcioDynamicPropertyValue::GradingPrimary(values),
+        ) => {
+            validate_custom_ocio_f64_values(kind, &values, 34)?;
+            serde_json::to_string(&values).map_err(|err| err.to_string())
+        }
+        (
+            CustomOcioDynamicPropertyKind::GradingTone,
+            CustomOcioDynamicPropertyValue::GradingTone(values),
+        ) => {
+            validate_custom_ocio_f64_values(kind, &values, 31)?;
+            serde_json::to_string(&values).map_err(|err| err.to_string())
+        }
+        (
+            CustomOcioDynamicPropertyKind::GradingRgbCurve,
+            CustomOcioDynamicPropertyValue::GradingRgbCurve(curves),
+        )
+        | (
+            CustomOcioDynamicPropertyKind::GradingHueCurve,
+            CustomOcioDynamicPropertyValue::GradingHueCurve(curves),
+        ) => {
+            validate_custom_ocio_curves(kind, &curves)?;
+            serde_json::to_string(&curves).map_err(|err| err.to_string())
+        }
+        _ => Err(format!(
+            "Custom OCIO {} received a mismatched value type",
+            kind.as_str()
+        )),
     }
 }
 
@@ -955,13 +1236,13 @@ impl CustomOcioProjectIdentity {
         if roles.windows(2).any(|pair| pair[0].role == pair[1].role) {
             return Err("Custom OCIO role names must be unique".to_owned());
         }
-        if dynamic_properties
-            .iter()
-            .any(|property| property.property.trim().is_empty() || property.value.trim().is_empty())
-        {
-            return Err(
-                "Custom OCIO dynamic-property names and values must not be blank".to_owned(),
-            );
+        let mut dynamic_properties = dynamic_properties
+            .into_iter()
+            .map(CustomOcioDynamicPropertyIdentity::canonicalized)
+            .collect::<Result<Vec<_>, _>>()?;
+        dynamic_properties.sort_by_key(CustomOcioDynamicPropertyIdentity::kind);
+        if dynamic_properties.windows(2).any(|pair| pair[0].kind() == pair[1].kind()) {
+            return Err("Custom OCIO dynamic-property kinds must be unique".to_owned());
         }
         Ok(Self {
             source,
@@ -1014,6 +1295,28 @@ impl CustomOcioProjectIdentity {
     /// Project-level dynamic-property overrides.
     pub fn dynamic_properties(&self) -> &[CustomOcioDynamicPropertyIdentity] {
         &self.dynamic_properties
+    }
+
+    /// Replace the complete dynamic-property override set.
+    pub fn with_dynamic_properties(
+        &self,
+        dynamic_properties: Vec<CustomOcioDynamicPropertyIdentity>,
+    ) -> Result<Self, String> {
+        Self::from_pinned_parts(
+            self.source.clone(),
+            self.config_sha256.clone(),
+            self.dependency_manifest_sha256.clone(),
+            self.working_space.clone(),
+            self.outputs.clone(),
+            self.roles.clone(),
+            dynamic_properties,
+        )
+    }
+
+    pub(crate) fn static_processor_identity(&self) -> Self {
+        let mut identity = self.clone();
+        identity.dynamic_properties.clear();
+        identity
     }
 }
 
@@ -1149,6 +1452,17 @@ impl ColorEngine {
         match self {
             Self::CustomOcio { identity } => Some(identity.as_ref()),
             Self::MondrianStandard { .. } | Self::Aces { .. } => None,
+        }
+    }
+
+    /// Engine identity that owns config, processor graph, shader, LUT, and
+    /// pipeline reuse while excluding runtime dynamic-property payload values.
+    pub fn static_processor_identity(&self) -> Self {
+        match self {
+            Self::CustomOcio { identity } => Self::CustomOcio {
+                identity: Box::new(identity.static_processor_identity()),
+            },
+            Self::MondrianStandard { .. } | Self::Aces { .. } => self.clone(),
         }
     }
 }
@@ -1396,6 +1710,110 @@ mod tests {
                 name: "studio-config-v4.0.0_aces-v2.0_ocio-v2.5".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn custom_ocio_dynamic_properties_are_typed_canonical_and_static_cache_neutral() {
+        let exposure = CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::Exposure,
+            CustomOcioDynamicPropertyValue::Scalar(1.25),
+        )
+        .expect("exposure property");
+        assert_eq!(exposure.property(), "exposure");
+        assert_eq!(exposure.value(), "1.25");
+
+        let gamma = CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::Gamma,
+            CustomOcioDynamicPropertyValue::Scalar(0.9),
+        )
+        .expect("gamma property");
+        let identity = CustomOcioProjectIdentity::from_resolved(
+            OcioConfigSource::Builtin { name: "unit-test".to_owned() },
+            "a".repeat(64),
+            "b".repeat(64),
+            "ACEScg".to_owned(),
+            vec![CustomOcioOutputIdentity::from_resolved(
+                ColorSpace::Srgb,
+                "sRGB".to_owned(),
+                "View".to_owned(),
+                "sRGB".to_owned(),
+                CustomOcioLookIdentity::None,
+            )],
+            Vec::new(),
+        );
+        let authored = identity
+            .with_dynamic_properties(vec![gamma, exposure])
+            .expect("dynamic properties");
+        assert_eq!(
+            authored
+                .dynamic_properties()
+                .iter()
+                .map(CustomOcioDynamicPropertyIdentity::kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CustomOcioDynamicPropertyKind::Exposure,
+                CustomOcioDynamicPropertyKind::Gamma
+            ]
+        );
+
+        let engine = ColorEngine::CustomOcio { identity: Box::new(authored.clone()) };
+        assert_eq!(
+            engine.static_processor_identity(),
+            ColorEngine::CustomOcio { identity: Box::new(identity) }
+        );
+        let reopened: ColorEngine = serde_json::from_str(
+            &serde_json::to_string(&engine).expect("serialize dynamic Custom OCIO"),
+        )
+        .expect("deserialize dynamic Custom OCIO");
+        assert_eq!(reopened, engine);
+
+        assert!(authored
+            .with_dynamic_properties(vec![
+                CustomOcioDynamicPropertyIdentity::new(
+                    CustomOcioDynamicPropertyKind::Exposure,
+                    CustomOcioDynamicPropertyValue::Scalar(0.0),
+                )
+                .expect("first exposure"),
+                CustomOcioDynamicPropertyIdentity::new(
+                    CustomOcioDynamicPropertyKind::Exposure,
+                    CustomOcioDynamicPropertyValue::Scalar(1.0),
+                )
+                .expect("second exposure"),
+            ])
+            .is_err());
+    }
+
+    #[test]
+    fn custom_ocio_curve_properties_reject_incomplete_or_non_monotonic_state() {
+        let point = |x: f32| CustomOcioGradingCurvePoint { x, y: x, slope: 1.0 };
+        let valid_curve = vec![point(0.0), point(1.0)];
+        let hue_curves = vec![valid_curve.clone(); 8];
+        let property = CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::GradingHueCurve,
+            CustomOcioDynamicPropertyValue::GradingHueCurve(hue_curves),
+        )
+        .expect("complete hue curves");
+        assert!(matches!(
+            property.parsed_value(),
+            CustomOcioDynamicPropertyValue::GradingHueCurve(curves) if curves.len() == 8
+        ));
+
+        assert!(CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::GradingHueCurve,
+            CustomOcioDynamicPropertyValue::GradingHueCurve(vec![valid_curve.clone(); 4]),
+        )
+        .is_err());
+        assert!(CustomOcioDynamicPropertyIdentity::new(
+            CustomOcioDynamicPropertyKind::GradingRgbCurve,
+            CustomOcioDynamicPropertyValue::GradingRgbCurve(vec![vec![point(1.0), point(0.0)]; 4]),
+        )
+        .is_err());
+
+        let malformed = CustomOcioDynamicPropertyIdentity {
+            property: "vendor_extension".to_owned(),
+            value: "1.0".to_owned(),
+        };
+        assert!(malformed.canonicalized().is_err());
     }
 
     #[test]

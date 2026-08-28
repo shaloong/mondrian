@@ -2425,6 +2425,7 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Crop { .. } => 10,
         EffectRenderOp::WhiteBalance { .. } => 11,
         EffectRenderOp::Primaries { .. } => 12,
+        EffectRenderOp::HdrGrading { .. } => 14,
         EffectRenderOp::AscCdl { .. } => 13,
         EffectRenderOp::ColorCurves { .. } => 14,
         EffectRenderOp::Qualifier { .. } => 15,
@@ -3951,6 +3952,7 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::ColorAdjust { .. }
             | crate::EffectRenderOp::WhiteBalance { .. }
             | crate::EffectRenderOp::Primaries { .. }
+            | crate::EffectRenderOp::HdrGrading { .. }
             | crate::EffectRenderOp::AscCdl { .. }
             | crate::EffectRenderOp::GamutCompression { .. }
             | crate::EffectRenderOp::HighlightRecovery { .. }
