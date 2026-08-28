@@ -150,7 +150,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let _ = self
                 .timeline_render_cache
                 .borrow()
-                .request_lookup(identity, evaluation.color_context.working_color_space);
+                .request_lookup(identity, evaluation.color_context.working_color_space());
         }
     }
 

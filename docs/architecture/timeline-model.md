@@ -403,6 +403,14 @@ external input and output `ColorSpace` values. Root color contexts carry a
 display-referred output identity, while nested contexts carry their parent working
 identity so render recursion cannot mistake an internal handoff for a delivery
 boundary.
+`ProgramColorContext` exposes read-only queries, not authorable fields. Its
+closed output representation distinguishes `Encoded` from `Working`, and only
+`root_program_color_context`, `nested_render_color_context`,
+`for_export_output`, and `for_rendering_view_output` may create or derive one.
+Every constructor validates the selected engine/working pair and output intent.
+Rendering-View presence is the authority for the reported tone-map state, so
+invalid View-without-tone-map and tone-map-without-View combinations cannot
+exist between validation and execution.
 Sequence validation rejects scene-linear and scene-Log source identities as
 presentation outputs even if a project file is authored outside the UI; the
 sequence output must be one of the display-referred SDR/HDR identities. This
@@ -453,6 +461,12 @@ decode/cache key. Local monitor adaptation is resolved after Program Output and
 does not create another Sequence context. Export either follows the Program
 context or resolves an explicit `ExportColorTarget`; it never mutates the
 Sequence to obtain a different deliverable.
+Nested construction consumes the already validated parent context rather than
+separate caller-supplied engine/output fields. Preserve-child mode validates the
+child working space against that exact engine; force-parent mode inherits the
+parent working/workflow semantics. Both produce only a colorimetric
+parent-working-space endpoint, so recursive evaluation cannot turn an internal
+frame into a Program or delivery boundary.
 An ordinary display-referred SDR context remains `Colorimetric`; a
 scene-referred or explicitly tone-mapped Mondrian Standard boundary resolves to
 the fully pinned `MondrianStandard { package }` product intent. ACES carries its
@@ -1346,6 +1360,15 @@ relative reorder, parameter preparation/application, shape-animation changes,
 and complete shape writes do not expose vector indexes or parse UUIDs from
 property strings. A locked Mask still permits execution enable/disable and
 unlocking, but rejects parameter, geometry, order, and removal edits.
+
+Completed motion analysis enters this same Interface through
+`Clip::apply_mask_tracking_result`. Timeline rechecks Track/Mask lock, validates
+the complete recipe and ordered generated range on a detached candidate, then
+atomically replaces that range. An existing exact-time shape key retains its
+`KeyframeId`; failure leaves every key and the prior recipe untouched. Manual
+shape writes or disabling shape animation clear tracking provenance. Clip copy,
+split and fragmentation fork `TrackingId` together with Mask and generated-key
+identities so two author objects never share one analysis lineage.
 
 Every structural Timeline command ends by compacting the three dependent
 author graphs as one invariant-restoration step: Clip link groups, visual

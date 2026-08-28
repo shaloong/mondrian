@@ -266,6 +266,9 @@ fn resolved_source_color(
     );
     match decision.resolved {
         ResolvedInputColor::Color(color_space) => Some(color_space),
-        ResolvedInputColor::Data | ResolvedInputColor::Rejected => None,
+        // DataTexture pixels must execute the numeric working-frame route;
+        // packet reuse would skip the authored visual program entirely.
+        ResolvedInputColor::Data => None,
+        ResolvedInputColor::Rejected => None,
     }
 }

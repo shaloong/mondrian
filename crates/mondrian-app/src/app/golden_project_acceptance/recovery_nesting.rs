@@ -406,8 +406,9 @@ fn execute_nested_frame(state: &AppState, frame: i64) -> anyhow::Result<NestedEx
     // complete collection here would fabricate a second root snapshot with
     // the same durable identity, which correctly fails closed as ambiguous.
     let sequences = state.sequences();
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let mut media_frame = |_request| PreviewTimelineMediaFrame::Unavailable {
         reason: PreviewUnavailability::blocked(
             PreviewOutputStage::MediaResolution,

@@ -1,5 +1,15 @@
 # Media Pipeline
 
+Decoded RGBA payloads cross the Media/Renderer seam with an explicit
+`PreviewSourceSampleIdentity`: either `ColorManaged(ColorSpace)` or
+`DataTexture`. Media owns this decode evidence and emits
+`DecodedRgbaEncoding::DataTexture` for the latter; it never invents a color
+identity for technical channels. DataTexture admission is deliberately limited
+to CPU-addressable RGB because YCbCr matrix conversion, decoder-native YUV
+surfaces, compact-YUV materialization, and generated proxies cannot currently
+prove numeric-channel preservation. Those representations fail closed at the
+decode-contract Interface rather than silently entering color management.
+
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
 ## Picture scan and stored geometry
@@ -269,6 +279,29 @@ It maps a resident raster into `RasterImage` while sharing the same `Arc<[u8]>`;
 it owns no worker, queue, cache, color interpretation, generation, retry, or
 failure policy. Headless verification consumes the service's immutable
 diagnostics and terminal records without importing Widget types.
+
+## Visual Mask tracking decode
+
+`app::visual_tracking::VisualTrackingService` is an instance-owned, single-worker
+analysis domain with a four-job transport and eight-result exact LRU. It is
+separate from realtime Preview scheduling so a long analysis cannot occupy the
+Playback lane, while each job still uses media's reusable
+`PreviewDecodeSessionContext` and `RandomAccessStillFrame` contract. Admission
+freezes the complete file fingerprint, physical video stream, resolved source
+color/range contract, exact Clip retime mapping and every requested source
+sample. The worker scales decode to the persisted analysis dimension, retains
+only adjacent luminance frames, and checks cooperative cancellation through
+decode, feature search and model fitting.
+
+Requests are capped at 10,000 frames and their analysis raster, feature count,
+search radius, patch radius and combined correlation work are all hard-bounded.
+Cache identity includes source revision/stream, exact source-sample vector,
+anchor, initial geometry, model/direction and every setting; Recompute bypasses
+reuse. Project replacement cancels and retires all attempts. Completion returns
+to the UI thread and may publish only after revalidating Authoring Session,
+Sequence revision, Clip/Mask/locks, Asset and live file fingerprint. Cancel wins
+over an already queued completion event, and stale/failure paths publish no
+partial author state.
 
 ## Probe
 

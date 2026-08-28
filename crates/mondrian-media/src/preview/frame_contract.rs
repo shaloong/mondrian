@@ -134,6 +134,14 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
             DecodedVideoRange::Full,
         ));
     }
+    if source.is_data_texture() {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "data-texture materialization requires RGB/GBR decoder samples, got {pixel_format:?}"
+            ),
+        });
+    }
 
     let decoded_matrix =
         decoded_video_matrix_from_ffmpeg(decoded_color_space).map_err(|reason| {
@@ -146,7 +154,7 @@ pub(super) fn resolve_cpu_rgba_contract_from_metadata(
         asset_id: path.display().to_string(),
         reason: format!(
             "YUV matrix is unspecified for resolved source color space {:?}; refusing implicit swscale defaults",
-            source.color_space
+            source.color_space()
         ),
     })?;
     if matrix == DecodedVideoMatrix::Rgb {

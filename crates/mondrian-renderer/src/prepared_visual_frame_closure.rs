@@ -711,7 +711,12 @@ where
                 }
                 let child_context = child
                     .settings
-                    .nested_render_color_context(color_context.clone(), demand.color_processing);
+                    .nested_render_color_context(&color_context, demand.color_processing)
+                    .map_err(|error| PreparedVisualFrameClosureError::ColorContext {
+                        parent_sequence_id: sequence.id,
+                        nested_sequence_id: child.id,
+                        reason: error.to_string(),
+                    })?;
                 let mut child_path = Vec::with_capacity(instance_path.len().saturating_add(1));
                 child_path.extend_from_slice(&instance_path);
                 child_path.push(PreparedVisualNestedInstanceStep {
@@ -732,8 +737,8 @@ where
                     placement: demand.placement,
                     sample: demand.sample,
                     source_sample: demand.source_sample,
-                    parent_working_color_space: color_context.working_color_space,
-                    child_working_color_space: child_context.working_color_space,
+                    parent_working_color_space: color_context.working_color_space(),
+                    child_working_color_space: child_context.working_color_space(),
                 };
                 let node = self
                     .nodes
@@ -1070,6 +1075,15 @@ pub enum PreparedVisualFrameClosureError {
         /// Effect-declared source extent.
         required_resolution: Resolution,
     },
+    /// A child Sequence could not derive a valid context from its parent.
+    ColorContext {
+        /// Parent Sequence.
+        parent_sequence_id: SequenceId,
+        /// Child Sequence.
+        nested_sequence_id: SequenceId,
+        /// Closed-context validation diagnostic.
+        reason: String,
+    },
     /// A plan emitted the same exact nested binding twice.
     DuplicateNestedBinding {
         /// Parent Sequence.
@@ -1206,6 +1220,14 @@ impl fmt::Display for PreparedVisualFrameClosureError {
                 required_resolution.width,
                 required_resolution.height
             ),
+            Self::ColorContext {
+                parent_sequence_id,
+                nested_sequence_id,
+                reason,
+            } => write!(
+                formatter,
+                "Sequence {parent_sequence_id} cannot derive nested Sequence {nested_sequence_id} color context: {reason}"
+            ),
             Self::DuplicateNestedBinding { parent_sequence_id, placement, sample } => write!(
                 formatter,
                 "Sequence {parent_sequence_id} placement {} emitted duplicate nested binding {sample:?}",
@@ -1256,6 +1278,7 @@ mod tests {
         sequence
             .settings
             .root_program_color_context(&ProjectColorEnvironment::default())
+            .expect("valid test color context")
     }
 
     fn prepare_direct_closure(
@@ -1265,13 +1288,35 @@ mod tests {
         root_resolution: Resolution,
         child_canvas_policy: PreparedVisualChildCanvasPolicy,
     ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
+        prepare_direct_closure_with_color_environment(
+            root,
+            sequences,
+            root_frame,
+            root_resolution,
+            child_canvas_policy,
+            &ProjectColorEnvironment::default(),
+        )
+    }
+
+    fn prepare_direct_closure_with_color_environment(
+        root: &Sequence,
+        sequences: &[Sequence],
+        root_frame: i64,
+        root_resolution: Resolution,
+        child_canvas_policy: PreparedVisualChildCanvasPolicy,
+        color_environment: &ProjectColorEnvironment,
+    ) -> Result<PreparedVisualFrameClosure<()>, PreparedVisualFrameClosureError> {
+        let root_color_context = root
+            .settings
+            .root_program_color_context(color_environment)
+            .expect("valid test color context");
         prepare_visual_frame_closure(
             PreparedVisualFrameClosureRequest {
                 root_sequence: root,
                 sequences,
                 root_frame,
                 root_resolution,
-                root_color_context: root_color_context(root),
+                root_color_context,
                 child_canvas_policy,
             },
             |sequence| {
@@ -1698,12 +1743,15 @@ mod tests {
             )
             .expect("add nested placement");
 
-        let closure = prepare_direct_closure(
+        let closure = prepare_direct_closure_with_color_environment(
             &root,
             std::slice::from_ref(&child),
             12,
             Resolution { width: 64, height: 36 },
             PreparedVisualChildCanvasPolicy::preview_scaled(4).expect("Preview policy"),
+            &ProjectColorEnvironment::new(mondrian_core::ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            }),
         )
         .expect("prepared closure");
         let binding = &closure.node(closure.root()).expect("root").bindings()[0];
@@ -1732,7 +1780,7 @@ mod tests {
             WorkingColorSpace::LinearRec2020
         );
         assert_eq!(
-            child_node.color_context().working_color_space,
+            child_node.color_context().working_color_space(),
             WorkingColorSpace::LinearRec2020
         );
     }

@@ -15,11 +15,13 @@ use mondrian_media::{
     DecodedVideoSurfaceFormat, PreviewDecodeDiagnostics, PreviewNativeDecodedFrame,
 };
 use mondrian_playback::FramePresentationQuality;
+#[cfg(test)]
+use mondrian_renderer::CpuSourceColorFrame;
 use mondrian_renderer::{
-    execute_cpu_source_input_stage_with_session, project_affine_to_sampled_extents, CpuColorFrame,
-    CpuSourceColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
-    RenderColorTransformError, RenderCpuColorExecutionSession, RenderInputTransform,
-    ViewerGpuCpuYuvSource, ViewerGpuMediaSource, ViewerGpuNativeSource,
+    project_affine_to_sampled_extents, CpuColorFrame, PreparedSourceFrame,
+    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformError,
+    RenderCpuColorExecutionSession, RenderInputTransform, ViewerGpuCpuYuvSource,
+    ViewerGpuMediaSource, ViewerGpuNativeSource,
 };
 
 use super::preview_execution::{PreviewDecodeExecutionSummary, PreviewSemanticIdentity};
@@ -41,7 +43,7 @@ pub(crate) struct MediaPreviewFrame {
 #[derive(Debug, Clone)]
 enum MediaPreviewPayload {
     Working(CpuColorFrame),
-    Source(MediaPreviewGpuSourceFrame),
+    Source(Box<MediaPreviewGpuSourceFrame>),
     CpuYuv(MediaPreviewCpuYuvSourceFrame),
     Native(MediaPreviewNativeSourceFrame),
 }
@@ -76,10 +78,10 @@ impl MediaPreviewFrame {
         presentation_quality: FramePresentationQuality,
         decode_execution: PreviewDecodeExecutionSummary,
     ) -> Self {
-        let descriptor = source.source.descriptor();
+        let (width, height) = source.prepared_source.extent();
         Self {
-            payload: MediaPreviewPayload::Source(source),
-            sampled_resolution: Resolution { width: descriptor.width, height: descriptor.height },
+            payload: MediaPreviewPayload::Source(Box::new(source)),
+            sampled_resolution: Resolution { width, height },
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
@@ -144,7 +146,7 @@ impl MediaPreviewFrame {
                     .saturating_mul(self.sampled_resolution.height as usize)
                     .saturating_mul(4)
                     .saturating_mul(std::mem::size_of::<f32>());
-                source.source.retained_bytes().saturating_add(working_reservation)
+                source.prepared_source.retained_bytes().saturating_add(working_reservation)
             }
             MediaPreviewPayload::CpuYuv(source) => source.frame.retained_bytes(),
             MediaPreviewPayload::Native(_) => 0,
@@ -239,7 +241,9 @@ impl MediaPreviewFrame {
     pub(crate) fn working_color_space(&self) -> Option<mondrian_core::WorkingColorSpace> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => frame.descriptor().color_space.working(),
-            MediaPreviewPayload::Source(source) => Some(source.input_transform.working_color_space),
+            MediaPreviewPayload::Source(source) => {
+                Some(source.prepared_source.working_color_space())
+            }
             MediaPreviewPayload::CpuYuv(source) => Some(source.input_transform.working_color_space),
             MediaPreviewPayload::Native(source) => Some(source.input_transform.working_color_space),
         }
@@ -278,9 +282,10 @@ impl MediaPreviewFrame {
         let MediaPreviewPayload::Source(source) = &self.payload else {
             return None;
         };
+        let (source_frame, input_transform) = source.prepared_source.color_managed_gpu_input()?;
         Some(ViewerGpuMediaSource {
-            source: Arc::clone(&source.source),
-            input_transform: source.input_transform.clone(),
+            source: source_frame,
+            input_transform,
             decoder_residency: source.decoder_residency,
             decoder_handle_kind: source.decoder_handle_kind,
             decoded_surface_format: source.decoded_surface_format,
@@ -335,17 +340,15 @@ impl MediaPreviewFrame {
                 let entry = source
                     .working_cache
                     .get_or_init(|| {
-                        execute_cpu_source_input_stage_with_session(
-                            source.source.as_ref(),
-                            &source.input_transform,
-                            color_session,
-                        )
-                        .map(|output| MediaPreviewWorkingFrameCacheEntry {
-                            frame: output.result.frame,
-                            color_diagnostics: output.result.diagnostics,
-                            stage_diagnostics: output.stage_diagnostics,
-                        })
-                        .map_err(Arc::new)
+                        source
+                            .prepared_source
+                            .execute_cpu_with_session(color_session)
+                            .map(|output| MediaPreviewWorkingFrameCacheEntry {
+                                frame: output.frame,
+                                color_diagnostics: output.color_diagnostics,
+                                stage_diagnostics: output.stage_diagnostics,
+                            })
+                            .map_err(Arc::new)
                     })
                     .as_ref()
                     .map_err(
@@ -355,7 +358,11 @@ impl MediaPreviewFrame {
                     )?;
                 Ok(MediaPreviewWorkingFrame {
                     frame: entry.frame.clone(),
-                    color_diagnostics: (!cached_before).then_some(entry.color_diagnostics),
+                    color_diagnostics: if cached_before {
+                        None
+                    } else {
+                        entry.color_diagnostics
+                    },
                     stage_diagnostics: if cached_before {
                         RenderColorStageDiagnostics::default()
                     } else {
@@ -418,8 +425,7 @@ pub(crate) enum MediaPreviewWorkingFrameError {
 
 #[derive(Debug, Clone)]
 pub(crate) struct MediaPreviewGpuSourceFrame {
-    pub(crate) source: Arc<CpuSourceColorFrame>,
-    pub(crate) input_transform: RenderInputTransform,
+    pub(crate) prepared_source: PreparedSourceFrame,
     pub(crate) decoder_residency: DecodedFrameResidency,
     pub(crate) decoder_handle_kind: Option<DecodedGpuFrameHandleKind>,
     pub(crate) decoded_surface_format: DecodedVideoSurfaceFormat,
@@ -485,8 +491,7 @@ impl MediaPreviewGpuSourceFrame {
         input_transform: RenderInputTransform,
     ) -> Self {
         Self {
-            source: Arc::new(source.into()),
-            input_transform,
+            prepared_source: PreparedSourceFrame::from_typed_source(source, input_transform),
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
@@ -498,15 +503,13 @@ impl MediaPreviewGpuSourceFrame {
     }
 
     pub(crate) fn from_decode_diagnostics(
-        source: impl Into<CpuSourceColorFrame>,
-        input_transform: RenderInputTransform,
+        prepared_source: PreparedSourceFrame,
         diagnostics: PreviewDecodeDiagnostics,
     ) -> Self {
         #[cfg(any(test, feature = "validation"))]
         let temporal_selection = diagnostics.temporal_selection();
         Self {
-            source: Arc::new(source.into()),
-            input_transform,
+            prepared_source,
             decoder_residency: diagnostics.decoded_frame_residency,
             decoder_handle_kind: diagnostics.gpu_frame_handle_kind,
             decoded_surface_format: diagnostics.decoded_surface_format,
@@ -521,6 +524,6 @@ impl MediaPreviewGpuSourceFrame {
 #[derive(Debug, Clone)]
 struct MediaPreviewWorkingFrameCacheEntry {
     frame: CpuColorFrame,
-    color_diagnostics: RenderColorTransformDiagnostics,
+    color_diagnostics: Option<RenderColorTransformDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
 }

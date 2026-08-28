@@ -543,7 +543,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let author_snapshot = authoring.visual_author_snapshot_identity();
         let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
+            match sequence.settings.root_program_color_context(authoring.color_environment()) {
+                Ok(context) => context,
+                Err(error) => {
+                    tracing::debug!(
+                        sequence_id = %sequence.id,
+                        reason = %error,
+                        "skipping Preview prefetch for invalid Program color context"
+                    );
+                    return;
+                }
+            };
         let preroll_deadline_at = transport
             .is_priming()
             .then(|| transport.demand().and_then(PreviewFrameDemandSnapshot::adapter_deadline))
@@ -910,8 +920,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             });
         }
         let (width, height) = preview_dimensions_for_snapshot(snapshot, sequence);
-        let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
+        let color_context = sequence
+            .settings
+            .root_program_color_context(authoring.color_environment())
+            .ok()?;
         let window = media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)?;
         let worker_queue = self.jobs.diagnostics();
         let prefetch_pressure = worker_queue

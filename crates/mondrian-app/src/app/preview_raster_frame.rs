@@ -78,12 +78,12 @@ pub(crate) enum PreviewRasterFrameError {
 pub(crate) fn preview_raster_presentation_contract(
     requested: &ProgramColorContext,
 ) -> Result<PreviewRasterPresentationContract, PreviewRasterPresentationContractError> {
-    let program_output = requested.output_color_space.color().ok_or({
+    let program_output = requested.output_color_space().color().ok_or({
         PreviewRasterPresentationContractError::ProgramOutputIdentity {
-            identity: requested.output_color_space,
+            identity: requested.output_color_space(),
         }
     })?;
-    RenderMonitorAdaptation::new(program_output, ColorSpace::Srgb, requested.engine.clone())
+    RenderMonitorAdaptation::new(program_output, ColorSpace::Srgb, requested.engine().clone())
         .map_err(PreviewRasterPresentationContractError::from)?;
     Ok(PreviewRasterPresentationContract { color_space: PreviewRasterColorSpace::Srgb })
 }

@@ -410,6 +410,7 @@ struct HeadlessViewerGpuExecutionSummary {
     compositing_diagnostics: GpuCompositingDiagnostics,
     compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
+    compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     resource_pool_samples: Vec<mondrian_renderer::GpuColorFrameWgpuResourcePoolDiagnostics>,
     rendered_decode_execution: PreviewDecodeExecutionSummary,
@@ -533,6 +534,9 @@ impl HeadlessViewerGpuExecutionSummary {
         }
         if let Some(diagnostics) = execution.compositor_texture_bindings {
             self.compositor_texture_bindings = Some(diagnostics);
+        }
+        if let Some(diagnostics) = execution.compositor_creative_luts {
+            self.compositor_creative_luts = Some(diagnostics);
         }
         if let Some(diagnostics) = execution.spatial_diagnostics {
             self.spatial_diagnostics = Some(diagnostics);
@@ -1239,6 +1243,7 @@ fn headless_gpu_summary_separates_execution_publication_and_terminal_rejection()
             compositing_diagnostics: None,
             compositor_uniform_arena: None,
             compositor_texture_bindings: None,
+            compositor_creative_luts: None,
             spatial_diagnostics: None,
             resource_pool_diagnostics: Default::default(),
             stage_diagnostics: None,
@@ -1354,6 +1359,7 @@ fn headless_gpu_summary_records_distinct_executed_extents() {
                 compositing_diagnostics: None,
                 compositor_uniform_arena: None,
                 compositor_texture_bindings: None,
+                compositor_creative_luts: None,
                 spatial_diagnostics: None,
                 resource_pool_diagnostics: Default::default(),
                 stage_diagnostics: None,

@@ -482,12 +482,51 @@ weighted source without inventing pixels. Preview execution records a distinct
 shader with the Export/CPU reference formula. An ordinary source-over opacity
 pair remains an invalid lowering.
 
-The first native subset is a bounded single-source chain of ColorAdjust,
-Vignette, and deterministic Grain. White Balance has authoring/schema support
-but no executable GPU lowering and therefore cannot enter the effect library as
-visually supported. Unsupported topology, spatial sampling, LUT resources, and
-custom operations remain explicit lowering blockers until dedicated renderer
-graph passes provide their resource and alpha contracts.
+The native point subset is a bounded single-source chain of ColorAdjust,
+creative LUT, White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color
+Curves, Vignette, deterministic Grain, and Crop. Effects compiles white balance into a working-space Bradford matrix
+and supplies already validated Primaries/CDL vectors; the renderer only lowers
+those immutable values into the common point uniform and WGSL. One pass accepts
+at most sixteen operations, remains far below the 64 KiB uniform limit, and
+splits longer admitted tails through the heterogeneous execution plan.
+Unsupported topology, neighborhood spatial sampling, and custom operations
+remain explicit lowering blockers until dedicated renderer graph passes provide
+their resource and alpha contracts.
+
+Qualifier is a dedicated non-preserving-domain GPU graph path. It is not
+inserted into the point-operation uniform: the heterogeneous suffix lowers the
+Effects-owned `PreparedQualifier` as `SceneLinearRgb -> AlphaMask`, then records
+the existing GPU Mask pass or a dedicated Matte Preview pass. HSL and 3D
+Include/Exclude sampling, Clean Black/White, inversion, box denoise, and
+Gaussian feather mirror the CPU Float32 algorithm. The qualifier owns exactly
+one pass without refinement, two passes with one separable refinement, or four
+passes with both; every output/private RGBA32F texture is retained through the
+submission and enters physical byte/texture admission. A real-wgpu parity gate
+covers HSL, 3D, negative/HDR input, refinement, Mask output, and opaque
+grayscale preview at `1e-4` maximum per-channel error, and proves the runtime
+materialization table is empty afterward.
+
+Power Window is a separate grade-matte GPU graph path. `MaskSource` geometry is
+rasterized once in the cancellable CPU Float32 prefix and uploaded as
+`AlphaMask + NonColorData`; `MaskCombine` reduces multiple Window textures with
+Add, Subtract, Intersect, or Difference, and `MatteMix` combines an ungraded
+base with its graded branch. The dedicated WGSL pass writes
+`mix(base.rgb, graded.rgb, matte.a)` and copies `base.a`, so it cannot turn a
+Window into programme transparency. The plan, token/live-set validator,
+physical texture/byte admission, and runtime materialization table cover both
+passes. A real-wgpu parity gate exercises the complete route, HDR/negative RGB,
+and alpha preservation against the CPU Float32 reference at `1e-4` maximum
+per-channel error.
+
+Compiled curves do not consume per-operation uniform capacity beyond their
+small location/mode/luminance descriptor. The compositor's device-resident
+RGBA32F grade-resource atlas packs each curve set as a `256 x 3 x 1` slab beside
+creative LUT cubes and keys residency by complete semantic fingerprint. WGSL
+uses explicit texel loads and linear interpolation, including endpoint-slope
+HDR extrapolation. A neutral-secondary flag bypasses the HSV stage exactly.
+The real-wgpu point-chain parity test includes non-neutral Hue/Luma/Saturation
+curves plus negative and greater-than-one values under the same `3e-5` Float32
+channel budget.
 
 Non-scene-linear point plans carry their exact `EffectColorDomain` into the
 renderer. `RenderEffectColorDomainGpuPlanner` resolves that declaration into a
@@ -511,7 +550,10 @@ A real-wgpu readback test compares the fused media and adjustment outputs
 against `apply_compiled_effect_graph_rgba_f32(...)` and
 `apply_compiled_effect_graph_pass_rgba_f32(...)` per channel. This is the
 numerical contract for extending the GPU subset; shader parsing or successful
-command recording alone is not sufficient evidence of effect correctness.
+command recording alone is not sufficient evidence of effect correctness. The
+qualified chain includes working-space White Balance, Primaries, and no-clamp
+ASC CDL and holds the same `3e-5` maximum per-channel Float32 budget while
+retaining extended values.
 An additional real-wgpu round-trip test compares
 `Working -> OCIO -> display-encoded point effect -> OCIO -> Working` against the
 stock-OCIO CPU processor with a `3e-5` maximum channel budget and asserts zero

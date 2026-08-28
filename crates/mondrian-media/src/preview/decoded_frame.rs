@@ -179,6 +179,8 @@ pub enum DecodedRgbaEncoding {
     SourceEncodedRgb,
     /// RGB channels retain scene-linear source values and primaries.
     SourceLinearRgb,
+    /// RGB channels carry normalized numeric data and have no color identity.
+    DataTexture,
 }
 
 /// Alpha representation of a decoded CPU RGBA payload.
@@ -209,9 +211,14 @@ impl DecodedRgbaFrameContract {
         applied_matrix: DecodedVideoMatrix,
         applied_range: DecodedVideoRange,
     ) -> Self {
+        let encoding = if source.is_data_texture() {
+            DecodedRgbaEncoding::DataTexture
+        } else {
+            DecodedRgbaEncoding::SourceEncodedRgb
+        };
         Self {
             source,
-            encoding: DecodedRgbaEncoding::SourceEncodedRgb,
+            encoding,
             alpha_mode: DecodedRgbaAlphaMode::Straight,
             applied_matrix,
             applied_range,
@@ -219,6 +226,7 @@ impl DecodedRgbaFrameContract {
     }
 
     pub(super) fn source_linear(source: PreviewSourceColorContract) -> Self {
+        debug_assert!(!source.is_data_texture());
         Self {
             source,
             encoding: DecodedRgbaEncoding::SourceLinearRgb,
@@ -724,5 +732,26 @@ impl CpuYuvFrame {
         self.diagnostics.selected_temporal_extent_source = selected_temporal_extent_source;
         self.diagnostics.temporal_approximation = temporal_approximation;
         self
+    }
+}
+
+#[cfg(test)]
+mod data_texture_contract_tests {
+    use super::*;
+
+    #[test]
+    fn decoded_rgba_contract_marks_data_texture_without_color_encoding() {
+        let source =
+            PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull);
+        let contract = DecodedRgbaFrameContract::source_encoded(
+            source,
+            DecodedVideoMatrix::Rgb,
+            DecodedVideoRange::Full,
+        );
+
+        assert_eq!(contract.source, source);
+        assert_eq!(contract.encoding, DecodedRgbaEncoding::DataTexture);
+        assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Rgb);
+        assert_eq!(contract.applied_range, DecodedVideoRange::Full);
     }
 }

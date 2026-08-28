@@ -186,11 +186,11 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
     color_context: &ProgramColorContext,
 ) -> PreviewOutputKey {
     let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.viewer-plan.v1");
-    color_context.working_color_space.hash(&mut builder);
-    color_context.output_color_space.hash(&mut builder);
-    color_context.output_tone_map.hash(&mut builder);
-    color_context.engine.hash(&mut builder);
-    color_context.output_transform.hash(&mut builder);
+    color_context.working_color_space().hash(&mut builder);
+    color_context.output_color_space().hash(&mut builder);
+    color_context.output_tone_map().hash(&mut builder);
+    color_context.engine().hash(&mut builder);
+    color_context.output_transform().hash(&mut builder);
     elements.len().hash(&mut builder);
     for element in elements {
         match element {
@@ -283,11 +283,11 @@ pub(crate) fn viewer_preview_color_fingerprint(
     color_context: &ProgramColorContext,
 ) -> PreviewSemanticIdentity {
     let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.color-context.v1");
-    color_context.working_color_space.hash(&mut builder);
-    color_context.output_color_space.hash(&mut builder);
-    color_context.output_tone_map.hash(&mut builder);
-    color_context.engine.hash(&mut builder);
-    color_context.output_transform.hash(&mut builder);
+    color_context.working_color_space().hash(&mut builder);
+    color_context.output_color_space().hash(&mut builder);
+    color_context.output_tone_map().hash(&mut builder);
+    color_context.engine().hash(&mut builder);
+    color_context.output_transform().hash(&mut builder);
     builder.finish_identity()
 }
 
@@ -459,7 +459,7 @@ pub(crate) fn gpu_composite_layers_for_resolved_with_session(
             }
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
-                    || layer.opacity <= 1.0e-4
+                    || !opacity_has_contribution(layer.opacity)
                     || layer.effect_graph.graph().is_identity()
                 {
                     continue;
@@ -594,7 +594,7 @@ pub(crate) fn prepare_gpu_composite_layers_with_heterogeneous_effects(
             }
             ResolvedPreviewElement::Adjustment(layer) => {
                 if !has_composited_layer
-                    || layer.opacity <= 1.0e-4
+                    || !opacity_has_contribution(layer.opacity)
                     || layer.effect_graph.graph().is_identity()
                 {
                     continue;

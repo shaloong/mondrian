@@ -32,7 +32,10 @@ use crate::app::ui_actions::{
     VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_PARAMETER_VALUE,
 };
 use crate::app_ui::test_utils::{event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-use mondrian_core::automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue};
+use mondrian_core::automation::{
+    Keyframe, PropertyHost, PropertyMutation, PropertyValue, QualifierSample,
+    QualifierSampleOperation, QualifierSampleSet,
+};
 use mondrian_core::types::AssetId;
 use mondrian_core::{SmpteCountingMode, TimelineDisplaySettings};
 use mondrian_effects::EffectNodeExt;
@@ -4222,6 +4225,163 @@ fn effects_add_refreshes_inspector_and_node_graph_selection_models() {
 }
 
 #[test]
+fn primary_grade_catalog_and_inspector_are_typed_animatable_and_undoable() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("primary-grade-ui");
+    let tb = sequence.time_base();
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+    let clip_id = clip.id;
+    let track_id = sequence.video_tracks[0].id;
+    sequence.video_tracks[0].add_clip(clip).expect("add video clip");
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips.push(selection);
+
+    let catalog = PanelListModel::from_effect_registry(Some(selection));
+    for effect_type in [
+        EffectType::WhiteBalance,
+        EffectType::ColorWheel,
+        EffectType::AscCdl,
+    ] {
+        let row = catalog
+            .items
+            .iter()
+            .find(|item| item.title == effect_display_name(&effect_type))
+            .unwrap_or_else(|| panic!("missing {} catalog row", effect_type.key()));
+        assert!(row.activate_action.is_some());
+        assert!(!row.disabled);
+    }
+
+    for effect_type in [
+        EffectType::WhiteBalance,
+        EffectType::ColorWheel,
+        EffectType::AscCdl,
+    ] {
+        state
+            .dispatch_action(visual_effect_add_to_clip_action(
+                VisualEffectAddToClipPayload { clip_id, effect_type },
+            ))
+            .expect("add primary grade effect");
+    }
+
+    let models = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(models.inspector.effects.len(), 3);
+    let white_balance = &models.inspector.effects[0];
+    assert_eq!(white_balance.label, "白平衡");
+    assert_eq!(
+        white_balance
+            .properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        ["色温", "色调"]
+    );
+    assert!(white_balance.properties.iter().all(|property| {
+        property.is_animatable && matches!(property.value, PropertyValue::Float(_))
+    }));
+
+    let primaries = &models.inspector.effects[1];
+    assert_eq!(primaries.label, "Primaries");
+    assert_eq!(
+        primaries
+            .properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Offset", "Lift", "Gamma", "Gain"]
+    );
+    assert!(primaries.properties.iter().all(|property| {
+        property.is_animatable && matches!(property.value, PropertyValue::Vec3(_))
+    }));
+
+    let cdl = &models.inspector.effects[2];
+    assert_eq!(cdl.label, "ASC CDL");
+    assert_eq!(
+        cdl.properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        ["Slope", "Offset", "Power", "Saturation"]
+    );
+    assert!(cdl.properties.iter().all(|property| property.is_animatable));
+    let slope = &cdl.properties[0];
+    let cdl_id = cdl.effect_id;
+    let edited_slope = glam::Vec3::new(1.1, 0.9, 1.2);
+    let action = inspector_effect_property_action(
+        Some(selection),
+        cdl_id,
+        slope.address.clone(),
+        PropertyValue::Vec3(edited_slope),
+    )
+    .expect("typed CDL slope action");
+    state.dispatch_action(action).expect("edit CDL slope");
+
+    let edited = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(
+        edited.inspector.effects[2].properties[0].value,
+        PropertyValue::Vec3(edited_slope)
+    );
+    state
+        .dispatch_action(mondrian_editor_state::Action::Undo)
+        .expect("undo CDL slope edit");
+    let undone = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(
+        undone.inspector.effects[2].properties[0].value,
+        PropertyValue::Vec3(glam::Vec3::ONE)
+    );
+}
+
+#[test]
+fn inspector_exposes_gamut_compression_and_highlight_recovery_schema() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("gamut-inspector");
+    let tb = sequence.time_base();
+    let clip = Clip::new(AssetId::new(), tt(0, tb), tt(30, tb)).expect("valid clip");
+    let clip_id = clip.id;
+    let track_id = sequence.video_tracks[0].id;
+    sequence.video_tracks[0].add_clip(clip).expect("add clip");
+    state.test_set_sequence(Some(sequence));
+    let selection = SelectedClipRef { track_id, is_video_track: true, clip_id };
+    state.selection.selected_clips.push(selection);
+
+    for effect_type in [EffectType::GamutCompression, EffectType::HighlightRecovery] {
+        state
+            .dispatch_action(visual_effect_add_to_clip_action(
+                VisualEffectAddToClipPayload { clip_id, effect_type },
+            ))
+            .expect("add gamut/highlight effect");
+    }
+
+    let models = AppUiPanelModels::from_app_state(&state);
+    assert_eq!(models.inspector.effects.len(), 2);
+    let gamut = &models.inspector.effects[0];
+    assert_eq!(gamut.label, "色域压缩");
+    assert_eq!(
+        gamut
+            .properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        ["强度"]
+    );
+    assert!(gamut.properties[0].is_animatable);
+
+    let highlight = &models.inspector.effects[1];
+    assert_eq!(highlight.label, "高光恢复");
+    assert_eq!(
+        highlight
+            .properties
+            .iter()
+            .map(|property| property.label.as_str())
+            .collect::<Vec<_>>(),
+        ["起始阈值", "过渡宽度", "恢复强度"]
+    );
+    assert!(highlight.properties.iter().all(|property| {
+        property.is_animatable && matches!(property.value, PropertyValue::Float(_))
+    }));
+}
+
+#[test]
 fn node_graph_model_falls_back_to_source_after_selected_effect_removal() {
     let mut state = AppState::new();
     let mut sequence = Sequence::new("edit");
@@ -4344,6 +4504,183 @@ fn inspector_effect_vector_property_rows_get_multi_component_height() {
         Some(132.0)
     );
     assert_eq!(effect_property_row_height(&PropertyValue::Float(0.5)), None);
+    assert_eq!(
+        effect_property_row_height(&PropertyValue::Curve(NormalizedCurve::identity())),
+        Some(150.0)
+    );
+}
+
+#[test]
+fn inspector_qualifier_sample_editor_preserves_typed_stable_address_and_validity() {
+    let effect_id = EffectId::new();
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let parameter = test_parameter_address("mondrian.effect.builtin.qualifier.samples");
+    let path = "effect.qualifier.samples".to_owned();
+    let samples = QualifierSampleSet::new(vec![
+        QualifierSample::new([0.0, 1.0, 0.0], QualifierSampleOperation::Include),
+        QualifierSample::new([1.0, 0.0, 0.0], QualifierSampleOperation::Exclude),
+    ])
+    .expect("valid Qualifier samples");
+    let property = InspectorEffectPropertyModel {
+        schema: ParameterSchema::v1(
+            parameter.parameter_id.clone(),
+            PropertyValue::QualifierSamples(samples.clone()),
+        ),
+        address: parameter.clone(),
+        path: path.clone(),
+        label: "Samples".to_owned(),
+        value: PropertyValue::QualifierSamples(samples.clone()),
+        min: None,
+        max: None,
+        hard_min: None,
+        hard_max: None,
+        step: None,
+        is_animatable: false,
+    };
+    assert_eq!(
+        effect_property_row_height(&property.value),
+        Some(102.0),
+        "two samples plus the add row own their full inspector height"
+    );
+    let mut widget =
+        effect_property_value_widget(&property, true, Some(selection), effect_id, path.clone());
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 102.0));
+    assert_eq!(widget.child_count(), 3);
+
+    let mut changed = samples.samples().to_vec();
+    changed[0].rgb = [0.1, 0.8, 0.2];
+    changed.push(QualifierSample::new(
+        [0.2, 0.2, 0.9],
+        QualifierSampleOperation::Exclude,
+    ));
+    let Some(Action::Custom { namespace, name, payload }) = qualifier_sample_set_action(
+        Some(selection),
+        InspectorPropertyTarget::Effect { effect_id, parameter: parameter.clone() },
+        &path,
+        changed.clone(),
+    ) else {
+        panic!("valid Qualifier edit must dispatch");
+    };
+    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+    let payload: VisualEffectSetParameterValuePayload =
+        serde_json::from_value(payload).expect("Qualifier action payload");
+    assert_eq!(payload.clip_id, selection.clip_id);
+    assert_eq!(payload.effect_id, effect_id);
+    assert_eq!(payload.parameter, parameter);
+    assert_eq!(
+        payload.value,
+        PropertyValue::QualifierSamples(
+            QualifierSampleSet::new(changed).expect("same valid sample payload")
+        )
+    );
+
+    assert!(qualifier_sample_set_action(
+        Some(selection),
+        InspectorPropertyTarget::Effect {
+            effect_id,
+            parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
+        },
+        &path,
+        vec![QualifierSample::new(
+            [1.0, 0.0, 0.0],
+            QualifierSampleOperation::Exclude,
+        )],
+    )
+    .is_none());
+    assert!(qualifier_sample_set_action(
+        Some(selection),
+        InspectorPropertyTarget::Effect {
+            effect_id,
+            parameter: test_parameter_address("mondrian.effect.builtin.qualifier.samples"),
+        },
+        &path,
+        Vec::new(),
+    )
+    .is_none());
+}
+
+#[test]
+fn inspector_effect_curve_editor_dispatches_structured_curve_value() {
+    let effect_id = EffectId::new();
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let property = InspectorEffectPropertyModel {
+        schema: ParameterSchema::v1(
+            mondrian_core::ParameterId::new_static("mondrian.test.curves.master"),
+            PropertyValue::Curve(NormalizedCurve::identity()),
+        ),
+        address: test_parameter_address("mondrian.test.curves.master"),
+        path: "curves.master".to_string(),
+        label: "Master".to_string(),
+        value: PropertyValue::Curve(NormalizedCurve::identity()),
+        min: None,
+        max: None,
+        hard_min: None,
+        hard_max: None,
+        step: None,
+        is_animatable: false,
+    };
+    let mut widget = effect_property_value_widget(
+        &property,
+        true,
+        Some(selection),
+        effect_id,
+        property.path.clone(),
+    );
+    widget.layout(Rect::new(0.0, 0.0, 220.0, 150.0));
+    let actions = RefCell::new(Vec::new());
+    let dispatch = |action| actions.borrow_mut().push(action);
+    let mut focus = DummyFocus;
+    let mut shortcut = DummyShortcut;
+    let mut tooltip = DummyTooltip;
+    let mut requests = EventRequests::default();
+    let mut ctx = event_ctx(
+        &mut focus,
+        &mut shortcut,
+        &mut tooltip,
+        &mut requests,
+        &dispatch,
+    );
+
+    assert_eq!(
+        widget.event(
+            &UiEvent::MouseDown {
+                position: Point::new(110.0, 75.0),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+            },
+            &mut ctx,
+        ),
+        EventResult::Handled
+    );
+
+    let recorded = actions.borrow();
+    assert_eq!(recorded.len(), 1);
+    let Action::Custom { namespace, name, payload } = &recorded[0] else {
+        panic!("expected inspector curve action, got {:?}", recorded[0]);
+    };
+    assert_eq!(namespace, VISUAL_EFFECT_NAMESPACE);
+    assert_eq!(name, VISUAL_EFFECT_SET_PARAMETER_VALUE);
+    let payload: VisualEffectSetParameterValuePayload =
+        serde_json::from_value(payload.clone()).expect("curve property payload");
+    assert_eq!(payload.clip_id, selection.clip_id);
+    assert_eq!(payload.effect_id, effect_id);
+    assert_eq!(payload.parameter, property.address);
+    let PropertyValue::Curve(curve) = payload.value else {
+        panic!("expected structured Curve payload");
+    };
+    assert_eq!(curve.points().len(), 3);
+    assert_eq!(curve.points()[0], NormalizedCurvePoint::new(0.0, 0.0));
+    assert_eq!(curve.points()[2], NormalizedCurvePoint::new(1.0, 1.0));
+    assert!(curve.points()[1].x > 0.4 && curve.points()[1].x < 0.6);
 }
 
 #[test]
@@ -5553,6 +5890,128 @@ fn inspector_projects_mask_identity_and_emits_closed_product_actions() {
             ),
         )
     );
+}
+
+#[test]
+fn viewer_power_window_projection_round_trips_bezier_handles_without_loss() {
+    let shape = MaskShape::Path {
+        points: vec![
+            BezierPoint {
+                position: glam::Vec2::new(0.12, 0.24),
+                control_in: glam::Vec2::new(-0.07, 0.03),
+                control_out: glam::Vec2::new(0.11, -0.05),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.83, 0.31),
+                control_in: glam::Vec2::new(-0.13, -0.09),
+                control_out: glam::Vec2::new(0.04, 0.17),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.61, 0.86),
+                control_in: glam::Vec2::new(0.08, -0.14),
+                control_out: glam::Vec2::new(-0.16, 0.02),
+            },
+        ],
+        closed: false,
+    };
+
+    assert_eq!(
+        mask_shape_from_viewer(viewer_power_window_shape(&shape)),
+        shape
+    );
+}
+
+#[test]
+fn viewer_power_window_fails_closed_for_playback_track_lock_and_mask_lock() {
+    let mut state = AppState::new();
+    let mut sequence = Sequence::new("Viewer Power Window");
+    let tb = sequence.time_base();
+    let mut clip = Clip::new_solid_color(
+        AssetId::new(),
+        Color::from_rgba8(32, 64, 128, 255),
+        tt(0, tb),
+        tt(24, tb),
+    )
+    .expect("solid Clip");
+    let mask_id = clip.add_mask_component(mondrian_core::mask_data::MaskComponent::new(
+        "Power Window".to_owned(),
+        mondrian_core::mask_data::MaskEvaluation {
+            shape: default_bezier_power_window(),
+            ..Default::default()
+        },
+    ));
+    let clip_id = clip.id;
+    sequence.video_tracks[0].add_clip(clip).expect("add Clip");
+    state.test_set_sequence(Some(sequence));
+    state.select_mask_by_id(clip_id, mask_id).expect("select Power Window");
+
+    let editable = AppUiPanelModels::from_app_state(&state)
+        .viewer
+        .power_window
+        .expect("project selected Power Window");
+    assert!(editable.overlay.editable);
+
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0].masks[0]
+        .locked = true;
+    assert!(
+        !AppUiPanelModels::from_app_state(&state)
+            .viewer
+            .power_window
+            .expect("locked Power Window")
+            .overlay
+            .editable
+    );
+
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].clips[0].masks[0]
+        .locked = false;
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = true;
+    assert!(
+        !AppUiPanelModels::from_app_state(&state)
+            .viewer
+            .power_window
+            .expect("track-locked Power Window")
+            .overlay
+            .editable
+    );
+
+    state.active_sequence_mut_uncommitted().expect("sequence").video_tracks[0].is_locked = false;
+    state.play().expect("play synthetic Clip");
+    assert!(
+        !AppUiPanelModels::from_app_state(&state)
+            .viewer
+            .power_window
+            .expect("playing Power Window")
+            .overlay
+            .editable
+    );
+}
+
+#[test]
+fn inspector_bezier_power_window_creation_emits_complete_closed_shape() {
+    let selection = SelectedClipRef {
+        track_id: TrackId::new(),
+        is_video_track: true,
+        clip_id: ClipId::new(),
+    };
+    let action = inspector_add_mask_action(Some(selection), default_bezier_power_window())
+        .expect("Bezier Power Window action");
+    let decoded = ProductAction::decode_external(&action)
+        .expect("valid Power Window payload")
+        .expect("recognized Power Window action");
+    let ProductAction::VisualMask(crate::app::product_action::VisualMaskProductAction::AddToClip(
+        payload,
+    )) = decoded
+    else {
+        panic!("expected add Power Window action");
+    };
+    let MaskShape::Path { points, closed } = payload.shape else {
+        panic!("expected Bezier Power Window");
+    };
+    assert!(closed);
+    assert_eq!(points.len(), 4);
+    assert!(points.iter().all(|point| {
+        point.control_in != glam::Vec2::ZERO && point.control_out != glam::Vec2::ZERO
+    }));
 }
 
 #[test]

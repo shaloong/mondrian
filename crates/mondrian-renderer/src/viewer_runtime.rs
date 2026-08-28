@@ -381,6 +381,11 @@ impl ViewerGpuExecutionRuntime {
         self.working_compositor.texture_binding_diagnostics()
     }
 
+    /// Point-in-time evidence for creative-LUT device residency and reuse.
+    pub fn compositor_creative_lut_diagnostics(&self) -> crate::GpuCreativeLutCacheDiagnostics {
+        self.working_compositor.creative_lut_diagnostics()
+    }
+
     /// Point-in-time evidence that hidden scopes perform no work and visible
     /// scopes reuse retained pipelines and display resources.
     pub fn program_scopes_diagnostics(&self) -> GpuProgramScopesRuntimeDiagnostics {
@@ -2078,11 +2083,9 @@ impl ViewerGpuNativeVideoFacts {
             }
         });
         let source_video_sampling = source_texture_format.and_then(|format| {
-            native_video_sampling_from_decoded(
-                source.frame.source_color.color_space,
-                format,
-                source.frame.video_sampling,
-            )
+            source.frame.source_color.color_space().and_then(|color_space| {
+                native_video_sampling_from_decoded(color_space, format, source.frame.video_sampling)
+            })
         });
         Self {
             decoder_residency: DecodedFrameResidency::CpuYuv,

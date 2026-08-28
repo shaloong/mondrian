@@ -498,6 +498,7 @@ impl AppState {
     pub(super) fn finalize_project_close_state(&mut self) {
         self.audio_idle_warmup.set_dispatch_enabled(false);
         self.audio_idle_warmup.bind_authoring(None);
+        self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(None);
         self.media_import.bind_project(None);
         self.media_import_batches.clear();

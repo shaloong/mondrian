@@ -792,7 +792,7 @@ where
             PreviewSemanticIdentityBuilder::new(b"mondrian.preview.temporal-source.v1");
         batch.placement().hash(&mut identity);
         batch.graph().semantic_fingerprint().hash(&mut identity);
-        color_context.working_color_space.hash(&mut identity);
+        color_context.working_color_space().hash(&mut identity);
         let mut batch_pending = false;
 
         for demand in batch.source_demands() {
@@ -906,7 +906,7 @@ where
                 width: tile.frame_extent().width(),
                 height: tile.frame_extent().height(),
                 data: tile.pixels().to_vec(),
-                color_space: color_context.working_color_space,
+                color_space: color_context.working_color_space(),
             }),
             ready.logical_resolution,
             PreviewSemanticIdentity::from_complete_fingerprint(output.cache_identity()),
@@ -982,7 +982,7 @@ where
                 execution,
                 demand,
                 frame,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )
             .map(PreviewTemporalSourceResolution::Ready)
         }
@@ -1057,7 +1057,7 @@ where
                 child_author_resolution,
                 child_frame,
                 child_resolution,
-                color_context.working_color_space,
+                color_context.working_color_space(),
                 child_context,
                 child_elements,
                 execution.scratch,
@@ -1067,7 +1067,7 @@ where
                 execution,
                 demand,
                 frame,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )
             .map(PreviewTemporalSourceResolution::Ready)
         }
@@ -1080,7 +1080,7 @@ where
                     [color.r, color.g, color.b, color.a];
                     extent.width() as usize * extent.height() as usize
                 ],
-                color_space: color_context.working_color_space,
+                color_space: color_context.working_color_space(),
             });
             let mut identity =
                 PreviewSemanticIdentityBuilder::new(b"mondrian.preview.temporal-solid.v1");
@@ -1514,7 +1514,7 @@ where
                     materialization,
                     &title,
                     target_resolution,
-                    color_context.working_color_space,
+                    color_context.working_color_space(),
                 )?;
                 resolved.push(ResolvedPreviewElement::Media {
                     frame,
@@ -1553,7 +1553,7 @@ where
                     let child_node = prepared_visual_node(execution.closure, child_id)?;
                     let nested_sequence_id = child_node.sequence_id();
                     let nested_author_resolution = child_node.author_resolution();
-                    let parent_working_color_space = color_context.working_color_space;
+                    let parent_working_color_space = color_context.working_color_space();
                     let child_frame = child_node.frame();
                     let child_resolution = child_node.execution_resolution();
                     let child_context = child_node.color_context().clone();
@@ -1831,7 +1831,7 @@ where
                 parent_materialization,
                 &title,
                 target_resolution,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )?;
             ResolvedPreviewTransitionInput::Media {
                 frame,
@@ -1868,7 +1868,7 @@ where
                 child_author_resolution,
                 child_frame,
                 child_resolution,
-                color_context.working_color_space,
+                color_context.working_color_space(),
                 child_context,
                 child_elements,
                 scratch,
@@ -2022,7 +2022,7 @@ fn materialize_prepared_nested_node(
         let converted = execute_cpu_working_transform_with_session(
             &working_frame,
             parent_working_color_space,
-            color_context.engine.clone(),
+            color_context.engine().clone(),
             scratch.color_execution_mut(),
         )
         .map_err(|error| {

@@ -200,7 +200,8 @@ impl PreparedMaskRasterSet {
         };
         for node in &graph.nodes {
             controlled_checkpoint(checkpoint)?;
-            let EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } = &node.kind
+            let EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, .. } =
+                &node.kind
             else {
                 continue;
             };
@@ -817,6 +818,7 @@ mod tests {
                     feather: 4.0,
                     expansion: 2.0,
                     opacity: 0.8,
+                    invert: false,
                 },
             }],
             output: Some(EffectGraphNodeId(11)),

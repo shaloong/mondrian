@@ -293,7 +293,7 @@ pub(super) fn resolve_media_path_for_preference(
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let input_color = sequence
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(sequence.settings.color.input.auto_tone_map_media);
     let proxy_config = state.proxy_config();
     let proxy_color = resolve_app_state_proxy_color_contract(state, asset).ok();
@@ -328,7 +328,7 @@ fn resolve_unavailable_reason(state: &AppState, asset: &AssetRecord) -> anyhow::
     let sequence = state.active_sequence().context("active Sequence is absent")?;
     let input_color = sequence
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(sequence.settings.color.input.auto_tone_map_media);
     let proxy_config = state.proxy_config();
     let outcome = resolve_preview_media_source(PreviewMediaSourceRequest {

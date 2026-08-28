@@ -166,6 +166,28 @@ impl AppState {
                         .apply_mask_parameter_mutation(mask_id, mutation)
                 })
             }
+            VisualMaskProductAction::StartTracking(payload) => {
+                self.start_visual_tracking(
+                    payload.clip_id,
+                    payload.mask_id,
+                    payload.model,
+                    payload.direction,
+                    payload.settings,
+                )
+                .map(|_| ())
+                .map_err(|error| mask_action_error("visual_mask_start_tracking", error.to_string()))
+            }
+            VisualMaskProductAction::CancelTracking(payload) => require_changed(
+                self.cancel_visual_tracking(payload.clip_id, payload.mask_id),
+                "visual_mask_cancel_tracking",
+                "Mask has no queued or running tracking attempt",
+            ),
+            VisualMaskProductAction::RecomputeTracking(payload) => self
+                .recompute_visual_tracking(payload.clip_id, payload.mask_id)
+                .map(|_| ())
+                .map_err(|error| {
+                    mask_action_error("visual_mask_recompute_tracking", error.to_string())
+                }),
         }
     }
 
@@ -388,15 +410,32 @@ mod tests {
             ),
         )
         .expect("enable shape animation");
+        let bezier_shape = MaskShape::Path {
+            points: vec![
+                mondrian_core::mask_data::BezierPoint {
+                    position: glam::Vec2::new(0.15, 0.2),
+                    control_in: glam::Vec2::new(-0.05, 0.03),
+                    control_out: glam::Vec2::new(0.12, -0.04),
+                },
+                mondrian_core::mask_data::BezierPoint {
+                    position: glam::Vec2::new(0.82, 0.28),
+                    control_in: glam::Vec2::new(-0.14, -0.06),
+                    control_out: glam::Vec2::new(0.04, 0.16),
+                },
+                mondrian_core::mask_data::BezierPoint {
+                    position: glam::Vec2::new(0.6, 0.84),
+                    control_in: glam::Vec2::new(0.08, -0.13),
+                    control_out: glam::Vec2::new(-0.15, 0.02),
+                },
+            ],
+            closed: true,
+        };
         dispatch(
             &mut state,
             VisualMaskProductAction::WriteShape(VisualMaskWriteShapePayload {
                 clip_id,
                 mask_id,
-                shape: MaskShape::Ellipse {
-                    center: glam::Vec2::new(0.5, 0.5),
-                    radii: glam::Vec2::new(0.2, 0.3),
-                },
+                shape: bezier_shape.clone(),
                 interpolation: MaskShapeInterpolation::Hold,
             }),
         )
@@ -408,6 +447,10 @@ mod tests {
             .expect("exact Clip-local shape key")
             .id;
         assert_ne!(written_key_id, initial_key_id);
+        assert_eq!(
+            mask(&state, clip_id, mask_id).evaluate_at(tt(5)).shape,
+            bezier_shape
+        );
 
         assert!(state.undo_timeline().expect("undo shape write"));
         assert_eq!(mask(&state, clip_id, mask_id).shape_keyframes.len(), 1);
@@ -420,6 +463,10 @@ mod tests {
                 .expect("restored key")
                 .id,
             written_key_id
+        );
+        assert_eq!(
+            mask(&state, clip_id, mask_id).evaluate_at(tt(5)).shape,
+            bezier_shape
         );
     }
 

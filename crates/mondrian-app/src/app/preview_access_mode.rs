@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use crate::app::ui_actions::TimelineSeekSource;
 use mondrian_core::timeline_data::AlphaInterpretation;
-use mondrian_core::types::{AssetId, ColorEngine};
-use mondrian_core::{Resolution, ResolvedPictureGeometry, SourceSampleTarget, WorkingColorSpace};
+use mondrian_core::types::AssetId;
+use mondrian_core::{Resolution, ResolvedPictureGeometry, SourceSampleTarget};
 use mondrian_media::{
     preview_decode_cpu_budget, HwAccelDeviceSelector, PreviewDecodeAccessMode,
     PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence, PreviewDecodeKey,
@@ -40,9 +40,8 @@ pub(crate) struct MediaPreviewKey {
     pub(crate) picture_geometry: ResolvedPictureGeometry,
     /// Author interpretation applied after physical decode.
     pub(crate) alpha_interpretation: AlphaInterpretation,
-    pub(crate) working_color_space: WorkingColorSpace,
-    pub(crate) input_tone_map: bool,
-    pub(crate) engine: ColorEngine,
+    /// Exact Renderer source admission and execution identity.
+    pub(crate) preparation_intent: mondrian_renderer::SourceFramePreparationIntent,
 }
 
 impl MediaPreviewKey {
@@ -105,9 +104,12 @@ impl MediaPreviewKey {
             picture_geometry: ResolvedPictureGeometry::square(resolution)
                 .expect("non-empty synthetic Preview geometry"),
             alpha_interpretation: AlphaInterpretation::Straight,
-            working_color_space: WorkingColorSpace::LinearRec709,
-            input_tone_map: false,
-            engine: ColorEngine::mondrian_standard(),
+            preparation_intent: mondrian_renderer::RenderInputTransform::to_working(
+                mondrian_core::WorkingColorSpace::LinearRec709,
+                false,
+                mondrian_core::ColorEngine::mondrian_standard(),
+            )
+            .into(),
         }
     }
 

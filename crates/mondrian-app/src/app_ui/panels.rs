@@ -14,10 +14,13 @@ use mondrian_assets::library::FolderRecord;
 use mondrian_assets::AssetMediaProbeCandidate;
 use mondrian_assets::{AssetKind, AssetLibrary, AssetRecord};
 use mondrian_core::automation::{
-    AnimationParameterAddress, ParameterResourceReference, ParameterSchema, PropertyValue,
+    AnimationParameterAddress, NormalizedCurve, NormalizedCurvePoint, ParameterResourceReference,
+    ParameterSchema, PropertyValue, QualifierSample, QualifierSampleOperation, QualifierSampleSet,
+    MAX_QUALIFIER_SAMPLES,
 };
 use mondrian_core::display_labels::{color_space_label, frame_rate_label};
 use mondrian_core::effect_data::EffectType;
+use mondrian_core::mask_data::{MaskTrackingDirection, MaskTrackingModel, MaskTrackingSettings};
 use mondrian_core::types::{
     AssetId, AudioComponentEditId, AudioSourceComponentId, ClipId, ClipLinkGroupId, ColorSpace,
     EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
@@ -30,7 +33,7 @@ use mondrian_core::{
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
 use mondrian_effects::{
-    effect_display_name, effect_library_types, MaskShape, MaskShapeInterpolation,
+    effect_display_name, effect_library_types, BezierPoint, MaskShape, MaskShapeInterpolation,
 };
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
@@ -81,7 +84,8 @@ use mondrian_ui_widgets::{
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
     TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
-    ViewerFrameContent, ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
+    ViewerStatusTone, ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -117,22 +121,23 @@ use crate::app::ui_actions::{
     visual_effect_add_to_clip_action, visual_effect_remove_action, visual_effect_reorder_action,
     visual_effect_select_action, visual_effect_set_enabled_action,
     visual_effect_set_parameter_value_action, visual_mask_add_to_clip_action,
+    visual_mask_cancel_tracking_action, visual_mask_recompute_tracking_action,
     visual_mask_remove_action, visual_mask_reorder_action, visual_mask_select_action,
     visual_mask_set_enabled_action, visual_mask_set_locked_action,
     visual_mask_set_parameter_value_action, visual_mask_set_shape_animation_enabled_action,
-    visual_mask_write_shape_action, AppShellInputColorPipelineDiagnostics,
-    AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
-    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload,
-    AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload, AssetsCreateFolderPayload,
-    AssetsDeleteAssetPayload, AssetsDeleteFolderPayload, AssetsDeleteSelectionPayload,
-    AssetsImportFilesPayload, AssetsMoveAssetPayload, AssetsMoveFolderPayload,
-    AssetsMoveSelectionPayload, AssetsOpenFolderPayload, AssetsPrepareDragPayload,
-    AssetsRebindAudioComponentPayload, AssetsRefreshAudioComponentsPayload,
-    AssetsRenameAssetPayload, AssetsRenameFolderPayload, AssetsSetProxyModePayload,
-    ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipNormalizedCurvePointPayload,
-    ClipParameterValueWrite, ClipSetEnabledPayload, ClipSetSolidColorPayload,
-    ClipWriteParameterValuesPayload, DockDropAreaPayload, ExportDraftEdit,
-    ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
+    visual_mask_start_tracking_action, visual_mask_write_shape_action,
+    AppShellInputColorPipelineDiagnostics, AppShellInterpretAssetDialogPayload,
+    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
+    AppShellRevealInFileManagerPayload, AppShellVideoSignalDiagnostics, AssetsCreateAssetPayload,
+    AssetsCreateFolderPayload, AssetsDeleteAssetPayload, AssetsDeleteFolderPayload,
+    AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveAssetPayload,
+    AssetsMoveFolderPayload, AssetsMoveSelectionPayload, AssetsOpenFolderPayload,
+    AssetsPrepareDragPayload, AssetsRebindAudioComponentPayload,
+    AssetsRefreshAudioComponentsPayload, AssetsRenameAssetPayload, AssetsRenameFolderPayload,
+    AssetsSetProxyModePayload, ClipCurveEditPayload, ClipEditNumericCurvePayload,
+    ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
+    ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, DockDropAreaPayload,
+    ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload, SequenceTargetPayload,
     TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineExportRequest,
     TimelineInOutPointKind, TimelineMoveClipPayload, TimelineSeekSource as AppTimelineSeekSource,
     TimelineSelectClipPayload, TimelineSetInOutPointPayload, TimelineTrimClipsPayload,
@@ -145,7 +150,7 @@ use crate::app::ui_actions::{
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
-    VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+    VisualMaskStartTrackingPayload, VisualMaskTargetPayload, VisualMaskWriteShapePayload,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::{
@@ -715,6 +720,16 @@ pub struct ViewerPanelModel {
     pub preview_unavailability: Option<PreviewUnavailability>,
     pub color_rejection: Option<ViewerPreviewColorRejectionModel>,
     pub color_pipeline_status: Option<ViewerColorPipelineStatus>,
+    /// Selected Clip-local Power Window projected at the current author time.
+    pub power_window: Option<ViewerPowerWindowModel>,
+}
+
+/// App-owned identity plus domain-light Viewer geometry for one Power Window.
+#[derive(Debug, Clone)]
+pub struct ViewerPowerWindowModel {
+    pub clip_id: ClipId,
+    pub mask_id: MaskId,
+    pub overlay: ViewerPowerWindow,
 }
 
 /// Program Output scopes data independent from renderer GPU handles.
@@ -924,6 +939,7 @@ impl ViewerPanelModel {
             color_rejection,
             color_pipeline_status: preview
                 .and_then(ViewerPreviewSource::viewer_color_pipeline_status),
+            power_window: viewer_power_window_model(state, sequence),
         }
     }
 
@@ -953,7 +969,88 @@ impl ViewerPanelModel {
             preview_unavailability: None,
             color_rejection: None,
             color_pipeline_status: None,
+            power_window: None,
         }
+    }
+}
+
+fn viewer_power_window_model(
+    state: &AppState,
+    sequence: &Sequence,
+) -> Option<ViewerPowerWindowModel> {
+    let selection = state.primary_selected_clip()?;
+    if !selection.is_video_track {
+        return None;
+    }
+    let (mask_id, mask_clip_id, _) = state.primary_selected_mask()?;
+    if mask_clip_id != selection.clip_id {
+        return None;
+    }
+    let (resolved_selection, clip) = clip_for_selection(sequence, &selection)?;
+    let mask = clip.mask(mask_id)?;
+    let timeline_time = state.current_timeline_time().ok().flatten().unwrap_or(sequence.playhead);
+    let author_time = clip.clamped_visual_author_time(timeline_time).unwrap_or(clip.clip_time_in);
+    let shape = viewer_power_window_shape(&mask.evaluate_at(author_time).shape);
+    Some(ViewerPowerWindowModel {
+        clip_id: clip.id,
+        mask_id,
+        overlay: ViewerPowerWindow {
+            shape,
+            editable: !state.is_playing()
+                && !mask.locked
+                && !selected_clip_track_is_locked(state, resolved_selection),
+        },
+    })
+}
+
+fn viewer_power_window_shape(shape: &MaskShape) -> ViewerPowerWindowShape {
+    match shape {
+        MaskShape::Rectangle { x, y, width, height, corner_radius } => {
+            ViewerPowerWindowShape::Rectangle {
+                x: *x,
+                y: *y,
+                width: *width,
+                height: *height,
+                corner_radius: *corner_radius,
+            }
+        }
+        MaskShape::Ellipse { center, radii } => {
+            ViewerPowerWindowShape::Ellipse { center: center.to_array(), radii: radii.to_array() }
+        }
+        MaskShape::Path { points, closed } => ViewerPowerWindowShape::Bezier {
+            points: points
+                .iter()
+                .map(|point| ViewerPowerWindowBezierPoint {
+                    position: point.position.to_array(),
+                    control_in: point.control_in.to_array(),
+                    control_out: point.control_out.to_array(),
+                })
+                .collect(),
+            closed: *closed,
+        },
+    }
+}
+
+fn mask_shape_from_viewer(shape: ViewerPowerWindowShape) -> MaskShape {
+    match shape {
+        ViewerPowerWindowShape::Rectangle { x, y, width, height, corner_radius } => {
+            MaskShape::Rectangle { x, y, width, height, corner_radius }
+        }
+        ViewerPowerWindowShape::Ellipse { center, radii } => MaskShape::Ellipse {
+            center: glam::Vec2::from_array(center),
+            radii: glam::Vec2::from_array(radii),
+        },
+        ViewerPowerWindowShape::Bezier { points, closed } => MaskShape::Path {
+            points: points
+                .into_iter()
+                .map(|point| mondrian_effects::BezierPoint {
+                    position: glam::Vec2::from_array(point.position),
+                    control_in: glam::Vec2::from_array(point.control_in),
+                    control_out: glam::Vec2::from_array(point.control_out),
+                })
+                .collect(),
+            closed,
+        },
     }
 }
 
@@ -1741,6 +1838,10 @@ pub struct InspectorMaskModel {
     pub shape_animation_enabled: bool,
     /// Current evaluated primitive family shown by the shape control.
     pub shape_label: String,
+    /// Latest background tracking state, when any request has run this Session.
+    pub tracking_status: Option<crate::app::visual_tracking::VisualTrackingStatus>,
+    /// Whether a completed recomputable recipe is persisted on the Mask.
+    pub has_tracking_recipe: bool,
     /// Stable-address scalar Mask parameters.
     pub properties: Vec<InspectorEffectPropertyModel>,
 }
@@ -1944,6 +2045,8 @@ impl InspectorPanelModel {
                         locked: mask.locked,
                         shape_animation_enabled: mask.shape_animation_enabled,
                         shape_label,
+                        tracking_status: state.visual_tracking_status(clip.id, mask.id).cloned(),
+                        has_tracking_recipe: mask.tracking.is_some(),
                         properties: mask
                             .properties
                             .iter()
@@ -2623,9 +2726,23 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     } else {
         surface
     };
-    match model.frame_content.clone() {
+    let surface = match model.frame_content.clone() {
         Some(frame_content) => surface.with_frame_content(frame_content),
         None => surface,
+    };
+    if let Some(window) = model.power_window.clone() {
+        let clip_id = window.clip_id;
+        let mask_id = window.mask_id;
+        surface.with_power_window(window.overlay).on_power_window_edit(move |shape| {
+            visual_mask_write_shape_action(VisualMaskWriteShapePayload {
+                clip_id,
+                mask_id,
+                shape: mask_shape_from_viewer(shape),
+                interpolation: MaskShapeInterpolation::Hold,
+            })
+        })
+    } else {
+        surface
     }
 }
 

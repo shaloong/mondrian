@@ -2147,7 +2147,11 @@ impl ViewerGpuOutputDisplayIssueCounts {
                 self.output_color_space_requires_surface_color_space =
                     self.output_color_space_requires_surface_color_space.saturating_add(1);
             }
-            "ReconfigureBlockedByPayload" => {
+            // `ReconfigureBlockedByPayload` is the historical pre-carrier
+            // spelling. Both remain in one budget bucket so old evidence is
+            // readable while current production diagnostics do not become an
+            // unknown issue.
+            "ReconfigureBlockedByPayload" | "ReconfigurationRequired" => {
                 self.reconfigure_blocked_by_payload =
                     self.reconfigure_blocked_by_payload.saturating_add(1);
             }

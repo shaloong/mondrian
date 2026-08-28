@@ -49,6 +49,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
+            authoring.color_environment().engine(),
             snapshot.viewer_display(),
             display_snapshot.as_ref(),
         ) {
@@ -65,7 +66,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
+            match sequence.settings.root_program_color_context(authoring.color_environment()) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.scheduler.prune_obsolete();
+                    return self.observe_preview_state(PreviewPresentationState::Unavailable(
+                        PreviewUnavailability::blocked(
+                            PreviewOutputStage::ProgramOutput,
+                            format!("invalid Program color context: {error}"),
+                        ),
+                    ));
+                }
+            };
         self.activate_preview_generation(ViewerPreviewGenerationKey::from_snapshot(
             snapshot,
             sequence,
@@ -73,7 +85,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             width,
             height,
             display_color_space,
-            display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_identity),
+            self.display_snapshot_identity.get(),
         ));
         let render_started_at = Instant::now();
         let resolve_started_at = Instant::now();
@@ -89,9 +101,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             runtime_scale: transport.runtime_scale(),
             display_color_space,
-            display_contract_identity: display_snapshot
-                .as_ref()
-                .map(DisplayOutputSnapshot::contract_identity),
+            display_contract_identity: self.display_snapshot_identity.get(),
         };
         let resolved = self.acquire_frame_evaluation(
             snapshot,
@@ -130,12 +140,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 let external_cache_key =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable)
                         .then(|| {
-                            evaluation.color_context.output_color_space.color().and_then(
+                            evaluation.color_context.output_color_space().color().and_then(
                                 |program_output_color_space| {
                                     RenderMonitorAdaptation::new(
                                         program_output_color_space,
                                         display_color_space,
-                                        evaluation.color_context.engine.clone(),
+                                        evaluation.color_context.engine().clone(),
                                     )
                                     .ok()
                                     .map(|adaptation| {

@@ -30,6 +30,35 @@ adds monitor/surface adaptation, while Export consumes only the immutable
    change, scale factor change, and surface reconfiguration all trigger a full
    contract re-resolve.
 
+6. **Three authorities remain separate.** Sequence/Project owns Program Output;
+   the machine-local policy owns monitor target and ICC calibration intent; the
+   Window/platform Adapter owns actual surface and monitor capability evidence.
+   No one authority may manufacture another.
+
+## Machine-local Display Policy
+
+`DisplayManagementPolicy` is a validated deep value Module with private fields:
+
+- `MonitorOutputIntent`: follow Program Output, a managed display-referred
+  target, or an exact engine-qualified OCIO display/view.
+- `DisplayCalibrationPolicy`: disabled, OS-default ICC, or an explicit absolute
+  ICC path.
+- `IccRenderingIntent`: perceptual, relative colorimetric, saturation, or
+  absolute colorimetric.
+- `ViewerDisplayMode`: follow Program Output, SDR, PQ, or HLG.
+
+Preview and Window both call the same `resolve_output_color_space` method. An
+OCIO pair resolves only when `ColorEngine::output_display_view` maps it to one
+of the six standardized monitor targets; invalid names, scene-linear/log
+targets, relative ICC paths, and engine drift fail closed. Window snapshot
+resolution receives the active Sequence Program Output, not the current
+swapchain color space.
+
+The policy is stored in user-level `AppUiPreferences` with a serde default for
+pre-COL-009 files. `AppUiHost` installs it into `AppState` before constructing
+Preview, and each production Preferences action atomically updates runtime and
+disk state. It never enters `.mdp`.
+
 ## Preview Display Output Contract v2
 
 ### DisplayOutputSnapshot
@@ -39,6 +68,7 @@ Defined in `mondrian-core::display_contract`.
 
 ```
 DisplayOutputSnapshot {
+    display_management_policy: DisplayManagementPolicy,
     display_id: DisplayId,             // monitor name, position, physical size
     platform: DisplayPlatform,         // Windows, macOS, Linux, Unknown
     scale_factor: ScaleFactorPpm,      // integer PPM for deterministic comparison
@@ -76,12 +106,12 @@ Status of the OS monitor ICC profile. The fail-closed chain:
 
 | User config | OS capability | Result |
 |---|---|---|
-| No ICC | * | `NotRequested` |
-| ColorSpace(x) | * | `ManagedColorSpace` |
-| IccProfile | OS discovery unsupported | `IccProfileUnsupported` |
-| IccProfile | OS discovery works, parse fails | `IccProfileReadError` |
-| IccProfile | ICC parses but device processor creation fails | `IccProfileUnmapped` + fail-closed blocker |
-| IccProfile | CPU LUT and full-fingerprint processor proof ready | `ManagedIccCalibration` |
+| Calibration disabled, Program Output target | * | `NotRequested` |
+| Calibration disabled, explicit managed/OCIO target | * | `ManagedColorSpace` |
+| OS-default ICC | OS discovery unsupported | `IccProfileUnsupported` |
+| Explicit/OS ICC | read or parse fails | `IccProfileReadError` |
+| Explicit/OS ICC | device processor creation fails | `IccProfileUnmapped` + fail-closed blocker |
+| Explicit/OS ICC | CPU LUT and full-fingerprint processor proof ready | `ManagedIccCalibration` |
 
 Parsing, descriptive mapping, and device calibration are separate. A valid
 generic RGB monitor profile is not implicitly Rec.709: the shared parser may
@@ -109,6 +139,13 @@ fingerprint, while the window owns the matching `Arc<DisplayCalibrationLut3d>`
 and the renderer owns pipeline, GPU LUT, and per-frame output resources. Display
 changes clear the GPU cache and preview resources. A mismatch at any layer fails
 before command submission.
+
+The live resolver applies the selected ICC rendering intent when constructing
+the processor. A bounded eight-entry process cache keyed by source color space,
+full profile fingerprint, and rendering intent avoids rebuilding the 33^3 LUT
+on resize or equivalent display refresh. Preview precomputes the snapshot's
+SHA-256 contract identity at the low-frequency install Seam and reuses the typed
+identity per frame rather than serializing and hashing the snapshot repeatedly.
 
 ### HdrStatus
 
@@ -148,9 +185,12 @@ Structured failure categories:
 
 ## Platform Display Probing
 
-### PlatformDisplayProbe trait
+### PlatformDisplayProbe test contract
 
-Defined in `mondrian-core::display_probe`. Abstracts OS-level display queries:
+Defined in `mondrian-core::display_probe` and retained for deterministic core
+fixtures. Production does not claim it as an OS Adapter: the Window Adapter
+projects real winit/wgpu surface facts and `mondrian-platform` ICC/HDR probe
+results into the live resolver.
 
 ```rust
 pub trait PlatformDisplayProbe {
@@ -212,6 +252,32 @@ The display contract produces structured diagnostics for:
 - **Display issue summaries** — correlation of blockers with refresh events
 - **Action codes** — machine-readable follow-up actions
 
+The Window JSONL evidence additionally records `ui_surface_carrier_active`,
+carrier target rebuilds, presented external-texture batches, and separate
+surface-code versus ICC/device-code batches. These are execution facts, not
+inferences from the selected policy.
+
+## Physical Viewer Display Qualification
+
+`tests/validation/viewer-display-qualification.json` is the fail-closed COL-010
+HITL profile. It requires exact Display P3, HDR-PQ, and managed-ICC scenarios on
+real displays. `scripts/validation/validate-viewer-display-qualification.ps1`
+consumes a product `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` JSONL file for each
+scenario plus one operator observation. A pass requires a valid Display Output
+Contract, Ready Viewer health, a registered and actually submitted external
+texture, zero readback stages, the exact native surface color space, the exact
+code-value transfer path, carrier allocation followed by steady reuse for
+P3/HDR, ICC processor proof for the ICC scenario, and a positive visual
+observation bound to the physical display identity. Missing capability or a
+skipped scenario is a failure.
+
+Surface format/color-space enumeration is not HDR compositor proof. The Window
+queries the platform Advanced Color/EDR state before selecting PQ/HLG. If the
+OS compositor or monitor is disabled, unsupported, or unknown, the application
+retains the usable SDR sRGB UI carrier and the Viewer remains blocked by the
+typed display snapshot. This prevents DXGI format enumeration from switching
+an SDR desktop into a misleading PQ swapchain.
+
 ### Action Codes
 
 | Code | Meaning |
@@ -226,11 +292,18 @@ The display contract produces structured diagnostics for:
 ## Current State (Alpha)
 
 ### Supported
+- Production Display Preferences UI with engine-qualified OCIO display/view,
+  monitor target, HDR policy, ICC source, and ICC rendering intent
+- User-level save, pre-Preview startup restore, complete snapshot diagnostics,
+  and display-dependent invalidation on policy or Program Output changes
 - SDR Program Output in Rec.709, sRGB, and Display P3 via OCIO, with
   Preview-only monitor/surface adaptation and independently contracted Export
   delivery
 - Display contract refresh on resize, scale factor change, window move
 - Surface format selection with color space capability matching
+- Direct sRGB, Display P3, Rec.2100 PQ, and Rec.2100 HLG UI/Viewer native
+  presentation carriers with linear-domain composition and cached resources
+- Managed ICC device-code round-trip on the direct sRGB carrier
 - Structured blocker taxonomy with health report integration
 - Fake display probe for testable display contract logic
 - Windows OS default ICC profile discovery via `mondrian-platform`
@@ -252,9 +325,6 @@ The display contract produces structured diagnostics for:
 - Cache invalidation on contract change
 
 ### Not Implemented (Fail-Closed)
-- **ICC profile id registry** — `IccProfile { profile_id }` accepts absolute
-  paths or `os-default`; arbitrary stable ids fail closed until a registry is
-  implemented.
 - **Wayland parametric-profile synthesis** — when an active Wayland output
   description provides primaries/transfer/luminance but no ICC file, Mondrian
   records the HDR evidence but does not synthesize an ICC payload. An explicit
@@ -271,3 +341,7 @@ The display contract produces structured diagnostics for:
 - `DataTexture` / `NonColorData` in display colorspace selection
 - Parallel color management engine outside OCIO
 - Silent Rec.709 fallback for unknown display states
+- Non-default monitor/HDR/ICC policy through the bounded CPU Viewer fallback:
+  the current CPU raster uses the fixed sRGB UI atlas and still fails closed
+  with `cpu_viewer_display_policy_carrier`; qualified wide-gamut/HDR/ICC
+  presentation is the GPU external-texture path.

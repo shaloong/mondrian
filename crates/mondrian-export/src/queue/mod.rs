@@ -7,6 +7,7 @@ use crate::audio_stems::{
 use crate::delivery::{
     ffmpeg_audio_channel_layout, ResolvedExportArtifactEncoding, ResolvedExportDeliveryContract,
 };
+pub use crate::frame_contract::{ExportFrameContract, ExportFramePackingError};
 use crate::image_sequence::{
     ffmpeg_frame_pattern, validate_and_write_manifest, ImageSequenceValidationContract,
 };
@@ -54,21 +55,21 @@ use mondrian_media::{
 use mondrian_renderer::{
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
     execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
-    execute_cpu_source_input_stage_with_session, execute_cpu_working_transform_with_session,
+    execute_cpu_working_transform_with_session, prepare_decoded_cpu_source_frame,
     prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
-    BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, CpuEncodedColorFrame,
-    CpuSourceColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
-    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
-    HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
-    HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
-    HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime, LinearFloatSource,
-    PreparedVisualChildCanvasPolicy, PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest,
-    PreparedVisualFrameEvaluation, PreparedVisualFrameNode, PreparedVisualFrameNodeId,
-    PreparedVisualMaterializationContract, PreparedVisualNestedSample, PreparedVisualProgram,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
+    BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, GpuColorFrameReadbackPlan,
+    GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameWgpuResourcePoolOptions, GpuContext, HeterogeneousCpuPrefixSource,
+    HeterogeneousGpuCompletedEvidence, HeterogeneousGpuCompletedFrame,
+    HeterogeneousGpuContinuationError, HeterogeneousGpuContinuationRequest,
+    HeterogeneousGpuContinuationRuntime, PreparedSourceFrame, PreparedVisualChildCanvasPolicy,
+    PreparedVisualFrameClosure, PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation,
+    PreparedVisualFrameNode, PreparedVisualFrameNodeId, PreparedVisualMaterializationContract,
+    PreparedVisualNestedSample, PreparedVisualProgram, RenderColorStageDiagnostics,
+    RenderColorStageGpuBlockerBreakdown, RenderColorTransformGpuOptions,
+    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputExecutionResourceGrant,
+    RenderInputTransform, RenderOutputColorBoundary, SourceFramePreparationIntent,
     TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeColorPathSummary,
     TimelineCompositeDiagnostics, TimelineCompositeDomainBlockerBreakdown,
     TimelineCompositeElement, TimelineCompositeLegacyBreakdown, TimelineCompositeOptions,
@@ -85,8 +86,8 @@ use mondrian_storage::{
     FilePublicationFailure, FilePublicationMode, OwnedPublicationDirectory, OwnedPublicationFile,
 };
 use mondrian_timeline::sequence::{
-    DeliveryBitDepth, InputColorResolutionSourceCounts, ProgramColorContext, ResolvedInputColor,
-    SequenceSettings, VideoRange,
+    DeliveryBitDepth, InputColorResolutionSource, InputColorResolutionSourceCounts,
+    ProgramColorContext, ResolvedInputColor, SequenceSettings, VideoRange,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -113,89 +114,6 @@ use visual_effect_execution::{
 };
 #[cfg(test)]
 use visual_effect_execution::{ExportHeterogeneousEffectError, ExportHeterogeneousPlacement};
-
-/// Internal pipe contract selected from the requested delivery bit depth.
-///
-/// This determines the GPU texture format, FFmpeg input pixel format, and
-/// canvas allocation strategy for the export pipeline.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExportFrameContract {
-    /// 8-bit RGBA legacy boundary. Used for SDR 8-bit delivery.
-    Rgba8,
-    /// 16-bit float RGBA boundary. Used for 10-bit ProRes/HDR delivery
-    /// and camera-log intermediates.
-    Rgba16Float,
-}
-
-impl ExportFrameContract {
-    /// Select the internal pipe contract from the delivery sample depth.
-    pub fn from_bit_depth(bit_depth: DeliveryBitDepth) -> Self {
-        match bit_depth {
-            DeliveryBitDepth::Eight => Self::Rgba8,
-            DeliveryBitDepth::Ten | DeliveryBitDepth::Twelve => Self::Rgba16Float,
-        }
-    }
-
-    /// GPU texture format for this contract.
-    pub fn gpu_texture_format(&self) -> GpuColorFrameTextureFormat {
-        match self {
-            Self::Rgba8 => GpuColorFrameTextureFormat::Rgba8Unorm,
-            Self::Rgba16Float => GpuColorFrameTextureFormat::Rgba16Float,
-        }
-    }
-
-    /// FFmpeg input pixel format string for the raw video pipe.
-    pub fn ffmpeg_pix_fmt(&self) -> &'static str {
-        match self {
-            Self::Rgba8 => "rgba",
-            Self::Rgba16Float => "rgba64le",
-        }
-    }
-
-    /// Bytes per pixel for canvas allocation.
-    pub fn bytes_per_pixel(&self) -> usize {
-        match self {
-            Self::Rgba8 => 4,
-            Self::Rgba16Float => 8, // 4 channels × 2 bytes (f16)
-        }
-    }
-
-    /// Canvas byte length for given dimensions.
-    pub fn canvas_len(&self, width: u32, height: u32) -> usize {
-        width as usize * height as usize * self.bytes_per_pixel()
-    }
-
-    /// Whether this output contract requires more precision than an RGBA8 CPU boundary provides.
-    pub fn requires_high_precision_boundary(&self) -> bool {
-        matches!(self, Self::Rgba16Float)
-    }
-
-    /// Pack RGBA8 pixels into the raw-video pipe format described by this contract.
-    pub fn pack_rgba8(&self, rgba: &[u8]) -> Vec<u8> {
-        match self {
-            Self::Rgba8 => rgba.to_vec(),
-            Self::Rgba16Float => pack_rgba8_to_rgba64le(rgba),
-        }
-    }
-
-    /// Pack normalized float RGBA pixels into the raw-video pipe format.
-    pub fn pack_rgba_f32(&self, rgba: &[f32]) -> Vec<u8> {
-        match self {
-            Self::Rgba8 => {
-                rgba.iter().map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8).collect()
-            }
-            Self::Rgba16Float => pack_rgba_f32_to_rgba64le(rgba),
-        }
-    }
-
-    /// Convert this contract's raw-video pipe bytes back to an RGBA8 source boundary.
-    pub fn to_rgba8_boundary(&self, pixels: &[u8]) -> Vec<u8> {
-        match self {
-            Self::Rgba8 => pixels.to_vec(),
-            Self::Rgba16Float => unpack_rgba64le_to_rgba8(pixels),
-        }
-    }
-}
 
 /// Resolve the export frame contract from the admitted delivery sample depth.
 fn export_frame_contract(bit_depth: DeliveryBitDepth) -> ExportFrameContract {
@@ -276,58 +194,6 @@ impl Drop for GpuBoundaryFailureGuard {
     }
 }
 
-fn pack_rgba8_to_rgba64le(rgba: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len() * 2);
-    for channel in rgba {
-        out.extend_from_slice(&u16::from(*channel).saturating_mul(257).to_le_bytes());
-    }
-    out
-}
-
-fn pack_rgba_f32_to_rgba64le(rgba: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba.len() * 2);
-    for channel in rgba {
-        let value = (channel.clamp(0.0, 1.0) * 65_535.0).round() as u16;
-        out.extend_from_slice(&value.to_le_bytes());
-    }
-    out
-}
-
-fn unpack_rgba64le_to_rgba8(rgba64le: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(rgba64le.len() / 2);
-    for channel in rgba64le.chunks_exact(2) {
-        let value = u16::from_le_bytes([channel[0], channel[1]]);
-        out.push((value / 257) as u8);
-    }
-    out
-}
-
-fn fill_canvas_black_opaque(
-    canvas: &mut Vec<u8>,
-    contract: ExportFrameContract,
-    width: u32,
-    height: u32,
-) {
-    canvas.clear();
-    match contract {
-        ExportFrameContract::Rgba8 => {
-            canvas.resize(contract.canvas_len(width, height), 0);
-            for px in canvas.chunks_exact_mut(4) {
-                px[3] = 255;
-            }
-        }
-        ExportFrameContract::Rgba16Float => {
-            canvas.reserve(contract.canvas_len(width, height));
-            for _ in 0..width as usize * height as usize {
-                canvas.extend_from_slice(&0u16.to_le_bytes());
-                canvas.extend_from_slice(&0u16.to_le_bytes());
-                canvas.extend_from_slice(&0u16.to_le_bytes());
-                canvas.extend_from_slice(&u16::MAX.to_le_bytes());
-            }
-        }
-    }
-}
-
 struct ExportGpuOutputBackend {
     context: Arc<GpuContext>,
     runtime: RenderGpuOutputBoundaryRuntime,
@@ -336,16 +202,17 @@ struct ExportGpuOutputBackend {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 struct ExportGpuOutputAttemptOutcome {
-    rgba: Vec<u8>,
+    pipe_bytes: Vec<u8>,
     stage_diagnostics: RenderColorStageDiagnostics,
 }
 
 const EXPORT_GPU_READBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPORT_GPU_READBACK_POLL_SLICE: Duration = Duration::from_millis(10);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ExportGpuOutputExecutionError {
     Fallback(ExportGpuOutputFallbackReason),
+    Packing(ExportFramePackingError),
     Canceled,
     DeviceTimedOut,
 }
@@ -353,6 +220,12 @@ enum ExportGpuOutputExecutionError {
 impl From<ExportGpuOutputFallbackReason> for ExportGpuOutputExecutionError {
     fn from(reason: ExportGpuOutputFallbackReason) -> Self {
         Self::Fallback(reason)
+    }
+}
+
+impl From<ExportFramePackingError> for ExportGpuOutputExecutionError {
+    fn from(error: ExportFramePackingError) -> Self {
+        Self::Packing(error)
     }
 }
 
@@ -515,10 +388,7 @@ impl ExportGpuExecutionRuntime {
                 Err(ExportGpuOutputFallbackReason::ContextUnavailable.into())
             }
         };
-        if result
-            .as_ref()
-            .is_err_and(|error| export_gpu_error_requires_backend_backoff(*error))
-        {
+        if result.as_ref().is_err_and(export_gpu_error_requires_backend_backoff) {
             self.state = ExportGpuExecutionRuntimeState::Backoff {
                 attempt_generation: self.attempt_generation,
             };
@@ -561,7 +431,7 @@ impl ExportGpuExecutionRuntime {
     }
 }
 
-const fn export_gpu_error_requires_backend_backoff(error: ExportGpuOutputExecutionError) -> bool {
+const fn export_gpu_error_requires_backend_backoff(error: &ExportGpuOutputExecutionError) -> bool {
     matches!(error, ExportGpuOutputExecutionError::DeviceTimedOut)
 }
 
@@ -695,7 +565,7 @@ fn execute_export_gpu_output_boundary_with_backend(
         .record_wgpu_output_boundary_owned_backend_with_grant(
             boundary,
             frame,
-            frame_contract.gpu_texture_format(),
+            frame_contract.gpu_boundary_texture_format(),
             RenderColorTransformGpuOptions {
                 output_residency: ColorFrameResidency::Cpu,
                 ..RenderColorTransformGpuOptions::default()
@@ -723,7 +593,7 @@ fn execute_export_gpu_output_boundary_with_backend(
     let readback_buffer = record.readback_buffer.ok_or(ExportGpuOutputExecutionError::Fallback(
         ExportGpuOutputFallbackReason::MissingReadbackBuffer,
     ))?;
-    let readback_plan = match frame_contract.gpu_texture_format() {
+    let readback_plan = match frame_contract.gpu_boundary_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
@@ -733,7 +603,7 @@ fn execute_export_gpu_output_boundary_with_backend(
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
         GpuColorFrameTextureFormat::Rgba32Float => {
-            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+            GpuColorFrameReadbackPlan::encoded_rgba32float(record.materialized.output)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
     };
@@ -747,27 +617,35 @@ fn execute_export_gpu_output_boundary_with_backend(
         cancellation,
         deadline,
     )?;
-    let rgba = match frame_contract.gpu_texture_format() {
+    let pipe_bytes = match frame_contract.gpu_boundary_texture_format() {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             let actual = readback_plan
                 .unpack_mapped_rgba8(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed);
-            actual.map(|actual| frame_contract.pack_rgba8(actual.rgba()))
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            frame_contract.pack_rgba8(actual.rgba())?
         }
-        GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float => {
+        GpuColorFrameTextureFormat::Rgba16Float => {
             let f32_data = readback_plan
                 .unpack_mapped_rgba16float(&mapped)
-                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed);
-            f32_data.map(|f32_data| frame_contract.pack_rgba_f32(&f32_data))
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            frame_contract.pack_rgba_f32(&f32_data)?
+        }
+        GpuColorFrameTextureFormat::Rgba32Float => {
+            let f32_data = readback_plan
+                .unpack_mapped_rgba32float(&mapped)
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            frame_contract.pack_rgba_f32(&f32_data)?
         }
     };
-    let rgba = rgba?;
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
     }
     backend.runtime.clear_frame_resources();
 
-    Ok(ExportGpuOutputAttemptOutcome { rgba, stage_diagnostics: record.stage_diagnostics })
+    Ok(ExportGpuOutputAttemptOutcome {
+        pipe_bytes,
+        stage_diagnostics: record.stage_diagnostics,
+    })
 }
 
 /// Diagnostics accumulated for one export job.
@@ -2484,6 +2362,10 @@ fn execute_timeline_export(
             Ok(session) => session,
             Err(error) => return JobExecutionResult::Failed(error),
         };
+        let export_color_context = match resolved_export_color_context(timeline, &delivery) {
+            Ok(context) => context,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
         if let Err(outcome) = preflight_timeline_visual_range_at_resolution(
             timeline,
             range,
@@ -2491,7 +2373,7 @@ fn execute_timeline_export(
                 width: delivery.resolution.width,
                 height: delivery.resolution.height,
             },
-            resolved_export_color_context(timeline, &delivery),
+            export_color_context,
             cancel,
             execution_gate,
             &mut visual_session,
@@ -3631,7 +3513,10 @@ fn render_timeline_frames_with_sink(
     write_frame: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), JobExecutionResult>,
 ) -> JobExecutionResult {
     let frame_contract = export_frame_contract(delivery.bit_depth);
-    let root_color_context = resolved_export_color_context(timeline, delivery);
+    let root_color_context = match resolved_export_color_context(timeline, delivery) {
+        Ok(context) => context,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
     let mut diagnostics = ExportJobDiagnostics::default();
@@ -3709,15 +3594,15 @@ fn render_timeline_frames_with_sink(
 fn export_output_boundary_from_context(
     color_context: &ProgramColorContext,
 ) -> Result<RenderOutputColorBoundary, String> {
-    let output_color_space = color_context.output_color_space.color().ok_or_else(|| {
+    let output_color_space = color_context.output_color_space().color().ok_or_else(|| {
         "deliverable output boundary requires an encoded output color space".to_owned()
     })?;
     RenderOutputColorBoundary::from_intent(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
         output_color_space,
-        &color_context.output_transform,
-        color_context.output_tone_map,
-        color_context.engine.clone(),
+        color_context.output_transform(),
+        color_context.output_tone_map(),
+        color_context.engine().clone(),
     )
     .map_err(|error| error.to_string())
 }
@@ -3725,15 +3610,19 @@ fn export_output_boundary_from_context(
 fn resolved_export_color_context(
     timeline: &TimelineExportSnapshot,
     delivery: &ResolvedExportDeliveryContract,
-) -> ProgramColorContext {
-    let mut context = timeline
+) -> Result<ProgramColorContext, String> {
+    let context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.color_environment);
-    context.output_color_space = delivery.color_target.color_space.into();
-    context.output_tone_map = delivery.color_target.tone_map;
-    context.output_transform = delivery.color_target.output_transform.clone();
+        .root_program_color_context(&timeline.color_environment)
+        .map_err(|error| format!("invalid root Program color context: {error}"))?;
     context
+        .for_export_output(
+            delivery.color_target.color_space,
+            delivery.color_target.tone_map,
+            delivery.color_target.output_transform.clone(),
+        )
+        .map_err(|error| format!("invalid export Program color context: {error}"))
 }
 
 fn render_timeline_frame_into(
@@ -3757,7 +3646,8 @@ fn render_timeline_frame_into(
     let color_context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.color_environment);
+        .root_program_color_context(&timeline.color_environment)
+        .map_err(|error| format!("invalid root Program color context: {error}"))?;
     render_timeline_frame_into_with_session(
         timeline,
         timeline_frame,
@@ -4169,10 +4059,9 @@ struct ExportDecodeCacheKey {
     source_fingerprint: MediaFileFingerprint,
     video_stream_index: u32,
     source_sample: mondrian_core::SourceSampleTarget,
-    input_color_space: ColorSpace,
-    input_video_range: DecodedVideoRangeContract,
+    source_contract: PreviewSourceColorContract,
     alpha_interpretation: AlphaInterpretation,
-    media_input_color: mondrian_timeline::sequence::MediaInputColorContext,
+    preparation_intent: SourceFramePreparationIntent,
     decode_resolution: Resolution,
     source_resolution: Resolution,
     picture_geometry: ResolvedPictureGeometry,
@@ -4184,11 +4073,9 @@ impl ExportDecodeCacheKey {
         asset_id: AssetId,
         dependency: &crate::preset::ExportMediaDependency,
         source_sample: mondrian_core::SourceSampleTarget,
-        input_color_space: ColorSpace,
-        input_video_range: DecodedVideoRangeContract,
+        source_contract: PreviewSourceColorContract,
+        preparation_intent: SourceFramePreparationIntent,
         alpha_interpretation: AlphaInterpretation,
-        color_context: &ProgramColorContext,
-        auto_tone_map: bool,
         decode_resolution: Resolution,
         source_resolution: Resolution,
         picture_geometry: ResolvedPictureGeometry,
@@ -4213,10 +4100,9 @@ impl ExportDecodeCacheKey {
             source_fingerprint: dependency.source_fingerprint,
             video_stream_index,
             source_sample,
-            input_color_space,
-            input_video_range,
+            source_contract,
             alpha_interpretation,
-            media_input_color: color_context.media_input(auto_tone_map),
+            preparation_intent,
             decode_resolution,
             source_resolution,
             picture_geometry,
@@ -4242,7 +4128,8 @@ pub fn export_input_color_resolution_counts_for_frame(
     let color_context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.color_environment);
+        .root_program_color_context(&timeline.color_environment)
+        .map_err(|error| format!("invalid root Program color context: {error}"))?;
     let closure = prepare_export_visual_frame_closure(
         timeline,
         &mut visual_session,
@@ -4391,14 +4278,14 @@ fn record_export_media_input_color_count(
         .media
         .get(&media.asset_id)
         .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
-    let resolution = color_context.missing_metadata_policy.resolve_asset_input_decision(
+    let resolution = color_context.missing_metadata_policy().resolve_asset_input_decision(
         media.color_space_override,
         dependency.interpretation,
         dependency
             .color_diagnostic
             .as_ref()
             .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
-        color_context.working_color_space,
+        color_context.working_color_space(),
     );
     counts.record(resolution.source);
     Ok(())
@@ -4584,7 +4471,7 @@ fn render_prepared_visual_node_into(
             frame_contract,
             width,
             height,
-            color_context.working_color_space,
+            color_context.working_color_space(),
             context.alpha_mode,
         );
         return Ok(());
@@ -4644,7 +4531,7 @@ fn render_prepared_visual_node_into(
                     title,
                     width,
                     height,
-                    color_context.working_color_space,
+                    color_context.working_color_space(),
                 )?);
             }
             TimelineRenderPlanElement::CrossDissolve(transition) => {
@@ -4761,7 +4648,7 @@ fn render_prepared_visual_node_into(
             .execute_heterogeneous_element(
                 route,
                 input,
-                color_context.working_color_space,
+                color_context.working_color_space(),
                 context.cancellation,
             )
             .map_err(|error| error.to_string())?;
@@ -4940,7 +4827,7 @@ fn render_prepared_visual_node_into(
             frame_contract,
             width,
             height,
-            color_context.working_color_space,
+            color_context.working_color_space(),
             context.alpha_mode,
         );
         return Ok(());
@@ -4963,7 +4850,10 @@ fn render_prepared_visual_node_into(
         height,
         &composite_elements,
         composite_options,
-        TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
+        TimelineEffectColorRuntime::new(
+            color_context.engine(),
+            color_context.working_color_space(),
+        ),
         &mut context.visual_session.composite_scratch,
     )
     .map_err(|error| format!("timeline composite failed: {error}"))?;
@@ -4997,7 +4887,7 @@ fn render_prepared_visual_node_into(
     let mut gpu_output_attempts = 0u64;
     let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = export_output_boundary_from_context(&color_context)?;
-    if color_context.output_tone_map
+    if color_context.output_tone_map()
         && boundary.display_view.is_none()
         && let Some(diagnostics) = context.export_diagnostics.as_deref_mut()
     {
@@ -5026,6 +4916,11 @@ fn render_prepared_visual_node_into(
             gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(reason);
             None
         }
+        Err(ExportGpuOutputExecutionError::Packing(error)) => {
+            return Err(format!(
+                "export GPU output cannot enter the declared FFmpeg pipe: {error}"
+            ));
+        }
     };
     gpu_output_attempts = gpu_output_attempts.saturating_add(1);
 
@@ -5034,10 +4929,10 @@ fn render_prepared_visual_node_into(
             if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                 diagnostics.accumulate(attempt.stage_diagnostics);
             }
-            attempt.rgba
+            attempt.pipe_bytes
         }
         None => {
-            if frame_contract.requires_high_precision_boundary() {
+            if frame_contract.requires_float_output_boundary() {
                 match cpu_output_boundary_float(
                     &rendered.frame,
                     &boundary,
@@ -5047,14 +4942,11 @@ fn render_prepared_visual_node_into(
                         if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                             diagnostics.accumulate(float_result.stage_diagnostics);
                         }
-                        let flat: Vec<f32> = float_result
-                            .frame
-                            .rgba_f32()
-                            .data
-                            .iter()
-                            .flat_map(|px| px.iter().copied())
-                            .collect();
-                        frame_contract.pack_rgba_f32(&flat)
+                        let flat: &[f32] =
+                            bytemuck::cast_slice(&float_result.frame.rgba_f32().data);
+                        frame_contract
+                            .pack_rgba_f32(flat)
+                            .map_err(|error| format!("export CPU float output cannot enter the declared FFmpeg pipe: {error}"))?
                     }
                     Err(float_err) => {
                         if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
@@ -5082,7 +4974,9 @@ fn render_prepared_visual_node_into(
                 if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                     diagnostics.accumulate(encoded.stage_diagnostics);
                 }
-                frame_contract.pack_rgba8(&encoded.rgba)
+                frame_contract.pack_rgba8(&encoded.rgba).map_err(|error| {
+                    format!("export RGBA8 output cannot enter the declared FFmpeg pipe: {error}")
+                })?
             }
         }
     };
@@ -5114,45 +5008,23 @@ fn decode_export_media_plan(
     let dependency = media_dependencies
         .get(&media.asset_id)
         .ok_or_else(|| format!("导出快照缺少素材依赖: {}", media.asset_id))?;
-    let input_color_resolution =
-        color_context.missing_metadata_policy.resolve_asset_input_decision(
-            media.color_space_override,
-            dependency.interpretation,
-            dependency
-                .color_diagnostic
-                .as_ref()
-                .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
-            color_context.working_color_space,
-        );
-    if let Some(counts) = input_color_counts {
-        counts.record(input_color_resolution.source);
-    }
-    let input_color_space = match input_color_resolution.resolved {
-        ResolvedInputColor::Color(color_space) => color_space,
-        ResolvedInputColor::Data | ResolvedInputColor::Rejected => {
-            let diagnostic = dependency
-                .color_diagnostic
-                .as_ref()
-                .map(mondrian_media::VideoColorDiagnostic::summary)
-                .unwrap_or_else(|| "unavailable".to_string());
-            return Err(format!(
-                "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
-                media.asset_id,
-                dependency.path.display(),
-                color_context.missing_metadata_policy,
-                input_color_resolution.source,
-                input_color_resolution.override_color_space,
-                input_color_resolution.executable_color_space,
-                input_color_resolution.working_color_space,
-                diagnostic
-            ));
-        }
-    };
     let input_video_range = resolve_export_input_video_range(
         media_dependencies,
         media.asset_id,
         dependency.interpretation,
     );
+    let source_preparation = resolve_export_source_preparation(
+        ExportSourcePreparationRequest {
+            asset_id: media.asset_id,
+            color_space_override: media.color_space_override,
+            auto_tone_map: media.auto_tone_map,
+            dependency,
+            input_video_range,
+            color_context,
+        },
+        input_color_counts,
+    )?;
+    let ExportSourcePreparation { source_contract, preparation_intent, .. } = source_preparation;
     let source_resolution = dependency.source_resolution.ok_or_else(|| {
         format!(
             "asset={} export snapshot has no source extent",
@@ -5181,11 +5053,9 @@ fn decode_export_media_plan(
         media.asset_id,
         dependency,
         media.source_sample,
-        input_color_space,
-        input_video_range,
+        source_contract,
+        preparation_intent.clone(),
         media.alpha_interpretation,
-        color_context,
-        media.auto_tone_map,
         Resolution { width, height },
         source_resolution,
         picture_geometry,
@@ -5209,13 +5079,9 @@ fn decode_export_media_plan(
             decode_resolution: Resolution { width, height },
             source_resolution,
             picture_geometry,
-            source_color: PreviewSourceColorContract::new(input_color_space, input_video_range),
+            source_color: source_contract,
             alpha_interpretation: media.alpha_interpretation,
-            input_transform: RenderInputTransform::to_working(
-                color_context.working_color_space,
-                media.auto_tone_map,
-                color_context.engine.clone(),
-            ),
+            preparation_intent,
         },
         ExportVideoLayerDecodeExecutionContext {
             color_session: visual_session.composite_scratch.color_execution_mut(),
@@ -5236,6 +5102,113 @@ fn decode_export_media_plan(
     }
     cache.insert(key, Arc::clone(&decoded));
     Ok(decoded)
+}
+
+/// Exact decode and renderer-preparation contract selected for one export source.
+///
+/// Keeping resolution behind this narrow Interface gives Preview-independent
+/// Export callers one closed decision for color-managed, DataTexture, and
+/// rejected inputs. Decode and cache code consume the result without
+/// reinterpreting authored or probe evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportSourcePreparation {
+    source_contract: PreviewSourceColorContract,
+    preparation_intent: SourceFramePreparationIntent,
+    resolution_source: InputColorResolutionSource,
+}
+
+struct ExportSourcePreparationRequest<'a> {
+    asset_id: AssetId,
+    color_space_override: Option<ColorSpace>,
+    auto_tone_map: bool,
+    dependency: &'a crate::preset::ExportMediaDependency,
+    input_video_range: DecodedVideoRangeContract,
+    color_context: &'a ProgramColorContext,
+}
+
+fn resolve_export_source_preparation(
+    request: ExportSourcePreparationRequest<'_>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+) -> Result<ExportSourcePreparation, String> {
+    let ExportSourcePreparationRequest {
+        asset_id,
+        color_space_override,
+        auto_tone_map,
+        dependency,
+        input_video_range,
+        color_context,
+    } = request;
+    let input_color_resolution =
+        color_context.missing_metadata_policy().resolve_asset_input_decision(
+            color_space_override,
+            dependency.interpretation,
+            dependency
+                .color_diagnostic
+                .as_ref()
+                .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
+            color_context.working_color_space(),
+        );
+    if let Some(counts) = input_color_counts {
+        counts.record(input_color_resolution.source);
+    }
+    let (source_contract, preparation_intent) = match input_color_resolution.resolved {
+        ResolvedInputColor::Color(color_space) => (
+            PreviewSourceColorContract::new(color_space, input_video_range),
+            SourceFramePreparationIntent::ColorManaged(RenderInputTransform::to_working(
+                color_context.working_color_space(),
+                auto_tone_map,
+                color_context.engine().clone(),
+            )),
+        ),
+        ResolvedInputColor::Data => {
+            let sampling = dependency
+                .color_diagnostic
+                .as_ref()
+                .and_then(|diagnostic| diagnostic.sampling)
+                .ok_or_else(|| {
+                    format!(
+                        "asset={} path={} data-texture export requires proven source sampling",
+                        asset_id,
+                        dependency.path.display()
+                    )
+                })?;
+            if !sampling.pixel_format.is_rgb() {
+                return Err(format!(
+                    "asset={} path={} data-texture export requires RGB source sampling, got {:?}",
+                    asset_id,
+                    dependency.path.display(),
+                    sampling.pixel_format
+                ));
+            }
+            (
+                PreviewSourceColorContract::data_texture(input_video_range),
+                SourceFramePreparationIntent::data_texture(color_context.working_color_space()),
+            )
+        }
+        ResolvedInputColor::Rejected => {
+            let diagnostic = dependency
+                .color_diagnostic
+                .as_ref()
+                .map(mondrian_media::VideoColorDiagnostic::summary)
+                .unwrap_or_else(|| "unavailable".to_string());
+            return Err(format!(
+                "asset={} path={} missing color metadata rejected by sequence policy {:?}; resolution={:?} override={:?} detected={:?} working={:?}; {}",
+                asset_id,
+                dependency.path.display(),
+                color_context.missing_metadata_policy(),
+                input_color_resolution.source,
+                input_color_resolution.override_color_space,
+                input_color_resolution.executable_color_space,
+                input_color_resolution.working_color_space,
+                diagnostic
+            ));
+        }
+    };
+    Ok(ExportSourcePreparation {
+        source_contract,
+        preparation_intent,
+        resolution_source: input_color_resolution.source,
+    })
 }
 
 fn materialize_export_nested_node(
@@ -5262,11 +5235,12 @@ fn materialize_export_nested_node(
             child_sequence_id
         )
     })?;
-    if frame.descriptor().color_space.working() != Some(parent_color_context.working_color_space) {
+    if frame.descriptor().color_space.working() != Some(parent_color_context.working_color_space())
+    {
         let converted = execute_cpu_working_transform_with_session(
             &frame,
-            parent_color_context.working_color_space,
-            parent_color_context.engine.clone(),
+            parent_color_context.working_color_space(),
+            parent_color_context.engine().clone(),
             context.visual_session.composite_scratch.color_execution_mut(),
         )
         .map_err(|error| format!("nested working-space transform failed: {error}"))?;
@@ -5387,7 +5361,7 @@ fn resolve_export_temporal_batches(
             width: tile.frame_extent().width(),
             height: tile.frame_extent().height(),
             data: tile.pixels().to_vec(),
-            color_space: color_context.working_color_space,
+            color_space: color_context.working_color_space(),
         });
         let layer = PreparedExportTemporalLayer {
             frame,
@@ -5509,7 +5483,7 @@ fn resolve_export_temporal_source(
                     width: extent.width(),
                     height: extent.height(),
                     data: vec![pixel; extent.width() as usize * extent.height() as usize],
-                    color_space: color_context.working_color_space,
+                    color_space: color_context.working_color_space(),
                 }),
                 materialization.author_resolution(),
                 [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -5528,7 +5502,7 @@ fn resolve_export_temporal_source(
             expected.height()
         ));
     }
-    if descriptor.color_space.working() != Some(color_context.working_color_space)
+    if descriptor.color_space.working() != Some(color_context.working_color_space())
         || descriptor.alpha != mondrian_renderer::ColorFrameAlpha::StraightCoverage
     {
         return Err(format!(
@@ -5598,7 +5572,7 @@ fn export_temporal_source_identity(
     }
     hasher.update(batch.execution_request().output_frame_seed().to_le_bytes());
     hasher.update(
-        serde_json::to_vec(&color_context.working_color_space)
+        serde_json::to_vec(&color_context.working_color_space())
             .map_err(|error| error.to_string())?,
     );
     hasher
@@ -5723,7 +5697,7 @@ fn resolve_export_transition_input(
                 title,
                 width,
                 height,
-                color_context.working_color_space,
+                color_context.working_color_space(),
             )?)
         }
         TimelineTransitionInputPlan::Media(media) => {
@@ -5980,7 +5954,7 @@ fn finish_empty_sequence_target(
         }
         SequenceRenderTarget::Deliverable(canvas) => match alpha_mode {
             ExportAlphaMode::FlattenBlack => {
-                fill_canvas_black_opaque(canvas, frame_contract, width, height);
+                frame_contract.fill_black_opaque(canvas, width, height);
             }
             ExportAlphaMode::Preserve => canvas.fill(0),
         },
@@ -5989,9 +5963,9 @@ fn finish_empty_sequence_target(
 
 /// Immutable author and delivery facts for one export still-frame decode.
 ///
-/// The request owns the renderer input transform so media decode cannot
-/// reinterpret working-space, tone-map, or color-engine policy while a job is
-/// executing. Source revision and physical stream authority remain frozen in
+/// The request owns the renderer source-preparation intent so media decode
+/// cannot reinterpret color-managed versus DataTexture execution while a job
+/// is running. Source revision and physical stream authority remain frozen in
 /// `dependency`.
 struct ExportVideoLayerDecodeRequest<'a> {
     asset_id: AssetId,
@@ -6002,7 +5976,7 @@ struct ExportVideoLayerDecodeRequest<'a> {
     picture_geometry: ResolvedPictureGeometry,
     source_color: PreviewSourceColorContract,
     alpha_interpretation: AlphaInterpretation,
-    input_transform: RenderInputTransform,
+    preparation_intent: SourceFramePreparationIntent,
 }
 
 /// Job-owned mutable execution services for one export still-frame decode.
@@ -6029,7 +6003,7 @@ fn decode_video_layer_scaled(
         picture_geometry,
         source_color,
         alpha_interpretation,
-        input_transform,
+        preparation_intent,
     } = request;
     let ExportVideoLayerDecodeExecutionContext { color_session, decode_context, cancellation } =
         execution;
@@ -6063,33 +6037,41 @@ fn decode_video_layer_scaled(
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
-    let (source, decode_diagnostics): (CpuSourceColorFrame, PreviewDecodeDiagnostics) =
+    let (source, decode_diagnostics): (PreparedSourceFrame, PreviewDecodeDiagnostics) =
         match outcome {
             Ok(PreviewDecodeOutcome::Frame(frame)) => {
                 let diagnostics = frame.diagnostics;
-                (
-                    CpuEncodedColorFrame::source_rgba8_shared(
-                        frame.width,
-                        frame.height,
-                        source_color.color_space,
-                        frame.into_shared_data(),
-                    )
-                    .into(),
-                    diagnostics,
+                let source = prepare_decoded_cpu_source_frame(
+                    frame,
+                    alpha_interpretation,
+                    preparation_intent.clone(),
                 )
+                .map_err(|err| {
+                    format!(
+                        "asset={} path={} source frame preparation failed: {}",
+                        asset_id,
+                        path.display(),
+                        err
+                    )
+                })?;
+                (source, diagnostics)
             }
             Ok(PreviewDecodeOutcome::FloatFrame(frame)) => {
                 let diagnostics = frame.diagnostics;
-                (
-                    LinearFloatSource::new(
-                        frame.width,
-                        frame.height,
-                        source_color.color_space,
-                        frame.into_data(),
-                    )
-                    .into(),
-                    diagnostics,
+                let source = prepare_decoded_cpu_source_frame(
+                    frame,
+                    alpha_interpretation,
+                    preparation_intent,
                 )
+                .map_err(|err| {
+                    format!(
+                        "asset={} path={} source frame preparation failed: {}",
+                        asset_id,
+                        path.display(),
+                        err
+                    )
+                })?;
+                (source, diagnostics)
             }
             Ok(PreviewDecodeOutcome::CpuYuvFrame(_)) => {
                 return Err(format!(
@@ -6123,19 +6105,11 @@ fn decode_video_layer_scaled(
                 ));
             }
         };
-    let source = source.normalize_alpha(alpha_interpretation).map_err(|err| {
-        format!(
-            "asset={} path={} alpha interpretation failed: {}",
-            asset_id,
-            path.display(),
-            err
-        )
-    })?;
-    let execution =
-        execute_cpu_source_input_stage_with_session(&source, &input_transform, color_session)
-            .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
+    let execution = source
+        .execute_cpu_with_session(color_session)
+        .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
-        frame: execution.result.frame,
+        frame: execution.frame,
         source_resolution,
         picture_geometry,
         source_fingerprint: dependency.source_fingerprint,
@@ -6219,7 +6193,7 @@ mod tests {
     use mondrian_renderer::RenderOutputColorBoundaryTarget;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
-        InputColorResolutionSource, MissingColorMetadataPolicy, Sequence, StaticHdrMetadataPolicy,
+        MissingColorMetadataPolicy, Sequence, StaticHdrMetadataPolicy,
     };
     use mondrian_timeline::track::Track;
     use std::path::PathBuf;
@@ -6234,6 +6208,24 @@ mod tests {
 
     fn open_execution_gate() -> service::ExportExecutionGate {
         service::ExportExecutionGate::always_open_for_test()
+    }
+
+    #[test]
+    fn export_cpu_rgba_decode_delegates_to_source_frame_preparation() {
+        let queue_source = include_str!("mod.rs");
+        let decode = queue_source
+            .split("fn decode_video_layer_scaled")
+            .nth(1)
+            .and_then(|suffix| suffix.split("fn compute_timeline_render_range").next())
+            .expect("export video decode implementation");
+
+        assert_eq!(
+            decode.matches("prepare_decoded_cpu_source_frame(").count(),
+            2
+        );
+        assert!(!decode.contains("CpuEncodedFloatColorFrame"));
+        assert!(!decode.contains("LinearFloatSource"));
+        assert!(!decode.contains("normalize_alpha"));
     }
 
     fn preflight_timeline_visual_range(
@@ -6253,7 +6245,12 @@ mod tests {
             timeline
                 .sequence
                 .settings
-                .root_program_color_context(&timeline.color_environment),
+                .root_program_color_context(&timeline.color_environment)
+                .map_err(|error| {
+                    JobExecutionResult::Failed(format!(
+                        "invalid root Program color context: {error}"
+                    ))
+                })?,
             cancel,
             execution_gate,
             visual_session,
@@ -6331,14 +6328,19 @@ mod tests {
             ExportGpuOutputFallbackReason::ReadbackUnpackFailed,
         ] {
             assert!(!export_gpu_error_requires_backend_backoff(
-                ExportGpuOutputExecutionError::Fallback(reason)
+                &ExportGpuOutputExecutionError::Fallback(reason)
             ));
         }
         assert!(!export_gpu_error_requires_backend_backoff(
-            ExportGpuOutputExecutionError::Canceled
+            &ExportGpuOutputExecutionError::Packing(
+                ExportFramePackingError::InvalidRgbaComponentCount { components: 3 }
+            )
+        ));
+        assert!(!export_gpu_error_requires_backend_backoff(
+            &ExportGpuOutputExecutionError::Canceled
         ));
         assert!(export_gpu_error_requires_backend_backoff(
-            ExportGpuOutputExecutionError::DeviceTimedOut
+            &ExportGpuOutputExecutionError::DeviceTimedOut
         ));
     }
 
@@ -7658,6 +7660,177 @@ mod tests {
         ResolvedPictureGeometry::square(resolution).expect("non-empty test picture geometry")
     }
 
+    fn data_texture_interpretation() -> AssetMediaInterpretation {
+        AssetMediaInterpretation {
+            payload: AssetColorPayload::NonColorData,
+            ..AssetMediaInterpretation::default()
+        }
+    }
+
+    #[test]
+    fn export_source_preparation_resolves_rgb_data_texture_without_color_identity() {
+        let source = tempfile::NamedTempFile::new().expect("temporary RGB data source");
+        std::fs::write(source.path(), b"rgb data identity").expect("write source identity");
+        let dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Srgb),
+            data_texture_interpretation(),
+            None,
+        );
+        let mut sequence = Sequence::new("data texture export");
+        sequence.settings.color.input.missing_metadata_policy =
+            MissingColorMetadataPolicy::RejectMedia;
+        let color_context = sequence
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid rejecting context");
+        let preparation = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: Some(ColorSpace::Rec2100Pq),
+                auto_tone_map: true,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideFull,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("proven RGB data texture must bypass color management");
+
+        assert_eq!(
+            preparation.source_contract,
+            PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull)
+        );
+        assert_eq!(
+            preparation.preparation_intent,
+            SourceFramePreparationIntent::data_texture(color_context.working_color_space())
+        );
+        assert_eq!(
+            preparation.resolution_source,
+            InputColorResolutionSource::DataTexture
+        );
+
+        let different_environment =
+            mondrian_core::ProjectColorEnvironment::new(ColorEngine::Aces {
+                preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+            });
+        let different_engine = sequence
+            .settings
+            .root_program_color_context(&different_environment)
+            .expect("valid ACES context");
+        let under_different_engine = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: None,
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideFull,
+                color_context: &different_engine,
+            },
+            None,
+        )
+        .expect("DataTexture identity is independent of OCIO engine and tone mapping");
+        assert_eq!(preparation, under_different_engine);
+    }
+
+    #[test]
+    fn export_source_preparation_rejects_yuv_data_texture_before_decode() {
+        let source = tempfile::NamedTempFile::new().expect("temporary YUV data source");
+        std::fs::write(source.path(), b"yuv data identity").expect("write source identity");
+        let dependency = test_media_dependency(
+            source.path().to_path_buf(),
+            Some(ColorSpace::Rec709),
+            data_texture_interpretation(),
+            None,
+        );
+        let color_context = Sequence::new("rejected YUV data texture")
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
+        let error = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: None,
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideLimited,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect_err("YCbCr conversion would alter technical channels and must fail closed");
+
+        assert!(error.contains("data-texture export requires RGB source sampling"));
+        assert!(error.contains("Yuv420p"));
+    }
+
+    #[test]
+    fn rgb_data_texture_decodes_and_materializes_for_export_without_color_stages() {
+        let root = tempfile::tempdir().expect("temporary RGB data directory");
+        let source = root.path().join("technical.ppm");
+        let mut ppm = b"P6\n1 1\n255\n".to_vec();
+        ppm.extend_from_slice(&[17, 64, 255]);
+        std::fs::write(&source, ppm).expect("write one-pixel RGB data image");
+        let dependency = test_media_dependency(
+            source,
+            Some(ColorSpace::Srgb),
+            data_texture_interpretation(),
+            None,
+        );
+        let color_context = Sequence::new("RGB data texture vertical slice")
+            .settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
+        let preparation = resolve_export_source_preparation(
+            ExportSourcePreparationRequest {
+                asset_id: AssetId::new(),
+                color_space_override: None,
+                auto_tone_map: false,
+                dependency: &dependency,
+                input_video_range: DecodedVideoRangeContract::OverrideFull,
+                color_context: &color_context,
+            },
+            None,
+        )
+        .expect("resolve RGB data texture");
+        let mut decode_context = PreviewDecodeSessionContext::new();
+        let mut color_session = mondrian_renderer::RenderCpuColorExecutionSession::new(0);
+        let cancellation = ExecutionCancellationToken::new();
+        let decoded = decode_video_layer_scaled(
+            ExportVideoLayerDecodeRequest {
+                asset_id: AssetId::new(),
+                dependency: &dependency,
+                source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+                decode_resolution: Resolution { width: 1, height: 1 },
+                source_resolution: Resolution { width: 1, height: 1 },
+                picture_geometry: square_picture_geometry(Resolution { width: 1, height: 1 }),
+                source_color: preparation.source_contract,
+                alpha_interpretation: AlphaInterpretation::Straight,
+                preparation_intent: preparation.preparation_intent,
+            },
+            ExportVideoLayerDecodeExecutionContext {
+                color_session: &mut color_session,
+                decode_context: &mut decode_context,
+                cancellation: &cancellation,
+            },
+        )
+        .expect("decode and prepare RGB data texture");
+
+        assert_eq!(
+            decoded.stage_diagnostics,
+            RenderColorStageDiagnostics::default()
+        );
+        let pixel = decoded.frame.rgba_f32().data[0];
+        assert!((pixel[0] - 17.0 / 255.0).abs() < 1.0e-6);
+        assert!((pixel[1] - 64.0 / 255.0).abs() < 1.0e-6);
+        assert_eq!(pixel[2], 1.0);
+        assert_eq!(pixel[3], 1.0);
+        assert_eq!(
+            decoded.frame.rgba_f32().color_space,
+            color_context.working_color_space()
+        );
+    }
+
     #[test]
     fn export_source_revision_change_is_fail_closed() {
         let root = std::env::temp_dir().join(format!("mondrian-export-revision-{}", JobId::new()));
@@ -7740,30 +7913,48 @@ mod tests {
             None,
         );
         let root_sequence = Sequence::new("root color context");
+        let root_environment = mondrian_core::ProjectColorEnvironment::new(ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        });
         let root_context = root_sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
-        let mut nested_working_context = root_context.clone();
-        nested_working_context.working_color_space = match root_context.working_color_space {
-            WorkingColorSpace::LinearRec709 => WorkingColorSpace::LinearRec2020,
-            _ => WorkingColorSpace::LinearRec709,
-        };
-        let mut nested_engine_context = root_context.clone();
-        nested_engine_context.engine = ColorEngine::Aces {
-            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-        };
+            .root_program_color_context(&root_environment)
+            .expect("valid root context");
+        let mut nested_working_sequence = Sequence::new("alternate working context");
+        nested_working_sequence.settings.color.working_color_space =
+            match root_context.working_color_space() {
+                WorkingColorSpace::LinearRec709 => WorkingColorSpace::LinearRec2020,
+                _ => WorkingColorSpace::LinearRec709,
+            };
+        let nested_working_context = nested_working_sequence
+            .settings
+            .root_program_color_context(&root_environment)
+            .expect("valid alternate working context");
+        let nested_engine_environment = mondrian_core::ProjectColorEnvironment::default();
+        let nested_engine_context = root_sequence
+            .settings
+            .root_program_color_context(&nested_engine_environment)
+            .expect("valid alternate engine context");
         let source_resolution = Resolution { width: 3_840, height: 2_160 };
         let decode_resolution = Resolution { width: 1_920, height: 1_080 };
         let build_key = |context: &ProgramColorContext, auto_tone_map: bool| {
+            let source_contract = PreviewSourceColorContract::new(
+                ColorSpace::Rec709,
+                DecodedVideoRangeContract::OverrideFull,
+            );
+            let preparation_intent = RenderInputTransform::to_working(
+                context.working_color_space(),
+                auto_tone_map,
+                context.engine().clone(),
+            )
+            .into();
             ExportDecodeCacheKey::new(
                 asset_id,
                 &dependency,
                 mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-                ColorSpace::Rec709,
-                DecodedVideoRangeContract::OverrideFull,
+                source_contract,
+                preparation_intent,
                 AlphaInterpretation::Straight,
-                context,
-                auto_tone_map,
                 decode_resolution,
                 source_resolution,
                 square_picture_geometry(source_resolution),
@@ -7813,11 +8004,12 @@ mod tests {
                     DecodedVideoRangeContract::OverrideLimited,
                 ),
                 alpha_interpretation: AlphaInterpretation::Straight,
-                input_transform: RenderInputTransform::to_working(
+                preparation_intent: RenderInputTransform::to_working(
                     WorkingColorSpace::LinearRec709,
                     false,
                     ColorEngine::mondrian_standard(),
-                ),
+                )
+                .into(),
             },
             ExportVideoLayerDecodeExecutionContext {
                 color_session: &mut color_session,
@@ -7867,11 +8059,12 @@ mod tests {
                         DecodedVideoRangeContract::OverrideLimited,
                     ),
                     alpha_interpretation: AlphaInterpretation::Straight,
-                    input_transform: RenderInputTransform::to_working(
+                    preparation_intent: RenderInputTransform::to_working(
                         WorkingColorSpace::LinearRec709,
                         false,
                         ColorEngine::mondrian_standard(),
-                    ),
+                    )
+                    .into(),
                 },
                 ExportVideoLayerDecodeExecutionContext {
                     color_session: session.composite_scratch.color_execution_mut(),
@@ -7949,11 +8142,12 @@ mod tests {
                     DecodedVideoRangeContract::OverrideLimited,
                 ),
                 alpha_interpretation: AlphaInterpretation::Straight,
-                input_transform: RenderInputTransform::to_working(
+                preparation_intent: RenderInputTransform::to_working(
                     WorkingColorSpace::LinearRec709,
                     false,
                     ColorEngine::mondrian_standard(),
-                ),
+                )
+                .into(),
             },
             ExportVideoLayerDecodeExecutionContext {
                 color_session: &mut color_session,
@@ -7980,16 +8174,25 @@ mod tests {
         );
         let context = Sequence::new("cache identity")
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
+        let source_contract = PreviewSourceColorContract::new(
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideFull,
+        );
+        let preparation_intent = RenderInputTransform::to_working(
+            context.working_color_space(),
+            false,
+            context.engine().clone(),
+        )
+        .into();
         let original = ExportDecodeCacheKey::new(
             asset_id,
             &dependency,
             mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-            ColorSpace::Rec709,
-            DecodedVideoRangeContract::OverrideFull,
+            source_contract,
+            preparation_intent,
             AlphaInterpretation::Straight,
-            &context,
-            false,
             Resolution { width: 1_920, height: 1_080 },
             Resolution { width: 3_840, height: 2_160 },
             square_picture_geometry(Resolution { width: 3_840, height: 2_160 }),
@@ -8018,10 +8221,20 @@ mod tests {
             mondrian_core::SourceSampleTarget::strict_predecessor(TimelineTime::ZERO);
         assert_ne!(original, changed);
         let mut changed = original.clone();
-        changed.input_color_space = ColorSpace::Srgb;
+        changed.source_contract = PreviewSourceColorContract::new(
+            ColorSpace::Srgb,
+            DecodedVideoRangeContract::OverrideFull,
+        );
         assert_ne!(original, changed);
         let mut changed = original.clone();
-        changed.input_video_range = DecodedVideoRangeContract::OverrideLimited;
+        changed.source_contract = PreviewSourceColorContract::new(
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideLimited,
+        );
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.preparation_intent =
+            SourceFramePreparationIntent::data_texture(WorkingColorSpace::LinearRec709);
         assert_ne!(original, changed);
         let mut changed = original.clone();
         changed.alpha_interpretation = AlphaInterpretation::Premultiplied;
@@ -8048,17 +8261,26 @@ mod tests {
         dependency.video_stream_index = None;
         let context = Sequence::new("missing physical stream")
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
+        let source_contract = PreviewSourceColorContract::new(
+            ColorSpace::Rec709,
+            DecodedVideoRangeContract::OverrideLimited,
+        );
+        let preparation_intent = RenderInputTransform::to_working(
+            context.working_color_space(),
+            false,
+            context.engine().clone(),
+        )
+        .into();
 
         let error = ExportDecodeCacheKey::new(
             asset_id,
             &dependency,
             mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
-            ColorSpace::Rec709,
-            DecodedVideoRangeContract::OverrideLimited,
+            source_contract,
+            preparation_intent,
             AlphaInterpretation::Straight,
-            &context,
-            false,
             Resolution { width: 1, height: 1 },
             Resolution { width: 1, height: 1 },
             square_picture_geometry(Resolution { width: 1, height: 1 }),
@@ -8872,16 +9094,12 @@ mod tests {
 
     #[test]
     fn export_output_boundary_from_context_uses_export_view_when_view_present() {
-        let ctx = ProgramColorContext {
-            working_color_space: WorkingColorSpace::LinearRec709,
-            output_color_space: ColorSpace::Srgb.into(),
-            output_tone_map: true,
-            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            engine: ColorEngine::mondrian_standard(),
-            missing_metadata_policy:
-                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-        };
+        let root = SequenceSettings::default()
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid root context");
+        let ctx = root
+            .for_rendering_view_output(ColorSpace::Srgb)
+            .expect("valid sRGB rendering View context");
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
@@ -8893,22 +9111,18 @@ mod tests {
     }
 
     #[test]
-    fn export_output_boundary_preserves_engine_intent_without_tone_flag() {
-        let ctx = ProgramColorContext {
-            working_color_space: WorkingColorSpace::LinearRec709,
-            output_color_space: ColorSpace::Rec709.into(),
-            output_tone_map: false,
-            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            engine: ColorEngine::mondrian_standard(),
-            missing_metadata_policy:
-                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-        };
-
-        let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
-        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
-        assert!(boundary.display_view.is_some());
-        assert!(!boundary.tone_map);
+    fn export_context_rejects_engine_intent_without_tone_flag() {
+        let root = SequenceSettings::default()
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid root context");
+        let error = root
+            .for_export_output(
+                ColorSpace::Rec709,
+                false,
+                mondrian_core::OutputTransformIntent::mondrian_standard(),
+            )
+            .expect_err("rendering View without tone-map mode must be rejected");
+        assert!(error.to_string().contains("disagrees"), "{error:#}");
     }
 
     #[test]
@@ -8969,16 +9183,11 @@ mod tests {
             prepared_execution: None,
             range: TimelineExportRange::SequenceInOut,
         };
-        let ctx = ProgramColorContext {
-            working_color_space: WorkingColorSpace::LinearRec709,
-            output_color_space: ColorSpace::Rec709.into(),
-            output_tone_map: true,
-            workflow: mondrian_timeline::sequence::ColorWorkflow::DisplayReferred,
-            engine: ColorEngine::mondrian_standard(),
-            missing_metadata_policy:
-                mondrian_timeline::sequence::MissingColorMetadataPolicy::AssumeRec709,
-            output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
-        };
+        let ctx = timeline
+            .sequence
+            .settings
+            .root_program_color_context(&timeline.color_environment)
+            .expect("valid root context");
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         // The boundary has a view -> no issue should be recorded.
@@ -8994,7 +9203,7 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::FlattenBlack,
-            frame_contract: ExportFrameContract::Rgba8,
+            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -9050,7 +9259,8 @@ mod tests {
         sequence.validate_author_identities().expect("valid author graph");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
         let mut timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
@@ -9067,7 +9277,7 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::Rgba8,
+            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -9119,7 +9329,8 @@ mod tests {
         sequence.validate_author_identities().expect("valid author graph");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
         let mut timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
@@ -9136,7 +9347,7 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::Rgba8,
+            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -9201,7 +9412,8 @@ mod tests {
         child.validate_author_identities().expect("valid child author graph");
         let color_context = root
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
         let mut timeline = TimelineExportSnapshot {
             sequence: root,
             sequences: vec![child],
@@ -9217,7 +9429,7 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::Rgba8,
+            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -9259,7 +9471,8 @@ mod tests {
             .expect("title placement");
         let color_context = sequence
             .settings
-            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("valid test context");
         let timeline = TimelineExportSnapshot {
             sequence,
             sequences: Vec::new(),
@@ -9275,7 +9488,7 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::Rgba8,
+            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -10837,7 +11050,8 @@ mod tests {
         let color_context = timeline
             .sequence
             .settings
-            .root_program_color_context(&timeline.color_environment);
+            .root_program_color_context(&timeline.color_environment)
+            .expect("valid test context");
         let mut canvas = Vec::new();
         let error = render_timeline_frame_into_with_session(
             &timeline,
@@ -10846,7 +11060,7 @@ mod tests {
             16,
             ExportAlphaMode::FlattenBlack,
             color_context,
-            ExportFrameContract::Rgba8,
+            ExportFrameContract::EncodedRgba8Unorm,
             &mut canvas,
             None,
             None,
@@ -11684,25 +11898,6 @@ mod tests {
     }
 
     #[test]
-    fn export_frame_contract_packs_rgba8_and_float_to_pipe_format() {
-        let rgba8 = [0, 128, 255, 64];
-        assert_eq!(ExportFrameContract::Rgba8.pack_rgba8(&rgba8), rgba8);
-        assert_eq!(
-            ExportFrameContract::Rgba16Float.pack_rgba8(&rgba8),
-            vec![0, 0, 128, 128, 255, 255, 64, 64]
-        );
-
-        assert_eq!(
-            ExportFrameContract::Rgba16Float.pack_rgba_f32(&[0.0, 0.5, 1.0, 1.5]),
-            vec![0, 0, 0, 128, 255, 255, 255, 255]
-        );
-        assert_eq!(
-            ExportFrameContract::Rgba16Float.to_rgba8_boundary(&[0, 0, 128, 128, 255, 255, 64, 64]),
-            rgba8
-        );
-    }
-
-    #[test]
     fn export_color_stage_diagnostics_for_frame_tracks_output_boundary() {
         let mut seq = Sequence::new("export-stage-diagnostics");
         let tb = seq.time_base();
@@ -12070,46 +12265,6 @@ mod tests {
 
         assert_eq!(&output[0..4], &[54, 54, 54, 255]);
         assert_eq!(&output[4..8], &[0, 255, 0, 255]);
-    }
-
-    #[test]
-    fn delivery_depth_selects_internal_pipe_precision_without_float_delivery_mode() {
-        assert_eq!(
-            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Eight),
-            ExportFrameContract::Rgba8
-        );
-        assert_eq!(
-            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Ten),
-            ExportFrameContract::Rgba16Float
-        );
-        assert_eq!(
-            ExportFrameContract::from_bit_depth(DeliveryBitDepth::Twelve),
-            ExportFrameContract::Rgba16Float
-        );
-    }
-
-    #[test]
-    fn export_frame_contract_rgba64le_packing_preserves_precision() {
-        let f32_input = [0.0f32, 0.5, 1.0, 0.75];
-        let packed = ExportFrameContract::Rgba16Float.pack_rgba_f32(&f32_input);
-        assert_eq!(packed.len(), 8);
-
-        let r = u16::from_le_bytes([packed[0], packed[1]]);
-        let g = u16::from_le_bytes([packed[2], packed[3]]);
-        let b = u16::from_le_bytes([packed[4], packed[5]]);
-        let a = u16::from_le_bytes([packed[6], packed[7]]);
-
-        assert_eq!(r, 0);
-        assert_eq!(g, 32768);
-        assert_eq!(b, 65535);
-        assert_eq!(a, 49151);
-        assert_eq!(packed.len(), 8);
-    }
-
-    #[test]
-    fn export_frame_contract_rgba8_canvas_len_is_correct() {
-        assert_eq!(ExportFrameContract::Rgba8.canvas_len(4, 3), 48);
-        assert_eq!(ExportFrameContract::Rgba16Float.canvas_len(4, 3), 96);
     }
 
     #[test]

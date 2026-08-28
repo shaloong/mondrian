@@ -209,35 +209,54 @@ pub enum OutputTransformIntentResolutionError {
     },
 }
 
-/// Display or monitor profile reference used by preview presentation.
+/// Machine-local monitor-output intent applied after Program Output.
+///
+/// An OCIO selection is accepted only when the active engine maps the exact
+/// display/view pair to one of Mondrian's standardized display targets. This
+/// prevents a machine preference from becoming a second, arbitrary creative
+/// output View authority.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
-pub enum MonitorProfileReference {
-    /// Use the final output color space as the display profile contract.
+pub enum MonitorOutputIntent {
+    /// Preserve the Sequence-authored Program Output target.
     #[default]
-    MatchOutputColorSpace,
-    /// Use a Mondrian-managed color space as the monitor profile.
+    MatchProgramOutput,
+    /// Adapt Program Output colorimetrically to a managed monitor target.
     ColorSpace(ColorSpace),
-    /// Use an OCIO display from the active config.
-    OcioDisplay {
-        /// OCIO display name.
+    /// Adapt to an engine-qualified standardized target identified by its
+    /// exact OCIO display/view pair.
+    OcioDisplayView {
+        /// Exact display name from the active engine.
         display: String,
-    },
-    /// Use an externally managed ICC profile identified by product metadata.
-    IccProfile {
-        /// Stable profile identifier or absolute profile path chosen by the caller.
-        profile_id: String,
+        /// Exact view name under `display`.
+        view: String,
     },
 }
 
-impl MonitorProfileReference {
-    /// Resolve the managed color space when this profile directly maps to one.
-    pub fn managed_color_space(&self, output_color_space: ColorSpace) -> Option<ColorSpace> {
-        match self {
-            Self::MatchOutputColorSpace => Some(output_color_space),
-            Self::ColorSpace(color_space) => Some(*color_space),
-            Self::OcioDisplay { .. } | Self::IccProfile { .. } => None,
-        }
-    }
+/// Final device-calibration policy, deliberately separate from monitor output
+/// intent and surface capability.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum DisplayCalibrationPolicy {
+    /// Do not apply an ICC device calibration transform.
+    #[default]
+    Disabled,
+    /// Resolve the active monitor profile from the operating system.
+    OsDefault,
+    /// Read an explicit absolute ICC profile path.
+    IccProfilePath(String),
+}
+
+/// ICC rendering intent used when building the final device-calibration LUT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum IccRenderingIntent {
+    /// Preserve perceptual relationships using the profile's perceptual table.
+    #[default]
+    Perceptual,
+    /// Preserve in-gamut colors relative to the destination white point.
+    RelativeColorimetric,
+    /// Preserve saturation relationships using the profile's saturation table.
+    Saturation,
+    /// Preserve absolute measured colorimetry including the source white point.
+    AbsoluteColorimetric,
 }
 
 /// Viewer presentation mode selected for display management.
@@ -320,21 +339,258 @@ impl DisplayToneMapPolicy {
 ///
 /// This value is execution/session state. It is deliberately separate from
 /// Sequence-authored output-transform and tone-map semantics.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct DisplayManagementPolicy {
-    /// Monitor/profile source used for preview presentation.
-    #[serde(default)]
-    pub monitor_profile: MonitorProfileReference,
+    /// Monitor target applied after the engine-owned Program Output View.
+    monitor_output: MonitorOutputIntent,
+    /// Optional final ICC device calibration.
+    calibration: DisplayCalibrationPolicy,
+    /// ICC rendering intent used only by the calibration stage.
+    icc_rendering_intent: IccRenderingIntent,
     /// SDR/HDR viewer mode policy.
-    #[serde(default)]
-    pub viewer_mode: ViewerDisplayMode,
+    viewer_mode: ViewerDisplayMode,
 }
 
 impl Default for DisplayManagementPolicy {
     fn default() -> Self {
         Self {
-            monitor_profile: MonitorProfileReference::MatchOutputColorSpace,
+            monitor_output: MonitorOutputIntent::MatchProgramOutput,
+            calibration: DisplayCalibrationPolicy::Disabled,
+            icc_rendering_intent: IccRenderingIntent::Perceptual,
             viewer_mode: ViewerDisplayMode::MatchOutputColorSpace,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DisplayManagementPolicyError {
+    /// A scene-linear, Log, or acquisition identity cannot describe a monitor target.
+    #[error("{color_space:?} is not a display-referred monitor target")]
+    InvalidMonitorColorSpace { color_space: ColorSpace },
+    /// OCIO display and view names must both be present.
+    #[error("OCIO monitor display and view names must not be empty")]
+    EmptyOcioDisplayView,
+    /// Explicit ICC paths must be absolute so preferences remain unambiguous.
+    #[error("ICC monitor profile path must be absolute: {profile_path}")]
+    RelativeIccProfilePath { profile_path: String },
+    /// The selected engine does not map the exact pair to a standardized target.
+    #[error("{engine_name} does not qualify OCIO monitor target '{display}/{view}'")]
+    UnqualifiedOcioDisplayView {
+        engine_name: &'static str,
+        display: String,
+        view: String,
+    },
+    /// The engine cannot provide its owned output View for the resolved target.
+    #[error("failed to resolve {engine_name} monitor output {output_color_space:?}: {reason}")]
+    OutputViewUnavailable {
+        engine_name: &'static str,
+        output_color_space: ColorSpace,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct DisplayManagementPolicySerde {
+    #[serde(default)]
+    monitor_output: MonitorOutputIntent,
+    #[serde(default)]
+    calibration: DisplayCalibrationPolicy,
+    #[serde(default)]
+    icc_rendering_intent: IccRenderingIntent,
+    #[serde(default)]
+    viewer_mode: ViewerDisplayMode,
+}
+
+impl<'de> Deserialize<'de> for DisplayManagementPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = DisplayManagementPolicySerde::deserialize(deserializer)?;
+        Self::try_new(
+            value.monitor_output,
+            value.calibration,
+            value.icc_rendering_intent,
+            value.viewer_mode,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+impl DisplayManagementPolicy {
+    /// Standardized display targets that a monitor preference may select.
+    pub const MONITOR_TARGETS: [ColorSpace; 6] = [
+        ColorSpace::Srgb,
+        ColorSpace::Rec709,
+        ColorSpace::DisplayP3,
+        ColorSpace::Rec2020,
+        ColorSpace::Rec2100Hlg,
+        ColorSpace::Rec2100Pq,
+    ];
+
+    /// Build a validated machine-local display policy.
+    pub fn try_new(
+        monitor_output: MonitorOutputIntent,
+        calibration: DisplayCalibrationPolicy,
+        icc_rendering_intent: IccRenderingIntent,
+        viewer_mode: ViewerDisplayMode,
+    ) -> Result<Self, DisplayManagementPolicyError> {
+        validate_monitor_output(&monitor_output)?;
+        validate_calibration(&calibration)?;
+        Ok(Self {
+            monitor_output,
+            calibration,
+            icc_rendering_intent,
+            viewer_mode,
+        })
+    }
+
+    /// Selected post-Program monitor-output intent.
+    pub fn monitor_output(&self) -> &MonitorOutputIntent {
+        &self.monitor_output
+    }
+
+    /// Selected final device-calibration policy.
+    pub fn calibration(&self) -> &DisplayCalibrationPolicy {
+        &self.calibration
+    }
+
+    /// Selected ICC rendering intent.
+    pub fn icc_rendering_intent(&self) -> IccRenderingIntent {
+        self.icc_rendering_intent
+    }
+
+    /// Selected SDR/HDR presentation policy.
+    pub fn viewer_mode(&self) -> ViewerDisplayMode {
+        self.viewer_mode
+    }
+
+    /// Return a validated copy with a different monitor-output intent.
+    pub fn with_monitor_output(
+        &self,
+        monitor_output: MonitorOutputIntent,
+    ) -> Result<Self, DisplayManagementPolicyError> {
+        Self::try_new(
+            monitor_output,
+            self.calibration.clone(),
+            self.icc_rendering_intent,
+            self.viewer_mode,
+        )
+    }
+
+    /// Return a validated copy with a different calibration policy.
+    pub fn with_calibration(
+        &self,
+        calibration: DisplayCalibrationPolicy,
+    ) -> Result<Self, DisplayManagementPolicyError> {
+        Self::try_new(
+            self.monitor_output.clone(),
+            calibration,
+            self.icc_rendering_intent,
+            self.viewer_mode,
+        )
+    }
+
+    /// Return a validated copy with a different ICC rendering intent.
+    pub fn with_icc_rendering_intent(&self, intent: IccRenderingIntent) -> Self {
+        Self { icc_rendering_intent: intent, ..self.clone() }
+    }
+
+    /// Return a validated copy with a different SDR/HDR policy.
+    pub fn with_viewer_mode(&self, viewer_mode: ViewerDisplayMode) -> Self {
+        Self { viewer_mode, ..self.clone() }
+    }
+
+    /// Resolve the one typed monitor target shared by Preview and Window.
+    pub fn resolve_output_color_space(
+        &self,
+        engine: &ColorEngine,
+        program_output: ColorSpace,
+    ) -> Result<ColorSpace, DisplayManagementPolicyError> {
+        let monitor_target = match &self.monitor_output {
+            MonitorOutputIntent::MatchProgramOutput => program_output,
+            MonitorOutputIntent::ColorSpace(color_space) => *color_space,
+            MonitorOutputIntent::OcioDisplayView { display, view } => Self::MONITOR_TARGETS
+                .into_iter()
+                .find(|target| {
+                    engine
+                        .output_display_view(*target)
+                        .is_ok_and(|candidate| candidate.0 == *display && candidate.1 == *view)
+                })
+                .ok_or_else(
+                    || DisplayManagementPolicyError::UnqualifiedOcioDisplayView {
+                        engine_name: engine.name(),
+                        display: display.clone(),
+                        view: view.clone(),
+                    },
+                )?,
+        };
+
+        Ok(match self.viewer_mode.resolve(monitor_target) {
+            ResolvedViewerDisplayMode::Sdr if monitor_target.is_hdr() => ColorSpace::Rec709,
+            ResolvedViewerDisplayMode::Sdr => monitor_target,
+            ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
+            ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
+        })
+    }
+
+    /// Resolve the engine-owned display/view for the typed monitor target.
+    pub fn resolve_display_view(
+        &self,
+        engine: &ColorEngine,
+        output_color_space: ColorSpace,
+    ) -> Result<(String, String), DisplayManagementPolicyError> {
+        engine.ensure_loaded().map_err(|reason| {
+            DisplayManagementPolicyError::OutputViewUnavailable {
+                engine_name: engine.name(),
+                output_color_space,
+                reason,
+            }
+        })?;
+        engine.output_display_view(output_color_space).map_err(|reason| {
+            DisplayManagementPolicyError::OutputViewUnavailable {
+                engine_name: engine.name(),
+                output_color_space,
+                reason,
+            }
+        })
+    }
+}
+
+fn validate_monitor_output(
+    monitor_output: &MonitorOutputIntent,
+) -> Result<(), DisplayManagementPolicyError> {
+    match monitor_output {
+        MonitorOutputIntent::MatchProgramOutput => Ok(()),
+        MonitorOutputIntent::ColorSpace(color_space) if color_space.is_display_referred() => Ok(()),
+        MonitorOutputIntent::ColorSpace(color_space) => {
+            Err(DisplayManagementPolicyError::InvalidMonitorColorSpace {
+                color_space: *color_space,
+            })
+        }
+        MonitorOutputIntent::OcioDisplayView { display, view }
+            if display.trim().is_empty() || view.trim().is_empty() =>
+        {
+            Err(DisplayManagementPolicyError::EmptyOcioDisplayView)
+        }
+        MonitorOutputIntent::OcioDisplayView { .. } => Ok(()),
+    }
+}
+
+fn validate_calibration(
+    calibration: &DisplayCalibrationPolicy,
+) -> Result<(), DisplayManagementPolicyError> {
+    match calibration {
+        DisplayCalibrationPolicy::Disabled | DisplayCalibrationPolicy::OsDefault => Ok(()),
+        DisplayCalibrationPolicy::IccProfilePath(profile_path)
+            if std::path::Path::new(profile_path.trim()).is_absolute() =>
+        {
+            Ok(())
+        }
+        DisplayCalibrationPolicy::IccProfilePath(profile_path) => {
+            Err(DisplayManagementPolicyError::RelativeIccProfilePath {
+                profile_path: profile_path.clone(),
+            })
         }
     }
 }
@@ -959,5 +1215,71 @@ mod tests {
             serialized.get("export_delivery_view").is_none(),
             "engine-owned output intent must not be overridden by a second display/view policy: {serialized}"
         );
+    }
+
+    #[test]
+    fn display_management_resolves_only_engine_qualified_monitor_views() {
+        let engine = ColorEngine::mondrian_standard();
+        let policy = DisplayManagementPolicy::default()
+            .with_monitor_output(MonitorOutputIntent::OcioDisplayView {
+                display: "Display P3 - Display".to_owned(),
+                view: "Mondrian Standard SDR v2".to_owned(),
+            })
+            .expect("non-empty display/view");
+
+        assert_eq!(
+            policy
+                .resolve_output_color_space(&engine, ColorSpace::Rec709)
+                .expect("qualified P3 monitor target"),
+            ColorSpace::DisplayP3
+        );
+
+        let unqualified = policy
+            .with_monitor_output(MonitorOutputIntent::OcioDisplayView {
+                display: "Display P3 - Display".to_owned(),
+                view: "Unpinned Creative View".to_owned(),
+            })
+            .expect("names are structurally valid");
+        assert!(matches!(
+            unqualified.resolve_output_color_space(&engine, ColorSpace::Rec709),
+            Err(DisplayManagementPolicyError::UnqualifiedOcioDisplayView { .. })
+        ));
+    }
+
+    #[test]
+    fn display_management_rejects_non_display_monitor_targets_and_relative_icc_paths() {
+        assert!(matches!(
+            DisplayManagementPolicy::default()
+                .with_monitor_output(MonitorOutputIntent::ColorSpace(ColorSpace::AcesCg)),
+            Err(DisplayManagementPolicyError::InvalidMonitorColorSpace { .. })
+        ));
+        assert!(matches!(
+            DisplayManagementPolicy::default().with_calibration(
+                DisplayCalibrationPolicy::IccProfilePath("monitor.icc".to_owned())
+            ),
+            Err(DisplayManagementPolicyError::RelativeIccProfilePath { .. })
+        ));
+    }
+
+    #[test]
+    fn display_management_deserialization_enforces_policy_invariants() {
+        let invalid = serde_json::json!({
+            "monitor_output": { "ColorSpace": "AcesCg" },
+            "calibration": "Disabled",
+            "icc_rendering_intent": "Perceptual",
+            "viewer_mode": "Sdr"
+        });
+        assert!(serde_json::from_value::<DisplayManagementPolicy>(invalid).is_err());
+
+        let policy = DisplayManagementPolicy::default()
+            .with_calibration(DisplayCalibrationPolicy::OsDefault)
+            .expect("OS default calibration")
+            .with_icc_rendering_intent(IccRenderingIntent::AbsoluteColorimetric)
+            .with_viewer_mode(ViewerDisplayMode::HdrPq);
+        let round_trip: DisplayManagementPolicy = serde_json::from_value(
+            serde_json::to_value(&policy).expect("serialize display policy"),
+        )
+        .expect("deserialize display policy");
+        assert_eq!(round_trip, policy);
     }
 }

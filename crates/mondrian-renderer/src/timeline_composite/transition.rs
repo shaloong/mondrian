@@ -119,17 +119,8 @@ pub(crate) fn cross_dissolve_straight_rgba_f32(
     progress: f32,
 ) {
     let progress = progress.clamp(0.0, 1.0);
-    let inverse = 1.0 - progress;
     for ((output, left), right) in output.iter_mut().zip(left).zip(right) {
-        let alpha = left[3] * inverse + right[3] * progress;
-        if alpha <= f32::EPSILON {
-            *output = [0.0, 0.0, 0.0, 0.0];
-            continue;
-        }
-        output[0] = (left[0] * left[3] * inverse + right[0] * right[3] * progress) / alpha;
-        output[1] = (left[1] * left[3] * inverse + right[1] * right[3] * progress) / alpha;
-        output[2] = (left[2] * left[3] * inverse + right[2] * right[3] * progress) / alpha;
-        output[3] = alpha;
+        *output = mondrian_effects::mix_straight_rgba(*left, *right, progress);
     }
 }
 
@@ -246,7 +237,7 @@ pub(super) fn cross_dissolve_straight_rgba8(
         let left_alpha = left[3] as f32 / 255.0;
         let right_alpha = right[3] as f32 / 255.0;
         let alpha = left_alpha * inverse + right_alpha * progress;
-        if alpha <= f32::EPSILON {
+        if !mondrian_effects::has_positive_coverage(alpha) {
             output.copy_from_slice(&[0, 0, 0, 0]);
             continue;
         }

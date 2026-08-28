@@ -130,6 +130,182 @@ pub struct LinearRgbaAccuracyReport {
     pub within_budget: bool,
 }
 
+/// Distribution-aware limits for integer signal-code comparisons.
+///
+/// The contract is intentionally color-model agnostic: callers first establish
+/// the channel ordering, bit depth, range, and subsampling interpretation, then
+/// compare the resulting integer codes. It is suitable for encoded RGB, YCbCr,
+/// alpha, ramps, and delivery-boundary qualification.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CodeValueAccuracyBudget {
+    /// Largest allowed absolute code difference for any sample.
+    pub max_absolute_code_delta: u16,
+    /// Largest allowed mean absolute code difference across all samples.
+    pub max_mean_absolute_code_delta: f64,
+    /// Largest allowed nearest-rank 99th-percentile absolute code difference.
+    pub max_percentile_99_code_delta: u16,
+}
+
+impl CodeValueAccuracyBudget {
+    /// Construct a code-value budget.
+    pub const fn new(
+        max_absolute_code_delta: u16,
+        max_mean_absolute_code_delta: f64,
+        max_percentile_99_code_delta: u16,
+    ) -> Self {
+        Self {
+            max_absolute_code_delta,
+            max_mean_absolute_code_delta,
+            max_percentile_99_code_delta,
+        }
+    }
+}
+
+/// Error distribution for one integer signal-code comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CodeValueAccuracyStatistics {
+    /// Number of compared scalar codes.
+    pub sample_count: u64,
+    /// Largest absolute code difference.
+    pub max_absolute_code_delta: u16,
+    /// Mean absolute code difference.
+    pub mean_absolute_code_delta: f64,
+    /// Nearest-rank 99th-percentile absolute code difference.
+    pub percentile_99_code_delta: u16,
+    /// Flattened scalar-sample index of the largest difference.
+    pub worst_sample_index: u64,
+}
+
+/// Complete integer signal-code accuracy report.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct CodeValueAccuracyReport {
+    /// Declared signal bit depth.
+    pub bit_depth: u8,
+    /// Observed error distribution.
+    pub statistics: CodeValueAccuracyStatistics,
+    /// Limits used to evaluate the distribution.
+    pub budget: CodeValueAccuracyBudget,
+    /// True only when every distribution limit is satisfied.
+    pub within_budget: bool,
+}
+
+/// Failure to construct an integer signal-code accuracy report.
+#[derive(Debug, Clone, PartialEq, Error)]
+pub enum CodeValueAccuracyError {
+    /// Expected and observed arrays contain different numbers of scalar codes.
+    #[error("code-value length mismatch: expected {expected_samples} samples, observed {observed_samples}")]
+    LengthMismatch {
+        /// Expected scalar-code count.
+        expected_samples: usize,
+        /// Observed scalar-code count.
+        observed_samples: usize,
+    },
+    /// Empty comparisons cannot establish qualification evidence.
+    #[error("code-value accuracy comparison requires at least one sample")]
+    EmptyInput,
+    /// Integer signal codes are supported from one through sixteen bits.
+    #[error("invalid code-value bit depth {bit_depth}; expected 1..=16")]
+    InvalidBitDepth {
+        /// Invalid signal bit depth.
+        bit_depth: u8,
+    },
+    /// A sample exceeded the declared bit-depth domain.
+    #[error(
+        "{side} code {value} at sample {sample_index} exceeds {bit_depth}-bit maximum {maximum}"
+    )]
+    CodeOutOfRange {
+        /// Stable buffer side (`expected` or `observed`).
+        side: &'static str,
+        /// Flattened scalar-sample index.
+        sample_index: usize,
+        /// Invalid code value.
+        value: u16,
+        /// Declared signal bit depth.
+        bit_depth: u8,
+        /// Largest code permitted by the bit depth.
+        maximum: u16,
+    },
+    /// Mean limits must be finite and non-negative.
+    #[error("invalid code-value mean budget {limit}; limit must be finite and non-negative")]
+    InvalidMeanBudget {
+        /// Invalid mean limit.
+        limit: f64,
+    },
+}
+
+/// Compare integer signal codes with peak, mean, and P99 gates.
+///
+/// Neither range expansion nor color conversion occurs here. Keeping that
+/// interpretation outside this primitive prevents a validation caller from
+/// silently changing legal/full range or chroma semantics while measuring it.
+pub fn compare_code_values(
+    expected: &[u16],
+    observed: &[u16],
+    bit_depth: u8,
+    budget: CodeValueAccuracyBudget,
+) -> Result<CodeValueAccuracyReport, CodeValueAccuracyError> {
+    if expected.len() != observed.len() {
+        return Err(CodeValueAccuracyError::LengthMismatch {
+            expected_samples: expected.len(),
+            observed_samples: observed.len(),
+        });
+    }
+    if expected.is_empty() {
+        return Err(CodeValueAccuracyError::EmptyInput);
+    }
+    if !(1..=16).contains(&bit_depth) {
+        return Err(CodeValueAccuracyError::InvalidBitDepth { bit_depth });
+    }
+    if !budget.max_mean_absolute_code_delta.is_finite() || budget.max_mean_absolute_code_delta < 0.0
+    {
+        return Err(CodeValueAccuracyError::InvalidMeanBudget {
+            limit: budget.max_mean_absolute_code_delta,
+        });
+    }
+    let maximum = if bit_depth == 16 {
+        u16::MAX
+    } else {
+        (1_u16 << bit_depth) - 1
+    };
+    let mut deltas = Vec::with_capacity(expected.len());
+    let mut sum = 0_u64;
+    let mut maximum_delta = 0_u16;
+    let mut worst_sample_index = 0_usize;
+    for (sample_index, (&expected, &observed)) in expected.iter().zip(observed).enumerate() {
+        for (side, value) in [("expected", expected), ("observed", observed)] {
+            if value > maximum {
+                return Err(CodeValueAccuracyError::CodeOutOfRange {
+                    side,
+                    sample_index,
+                    value,
+                    bit_depth,
+                    maximum,
+                });
+            }
+        }
+        let delta = expected.abs_diff(observed);
+        deltas.push(delta);
+        sum = sum.saturating_add(u64::from(delta));
+        if sample_index == 0 || delta > maximum_delta {
+            maximum_delta = delta;
+            worst_sample_index = sample_index;
+        }
+    }
+    let percentile_index = deltas.len().saturating_mul(99).div_ceil(100).saturating_sub(1);
+    let percentile = *deltas.select_nth_unstable(percentile_index).1;
+    let statistics = CodeValueAccuracyStatistics {
+        sample_count: expected.len() as u64,
+        max_absolute_code_delta: maximum_delta,
+        mean_absolute_code_delta: sum as f64 / expected.len() as f64,
+        percentile_99_code_delta: percentile,
+        worst_sample_index: worst_sample_index as u64,
+    };
+    let within_budget = maximum_delta <= budget.max_absolute_code_delta
+        && statistics.mean_absolute_code_delta <= budget.max_mean_absolute_code_delta
+        && percentile <= budget.max_percentile_99_code_delta;
+    Ok(CodeValueAccuracyReport { bit_depth, statistics, budget, within_budget })
+}
+
 /// Failure to construct a scene-linear accuracy report.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum LinearAccuracyError {
@@ -683,6 +859,43 @@ mod tests {
 
     const PQ_STRICT: PqHdrDisplayAccuracyBudget =
         PqHdrDisplayAccuracyBudget::new(1.0, 0.25, 0.75, 0.001);
+
+    #[test]
+    fn code_value_report_gates_peak_mean_and_p99_without_color_reinterpretation() {
+        let expected = vec![64_u16; 100];
+        let mut observed = expected.clone();
+        observed[17] = 68;
+        let report = compare_code_values(
+            &expected,
+            &observed,
+            10,
+            CodeValueAccuracyBudget::new(4, 0.03, 0),
+        )
+        .expect("valid code-value report");
+
+        assert_eq!(report.statistics.max_absolute_code_delta, 4);
+        assert_eq!(report.statistics.worst_sample_index, 17);
+        assert_eq!(report.statistics.percentile_99_code_delta, 0);
+        assert_eq!(report.statistics.mean_absolute_code_delta, 0.04);
+        assert!(!report.within_budget);
+    }
+
+    #[test]
+    fn code_value_report_fails_closed_for_domain_and_budget_errors() {
+        let strict = CodeValueAccuracyBudget::new(0, 0.0, 0);
+        assert!(matches!(
+            compare_code_values(&[1], &[1], 0, strict),
+            Err(CodeValueAccuracyError::InvalidBitDepth { bit_depth: 0 })
+        ));
+        assert!(matches!(
+            compare_code_values(&[1_024], &[0], 10, strict),
+            Err(CodeValueAccuracyError::CodeOutOfRange { side: "expected", sample_index: 0, .. })
+        ));
+        assert!(matches!(
+            compare_code_values(&[0], &[0], 10, CodeValueAccuracyBudget::new(0, f64::NAN, 0)),
+            Err(CodeValueAccuracyError::InvalidMeanBudget { .. })
+        ));
+    }
 
     #[test]
     fn pq_hdr_report_uses_delta_e_itp_and_separate_alpha_coverage() {

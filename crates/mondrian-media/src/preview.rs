@@ -498,11 +498,21 @@ pub struct PreviewDecodeRequest<'a> {
     pub source_color: PreviewSourceColorContract,
 }
 
-/// App-resolved source color facts required before media can convert YUV to RGB.
+/// Semantic interpretation of decoded RGB samples at the Media/Renderer seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreviewSourceSampleIdentity {
+    /// Picture samples retain one explicit source color identity.
+    ColorManaged(ColorSpace),
+    /// Numeric RGB(A) channels are technical data and must bypass OCIO.
+    DataTexture,
+}
+
+/// App-resolved source sample and range facts required before Media materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PreviewSourceColorContract {
-    /// Effective input/source color space after interpretation policy.
-    pub color_space: ColorSpace,
+    /// Whether decoded channels are color-managed picture samples or numeric data.
+    pub identity: PreviewSourceSampleIdentity,
     /// Authority-aware encoded quantization-range interpretation.
     pub range: DecodedVideoRangeContract,
     /// Explicit policy/authored fallback used only when a decoded YUV frame
@@ -514,12 +524,48 @@ pub struct PreviewSourceColorContract {
 impl PreviewSourceColorContract {
     /// Build a source color contract from resolved input color and range authority.
     pub const fn new(color_space: ColorSpace, range: DecodedVideoRangeContract) -> Self {
-        Self { color_space, range, yuv_matrix_fallback: None }
+        Self {
+            identity: PreviewSourceSampleIdentity::ColorManaged(color_space),
+            range,
+            yuv_matrix_fallback: None,
+        }
+    }
+
+    /// Build a numeric data-texture contract that carries no color identity.
+    pub const fn data_texture(range: DecodedVideoRangeContract) -> Self {
+        Self {
+            identity: PreviewSourceSampleIdentity::DataTexture,
+            range,
+            yuv_matrix_fallback: None,
+        }
+    }
+
+    /// Return the effective source color identity for color-managed picture samples.
+    pub const fn color_space(self) -> Option<ColorSpace> {
+        match self.identity {
+            PreviewSourceSampleIdentity::ColorManaged(color_space) => Some(color_space),
+            PreviewSourceSampleIdentity::DataTexture => None,
+        }
+    }
+
+    /// Whether decoded channels are an explicit numeric data texture.
+    pub const fn is_data_texture(self) -> bool {
+        matches!(self.identity, PreviewSourceSampleIdentity::DataTexture)
+    }
+
+    /// Whether color-managed samples carry a scene-linear identity.
+    pub fn is_scene_linear(self) -> bool {
+        match self.identity {
+            PreviewSourceSampleIdentity::ColorManaged(color_space) => color_space.is_scene_linear(),
+            PreviewSourceSampleIdentity::DataTexture => false,
+        }
     }
 
     /// Bind an explicit missing-matrix policy into decode and cache identity.
     pub const fn with_yuv_matrix_fallback(mut self, matrix: DecodedVideoMatrix) -> Self {
-        self.yuv_matrix_fallback = Some(matrix);
+        if !self.is_data_texture() {
+            self.yuv_matrix_fallback = Some(matrix);
+        }
         self
     }
 

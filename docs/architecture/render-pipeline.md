@@ -1,5 +1,27 @@
 # Render Pipeline
 
+Decoded CPU media enters the renderer through the `Source Frame Preparation`
+Module. The Module consumes Media's immutable RGBA frame contract, validates
+payload extent and encoded-versus-linear-versus-DataTexture identity, and
+normalizes Alpha. It atomically constructs either a color-managed source bound
+to one `RenderInputTransform`, or a DataTexture working frame that preserves
+normalized numeric channels and executes zero OCIO/color stages. Preview may
+retain that prepared value for GPU admission or lazy CPU fallback, while Export
+executes its CPU source-to-working method directly. This shared seam prevents
+consumer Adapters from deriving color semantics from scalar type or bit depth,
+and structurally prevents payload/intent domain mismatches after preparation.
+
+Pointwise gamut/highlight grades stay in the same prepared Effect graph used by
+Preview and Export. CPU normalized-RGBA8 and Float32 dispatch call the same
+compiled grade objects; the production working compositor lowers them to two
+fused GPU point-op IDs. Gamut Compression passes only working-space identity
+and amount in its uniform, while shader and CPU mirror the reviewed fixed
+working/AP1 matrices and ACES 1.3 constants. Highlight Recovery passes
+threshold, rolloff, strength, and working-space CIE-Y coefficients. Both paths
+retain straight alpha, do no frame allocation or readback, and are qualified on
+a real wgpu device for Rec.709 and ACEScg. They never become a renderer-only
+filter or a Preview/Export fork.
+
 The intended render path is shared by preview and export:
 
 Tests that inspect prepared-program dependency currency must bind all assertions to
@@ -201,6 +223,14 @@ failure; admission rejects temporal or continuity obligations, unsupported
 exact modes, unresolvable domains in the selected representation, and every
 heterogeneous shape or placement outside the bounded production Adapter.
 
+Clip Power Windows do not become compositor alpha. Frame evaluation builds one
+`PreparedEffectProgram -> CompiledEffectGraph` for both consumers: the original
+source and graded branch feed `MatteMix`, while the ordered Window stack feeds
+it through `MaskSource` and `MaskCombine`. `MatteMix` changes working RGB only
+and retains the original programme alpha. A complete CPU Float32 route, finite
+temporal/ROI route, and admitted CPU-prefix/GPU-suffix route all consume this
+same graph and MaskOp algebra; Export has no parallel mask walker.
+
 Preflight freezes a versioned, conservative route-contract ledger containing
 placement, maximum extent, execution-plan residency/step/backend/precision
 shape, CPU/GPU partition, operation kinds, and resource upper bounds. Render
@@ -383,6 +413,16 @@ remain `Working`, while MaskSource rasters become `NonColorData/AlphaMask`
 resources that color transforms reject. The GPU Mask pass consumes one of each,
 implements every canonical MaskOp plus inversion, changes only straight alpha,
 and has real-wgpu parity with the CPU Float32 graph for all eight combinations.
+Qualifier extends this exact value-domain route without adding another Preview
+or Export interpretation. A scene-linear upload enters the dedicated HSL/3D
+qualifier dispatch, whose Float32 output materialization is explicitly
+`AlphaMask`; the following canonical Mask dispatch returns a Working frame, or
+the Matte Preview dispatch returns opaque grayscale Working RGB. Denoise and
+Gaussian feather allocate their private separable-pass textures under the same
+one-submission physical admission authority: the qualifier is charged for its
+real one/two/four pass count rather than one semantic output. Completion-token,
+wait/signal, release, domain, and final-live-set validation all remain part of
+the frozen heterogeneous route.
 The prepared GPU suffix consumes the same value plan as explicit dispatch and
 release steps: a shared GPU value can feed two point-operation branches and a
 canonical scene-linear BlendMode join. Authored opacity and the complete
@@ -1104,8 +1144,13 @@ background, the compositor may fuse first-layer alpha initialization and the
 second source-over operation into one output write. Any missing condition
 selects the ordinary scalar element loop. The fused operation retains the same
 straight-alpha float equation, including canonical transparent initialization:
-an effective alpha at or below the compositor epsilon publishes zero RGBA
-rather than preserving hidden source RGB. It has separate execution evidence
+only exact zero effective Alpha publishes zero RGBA rather than preserving
+hidden source RGB. Every positive Float32 coverage or opacity, including one
+16-bit UNORM code, enters the same source-over equation. Working-set admission,
+Effect visitation, first-layer/two-layer fast paths, Preview GPU lowering, CPU
+execution, and WGSL recording use that identical contribution predicate, so a
+scheduler optimization cannot erase work that pixel execution would preserve.
+It has separate execution evidence
 so a performance gate cannot infer it from an authored two-layer shape. The
 named 4K fusion gate fixes resolution, rate, layer count, and blend shape,
 retains the complete output across release optimization, and requires both
@@ -1126,23 +1171,32 @@ and LUT, runs in this path through the same `mondrian-effects` float contract.
 Primary Color carries the Sequence working-space identity and coefficients into
 both CPU and GPU plans; contrast pivots at linear 0.18. LUT execution first
 satisfies its explicitly authored processing-domain transition, then applies
-the same domain-normalized tetrahedral cube on Preview and Export CPU paths.
-GPU LUT execution remains a typed blocker until a backend implements that exact
-contract; it may not substitute trilinear or guessed-domain output. Spatial
+the same domain-normalized tetrahedral cube on Preview and Export CPU or GPU
+paths. A GPU-resident source can fuse multiple creative LUT and point-grade
+nodes into the working compositor pass without a CPU prefix, upload, or
+readback. Non-scene-linear LUT domains use the existing renderer-owned OCIO
+round trip around the same point pass; the effects graph never guesses a
+domain. The compositor owns a bounded RGBA32F 3D-atlas cache keyed by the
+complete sorted LUT semantic set, independent of animated intensity and node
+order. Spatial
 effects use premultiplied-alpha sampling internally while the
 typed public frame remains straight-alpha. The Viewer spatial Module records its
 horizontal RGBA32F intermediate as `PremultipliedCoverage`; shader uniforms are
 derived from the input/output descriptors, and the vertical pass restores the
-declared straight/opaque output contract. Premultiplied frames are rejected at
+declared straight/opaque output contract. Its unassociation branch canonicalizes
+only exact zero; positive filter coverage is never discarded by a numerical
+epsilon. Premultiplied frames are rejected at
 OCIO, effect, composite, display-calibration and output seams. Affine geometric transforms (scale, rotate,
 translate) are implemented
 in the float/linear path using inverse-affine mapping with bilinear sampling,
 so media and solid layers with non-identity transforms no longer require legacy
 RGBA8 fallback. Custom processors without a float ABI and non-unary effect graph
 nodes are handled separately: custom processors remain diagnosed blockers until
-they expose an exact Float32 mode, while built-in Blend, Mask, MaskSource, and ordered MultiInput
-nodes execute in the CPU float DAG. Clip masks rasterize directly to float matte
-coverage. Solid layers must materialize their float source when they carry an
+they expose an exact Float32 mode, while built-in Blend, Mask, MaskSource,
+MaskCombine, MatteMix, and ordered MultiInput nodes execute in the CPU float DAG.
+Clip masks rasterize directly to float matte coverage. Power Window MatteMix
+retains base picture alpha rather than applying that coverage as Clip
+transparency. Solid layers must materialize their float source when they carry an
 effect graph or affine transform, execute that same compiled graph, and then use
 the shared layer sampler; diagnostics must never claim a solid effect is float
 while bypassing its pixel semantics.
@@ -1212,6 +1266,22 @@ decoder import and applies non-singular media affine transforms plus supported
 fused point effects in one working-space render pass. These operations must not
 materialize a CPU frame or schedule GPU readback; readback is reserved for an
 explicit presentation, debug, or encoder boundary.
+The point-grade subset includes ColorAdjust, creative LUT, working-space
+Bradford White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color Curves,
+Vignette, deterministic Grain, and Crop. Effects owns validation and mathematical compilation; Renderer owns the
+bounded sixteen-operation uniform/WGSL execution. CPU Float32 and real-wgpu
+readback parity are gated at a `3e-5` maximum per-channel budget, including HDR
+values above one and the complete ordered primary-grade chain.
+Curves are compiled once to a shared immutable 256-sample table; GPU execution
+stores a three-row RGBA slab in the same bounded grade-resource 3D atlas used by
+creative LUTs instead of copying samples into every point-operation uniform.
+The CPU and WGSL paths share master/channel ordering, working-space luminance,
+secondary HSV math, neutral-secondary bypass, and unbounded RGB endpoint
+extrapolation.
+Creative LUT diagnostics separately prove immutable texture uploads, warm
+cache hits, evictions, oversized one-shot execution, and current resident GPU
+bytes. They are projected through Viewer product JSONL and headless performance
+reports; graph shape alone is never accepted as residency evidence.
 
 Rec.601 PAL/NTSC delivery keeps its distinct primaries, transfer, and matrix
 tags through the export signal contract; swscale matrix selection and
@@ -1385,12 +1455,22 @@ route-local and cannot poison required heterogeneous execution.
 Export readback is serialized through the export frame contract selected from
 delivery sample depth: 8-bit delivery writes RGBA8 raw-video bytes, while
 10-bit and 12-bit delivery read the renderer GPU `Rgba16Float` boundary and
-pack normalized channels into FFmpeg `rgba64le` pipe bytes. When GPU output is
+pack normalized channels into the explicitly named `EncodedRgba16Unorm`
+contract and FFmpeg `rgba64le` pipe bytes. Renderer texture precision is not
+pipe sample encoding. The same deep contract module defines true
+`FloatMasterRgba16` (`rgbaf16le`, interleaved) and `FloatMasterRgba32`
+(`gbrapf32le`, planar G/B/R/A) seams for later master formats. UNORM packing
+validates finite samples, clamps to `[0, 1]`, and quantizes once; float packing
+validates finite/range constraints and preserves negative or greater-than-one
+values without normalized clamp. Its corpus proves byte layout and the bundled
+FFmpeg binary consumes every declared raw-video layout. No current delivery
+preset selects a float master. When GPU output is
 unavailable, 10/12-bit delivery CPU fallback must use the renderer-owned
 `execute_cpu_output_boundary_float(...)` helper, which applies the working ->
 output OCIO float transform without u8 quantization. The caller flattens the
 float result into `[f32]` and uses
-`ExportFrameContract::pack_rgba_f32(...)` to produce `rgba64le` pipe bytes.
+`ExportFrameContract::pack_rgba_f32(...)`; the selected UNORM16 contract alone
+performs the final normalized clamp and `rgba64le` quantization.
 If both the GPU output path and renderer-owned CPU float helper fail, 10/12-bit
 export fails closed. It must never manufacture an `rgba64le` payload from an
 RGBA8 boundary. Export diagnostics record `FloatBoundaryUnavailable`, retain
@@ -2061,18 +2141,40 @@ distinguish color arithmetic from alpha corruption. Real-wgpu point-effect
 tests include negative and above-one working values and fail closed on NaN or
 infinity.
 
-The current Mondrian Standard package additionally has a digest-pinned numeric quality
-corpus. The same generated working-space samples execute through the production
-CPU OCIO SDR and PQ output boundaries; a separate implementation of the View is
-not used as the oracle. The corpus enforces objective invariants rather than
-self-comparison: finite normalized outputs, exact alpha preservation, neutral
-axis, monotonic tone response, dense non-negative hue-boundary continuity, a
-locally dense negative-channel continuity path, 10-bit ramp cardinality, and
-legal/full-range signal codes. Public ColorChecker 2005 D50 xyY coordinates are
-converted through an explicit Bradford D50-to-D65 adaptation and XYZ-to-linear
-Rec.2020 matrix before entering that same production boundary. They provide
-externally sourced stimuli, while future independent application frames provide
-external output evidence on top of the invariants.
+The current Mondrian Standard package additionally has a digest-pinned numeric
+quality corpus. The same generated working-space samples execute through the
+production CPU OCIO SDR and PQ output boundaries. That corpus enforces objective
+invariants rather than self-comparison: finite normalized outputs, exact alpha
+preservation, neutral axis, monotonic tone response, dense non-negative
+hue-boundary continuity, a locally dense negative-channel continuity path,
+10-bit ramp cardinality, and legal/full-range signal codes. Public ColorChecker
+2005 D50 xyY coordinates are converted through an explicit Bradford D50-to-D65
+adaptation and XYZ-to-linear Rec.2020 matrix before entering that same production
+boundary. This remains rendering-View regression and externally sourced
+stimulus evidence; it is not an absolute target oracle.
+
+Absolute technical-boundary qualification instead uses
+`independent-colorimetric-oracle-v1.json`. The complete file is SHA-256 pinned
+by its test target and records public specification/revision, origin, units, and
+numeric precision. It contains fixed IEC sRGB and BT.709 SDR transfer targets,
+ST 2084 PQ and BT.2100 HLG absolute-luminance targets, 8/10/12-bit full and
+studio-range codes, 8/10/16-bit Alpha edge codes including the smallest positive
+value, 4:2:0 and 4:2:2 left/center/top-left sample coordinates, Sharma-Wu-Dalal
+CIEDE2000 pairs, and the BT.2124 Annex 4 Delta E ITP pair. A test-only binary64
+implementation evaluates the transfer, chroma-geometry, CIEDE2000, and Delta E
+ITP equations without importing a production OCIO processor or production
+transform helper. The production PQ/HLG color-science boundary and native-YUV
+shader uniforms must then match those fixed targets.
+
+Integer output qualification uses the renderer-owned
+`CodeValueAccuracyBudget`/`CodeValueAccuracyReport`. It accepts an explicit
+1-through-16-bit scalar-code domain, rejects empty, mismatched, out-of-range, or
+invalid-budget evidence, and reports maximum, mean, nearest-rank P99, and worst
+sample index. Range expansion and channel interpretation stay outside the
+primitive so a gate cannot silently reinterpret full/studio range, RGB/YCbCr,
+or Alpha while measuring. The production Rec.709 Standard round-trip applies
+this gate separately to RGB and exact Alpha instead of retaining a peak-only
+assertion.
 
 Encoded SDR sRGB output validation uses a separate
 `SrgbDisplayAccuracyBudget`/`SrgbDisplayAccuracyReport` contract. It converts
@@ -2089,9 +2191,13 @@ This perceptual contract is deliberately named sRGB and rejects malformed
 RGBA8 buffers. It must not be applied to Rec.709, Display P3, PQ, HLG, or
 scene-linear data. HDR validation requires an absolute-luminance-aware model
 and target display contract rather than relabeling CIELAB thresholds.
-The production PQ GPU conformance gate applies that model to both the versioned
-Mondrian Standard 1000-nit View and the independent ACES 2 reference View,
-using the matching CPU OCIO processor as the semantic oracle.
+The production PQ GPU conformance test applies that model to both the versioned
+Mondrian Standard 1000-nit View and the ACES 2 reference View. Its matching CPU
+OCIO result is only CPU/GPU parity evidence; it is not labeled an independent
+absolute oracle. Public-specification absolute HDR targets are enforced by the
+independent corpus above. Full cross-application rendering-View frames remain a
+separate release-qualification obligation rather than being inferred from CPU
+parity.
 
 ## Engine-Owned Output View Transform
 
@@ -2132,8 +2238,23 @@ target-aware preset, Custom OCIO carries the requested output target and resolve
 its display/view/output-endpoint tuple from the pinned config identity, and an
 explicitly display-referred workflow carries `Colorimetric`.
 
-`DisplayManagementPolicy` is limited to monitor/profile identity, Viewer mode,
-and tone-map policy. It cannot replace the engine-owned output View. The sequence
+The resulting `ProgramColorContext` cannot be assembled or patched by a render
+consumer. Its private closed output is either `Encoded` or `Working`; root and
+nested construction plus explicit Export/rendering-View derivation are the only
+creation Seams. Each Seam validates the engine-qualified working space and the
+target-qualified intent, and stores rendering-View presence as the sole source
+of the public tone-map result. Nested frame-closure nodes therefore always end
+in the parent working domain and cannot derive an encoded boundary. Preview,
+Export, proxy, thumbnail, cache, and recursive-closure setup propagate a
+construction error as blocked/failed admission rather than relabeling an
+invalid context or substituting an unrelated fallback.
+
+`DisplayManagementPolicy` is limited to a validated monitor-output intent,
+optional ICC device calibration plus rendering intent, and Viewer SDR/HDR
+policy. Program Output tone mapping remains Sequence-authored and is not part
+of this machine-local policy. Exact OCIO display/view selections must map back
+to an engine-qualified standardized monitor target, so the policy cannot
+replace the engine-owned output View. The sequence
 settings UI therefore exposes the engine and output target, but no independent
 export display/view selector. This prevents preview pixels, encoded pixels, and
 container color metadata from describing different output transforms.
@@ -2605,6 +2726,40 @@ processor cache id, shader/LUT resource shape, cold and warm CPU record cost,
 GPU p50/p95/p99, and runtime-cache deltas. Its 5 ms default p95 budget and
 creation-free warm-path gate are independent of the View-versus-ACES gate so
 input-stage regressions cannot be hidden by output-stage results.
+
+Ignored hardware tests are invocation mechanics, not permission to omit release
+evidence. `GpuColorQualificationExecutionPolicy` owns the only distinction
+between `development-optional` and `sealed-required`. With no policy environment
+binding, broad cross-platform tests may retain diagnostic coverage by reporting
+an unavailable adapter. The exact sealed token turns adapter/device creation or
+missing timestamp-query support into a structured terminal error; misspelled or
+non-Unicode policy values also fail rather than selecting development behavior.
+
+`gpu-color-qualification.json` defines the closed Windows gate set: output-stage
+smoke/readback health, all Standard Views, Standard Rec.709 code parity,
+Standard and ACES PQ Delta E ITP, native YUV numeric decode, 4K Standard
+SDR/PQ/HLG View performance, and 4K identity/matrix/input transform performance.
+The external PowerShell supervisor runs every exact test under an independent
+wall-clock deadline and requires output proving exactly one test passed. It
+rejects any diagnostic skip, missing/duplicate report, non-passing health
+summary, absent report hash, or incomplete gate set.
+
+The dedicated `mondrian-gpu-color` self-hosted runner label is additive to the
+Windows reference-machine label. Qualification binds the clean source SHA and
+operator machine ID to both the captured Windows GPU/driver inventory and the
+wgpu adapter reported independently by the smoke and two performance gates.
+Every adapter-bearing report must agree byte-for-byte on name, backend, device
+type, driver, and driver information; the admitted adapter must be DX12,
+discrete, uniquely match the machine inventory name, and carry the exact
+captured driver version. WARP, a different physical GPU, driver rotation during
+the run, or one gate executing elsewhere fails before evidence publication.
+
+The schema-1 aggregate retains bounded build/gate exit facts, log hashes, report
+hashes, source/machine/profile identities, and zero skipped gates. Windows
+Commercial Engine evidence schema 2 now requires and hashes this GPU color
+report beside Complete Golden and Playback evidence. Release verification reads
+the same profile and rejects older manifests that contain no sealed GPU color
+qualification.
 
 Renderer-owned color stages share a device-scoped exact-contract texture pool
 across native import and Viewer output runtimes. A candidate returns its typed

@@ -918,12 +918,39 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
 
     if selected_clip.is_some_and(|selection| selection.is_video_track) {
         panel = panel.with_section(
-            PropertySection::new("蒙版").with_row(PropertyRow::new(
+            PropertySection::new("Power Window（窗口）").with_row(PropertyRow::new(
                 "添加",
                 Box::new(
-                    Button::new("添加矩形蒙版")
-                        .enabled(can_edit)
-                        .on_click(inspector_add_mask_action(selected_clip)),
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(Button::new("矩形").enabled(can_edit).on_click(
+                                inspector_add_mask_action(selected_clip, MaskShape::default()),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(Button::new("椭圆").enabled(can_edit).on_click(
+                                inspector_add_mask_action(
+                                    selected_clip,
+                                    MaskShape::Ellipse {
+                                        center: glam::Vec2::splat(0.5),
+                                        radii: glam::Vec2::splat(0.35),
+                                    },
+                                ),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(Button::new("Bezier").enabled(can_edit).on_click(
+                                inspector_add_mask_action(
+                                    selected_clip,
+                                    default_bezier_power_window(),
+                                ),
+                            )),
+                            1.0,
+                        ),
+                    ])
+                    .with_gap(6.0),
                 ),
             )),
         );
@@ -949,6 +976,10 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         radii: glam::Vec2::splat(0.4),
                     },
                 ),
+            ),
+            MenuItem::new(
+                "Bezier",
+                inspector_mask_shape_action(selected_clip, mask_id, default_bezier_power_window()),
             ),
         ];
         let mut section = PropertySection::new(mask.label.clone())
@@ -1039,6 +1070,100 @@ pub(super) fn inspector_panel(model: &InspectorPanelModel) -> PropertyPanel {
                         .on_change(move |enabled| {
                             inspector_mask_shape_animation_action(selected_clip, mask_id, enabled)
                         }),
+                ),
+            ));
+        let tracking_active = mask.tracking_status.as_ref().is_some_and(|status| {
+            matches!(
+                status.phase,
+                crate::app::visual_tracking::VisualTrackingPhase::Queued
+                    | crate::app::visual_tracking::VisualTrackingPhase::Analyzing
+                    | crate::app::visual_tracking::VisualTrackingPhase::Canceling
+            )
+        });
+        let tracking_items = [
+            (
+                "目标 · 向前",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Forward,
+            ),
+            (
+                "目标 · 向后",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Backward,
+            ),
+            (
+                "目标 · 双向",
+                MaskTrackingModel::ObjectTranslation,
+                MaskTrackingDirection::Both,
+            ),
+            (
+                "平面 · 向前",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Forward,
+            ),
+            (
+                "平面 · 向后",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Backward,
+            ),
+            (
+                "平面 · 双向",
+                MaskTrackingModel::PlanarHomography,
+                MaskTrackingDirection::Both,
+            ),
+        ]
+        .into_iter()
+        .map(|(label, tracking_model, direction)| {
+            MenuItem::new(
+                label,
+                inspector_mask_start_tracking_action(
+                    selected_clip,
+                    mask_id,
+                    tracking_model,
+                    direction,
+                ),
+            )
+        })
+        .collect();
+        section = section
+            .with_row(PropertyRow::new(
+                "跟踪",
+                Box::new(
+                    Dropdown::new("选择模型与方向…", tracking_items)
+                        .enabled(mask_can_edit && !tracking_active),
+                ),
+            ))
+            .with_row(PropertyRow::new(
+                "跟踪状态",
+                Box::new(Label::new(inspector_tracking_status_label(mask)).muted()),
+            ))
+            .with_row(PropertyRow::new(
+                "跟踪控制",
+                Box::new(
+                    FlexContainer::row(vec![
+                        FlexChild::flex(
+                            Box::new(Button::new("取消").enabled(tracking_active).on_click(
+                                inspector_mask_cancel_tracking_action(selected_clip, mask_id),
+                            )),
+                            1.0,
+                        ),
+                        FlexChild::flex(
+                            Box::new(
+                                Button::new("重算")
+                                    .enabled(
+                                        mask_can_edit
+                                            && mask.has_tracking_recipe
+                                            && !tracking_active,
+                                    )
+                                    .on_click(inspector_mask_recompute_tracking_action(
+                                        selected_clip,
+                                        mask_id,
+                                    )),
+                            ),
+                            1.0,
+                        ),
+                    ])
+                    .with_gap(6.0),
                 ),
             ));
         for property in &mask.properties {
@@ -1619,13 +1744,45 @@ pub(super) fn inspector_reorder_effect_action(
     })
 }
 
-pub(super) fn inspector_add_mask_action(selection: Option<SelectedClipRef>) -> Option<Action> {
+pub(super) fn inspector_add_mask_action(
+    selection: Option<SelectedClipRef>,
+    shape: MaskShape,
+) -> Option<Action> {
     selection.filter(|selection| selection.is_video_track).map(|selection| {
         visual_mask_add_to_clip_action(VisualMaskAddToClipPayload {
             clip_id: selection.clip_id,
-            shape: MaskShape::default(),
+            shape,
         })
     })
+}
+
+pub(super) fn default_bezier_power_window() -> MaskShape {
+    const HANDLE: f32 = 0.193_299_9;
+    MaskShape::Path {
+        points: vec![
+            BezierPoint {
+                position: glam::Vec2::new(0.5, 0.15),
+                control_in: glam::Vec2::new(-HANDLE, 0.0),
+                control_out: glam::Vec2::new(HANDLE, 0.0),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.85, 0.5),
+                control_in: glam::Vec2::new(0.0, -HANDLE),
+                control_out: glam::Vec2::new(0.0, HANDLE),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.5, 0.85),
+                control_in: glam::Vec2::new(HANDLE, 0.0),
+                control_out: glam::Vec2::new(-HANDLE, 0.0),
+            },
+            BezierPoint {
+                position: glam::Vec2::new(0.15, 0.5),
+                control_in: glam::Vec2::new(0.0, HANDLE),
+                control_out: glam::Vec2::new(0.0, -HANDLE),
+            },
+        ],
+        closed: true,
+    }
 }
 
 pub(super) fn inspector_mask_select_action(
@@ -1692,6 +1849,76 @@ pub(super) fn inspector_mask_shape_action(
             interpolation: MaskShapeInterpolation::Hold,
         })
     })
+}
+
+pub(super) fn inspector_mask_start_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+    model: MaskTrackingModel,
+    direction: MaskTrackingDirection,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_start_tracking_action(VisualMaskStartTrackingPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+            model,
+            direction,
+            settings: MaskTrackingSettings::default(),
+        })
+    })
+}
+
+pub(super) fn inspector_mask_cancel_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_cancel_tracking_action(VisualMaskTargetPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+        })
+    })
+}
+
+pub(super) fn inspector_mask_recompute_tracking_action(
+    selection: Option<SelectedClipRef>,
+    mask_id: MaskId,
+) -> Option<Action> {
+    selection.map(|selection| {
+        visual_mask_recompute_tracking_action(VisualMaskTargetPayload {
+            clip_id: selection.clip_id,
+            mask_id,
+        })
+    })
+}
+
+pub(super) fn inspector_tracking_status_label(mask: &InspectorMaskModel) -> String {
+    let Some(status) = &mask.tracking_status else {
+        return if mask.has_tracking_recipe {
+            "已生成 · 可重算".to_owned()
+        } else {
+            "未跟踪".to_owned()
+        };
+    };
+    use crate::app::visual_tracking::VisualTrackingPhase;
+    match status.phase {
+        VisualTrackingPhase::Queued => "排队中".to_owned(),
+        VisualTrackingPhase::Analyzing => {
+            format!("分析中 {}/{}", status.completed_pairs, status.total_pairs)
+        }
+        VisualTrackingPhase::Canceling => "正在取消".to_owned(),
+        VisualTrackingPhase::Canceled => "已取消".to_owned(),
+        VisualTrackingPhase::Completed => "已完成 · 可重算".to_owned(),
+        VisualTrackingPhase::CacheHit => "缓存命中 · 已应用".to_owned(),
+        VisualTrackingPhase::Stale => status.detail.as_deref().map_or_else(
+            || "结果已过期".to_owned(),
+            |detail| format!("已过期 · {detail}"),
+        ),
+        VisualTrackingPhase::Failed => status
+            .detail
+            .as_deref()
+            .map_or_else(|| "失败".to_owned(), |detail| format!("失败 · {detail}")),
+    }
 }
 
 pub(super) fn inspector_remove_mask_action(
@@ -1861,6 +2088,10 @@ pub(super) fn inspector_property_row(
 
 pub(super) fn effect_property_row_height(value: &PropertyValue) -> Option<f32> {
     let components: usize = match value {
+        PropertyValue::Curve(_) => return Some(150.0),
+        PropertyValue::QualifierSamples(samples) => {
+            return Some((samples.samples().len() as f32 + 1.0) * 34.0);
+        }
         PropertyValue::Vec2(_) => 2,
         PropertyValue::Vec3(_) => 3,
         PropertyValue::Vec4(_) => 4,
@@ -2094,6 +2325,31 @@ pub(super) fn inspector_property_value_widget(
                 }),
             )
         }
+        PropertyValue::Curve(curve) => {
+            let points =
+                curve.points().iter().map(|point| CurvePoint::new(point.x, point.y)).collect();
+            let selected_clip = selection;
+            Box::new(
+                CurveEditor::with_points(points).enabled(can_edit).on_change(move |points| {
+                    let curve = NormalizedCurve::new(
+                        points
+                            .iter()
+                            .map(|point| NormalizedCurvePoint::new(point.x, point.y))
+                            .collect(),
+                    )
+                    .ok()?;
+                    inspector_property_action(
+                        selected_clip,
+                        target.clone(),
+                        &path,
+                        PropertyValue::Curve(curve),
+                    )
+                }),
+            )
+        }
+        PropertyValue::QualifierSamples(samples) => {
+            qualifier_sample_editor(samples, can_edit, selection, target, path)
+        }
         PropertyValue::Vec2(value) => vector_property_widget(
             &["X", "Y"],
             &[value.x, value.y],
@@ -2125,6 +2381,117 @@ pub(super) fn inspector_property_value_widget(
             |values| PropertyValue::Vec4([values[0], values[1], values[2], values[3]]),
         ),
     }
+}
+
+fn qualifier_sample_editor(
+    samples: &QualifierSampleSet,
+    can_edit: bool,
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: String,
+) -> Box<dyn Widget> {
+    let mut rows = Vec::with_capacity(samples.samples().len() + 1);
+    for (index, sample) in samples.samples().iter().copied().enumerate() {
+        let base_for_color = samples.clone();
+        let color_target = target.clone();
+        let color_path = path.clone();
+        let color = Color {
+            r: sample.rgb[0],
+            g: sample.rgb[1],
+            b: sample.rgb[2],
+            a: 1.0,
+        };
+        let color_picker = color_picker_trigger(color).enabled(can_edit).on_change(move |color| {
+            let mut changed = base_for_color.samples().to_vec();
+            changed[index].rgb = [
+                color.r.clamp(0.0, 1.0),
+                color.g.clamp(0.0, 1.0),
+                color.b.clamp(0.0, 1.0),
+            ];
+            qualifier_sample_set_action(selection, color_target.clone(), &color_path, changed)
+        });
+
+        let operation_items = [
+            (QualifierSampleOperation::Include, "包含"),
+            (QualifierSampleOperation::Exclude, "排除"),
+        ]
+        .into_iter()
+        .map(|(operation, label)| {
+            let mut changed = samples.samples().to_vec();
+            changed[index].operation = operation;
+            MenuItem::new(
+                label,
+                qualifier_sample_set_action(selection, target.clone(), &path, changed),
+            )
+        })
+        .collect();
+        let operation_label = match sample.operation {
+            QualifierSampleOperation::Include => "包含",
+            QualifierSampleOperation::Exclude => "排除",
+        };
+        let mut without = samples.samples().to_vec();
+        without.remove(index);
+        let remove = qualifier_sample_set_action(selection, target.clone(), &path, without);
+        rows.push(FlexChild::fixed(Box::new(
+            FlexContainer::row(vec![
+                FlexChild::fixed(Box::new(color_picker)),
+                FlexChild::flex(
+                    Box::new(Dropdown::new(operation_label, operation_items).enabled(can_edit)),
+                    1.0,
+                ),
+                FlexChild::fixed(Box::new(
+                    Button::new("删除").enabled(can_edit && remove.is_some()).on_click(remove),
+                )),
+            ])
+            .with_gap(4.0),
+        )));
+    }
+
+    let can_add = can_edit && samples.samples().len() < MAX_QUALIFIER_SAMPLES;
+    let add_action = |operation| {
+        let mut changed = samples.samples().to_vec();
+        changed.push(QualifierSample::new([0.5, 0.5, 0.5], operation));
+        qualifier_sample_set_action(selection, target.clone(), &path, changed)
+    };
+    let add_include = add_action(QualifierSampleOperation::Include);
+    let add_exclude = add_action(QualifierSampleOperation::Exclude);
+    rows.push(FlexChild::fixed(Box::new(
+        FlexContainer::row(vec![
+            FlexChild::flex(
+                Box::new(
+                    Button::new("+ 包含")
+                        .enabled(can_add && add_include.is_some())
+                        .on_click(add_include),
+                ),
+                1.0,
+            ),
+            FlexChild::flex(
+                Box::new(
+                    Button::new("+ 排除")
+                        .enabled(can_add && add_exclude.is_some())
+                        .on_click(add_exclude),
+                ),
+                1.0,
+            ),
+        ])
+        .with_gap(4.0),
+    )));
+    Box::new(FlexContainer::column(rows).with_gap(4.0))
+}
+
+pub(super) fn qualifier_sample_set_action(
+    selection: Option<SelectedClipRef>,
+    target: InspectorPropertyTarget,
+    path: &str,
+    samples: Vec<QualifierSample>,
+) -> Option<Action> {
+    let samples = QualifierSampleSet::new(samples).ok()?;
+    inspector_property_action(
+        selection,
+        target,
+        path,
+        PropertyValue::QualifierSamples(samples),
+    )
 }
 
 pub(super) fn vector_property_widget(

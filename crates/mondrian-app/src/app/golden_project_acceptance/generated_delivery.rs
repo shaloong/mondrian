@@ -523,8 +523,9 @@ fn render_program_reference(
             "delivery work area contains no generated title",
         ),
     };
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let resolved = match resolve_preview_timeline(
         sequence,
         state.sequences(),
@@ -578,15 +579,15 @@ fn render_program_reference(
     let program_output_color = resolved
         .plan
         .color_context
-        .output_color_space
+        .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
     let output_boundary = RenderOutputColorBoundary::from_intent(
         RenderOutputColorBoundaryTarget::Export,
         program_output_color,
-        &resolved.plan.color_context.output_transform,
-        resolved.plan.color_context.output_tone_map,
-        resolved.plan.color_context.engine.clone(),
+        resolved.plan.color_context.output_transform(),
+        resolved.plan.color_context.output_tone_map(),
+        resolved.plan.color_context.engine().clone(),
     )?;
     let rgba = execute_cpu_output_boundary(&flattened, &output_boundary)?
         .result
@@ -1091,7 +1092,7 @@ fn reimport_export(
         .active_sequence()
         .context("active Sequence is absent")?
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
         asset_id: asset.id,

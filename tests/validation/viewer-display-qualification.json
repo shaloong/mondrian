@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "id": "windows-viewer-display-v1",
+  "execution_policy": "physical-display-hitl-required",
+  "scenarios": [
+    {
+      "id": "display-p3",
+      "surface_color_space": "DisplayP3",
+      "monitor_color_space": "DisplayP3",
+      "surface_carrier_active": true,
+      "transfer": "surface-code-values"
+    },
+    {
+      "id": "hdr-pq",
+      "surface_color_space": "Bt2100Pq",
+      "monitor_color_space": "Rec2100Pq",
+      "surface_carrier_active": true,
+      "transfer": "surface-code-values"
+    },
+    {
+      "id": "icc-sdr",
+      "surface_color_space": "Srgb",
+      "monitor_color_space": "Rec709",
+      "surface_carrier_active": false,
+      "transfer": "device-code-values"
+    }
+  ],
+  "acceptance": {
+    "ready_health_required": true,
+    "valid_display_snapshot_required": true,
+    "external_texture_presentation_required": true,
+    "zero_readback_stages_required": true,
+    "carrier_reuse_evidence_required": true,
+    "operator_visual_observation_required": true,
+    "capability_skip_forbidden": true
+  }
+}

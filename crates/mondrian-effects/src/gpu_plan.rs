@@ -16,11 +16,11 @@ use std::{
 };
 
 /// Maximum number of point operations fused into one GPU pass.
-pub const MAX_FUSED_GPU_EFFECT_OPS: usize = 8;
+pub const MAX_FUSED_GPU_EFFECT_OPS: usize = 16;
 const GPU_PLAN_CACHE_ENTRY_OVERHEAD_BYTES: usize = 256;
 
 /// One pointwise operation executable by a working-space GPU backend.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EffectGpuPointOp {
     /// Exposure, contrast, and saturation adjustment.
     ColorAdjust {
@@ -29,6 +29,22 @@ pub enum EffectGpuPointOp {
         saturation: f32,
         /// CIE Y coefficients for the authored Sequence working space.
         luminance_coefficients: [f32; 3],
+    },
+    /// Working-space Bradford white-balance matrix.
+    WhiteBalance { grade: crate::WhiteBalanceGrade },
+    /// Lift/Gamma/Gain/Offset primary correction.
+    Primaries { grade: crate::PrimariesGrade },
+    /// ASC CDL v1.2 no-clamp correction.
+    AscCdl { grade: crate::AscCdlGrade },
+    /// ACES 1.3 Reference Gamut Compression.
+    GamutCompression { grade: crate::GamutCompressionGrade },
+    /// Scene-linear highlight chroma reconstruction.
+    HighlightRecovery {
+        grade: crate::HighlightRecoveryGrade,
+    },
+    /// Immutable sampled RGB/YRGB and secondary curves.
+    ColorCurves {
+        curves: Arc<crate::PreparedColorCurves>,
     },
     /// Source-relative radial vignette.
     Vignette { intensity: f32, feather: f32 },
@@ -40,6 +56,16 @@ pub enum EffectGpuPointOp {
         top: f32,
         right: f32,
         bottom: f32,
+    },
+    /// Prepared creative 3D LUT sampled in its explicitly authored processing domain.
+    ///
+    /// The backend-neutral plan retains the immutable semantic payload only;
+    /// device upload, residency, and binding remain renderer-owned.
+    Lut3D {
+        /// Immutable parsed cube with a precomputed complete semantic fingerprint.
+        lut: Arc<crate::PreparedLut3D>,
+        /// Blend from the unbounded source RGB to the domain-clamped LUT sample.
+        intensity: f32,
     },
 }
 
@@ -644,6 +670,13 @@ fn gpu_plan_cache_entry_bytes(
             .saturating_add(
                 plan.node_ids.len().saturating_mul(std::mem::size_of::<EffectGraphNodeId>()),
             )
+            .saturating_add(plan.operations.iter().fold(0_usize, |total, operation| {
+                let retained = match operation {
+                    EffectGpuPointOp::Lut3D { lut, .. } => lut.retained_bytes_estimate(),
+                    _ => 0,
+                };
+                total.saturating_add(retained)
+            }))
             .saturating_add(std::mem::size_of::<usize>().saturating_mul(2)),
         Err(_) => std::mem::size_of::<EffectGpuPlanBlocker>(),
     };
@@ -668,6 +701,20 @@ fn lower_point_op(
             saturation: *saturation,
             luminance_coefficients: working_color_space.luminance_coefficients(),
         }),
+        EffectRenderOp::WhiteBalance { grade } => {
+            Ok(EffectGpuPointOp::WhiteBalance { grade: *grade })
+        }
+        EffectRenderOp::Primaries { grade } => Ok(EffectGpuPointOp::Primaries { grade: *grade }),
+        EffectRenderOp::AscCdl { grade } => Ok(EffectGpuPointOp::AscCdl { grade: *grade }),
+        EffectRenderOp::GamutCompression { grade } => {
+            Ok(EffectGpuPointOp::GamutCompression { grade: *grade })
+        }
+        EffectRenderOp::HighlightRecovery { grade } => {
+            Ok(EffectGpuPointOp::HighlightRecovery { grade: *grade })
+        }
+        EffectRenderOp::ColorCurves { curves } => {
+            Ok(EffectGpuPointOp::ColorCurves { curves: Arc::clone(curves) })
+        }
         EffectRenderOp::Vignette { intensity, feather } => {
             Ok(EffectGpuPointOp::Vignette { intensity: *intensity, feather: *feather })
         }
@@ -678,6 +725,9 @@ fn lower_point_op(
             right: *right,
             bottom: *bottom,
         }),
+        EffectRenderOp::Lut3D { lut, intensity } => {
+            Ok(EffectGpuPointOp::Lut3D { lut: Arc::clone(lut), intensity: *intensity })
+        }
         unsupported => Err(EffectGpuPlanBlocker::UnsupportedOperation {
             node_id,
             op: operation_name(unsupported),
@@ -693,6 +743,8 @@ fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
         EffectGraphNodeKind::Blend { .. } => "blend",
         EffectGraphNodeKind::Mask { .. } => "mask",
         EffectGraphNodeKind::MaskSource { .. } => "mask_source",
+        EffectGraphNodeKind::MaskCombine { .. } => "mask_combine",
+        EffectGraphNodeKind::MatteMix { .. } => "matte_mix",
         EffectGraphNodeKind::MultiInput { .. } => "multi_input",
     }
 }
@@ -700,6 +752,14 @@ fn node_kind_name(kind: &EffectGraphNodeKind) -> &'static str {
 fn operation_name(op: &EffectRenderOp) -> &'static str {
     match op {
         EffectRenderOp::ColorAdjust { .. } => "color_adjust",
+        EffectRenderOp::WhiteBalance { .. } => "white_balance",
+        EffectRenderOp::Primaries { .. } => "primaries",
+        EffectRenderOp::AscCdl { .. } => "asc_cdl",
+        EffectRenderOp::GamutCompression { .. } => "gamut_compression",
+        EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
+        EffectRenderOp::ColorCurves { .. } => "color_curves",
+        EffectRenderOp::Qualifier { .. } => "qualifier",
+        EffectRenderOp::MattePreview { .. } => "matte_preview",
         EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
         EffectRenderOp::Sharpen { .. } => "sharpen",
         EffectRenderOp::Vignette { .. } => "vignette",
@@ -741,6 +801,33 @@ mod tests {
             EffectGpuPointOp::Crop { left: 0.25, top: 0.0, right: 0.0, bottom: 0.25 }
         );
         assert_eq!(plan.graph_signature(), compiled.signature_hash());
+    }
+
+    #[test]
+    fn lowers_creative_lut_inside_one_fused_grade_chain() {
+        let lut = Arc::new(crate::PreparedLut3D::new(
+            crate::Lut3D::identity(2).expect("identity LUT"),
+        ));
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ColorAdjust {
+            exposure: 0.25,
+            contrast: 1.1,
+            saturation: 0.9,
+            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        });
+        builder.append_unary(EffectRenderOp::Lut3D { lut: Arc::clone(&lut), intensity: 0.75 });
+        builder.append_unary(EffectRenderOp::Crop { left: 0.0, top: 0.0, right: 0.1, bottom: 0.0 });
+        let compiled = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&compiled).expect("fused GPU grade chain");
+
+        assert_eq!(plan.operations().len(), 3);
+        assert!(matches!(
+            &plan.operations()[1],
+            EffectGpuPointOp::Lut3D { lut: lowered, intensity }
+                if Arc::ptr_eq(lowered, &lut) && *intensity == 0.75
+        ));
+        assert_eq!(plan.node_ids().len(), 3);
+        assert_eq!(plan.processing_domain(), EffectColorDomain::SceneLinearRgb);
     }
 
     #[test]

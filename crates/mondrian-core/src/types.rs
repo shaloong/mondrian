@@ -70,6 +70,7 @@ define_id!(ProgramOutputId, "节目输出 ID");
 define_id!(AudioRoleId, "音频角色 ID");
 define_id!(JobId, "渲染任务 ID");
 define_id!(MaskId, "蒙版 ID");
+define_id!(TrackingId, "跟踪分析 ID");
 
 /// Monotonic authoring revision of one stable Sequence identity.
 ///

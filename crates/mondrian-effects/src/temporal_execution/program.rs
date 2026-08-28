@@ -265,6 +265,18 @@ impl TemporalProgramBuilder<'_> {
                 self.add_use(mask)?;
             }
             EffectGraphNodeKind::MaskSource { .. } => {}
+            EffectGraphNodeKind::MaskCombine { left, right, .. } => {
+                let left = self.visit_graph_value(context, left)?;
+                let right = self.visit_graph_value(context, right)?;
+                self.add_use(left)?;
+                self.add_use(right)?;
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                for input in [base, graded, matte] {
+                    let input = self.visit_graph_value(context, input)?;
+                    self.add_use(input)?;
+                }
+            }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 if inputs.is_empty() {
                     return Err(EffectTemporalExecutionError::InvalidGraphLiveness {

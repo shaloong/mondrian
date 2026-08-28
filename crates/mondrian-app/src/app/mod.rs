@@ -177,6 +177,7 @@ mod video_transitions;
 pub mod viewer_gpu_output_health;
 pub(crate) mod viewer_gpu_output_residency;
 mod visual_mask_authoring;
+pub mod visual_tracking;
 pub mod waveform_service;
 
 use self::ui_actions::TimelineSeekSource;
@@ -443,6 +444,8 @@ pub struct AppState {
     media_import_batches: HashMap<u64, PendingMediaImportBatch>,
     /// Ordered two-phase execution for relink and audio Component mutations.
     media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution,
+    /// Instance-owned, bounded Mask tracking execution and result cache.
+    visual_tracking: visual_tracking::VisualTrackingService,
 }
 
 impl AppState {
@@ -497,6 +500,7 @@ impl AppState {
             media_import: MediaImportExecution::new(),
             media_import_batches: HashMap::new(),
             media_asset_mutations: media_asset_mutation::MediaAssetMutationExecution::new(),
+            visual_tracking: visual_tracking::VisualTrackingService::new(),
         }
     }
 
@@ -608,30 +612,31 @@ impl AppState {
     /// Thumbnails use the future-Sequence template for source interpretation,
     /// but always publish an sRGB display raster. Window Adapters consume this
     /// value and never interpret the Project color engine themselves.
-    pub(crate) fn thumbnail_color_context(&self) -> ProgramColorContext {
+    pub(crate) fn thumbnail_color_context(
+        &self,
+    ) -> Result<ProgramColorContext, mondrian_timeline::sequence::ProgramColorContextError> {
         let environment = self.project_color_environment();
-        let mut context = self.new_sequence_defaults().root_program_color_context(environment);
-        context.output_color_space = mondrian_core::types::ColorSpace::Srgb.into();
-        context.output_tone_map = true;
-        context.output_transform = match environment.engine() {
-            mondrian_core::ColorEngine::MondrianStandard { package } => {
-                mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
-            }
-            mondrian_core::ColorEngine::Aces { preset } => {
-                mondrian_core::OutputTransformIntent::aces_preset(*preset)
-            }
-            mondrian_core::ColorEngine::CustomOcio { .. } => {
-                mondrian_core::OutputTransformIntent::CustomOcio {
-                    output_color_space: mondrian_core::types::ColorSpace::Srgb,
-                }
-            }
-        };
-        context
+        self.new_sequence_defaults()
+            .root_program_color_context(environment)?
+            .for_rendering_view_output(mondrian_core::types::ColorSpace::Srgb)
     }
 
     /// Machine-local Viewer display policy used by Window and Headless Adapters.
     pub fn viewer_display_management(&self) -> &DisplayManagementPolicy {
         &self.viewer_display_management
+    }
+
+    /// Install the validated machine-local Viewer display policy.
+    ///
+    /// This is runtime/user preference state. It never mutates Project or
+    /// Sequence authoring data; Window observes the changed value and rebuilds
+    /// the display-dependent output contract before publishing more pixels.
+    pub fn set_viewer_display_management(&mut self, policy: DisplayManagementPolicy) -> bool {
+        if self.viewer_display_management == policy {
+            return false;
+        }
+        self.viewer_display_management = policy;
+        true
     }
 
     /// Current author generation used by execution snapshots and cache identity.
@@ -779,6 +784,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_sequence(&mut self, sequence: Option<Sequence>) {
         let Some(sequence) = sequence else {
+            self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.media_asset_mutations.bind_project(None);
@@ -890,6 +896,7 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn test_set_asset_library(&mut self, library: Option<Arc<AssetLibrary>>) {
         let Some(library) = library else {
+            self.visual_tracking.cancel_all();
             self.media_import.bind_project(None);
             self.media_import_batches.clear();
             self.media_asset_mutations.bind_project(None);
@@ -914,6 +921,7 @@ impl AppState {
             AuthoringSession::open_saved(document, project_file, runtime_root, library)
                 .expect("replace test asset library"),
         );
+        self.visual_tracking.cancel_all();
         self.manual_project_file_destination = None;
         self.manual_project_file_applied_request = None;
         self.synchronize_audio_idle_warmup_binding();
@@ -1132,16 +1140,16 @@ mod color_policy_tests {
     fn thumbnail_color_policy_is_resolved_by_app_state_for_srgb_publication() {
         let state = AppState::new();
 
-        let context = state.thumbnail_color_context();
+        let context = state.thumbnail_color_context().expect("valid thumbnail context");
 
         assert_eq!(
-            context.output_color_space.color(),
+            context.output_color_space().color(),
             Some(mondrian_core::types::ColorSpace::Srgb)
         );
-        assert!(context.output_tone_map);
+        assert!(context.output_tone_map());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 }

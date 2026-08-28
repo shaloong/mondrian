@@ -813,9 +813,11 @@ fn inject_masks(
     time: TimelineTime,
 ) -> EvaluatedEffectGraph {
     let graph = &mut evaluation.graph;
-    let stage_input = graph.output.unwrap_or(EffectGraphNodeId(0));
+    let base = EffectGraphNodeId(0);
+    let graded = graph.output.unwrap_or(base);
+    let stage_input = graded;
     let mut emitted_nodes = Vec::with_capacity(masks.len().saturating_mul(2));
-    let mut current_output = graph.output;
+    let mut matte = None;
     let mut next_id = graph.nodes.len() as u32;
     for mask in masks {
         let params = mask.evaluate_at(time);
@@ -828,24 +830,37 @@ fn inject_masks(
                 feather: params.feather,
                 expansion: params.expansion,
                 opacity: params.opacity,
+                invert: params.invert,
             },
         });
         emitted_nodes.push(source_id);
-        let mask_id = EffectGraphNodeId(next_id);
-        next_id += 1;
-        graph.nodes.push(EffectGraphNode {
-            id: mask_id,
-            kind: EffectGraphNodeKind::Mask {
-                input: current_output.unwrap_or(EffectGraphNodeId(0)),
-                mask: source_id,
-                invert: params.invert,
-                mask_op: params.mask_op,
-            },
+        matte = Some(match matte {
+            None => source_id,
+            Some(left) => {
+                let combine_id = EffectGraphNodeId(next_id);
+                next_id += 1;
+                graph.nodes.push(EffectGraphNode {
+                    id: combine_id,
+                    kind: EffectGraphNodeKind::MaskCombine {
+                        left,
+                        right: source_id,
+                        mask_op: params.mask_op,
+                    },
+                });
+                emitted_nodes.push(combine_id);
+                combine_id
+            }
         });
-        emitted_nodes.push(mask_id);
-        current_output = Some(mask_id);
     }
-    graph.output = current_output;
+    if let Some(matte) = matte {
+        let mix_id = EffectGraphNodeId(next_id);
+        graph.nodes.push(EffectGraphNode {
+            id: mix_id,
+            kind: EffectGraphNodeKind::MatteMix { base, graded, matte },
+        });
+        emitted_nodes.push(mix_id);
+        graph.output = Some(mix_id);
+    }
     if !masks.is_empty() {
         let mut stage_bindings = evaluation.stage_bindings.to_vec();
         stage_bindings.push(CompiledEffectStageBinding::new(
@@ -862,7 +877,9 @@ fn inject_masks(
 
 fn mask_execution_contract() -> EffectExecutionContract {
     EffectExecutionContract {
-        execution_modes: EffectExecutionModes::CPU_F32,
+        execution_modes: EffectExecutionModes::CPU_U8
+            .union(EffectExecutionModes::CPU_F32)
+            .union(EffectExecutionModes::GPU_F32),
         determinism: EffectDeterminism::Deterministic,
         state_model: EffectStateModel::Stateless,
         temporal_input: EffectTemporalInputExtent::CURRENT_FRAME,
@@ -1097,6 +1114,110 @@ mod tests {
             EffectRoiPropagation::PixelLocal
         );
         assert_eq!(demand.input_roi().region(), output_roi);
+    }
+
+    fn exposure_effect(stops: f32) -> EffectNode {
+        let mut effect = EffectNode::with_defaults(EffectType::BasicCorrection);
+        let exposure_id = EffectType::BasicCorrection
+            .parameter_id("exposure")
+            .expect("exposure parameter ID");
+        effect
+            .set_static_value_by_parameter(&exposure_id, PropertyValue::Float(stops))
+            .expect("set exposure");
+        effect
+    }
+
+    fn execute_window(shape: MaskShape, invert: bool) -> Vec<[f32; 4]> {
+        let mask = MaskComponent::new(
+            "window".to_owned(),
+            MaskEvaluation { shape, invert, ..MaskEvaluation::default() },
+        );
+        let graph = PreparedEffectProgram::prepare(
+            &[exposure_effect(1.0)],
+            &[mask],
+            WorkingColorSpace::LinearRec709,
+        )
+        .expect("prepare Power Window program")
+        .evaluate(TimelineTime::ZERO)
+        .expect("evaluate Power Window graph");
+        let mask_binding = graph.stage_bindings().last().expect("Mask stage binding");
+        let node_modes = mask_binding
+            .emitted_nodes()
+            .iter()
+            .map(|node| graph.node_execution_modes(*node).expect("node execution modes"))
+            .collect::<Vec<_>>();
+        assert!(node_modes.iter().any(|modes| {
+            modes.contains(
+                crate::EffectProcessingBackend::Cpu,
+                crate::EffectWorkingPrecision::NormalizedU8,
+            )
+        }));
+        assert!(node_modes.iter().any(|modes| {
+            modes.contains(
+                crate::EffectProcessingBackend::Gpu,
+                crate::EffectWorkingPrecision::Float32,
+            )
+        }));
+
+        let input = vec![[1.5, -0.25, 0.125, 0.37]; 64];
+        crate::apply_compiled_effect_graph_rgba_f32(&input, 8, 8, &graph, 0)
+            .expect("execute Power Window graph")
+    }
+
+    #[test]
+    fn prepared_rectangle_ellipse_and_bezier_are_grade_mattes_not_alpha_masks() {
+        let shapes = [
+            MaskShape::Rectangle {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+                corner_radius: 0.08,
+            },
+            MaskShape::Ellipse {
+                center: glam::Vec2::splat(0.5),
+                radii: glam::Vec2::splat(0.3),
+            },
+            MaskShape::Path {
+                points: vec![
+                    crate::BezierPoint::new(glam::Vec2::new(0.25, 0.25)),
+                    crate::BezierPoint::new(glam::Vec2::new(0.75, 0.25)),
+                    crate::BezierPoint::new(glam::Vec2::new(0.75, 0.75)),
+                    crate::BezierPoint::new(glam::Vec2::new(0.25, 0.75)),
+                ],
+                closed: true,
+            },
+        ];
+
+        for shape in shapes {
+            let output = execute_window(shape, false);
+            let outside = output[0];
+            let inside = output[4 * 8 + 4];
+            assert_eq!(outside, [1.5, -0.25, 0.125, 0.37]);
+            assert_eq!(inside, [3.0, -0.5, 0.25, 0.37]);
+            assert!(
+                inside[0] > 1.0 && inside[1] < 0.0,
+                "HDR/negative RGB must survive"
+            );
+        }
+    }
+
+    #[test]
+    fn prepared_power_window_invert_reverses_grade_selection_without_touching_alpha() {
+        let output = execute_window(
+            MaskShape::Rectangle {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+                corner_radius: 0.0,
+            },
+            true,
+        );
+
+        assert_eq!(output[0], [3.0, -0.5, 0.25, 0.37]);
+        assert_eq!(output[4 * 8 + 4], [1.5, -0.25, 0.125, 0.37]);
+        assert!(output.iter().all(|pixel| pixel[3] == 0.37));
     }
 
     #[test]

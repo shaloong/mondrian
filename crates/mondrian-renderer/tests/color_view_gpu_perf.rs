@@ -12,11 +12,11 @@ use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameTextureFormat, GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest,
-    GpuFrameCompositor, OcioGpuShaderPlan, OcioGpuShaderRequest, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
-    RenderIntermediateColorTransform, RenderOutputColorBoundary,
+    GpuColorFrameTextureFormat, GpuColorQualificationExecutionPolicy, GpuCompositeLayer,
+    GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor, OcioGpuShaderPlan,
+    OcioGpuShaderRequest, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    RenderInputTransform, RenderIntermediateColorTransform, RenderOutputColorBoundary,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -456,6 +456,7 @@ struct RecordedSample {
 async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<()> {
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
+    let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
     let Some(context) = create_timestamp_gpu_context().await? else {
         eprintln!(
             "MONDRIAN_COLOR_VIEW_GPU_PERF_JSON={}",
@@ -465,6 +466,11 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
         );
+        qualification_policy.admit_capability(
+            "standard-view-4k-performance",
+            "real-adapter-with-complete-timestamp-query",
+            false,
+        )?;
         return Ok(());
     };
 
@@ -698,6 +704,7 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
 async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> {
     ensure_mondrian_default_ocio_loaded()
         .map_err(|error| anyhow!("load Mondrian Standard OCIO package: {error}"))?;
+    let qualification_policy = GpuColorQualificationExecutionPolicy::from_environment()?;
     let Some(context) = create_timestamp_gpu_context().await? else {
         eprintln!(
             "MONDRIAN_COLOR_TRANSFORM_GPU_PERF_JSON={}",
@@ -707,6 +714,11 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
                 "skipped": "no real adapter with complete encoder timestamp-query support"
             })
         );
+        qualification_policy.admit_capability(
+            "standard-input-4k-performance",
+            "real-adapter-with-complete-timestamp-query",
+            false,
+        )?;
         return Ok(());
     };
 

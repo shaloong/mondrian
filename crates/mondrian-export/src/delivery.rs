@@ -257,8 +257,14 @@ fn resolve_export_color_target(
 ) -> Result<ResolvedExportColorTarget, ExportDeliveryError> {
     match preset.color_target {
         ExportColorTarget::FollowSequence => {
-            let context = settings.root_program_color_context(color_environment);
-            let color_space = context.output_color_space.color().ok_or_else(|| {
+            let context =
+                settings.root_program_color_context(color_environment).map_err(|error| {
+                    ExportDeliveryError::new(
+                        ExportDeliveryIssueCode::IncompatibleColorOutput,
+                        format!("Sequence Program Output context invalid: {error}"),
+                    )
+                })?;
+            let color_space = context.output_color_space().color().ok_or_else(|| {
                 ExportDeliveryError::new(
                     ExportDeliveryIssueCode::IncompatibleColorOutput,
                     "Sequence Program Output 必须是可编码色彩空间",
@@ -266,8 +272,8 @@ fn resolve_export_color_target(
             })?;
             Ok(ResolvedExportColorTarget {
                 color_space,
-                tone_map: context.output_tone_map,
-                output_transform: context.output_transform,
+                tone_map: context.output_tone_map(),
+                output_transform: context.output_transform().clone(),
             })
         }
         ExportColorTarget::Colorimetric(color_space) => {

@@ -14,17 +14,16 @@ use std::time::{Duration, Instant};
 
 use mondrian_core::MondrianError;
 use mondrian_media::{
-    decode_preview_frame_cancellable, DecodedGpuFrameHandleKind, DecodedRgbaEncoding,
-    DecodedRgbaFrameContract, DecodedVideoSampling, DecodedVideoSurfaceFormat,
-    HwAccelDeviceSelector, PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints,
-    PreviewDecodeCancellation, PreviewDecodeDiagnostics, PreviewDecodeExecutionPath,
-    PreviewDecodeKey, PreviewDecodeOutcome, PreviewDecodeRequest, PreviewDecodeSessionContext,
-    PreviewDecodeSessionContextBootstrap, PreviewHardwareDecodeRequest,
+    decode_preview_frame_cancellable, DecodedGpuFrameHandleKind, DecodedRgbaFrameContract,
+    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelDeviceSelector,
+    PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeCancellation,
+    PreviewDecodeDiagnostics, PreviewDecodeExecutionPath, PreviewDecodeKey, PreviewDecodeOutcome,
+    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
+    PreviewHardwareDecodeRequest,
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
-    CpuEncodedColorFrame, CpuEncodedFloatColorFrame, CpuSourceColorFrame, LinearFloatSource,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderInputTransform,
+    prepare_decoded_cpu_source_frame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
 };
 
 use super::preview_access_mode::{
@@ -1003,15 +1002,11 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let source = CpuEncodedColorFrame::source_rgba8_shared(
-                width,
-                height,
-                job.key.decode.source_color().color_space,
-                frame.into_shared_data(),
-            );
-            let source = match CpuSourceColorFrame::from(source)
-                .normalize_alpha(job.key.alpha_interpretation)
-            {
+            let prepared_source = match prepare_decoded_cpu_source_frame(
+                frame,
+                job.key.alpha_interpretation,
+                job.key.preparation_intent.clone(),
+            ) {
                 Ok(source) => source,
                 Err(error) => {
                     return media_preview_alpha_failure(
@@ -1023,14 +1018,8 @@ fn decode_media_preview_inner(
                     );
                 }
             };
-            let input_transform = RenderInputTransform::to_working(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                source,
-                input_transform,
+                prepared_source,
                 decode_diagnostics,
             );
             MediaPreviewResult {
@@ -1098,25 +1087,11 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let source = match frame.color_contract.encoding {
-                DecodedRgbaEncoding::SourceEncodedRgb => {
-                    CpuSourceColorFrame::from(CpuEncodedFloatColorFrame::source_flat_rgba_f32(
-                        width,
-                        height,
-                        frame.color_contract.source.color_space,
-                        frame.into_data(),
-                    ))
-                }
-                DecodedRgbaEncoding::SourceLinearRgb => {
-                    CpuSourceColorFrame::from(LinearFloatSource::new_shared(
-                        width,
-                        height,
-                        frame.color_contract.source.color_space,
-                        frame.into_shared_data(),
-                    ))
-                }
-            };
-            let source = match source.normalize_alpha(job.key.alpha_interpretation) {
+            let prepared_source = match prepare_decoded_cpu_source_frame(
+                frame,
+                job.key.alpha_interpretation,
+                job.key.preparation_intent.clone(),
+            ) {
                 Ok(source) => source,
                 Err(error) => {
                     return media_preview_alpha_failure(
@@ -1128,14 +1103,8 @@ fn decode_media_preview_inner(
                     );
                 }
             };
-            let input_transform = RenderInputTransform::to_working(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
             let gpu_source = MediaPreviewGpuSourceFrame::from_decode_diagnostics(
-                source,
-                input_transform,
+                prepared_source,
                 decode_diagnostics,
             );
             MediaPreviewResult {
@@ -1214,11 +1183,16 @@ fn decode_media_preview_inner(
                 .decode
                 .representation()
                 .materialization_extent_for_source(logical_resolution);
-            let input_transform = RenderInputTransform::to_working_gpu(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
+            let Some(input_transform) = job.key.preparation_intent.color_transform().cloned()
+            else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "data-texture decode unexpectedly produced compact CPU YUV".to_owned(),
+                );
+            };
             let cpu_yuv_source = MediaPreviewCpuYuvSourceFrame::from_decode(frame, input_transform);
             MediaPreviewResult {
                 key: job.key,
@@ -1293,11 +1267,26 @@ fn decode_media_preview_inner(
                     execution: decode_execution,
                 },
             );
-            let input_transform = RenderInputTransform::to_working_gpu(
-                job.key.working_color_space,
-                job.key.input_tone_map,
-                job.key.engine.clone(),
-            );
+            let Some(input_transform) = job.key.preparation_intent.color_transform().cloned()
+            else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "data-texture decode unexpectedly produced a native GPU surface".to_owned(),
+                );
+            };
+            let Some(source_color_space) = job.key.decode.source_color().color_space() else {
+                return media_preview_alpha_failure(
+                    job,
+                    queue_wait_us,
+                    decode_elapsed_us,
+                    decode_diagnostics,
+                    "native GPU decode contract is missing a color-managed source identity"
+                        .to_owned(),
+                );
+            };
             // The sampled extent is the native surface's own representation
             // extent, never an output/composition extent. Scaling to the
             // composition target is owned by the compositor/spatial stage.
@@ -1305,7 +1294,7 @@ fn decode_media_preview_inner(
                 mondrian_core::Resolution { width: frame.width, height: frame.height };
             let native_source = MediaPreviewNativeSourceFrame::from_native_frame(
                 frame,
-                job.key.decode.source_color().color_space,
+                source_color_space,
                 input_transform,
             );
             MediaPreviewResult {

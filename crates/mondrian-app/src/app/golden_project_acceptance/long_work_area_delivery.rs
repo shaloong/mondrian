@@ -414,7 +414,7 @@ fn reimport_and_sample(
     let time_base = sequence.time_base();
     let input_color = sequence
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
 
     let mut sampled_frames = Vec::new();

@@ -366,6 +366,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     last_color_rejection: RefCell<Option<PreviewColorRejection>>,
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
+    display_snapshot_identity: Cell<Option<DisplayOutputIdentity>>,
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
@@ -742,6 +743,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             last_color_rejection: RefCell::new(None),
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
             display_snapshot: RefCell::new(None),
+            display_snapshot_identity: Cell::new(None),
             hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
             decode_worker_count,
@@ -904,6 +906,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let display_snapshot = self.display_snapshot.borrow();
         let display_color_space = match preview_display_color_space(
             sequence,
+            authoring.color_environment().engine(),
             snapshot.viewer_display(),
             display_snapshot.as_ref(),
         ) {
@@ -918,13 +921,28 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         let color_context =
-            sequence.settings.root_program_color_context(authoring.color_environment());
-        let Some(program_output_color_space) = color_context.output_color_space.color() else {
+            match sequence.settings.root_program_color_context(authoring.color_environment()) {
+                Ok(context) => context,
+                Err(error) => {
+                    self.record_preview_gpu_output_blocker(
+                        &PreviewGpuOutputBlocker::UnsupportedFeature {
+                            feature: "program_color_context".to_owned(),
+                            reason: error.to_string(),
+                        },
+                    );
+                    self.scheduler.prune_obsolete();
+                    return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                        PreviewOutputStage::ProgramOutput,
+                        error.to_string(),
+                    ));
+                }
+            };
+        let Some(program_output_color_space) = color_context.output_color_space().color() else {
             self.record_preview_gpu_output_blocker(&PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "program_output_identity".to_owned(),
                 reason: format!(
                     "Program Output {:?} is not an encoded color identity",
-                    color_context.output_color_space
+                    color_context.output_color_space()
                 ),
             });
             self.scheduler.prune_obsolete();
@@ -932,14 +950,14 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 PreviewOutputStage::ProgramOutput,
                 format!(
                     "Program Output {:?} is not an encoded color identity",
-                    color_context.output_color_space
+                    color_context.output_color_space()
                 ),
             ));
         };
         let monitor_adaptation = match RenderMonitorAdaptation::new(
             program_output_color_space,
             display_color_space,
-            color_context.engine.clone(),
+            color_context.engine().clone(),
         ) {
             Ok(adaptation) => adaptation,
             Err(error) => {
@@ -964,7 +982,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 width,
                 height,
                 display_color_space,
-                display_snapshot.as_ref().map(DisplayOutputSnapshot::contract_identity),
+                self.display_snapshot_identity.get(),
             ));
         let generation = match generation_binding {
             PreviewGenerationBinding::Current(generation)
@@ -1078,9 +1096,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             height,
             runtime_scale: transport.runtime_scale(),
             display_color_space,
-            display_contract_identity: display_snapshot
-                .as_ref()
-                .map(DisplayOutputSnapshot::contract_identity),
+            display_contract_identity: self.display_snapshot_identity.get(),
         };
         let resolved = match self.acquire_frame_evaluation(
             snapshot,
@@ -1241,6 +1257,18 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             }
         };
         if self.viewer_cpu_fallback_active.get() {
+            if snapshot.viewer_display() != &mondrian_core::DisplayManagementPolicy::default() {
+                let blocker = PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "cpu_viewer_display_policy_carrier".to_owned(),
+                    reason: "bounded CPU Viewer fallback uses the fixed sRGB UI atlas and cannot execute a non-default monitor/HDR/ICC policy".to_owned(),
+                };
+                self.record_preview_gpu_output_blocker(&blocker);
+                self.scheduler.prune_obsolete();
+                return self.unavailable_gpu_candidate(PreviewUnavailability::blocked(
+                    PreviewOutputStage::DisplayContract,
+                    blocker.description(),
+                ));
+            }
             let state =
                 self.schedule_cpu_fallback(generation, transport.epoch(), &resolved, width, height);
             self.schedule_media_prefetches(snapshot, proxy_demands, sequence, frame, width, height);
@@ -1273,7 +1301,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     .map_err(|reason| (Some(reason), format!("cached working frame: {reason:?}"))),
                 None => prepare_gpu_composite_layers_with_heterogeneous_effects(
                     &resolved.elements,
-                    resolved.color_context.working_color_space,
+                    resolved.color_context.working_color_space(),
                     &mut scratch,
                     heterogeneous_decision.cpu_prefix_grant(),
                 )
@@ -1614,7 +1642,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             frame,
             width,
             height,
-            resolved.color_context.working_color_space,
+            resolved.color_context.working_color_space(),
             working_input,
             program_output_boundary,
             monitor_adaptation,
@@ -2196,11 +2224,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     /// Synchronize the display output contract snapshot used by preview scheduling.
     pub(crate) fn set_display_output_snapshot(&self, snapshot: Option<&DisplayOutputSnapshot>) {
-        let previous_identity = self
-            .display_snapshot
-            .borrow()
-            .as_ref()
-            .map(DisplayOutputSnapshot::contract_identity);
+        let previous_identity = self.display_snapshot_identity.get();
         let next_identity = snapshot.map(DisplayOutputSnapshot::contract_identity);
 
         if previous_identity != next_identity {
@@ -2208,6 +2232,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
 
         self.display_snapshot.replace(snapshot.cloned());
+        self.display_snapshot_identity.set(next_identity);
     }
 
     fn clear_cached_frames_for_display_change(&self) {
@@ -2689,7 +2714,16 @@ pub fn preview_input_color_resolution_counts_for_frame(
     color_environment: &mondrian_core::ProjectColorEnvironment,
     frame: i64,
 ) -> Result<InputColorResolutionSourceCounts, PreviewUnavailability> {
-    let color_context = sequence.settings.root_program_color_context(color_environment);
+    let color_context =
+        sequence
+            .settings
+            .root_program_color_context(color_environment)
+            .map_err(|error| {
+                PreviewUnavailability::blocked(
+                    PreviewOutputStage::ProgramOutput,
+                    format!("invalid Program color context: {error}"),
+                )
+            })?;
     let target_resolution = preview_execution_resolution(
         sequence.settings.resolution,
         sequence.settings.preview.resolution_scale,
@@ -2936,30 +2970,38 @@ fn preview_dimensions_for_sequence_at_runtime_scale(
 
 fn preview_display_color_space(
     sequence: &Sequence,
+    engine: &mondrian_core::ColorEngine,
     viewer_display_management: &mondrian_core::DisplayManagementPolicy,
     display_snapshot: Option<&DisplayOutputSnapshot>,
 ) -> Result<ColorSpace, crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker> {
     let sequence_output = sequence.settings.color.program_output.color_space;
-    let profile_space = match viewer_display_management.monitor_profile {
-        mondrian_core::MonitorProfileReference::IccProfile { .. } => {
-            preview_icc_display_color_space(display_snapshot)?
-        }
-        ref monitor => monitor.managed_color_space(sequence_output).unwrap_or(sequence_output),
-    };
-
-    Ok(
-        match viewer_display_management.viewer_mode.resolve(profile_space) {
-            mondrian_core::ResolvedViewerDisplayMode::Sdr => {
-                if profile_space.is_hdr() {
-                    ColorSpace::Rec709
-                } else {
-                    profile_space
-                }
+    let resolved = viewer_display_management
+        .resolve_output_color_space(engine, sequence_output)
+        .map_err(|error| {
+            crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                feature: "display_policy_resolution".to_owned(),
+                reason: error.to_string(),
             }
-            mondrian_core::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
-            mondrian_core::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
-        },
-    )
+        })?;
+
+    if !matches!(
+        viewer_display_management.calibration(),
+        mondrian_core::DisplayCalibrationPolicy::Disabled
+    ) {
+        let calibrated_source = preview_icc_display_color_space(display_snapshot)?;
+        if calibrated_source != resolved {
+            return Err(
+                crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
+                    feature: "display_calibration_source_drift".to_owned(),
+                    reason: format!(
+                        "display contract calibrates {calibrated_source:?}, but policy resolves {resolved:?}"
+                    ),
+                },
+            );
+        }
+    }
+
+    Ok(resolved)
 }
 
 fn preview_icc_display_color_space(
@@ -2969,7 +3011,7 @@ fn preview_icc_display_color_space(
         return Err(
             crate::app::preview_gpu_output_blocker::PreviewGpuOutputBlocker::UnsupportedFeature {
                 feature: "icc_preview_color_space_resolution".to_owned(),
-                reason: "MonitorProfileReference::IccProfile requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
+                reason: "ICC device calibration requires the display output contract to provide a resolved monitor color space before preview scheduling".to_owned(),
             },
         );
     };

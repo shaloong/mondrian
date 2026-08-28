@@ -9,6 +9,10 @@ param(
 
     [Parameter(Mandatory = $true, ParameterSetName = "Create")]
     [ValidateNotNullOrEmpty()]
+    [string]$GpuColorReportPath,
+
+    [Parameter(Mandatory = $true, ParameterSetName = "Create")]
+    [ValidateNotNullOrEmpty()]
     [string]$OutputDirectory,
 
     [Parameter(Mandatory = $true, ParameterSetName = "Verify")]
@@ -45,6 +49,10 @@ function Assert-ExactStringSet([object[]]$Expected, [object[]]$Actual, [string]$
     if (@(Compare-Object $expectedValues $actualValues).Count -ne 0) {
         throw "$Label does not exactly match the commercial engine contract."
     }
+}
+
+function Normalize-AdapterName([string]$Name) {
+    return ($Name.ToLowerInvariant() -replace '[^a-z0-9]', '')
 }
 
 function Assert-SourceAttestation([object]$Evidence, [string]$Label, [string]$SourceSha) {
@@ -156,14 +164,89 @@ function Assert-PlaybackReport(
     }
 }
 
+function Assert-GpuColorReport(
+    [object]$Report,
+    [object]$Contract,
+    [object]$Profile,
+    [string]$ProfileHash,
+    [string]$SourceSha
+) {
+    if (
+        $Report.schema_version -ne $Contract.gpu_color.report_schema_version -or
+        $Report.profile.id -ne $Contract.gpu_color.profile_id -or
+        $Report.profile.id -ne $Profile.id -or
+        $Report.profile.sha256 -ne $ProfileHash -or
+        $Report.status -ne $Contract.gpu_color.required_status -or
+        $Report.execution_policy -ne $Contract.gpu_color.execution_policy -or
+        $Report.source_sha -ne $SourceSha -or
+        $Report.all_required_gates_ran -ne $true -or
+        $Report.skipped_gate_count -ne 0 -or
+        $Report.build.exit_code -ne 0 -or
+        $Report.build.timed_out -ne $false -or
+        [string]$Report.build.stdout_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]$Report.build.stderr_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $Report.adapter.backend -ne $Profile.required_adapter.backend -or
+        $Report.adapter.device_type -ne $Profile.required_adapter.device_type -or
+        [string]::IsNullOrWhiteSpace([string]$Report.adapter.name) -or
+        [string]::IsNullOrWhiteSpace([string]$Report.adapter.driver) -or
+        [string]::IsNullOrWhiteSpace([string]$Report.machine.id) -or
+        [string]$Report.machine.report_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [string]::IsNullOrWhiteSpace([string]$Report.machine.gpu_inventory_name) -or
+        [string]::IsNullOrWhiteSpace([string]$Report.machine.gpu_inventory_driver_version)
+    ) {
+        throw "GPU color evidence is not a complete sealed real-device qualification."
+    }
+    $gateReports = @($Report.gates)
+    if ($gateReports.Count -ne @($Profile.gates).Count) {
+        throw "GPU color evidence does not contain exactly one report for every profile gate."
+    }
+    Assert-ExactStringSet $Contract.gpu_color.required_gate_ids @($gateReports.id) "GPU color gate reports"
+    Assert-ExactStringSet @($Profile.gates.id) @($gateReports.id) "GPU color profile gates"
+    $adapterName = Normalize-AdapterName ([string]$Report.adapter.name)
+    $machineAdapterName = Normalize-AdapterName ([string]$Report.machine.gpu_inventory_name)
+    if (
+        [string]::IsNullOrWhiteSpace($adapterName) -or
+        [string]::IsNullOrWhiteSpace($machineAdapterName) -or
+        (-not $adapterName.Contains($machineAdapterName) -and
+            -not $machineAdapterName.Contains($adapterName)) -or
+        [string]$Report.adapter.driver -ne [string]$Report.machine.gpu_inventory_driver_version
+    ) {
+        throw "GPU color adapter identity does not match the sealed machine inventory."
+    }
+    foreach ($gate in $gateReports) {
+        $gateContract = @($Profile.gates | Where-Object { $_.id -eq $gate.id })
+        if ($gateContract.Count -ne 1 -or
+            $gate.test -ne $gateContract[0].test -or
+            $gate.exit_code -ne 0 -or
+            $gate.process_timed_out -ne $false -or
+            $gate.passed -ne $true -or
+            [string]$gate.stdout_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            [string]$gate.stderr_sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw "GPU color gate '$($gate.id)' has incomplete execution evidence."
+        }
+        $reportRequired = $null -ne $gateContract[0].PSObject.Properties['report']
+        if ($reportRequired -and (
+            [string]::IsNullOrWhiteSpace([string]$gate.report_file) -or
+            [string]$gate.report_sha256 -notmatch '^[0-9a-f]{64}$')) {
+            throw "GPU color gate '$($gate.id)' has no required report hash."
+        }
+        if (-not $reportRequired -and ($null -ne $gate.report_file -or $null -ne $gate.report_sha256)) {
+            throw "GPU color gate '$($gate.id)' carries an undeclared report."
+        }
+    }
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 $contractPath = Resolve-RepositoryPath "tests/validation/windows-commercial-engine.json"
 $goldenContractPath = Resolve-RepositoryPath "tests/validation/golden-project.json"
 $playbackPlanPath = Resolve-RepositoryPath "tests/validation/playback-reference-gates.json"
+$gpuColorProfilePath = Resolve-RepositoryPath "tests/validation/gpu-color-qualification.json"
 $contract = Read-JsonObject $contractPath "Commercial engine contract"
 $goldenContract = Read-JsonObject $goldenContractPath "Golden Project contract"
 $playbackPlan = Read-JsonObject $playbackPlanPath "Playback reference plan"
+$gpuColorProfile = Read-JsonObject $gpuColorProfilePath "GPU color qualification profile"
 $playbackPlanHash = (Get-FileHash -LiteralPath $playbackPlanPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$gpuColorProfileHash = (Get-FileHash -LiteralPath $gpuColorProfilePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $sourceSha = $ExpectedSourceSha.ToLowerInvariant()
 $headSha = ([string](& git -C $repositoryRoot rev-parse HEAD)).Trim().ToLowerInvariant()
 if ($LASTEXITCODE -ne 0 -or $headSha -ne $sourceSha) {
@@ -171,37 +254,45 @@ if ($LASTEXITCODE -ne 0 -or $headSha -ne $sourceSha) {
 }
 
 if (
-    $contract.schema_version -ne 1 -or
+    $contract.schema_version -ne 2 -or
     $contract.complete_golden.contract_id -ne $goldenContract.id -or
-    $contract.playback_reference.plan_id -ne $playbackPlan.id
+    $contract.playback_reference.plan_id -ne $playbackPlan.id -or
+    $contract.gpu_color.profile_id -ne $gpuColorProfile.id
 ) {
     throw "Commercial engine contract does not reference the current validation contracts."
 }
 Assert-ExactStringSet $contract.playback_reference.required_gate_ids $playbackPlan.baseline_acceptance.required_gate_ids "Contract playback gates"
+Assert-ExactStringSet $contract.gpu_color.required_gate_ids @($gpuColorProfile.gates.id) "Contract GPU color gates"
 
 if ($PSCmdlet.ParameterSetName -eq "Create") {
     $goldenPath = Resolve-RepositoryPath $GoldenReportPath
     $playbackPath = Resolve-RepositoryPath $PlaybackReportPath
+    $gpuColorPath = Resolve-RepositoryPath $GpuColorReportPath
     $evidenceRoot = Resolve-RepositoryPath $OutputDirectory
 } else {
     $evidenceRoot = Resolve-RepositoryPath $EvidenceDirectory
     $goldenPath = Join-Path $evidenceRoot "complete-golden.json"
     $playbackPath = Join-Path $evidenceRoot "playback-reference.json"
+    $gpuColorPath = Join-Path $evidenceRoot "gpu-color.json"
 }
 
 $golden = Read-JsonObject $goldenPath "Complete Golden evidence"
 $playback = Read-JsonObject $playbackPath "Playback reference evidence"
+$gpuColor = Read-JsonObject $gpuColorPath "GPU color evidence"
 Assert-GoldenReport $golden $contract $sourceSha
 Assert-PlaybackReport $playback $contract $playbackPlan $playbackPlanHash $sourceSha
+Assert-GpuColorReport $gpuColor $contract $gpuColorProfile $gpuColorProfileHash $sourceSha
 
 if ($PSCmdlet.ParameterSetName -eq "Create") {
     New-Item -ItemType Directory -Force -Path $evidenceRoot | Out-Null
     $goldenCopy = Join-Path $evidenceRoot "complete-golden.json"
     $playbackCopy = Join-Path $evidenceRoot "playback-reference.json"
+    $gpuColorCopy = Join-Path $evidenceRoot "gpu-color.json"
     Copy-Item -LiteralPath $goldenPath -Destination $goldenCopy -Force
     Copy-Item -LiteralPath $playbackPath -Destination $playbackCopy -Force
+    Copy-Item -LiteralPath $gpuColorPath -Destination $gpuColorCopy -Force
     $manifest = [ordered]@{
-        schema_version = 1
+        schema_version = 2
         contract = [ordered]@{
             id = [string]$contract.id
             sha256 = (Get-FileHash -LiteralPath $contractPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -218,6 +309,10 @@ if ($PSCmdlet.ParameterSetName -eq "Create") {
                 file = "playback-reference.json"
                 sha256 = (Get-FileHash -LiteralPath $playbackCopy -Algorithm SHA256).Hash.ToLowerInvariant()
             }
+            gpu_color = [ordered]@{
+                file = "gpu-color.json"
+                sha256 = (Get-FileHash -LiteralPath $gpuColorCopy -Algorithm SHA256).Hash.ToLowerInvariant()
+            }
         }
         status = "passed"
     }
@@ -228,8 +323,9 @@ if ($PSCmdlet.ParameterSetName -eq "Create") {
     $contractHash = (Get-FileHash -LiteralPath $contractPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $goldenHash = (Get-FileHash -LiteralPath $goldenPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $playbackHash = (Get-FileHash -LiteralPath $playbackPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $gpuColorHash = (Get-FileHash -LiteralPath $gpuColorPath -Algorithm SHA256).Hash.ToLowerInvariant()
     if (
-        $manifest.schema_version -ne 1 -or
+        $manifest.schema_version -ne 2 -or
         $manifest.contract.id -ne $contract.id -or
         $manifest.contract.sha256 -ne $contractHash -or
         $manifest.source_sha -ne $sourceSha -or
@@ -238,6 +334,8 @@ if ($PSCmdlet.ParameterSetName -eq "Create") {
         $manifest.evidence.complete_golden.sha256 -ne $goldenHash -or
         $manifest.evidence.playback_reference.file -ne "playback-reference.json" -or
         $manifest.evidence.playback_reference.sha256 -ne $playbackHash -or
+        $manifest.evidence.gpu_color.file -ne "gpu-color.json" -or
+        $manifest.evidence.gpu_color.sha256 -ne $gpuColorHash -or
         $manifest.status -ne "passed"
     ) {
         throw "Commercial engine manifest identity or evidence hashes are invalid."

@@ -4,7 +4,11 @@
 //! deliberately depends on app-shell actions instead of legacy egui preference
 //! state so each preference can be migrated into a clean, typed boundary.
 
-use mondrian_core::Color;
+use mondrian_core::display_contract::DisplayOutputSnapshot;
+use mondrian_core::{
+    Color, DisplayCalibrationPolicy, DisplayManagementPolicy, IccRenderingIntent,
+    MonitorOutputIntent, ViewerDisplayMode,
+};
 use mondrian_editor_state::state::WorkspacePreset;
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_media::{RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceSelection};
@@ -16,10 +20,13 @@ use mondrian_ui_widgets::{
     Button, ContextMenu, DialogSurface, Dropdown, Label, MenuItem, SegmentedButtonGroup,
     SegmentedButtonItem, TextInput, VectorIcon, ViewerCanvasBackground, WaveformDisplay,
 };
+use std::path::Path;
 
 use crate::app::ui_actions::{
     app_shell_close_modal_action, app_shell_preferences_audio_output_device_changed_action,
+    app_shell_preferences_display_management_changed_action,
     app_shell_preferences_refresh_audio_output_devices_action,
+    app_shell_preferences_select_display_icc_profile_action,
     app_shell_preferences_shortcut_disabled_action, app_shell_preferences_shortcut_rebound_action,
     app_shell_preferences_shortcut_reset_action, app_shell_preferences_tab_changed_action,
     app_shell_preferences_theme_changed_action,
@@ -65,7 +72,7 @@ const SHORTCUT_KEYCAP_PADDING_X: f32 = 8.0;
 const SHORTCUT_KEYCAP_MIN_WIDTH: f32 = 24.0;
 const SHORTCUT_KEYCAP_ACTION_GAP: f32 = 14.0;
 const SHORTCUT_CHEVRON_SIZE: f32 = 12.0;
-const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 6;
+const PREFERENCES_INTERACTIVE_CHILD_COUNT: usize = PreferencesDialogTab::ALL.len() + 11;
 
 const CHEVRON_RIGHT_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M6 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
 const CHEVRON_DOWN_SVG: &str = r#"<svg viewBox="0 0 16 16"><path d="M4 6l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"#;
@@ -95,6 +102,17 @@ pub struct AppUiPreferencesModel {
     pub waveform_display_label: String,
     pub viewer_canvas_background: ViewerCanvasBackground,
     pub viewer_canvas_background_label: String,
+    pub display_management: DisplayManagementPolicy,
+    pub display_engine_name: String,
+    pub monitor_output_choices: Vec<MonitorOutputChoice>,
+    pub display_output_snapshot: Option<DisplayOutputSnapshot>,
+}
+
+/// One engine-qualified monitor target offered by display preferences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorOutputChoice {
+    pub label: String,
+    pub intent: MonitorOutputIntent,
 }
 
 /// One shortcut row shown in the app UI preferences UI.
@@ -117,6 +135,11 @@ impl AppUiPreferencesModel {
         self.audio_output_device_label =
             audio_output_device_label(&self.audio_output_device_selection, &catalog);
         self.audio_output_device_catalog = catalog;
+    }
+
+    /// Replace the latest structured monitor/surface/display diagnosis.
+    pub fn set_display_output_snapshot(&mut self, snapshot: Option<DisplayOutputSnapshot>) {
+        self.display_output_snapshot = snapshot;
     }
 
     /// Build the preferences model from the state actually owned by the
@@ -192,6 +215,8 @@ impl AppUiPreferencesModel {
             .unwrap_or_else(|| "没有活动序列".to_owned());
         let audio_output_device_label =
             audio_output_device_label(&audio_output_device_selection, &audio_output_device_catalog);
+        let display_management = state.viewer_display_management().clone();
+        let engine = state.project_color_environment().engine();
         Self {
             theme_preference,
             resolved_theme_preset,
@@ -225,6 +250,10 @@ impl AppUiPreferencesModel {
                 viewer_canvas_background,
             )
             .to_owned(),
+            display_management,
+            display_engine_name: engine.name().to_owned(),
+            monitor_output_choices: monitor_output_choices(engine),
+            display_output_snapshot: None,
         }
     }
 }
@@ -254,6 +283,12 @@ impl Default for AppUiPreferencesModel {
             waveform_display_label: "整流".to_owned(),
             viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             viewer_canvas_background_label: "棋盘格".to_owned(),
+            display_management: DisplayManagementPolicy::default(),
+            display_engine_name: "Mondrian Standard".to_owned(),
+            monitor_output_choices: monitor_output_choices(
+                &mondrian_core::ColorEngine::mondrian_standard(),
+            ),
+            display_output_snapshot: None,
         }
     }
 }
@@ -263,17 +298,25 @@ impl Default for AppUiPreferencesModel {
 pub enum PreferencesDialogTab {
     General,
     Media,
+    Display,
     Shortcuts,
     Developer,
 }
 
 impl PreferencesDialogTab {
-    const ALL: [Self; 4] = [Self::General, Self::Media, Self::Shortcuts, Self::Developer];
+    const ALL: [Self; 5] = [
+        Self::General,
+        Self::Media,
+        Self::Display,
+        Self::Shortcuts,
+        Self::Developer,
+    ];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "常规",
             Self::Media => "媒体",
+            Self::Display => "显示",
             Self::Shortcuts => "快捷键",
             Self::Developer => "开发者",
         }
@@ -283,6 +326,7 @@ impl PreferencesDialogTab {
         match self {
             Self::General => PreferencesTabPayload::General,
             Self::Media => PreferencesTabPayload::Media,
+            Self::Display => PreferencesTabPayload::Display,
             Self::Shortcuts => PreferencesTabPayload::Shortcuts,
             Self::Developer => PreferencesTabPayload::Developer,
         }
@@ -294,6 +338,7 @@ impl From<PreferencesTabPayload> for PreferencesDialogTab {
         match value {
             PreferencesTabPayload::General => Self::General,
             PreferencesTabPayload::Media => Self::Media,
+            PreferencesTabPayload::Display => Self::Display,
             PreferencesTabPayload::Shortcuts => Self::Shortcuts,
             PreferencesTabPayload::Developer => Self::Developer,
         }
@@ -324,6 +369,11 @@ pub struct PreferencesDialog {
     waveform_group: SegmentedButtonGroup,
     viewer_background_group: SegmentedButtonGroup,
     audio_output_device_dropdown: Dropdown,
+    monitor_output_dropdown: Dropdown,
+    calibration_dropdown: Dropdown,
+    icc_rendering_intent_group: SegmentedButtonGroup,
+    hdr_policy_group: SegmentedButtonGroup,
+    select_icc_profile_button: Button,
     content_labels: Vec<Label>,
     close_button: Button,
 }
@@ -449,6 +499,10 @@ impl PreferencesDialog {
             viewer_background_selected,
         );
         let audio_output_device_dropdown = audio_output_device_dropdown(&model);
+        let monitor_output_dropdown = monitor_output_dropdown(&model);
+        let calibration_dropdown = calibration_dropdown(&model);
+        let icc_rendering_intent_group = icc_rendering_intent_group(&model);
+        let hdr_policy_group = hdr_policy_group(&model);
         let mut dialog = Self {
             id: WidgetId::new(),
             active_tab,
@@ -476,6 +530,12 @@ impl PreferencesDialog {
             waveform_group,
             viewer_background_group,
             audio_output_device_dropdown,
+            monitor_output_dropdown,
+            calibration_dropdown,
+            icc_rendering_intent_group,
+            hdr_policy_group,
+            select_icc_profile_button: Button::new("选择 ICC…")
+                .on_click(app_shell_preferences_select_display_icc_profile_action()),
             content_labels: Vec::new(),
             close_button: Button::new("关闭").on_click(app_shell_close_modal_action()),
         };
@@ -522,6 +582,20 @@ impl PreferencesDialog {
             self.model.audio_output_device_label.clone(),
             audio_output_device_items(&self.model),
         );
+        self.monitor_output_dropdown.set_model(
+            monitor_output_label(&self.model),
+            monitor_output_items(&self.model),
+        );
+        self.calibration_dropdown.set_model(
+            calibration_label(self.model.display_management.calibration()),
+            calibration_items(&self.model),
+        );
+        self.icc_rendering_intent_group.set_selected_index(icc_rendering_intent_index(
+            self.model.display_management.icc_rendering_intent(),
+        ));
+        self.hdr_policy_group.set_selected_index(hdr_policy_index(
+            self.model.display_management.viewer_mode(),
+        ));
         if self
             .shortcut_capture
             .as_ref()
@@ -872,6 +946,11 @@ impl Widget for PreferencesDialog {
                 SEGMENTED_GROUP_HEIGHT,
             ));
             self.audio_output_device_dropdown.layout(Rect::ZERO);
+            self.monitor_output_dropdown.layout(Rect::ZERO);
+            self.calibration_dropdown.layout(Rect::ZERO);
+            self.icc_rendering_intent_group.layout(Rect::ZERO);
+            self.hdr_policy_group.layout(Rect::ZERO);
+            self.select_icc_profile_button.layout(Rect::ZERO);
         } else if self.active_tab == PreferencesDialogTab::Media {
             self.theme_group.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
@@ -882,11 +961,56 @@ impl Widget for PreferencesDialog {
                 320.0,
                 SEGMENTED_GROUP_HEIGHT,
             ));
+            self.monitor_output_dropdown.layout(Rect::ZERO);
+            self.calibration_dropdown.layout(Rect::ZERO);
+            self.icc_rendering_intent_group.layout(Rect::ZERO);
+            self.hdr_policy_group.layout(Rect::ZERO);
+            self.select_icc_profile_button.layout(Rect::ZERO);
+        } else if self.active_tab == PreferencesDialogTab::Display {
+            self.theme_group.layout(Rect::ZERO);
+            self.waveform_group.layout(Rect::ZERO);
+            self.viewer_background_group.layout(Rect::ZERO);
+            self.audio_output_device_dropdown.layout(Rect::ZERO);
+            self.monitor_output_dropdown.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 2.0 * ROW_HEIGHT,
+                390.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+            self.hdr_policy_group.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 3.0 * ROW_HEIGHT,
+                330.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+            self.calibration_dropdown.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 5.0 * ROW_HEIGHT,
+                270.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+            self.select_icc_profile_button.layout(Rect::new(
+                content_x + 408.0,
+                body_top + 5.0 * ROW_HEIGHT,
+                108.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
+            self.icc_rendering_intent_group.layout(Rect::new(
+                content_x + 126.0,
+                body_top + 6.0 * ROW_HEIGHT,
+                390.0,
+                SEGMENTED_GROUP_HEIGHT,
+            ));
         } else {
             self.theme_group.layout(Rect::ZERO);
             self.waveform_group.layout(Rect::ZERO);
             self.viewer_background_group.layout(Rect::ZERO);
             self.audio_output_device_dropdown.layout(Rect::ZERO);
+            self.monitor_output_dropdown.layout(Rect::ZERO);
+            self.calibration_dropdown.layout(Rect::ZERO);
+            self.icc_rendering_intent_group.layout(Rect::ZERO);
+            self.hdr_policy_group.layout(Rect::ZERO);
+            self.select_icc_profile_button.layout(Rect::ZERO);
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.layout(Rect::new(
@@ -986,6 +1110,19 @@ impl Widget for PreferencesDialog {
             && self.audio_output_device_dropdown.event(event, ctx) == EventResult::Handled
         {
             return EventResult::Handled;
+        }
+        if self.active_tab == PreferencesDialogTab::Display {
+            for widget in [
+                &mut self.monitor_output_dropdown as &mut dyn Widget,
+                &mut self.calibration_dropdown as &mut dyn Widget,
+                &mut self.icc_rendering_intent_group as &mut dyn Widget,
+                &mut self.hdr_policy_group as &mut dyn Widget,
+                &mut self.select_icc_profile_button as &mut dyn Widget,
+            ] {
+                if widget.event(event, ctx) == EventResult::Handled {
+                    return EventResult::Handled;
+                }
+            }
         }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             if let Some(menu_state) = &mut self.shortcut_actions_menu {
@@ -1126,6 +1263,13 @@ impl Widget for PreferencesDialog {
         if self.active_tab == PreferencesDialogTab::Media {
             self.audio_output_device_dropdown.paint(ctx);
         }
+        if self.active_tab == PreferencesDialogTab::Display {
+            self.monitor_output_dropdown.paint(ctx);
+            self.calibration_dropdown.paint(ctx);
+            self.icc_rendering_intent_group.paint(ctx);
+            self.hdr_policy_group.paint(ctx);
+            self.select_icc_profile_button.paint(ctx);
+        }
         if self.active_tab == PreferencesDialogTab::Shortcuts {
             self.shortcut_search.paint(ctx);
             ctx.push_clip(self.shortcut_viewport);
@@ -1233,7 +1377,32 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::Media)
                 .then_some(&self.audio_output_device_dropdown as &dyn Widget);
         }
-        let search_index = audio_output_device_index + 1;
+        let monitor_output_index = audio_output_device_index + 1;
+        if index == monitor_output_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&self.monitor_output_dropdown as &dyn Widget);
+        }
+        let calibration_index = monitor_output_index + 1;
+        if index == calibration_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&self.calibration_dropdown as &dyn Widget);
+        }
+        let icc_intent_index = calibration_index + 1;
+        if index == icc_intent_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&self.icc_rendering_intent_group as &dyn Widget);
+        }
+        let hdr_policy_index = icc_intent_index + 1;
+        if index == hdr_policy_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&self.hdr_policy_group as &dyn Widget);
+        }
+        let select_icc_index = hdr_policy_index + 1;
+        if index == select_icc_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&self.select_icc_profile_button as &dyn Widget);
+        }
+        let search_index = select_icc_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&self.shortcut_search as &dyn Widget);
@@ -1270,7 +1439,32 @@ impl Widget for PreferencesDialog {
             return (self.active_tab == PreferencesDialogTab::Media)
                 .then_some(&mut self.audio_output_device_dropdown as &mut dyn Widget);
         }
-        let search_index = audio_output_device_index + 1;
+        let monitor_output_index = audio_output_device_index + 1;
+        if index == monitor_output_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&mut self.monitor_output_dropdown as &mut dyn Widget);
+        }
+        let calibration_index = monitor_output_index + 1;
+        if index == calibration_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&mut self.calibration_dropdown as &mut dyn Widget);
+        }
+        let icc_intent_index = calibration_index + 1;
+        if index == icc_intent_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&mut self.icc_rendering_intent_group as &mut dyn Widget);
+        }
+        let hdr_policy_index = icc_intent_index + 1;
+        if index == hdr_policy_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&mut self.hdr_policy_group as &mut dyn Widget);
+        }
+        let select_icc_index = hdr_policy_index + 1;
+        if index == select_icc_index {
+            return (self.active_tab == PreferencesDialogTab::Display)
+                .then_some(&mut self.select_icc_profile_button as &mut dyn Widget);
+        }
+        let search_index = select_icc_index + 1;
         if index == search_index {
             return (self.active_tab == PreferencesDialogTab::Shortcuts)
                 .then_some(&mut self.shortcut_search as &mut dyn Widget);
@@ -1693,6 +1887,7 @@ fn content_rows_for_tab(
             detail(format!("范围：{}", model.export_range)),
             detail(format!("输出：{}", model.export_output)),
         ],
+        PreferencesDialogTab::Display => display_content_rows(model),
         PreferencesDialogTab::Shortcuts => Vec::new(),
         PreferencesDialogTab::Developer => vec![
             heading("诊断"),
@@ -1702,6 +1897,65 @@ fn content_rows_for_tab(
             detail(format!("后台工作线程：{}", model.background_workers)),
         ],
     }
+}
+
+fn display_content_rows(model: &AppUiPreferencesModel) -> Vec<ContentRow> {
+    let mut rows = vec![
+        heading("监看输出"),
+        detail(format!("色彩引擎：{}", model.display_engine_name)),
+        detail("Monitor target："),
+        detail("HDR policy："),
+        heading("ICC device calibration"),
+        detail("配置文件："),
+        detail("Rendering intent："),
+        heading("当前结构化诊断"),
+    ];
+    let Some(snapshot) = &model.display_output_snapshot else {
+        rows.push(detail("等待 Window 发布 monitor/surface snapshot"));
+        return rows;
+    };
+    rows.extend([
+        detail(format!(
+            "状态：{} · 显示器：{:?} · 平台：{:?}",
+            snapshot.validation_status, snapshot.display_id.name, snapshot.platform
+        )),
+        detail(format!(
+            "Surface：{} / {} / {}",
+            snapshot.surface_format, snapshot.surface_color_space, snapshot.surface_hdr_mode
+        )),
+        detail(format!(
+            "输出：{} → {} · Viewer：{}",
+            snapshot.requested_output_color_space,
+            snapshot.resolved_output_color_space,
+            snapshot.requested_viewer_mode
+        )),
+        detail(format!(
+            "OCIO：{} / {}",
+            snapshot.ocio_display.as_deref().unwrap_or("—"),
+            snapshot.ocio_view.as_deref().unwrap_or("—")
+        )),
+        detail(format!("ICC：{}", snapshot.monitor_profile_status)),
+        detail(format!("HDR：{}", snapshot.hdr_status)),
+        detail(format!(
+            "Warnings：{}",
+            snapshot
+                .warnings
+                .iter()
+                .map(|warning| warning.code.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        detail(format!(
+            "Blockers：{}",
+            snapshot
+                .blockers
+                .iter()
+                .map(|blocker| format!("{}: {}", blocker.code(), blocker.description()))
+                .collect::<Vec<_>>()
+                .join(" | ")
+        )),
+    ]);
+    rows
 }
 
 fn audio_output_device_label(
@@ -1735,6 +1989,176 @@ fn audio_output_device_label(
             AudioOutputDeviceCatalogState::Failed(_) => "无法确认已选设备".to_owned(),
         },
     }
+}
+
+fn monitor_output_choices(engine: &mondrian_core::ColorEngine) -> Vec<MonitorOutputChoice> {
+    let mut choices = vec![MonitorOutputChoice {
+        label: "跟随 Program Output".to_owned(),
+        intent: MonitorOutputIntent::MatchProgramOutput,
+    }];
+    choices.extend(
+        DisplayManagementPolicy::MONITOR_TARGETS.into_iter().filter_map(|target| {
+            engine
+                .output_display_view(target)
+                .ok()
+                .map(|(display, view)| MonitorOutputChoice {
+                    label: format!("{target:?} · {display} / {view}"),
+                    intent: MonitorOutputIntent::OcioDisplayView { display, view },
+                })
+        }),
+    );
+    choices
+}
+
+fn monitor_output_label(model: &AppUiPreferencesModel) -> String {
+    model
+        .monitor_output_choices
+        .iter()
+        .find(|choice| choice.intent == *model.display_management.monitor_output())
+        .map(|choice| choice.label.clone())
+        .unwrap_or_else(|| match model.display_management.monitor_output() {
+            MonitorOutputIntent::MatchProgramOutput => "跟随 Program Output".to_owned(),
+            MonitorOutputIntent::ColorSpace(color_space) => format!("{color_space:?}"),
+            MonitorOutputIntent::OcioDisplayView { display, view } => {
+                format!("不可用 · {display} / {view}")
+            }
+        })
+}
+
+fn monitor_output_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
+    model
+        .monitor_output_choices
+        .iter()
+        .filter_map(|choice| {
+            model
+                .display_management
+                .with_monitor_output(choice.intent.clone())
+                .ok()
+                .map(|policy| {
+                    MenuItem::new(
+                        choice.label.clone(),
+                        app_shell_preferences_display_management_changed_action(policy),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn monitor_output_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
+    Dropdown::new(monitor_output_label(model), monitor_output_items(model))
+        .with_max_visible_items(10)
+}
+
+fn calibration_label(calibration: &DisplayCalibrationPolicy) -> String {
+    match calibration {
+        DisplayCalibrationPolicy::Disabled => "关闭".to_owned(),
+        DisplayCalibrationPolicy::OsDefault => "操作系统默认".to_owned(),
+        DisplayCalibrationPolicy::IccProfilePath(path) => Path::new(path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone()),
+    }
+}
+
+fn calibration_items(model: &AppUiPreferencesModel) -> Vec<MenuItem> {
+    let mut policies = vec![
+        ("关闭".to_owned(), DisplayCalibrationPolicy::Disabled),
+        (
+            "操作系统默认".to_owned(),
+            DisplayCalibrationPolicy::OsDefault,
+        ),
+    ];
+    if let DisplayCalibrationPolicy::IccProfilePath(path) = model.display_management.calibration() {
+        policies.push((
+            format!(
+                "当前文件 · {}",
+                calibration_label(model.display_management.calibration())
+            ),
+            DisplayCalibrationPolicy::IccProfilePath(path.clone()),
+        ));
+    }
+    policies
+        .into_iter()
+        .filter_map(|(label, calibration)| {
+            model.display_management.with_calibration(calibration).ok().map(|policy| {
+                MenuItem::new(
+                    label,
+                    app_shell_preferences_display_management_changed_action(policy),
+                )
+            })
+        })
+        .collect()
+}
+
+fn calibration_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
+    Dropdown::new(
+        calibration_label(model.display_management.calibration()),
+        calibration_items(model),
+    )
+}
+
+fn icc_rendering_intent_index(intent: IccRenderingIntent) -> usize {
+    match intent {
+        IccRenderingIntent::Perceptual => 0,
+        IccRenderingIntent::RelativeColorimetric => 1,
+        IccRenderingIntent::Saturation => 2,
+        IccRenderingIntent::AbsoluteColorimetric => 3,
+    }
+}
+
+fn icc_rendering_intent_group(model: &AppUiPreferencesModel) -> SegmentedButtonGroup {
+    let items = [
+        ("感知", IccRenderingIntent::Perceptual),
+        ("相对", IccRenderingIntent::RelativeColorimetric),
+        ("饱和度", IccRenderingIntent::Saturation),
+        ("绝对", IccRenderingIntent::AbsoluteColorimetric),
+    ]
+    .into_iter()
+    .map(|(label, intent)| {
+        SegmentedButtonItem::new(
+            label,
+            app_shell_preferences_display_management_changed_action(
+                model.display_management.with_icc_rendering_intent(intent),
+            ),
+        )
+    })
+    .collect();
+    SegmentedButtonGroup::new(
+        items,
+        icc_rendering_intent_index(model.display_management.icc_rendering_intent()),
+    )
+}
+
+fn hdr_policy_index(mode: ViewerDisplayMode) -> usize {
+    match mode {
+        ViewerDisplayMode::MatchOutputColorSpace => 0,
+        ViewerDisplayMode::Sdr => 1,
+        ViewerDisplayMode::HdrPq => 2,
+        ViewerDisplayMode::HdrHlg => 3,
+    }
+}
+
+fn hdr_policy_group(model: &AppUiPreferencesModel) -> SegmentedButtonGroup {
+    let items = [
+        ("跟随输出", ViewerDisplayMode::MatchOutputColorSpace),
+        ("SDR", ViewerDisplayMode::Sdr),
+        ("PQ", ViewerDisplayMode::HdrPq),
+        ("HLG", ViewerDisplayMode::HdrHlg),
+    ]
+    .into_iter()
+    .map(|(label, mode)| {
+        SegmentedButtonItem::new(
+            label,
+            app_shell_preferences_display_management_changed_action(
+                model.display_management.with_viewer_mode(mode),
+            ),
+        )
+    })
+    .collect();
+    SegmentedButtonGroup::new(
+        items,
+        hdr_policy_index(model.display_management.viewer_mode()),
+    )
 }
 
 fn audio_output_device_dropdown(model: &AppUiPreferencesModel) -> Dropdown {
@@ -1946,7 +2370,12 @@ mod tests {
         let waveform_index = theme_index + 1;
         let viewer_background_index = waveform_index + 1;
         let audio_output_device_index = viewer_background_index + 1;
-        let search_index = audio_output_device_index + 1;
+        let monitor_output_index = audio_output_device_index + 1;
+        let calibration_index = monitor_output_index + 1;
+        let icc_intent_index = calibration_index + 1;
+        let hdr_policy_index = icc_intent_index + 1;
+        let select_icc_index = hdr_policy_index + 1;
+        let search_index = select_icc_index + 1;
         let close_index = search_index + 1;
         let close_id = dialog.close_button.id();
 
@@ -1955,6 +2384,11 @@ mod tests {
         assert!(dialog.child(waveform_index).is_some());
         assert!(dialog.child(viewer_background_index).is_some());
         assert!(dialog.child(audio_output_device_index).is_none());
+        assert!(dialog.child(monitor_output_index).is_none());
+        assert!(dialog.child(calibration_index).is_none());
+        assert!(dialog.child(icc_intent_index).is_none());
+        assert!(dialog.child(hdr_policy_index).is_none());
+        assert!(dialog.child(select_icc_index).is_none());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         let close = dialog.child(close_index).expect("close child");
@@ -1970,6 +2404,26 @@ mod tests {
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(viewer_background_index).is_none());
         assert!(dialog.child(audio_output_device_index).is_some());
+        assert!(dialog.child(monitor_output_index).is_none());
+        assert!(dialog.child(calibration_index).is_none());
+        assert!(dialog.child(icc_intent_index).is_none());
+        assert!(dialog.child(hdr_policy_index).is_none());
+        assert!(dialog.child(select_icc_index).is_none());
+        assert!(dialog.child(search_index).is_none());
+        assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
+        assert!(dialog.child(close_index).expect("close child").can_focus());
+
+        dialog.set_active_tab(PreferencesDialogTab::Display);
+        assert_eq!(dialog.child_count(), PREFERENCES_INTERACTIVE_CHILD_COUNT);
+        assert!(dialog.child(theme_index).is_none());
+        assert!(dialog.child(waveform_index).is_none());
+        assert!(dialog.child(viewer_background_index).is_none());
+        assert!(dialog.child(audio_output_device_index).is_none());
+        assert!(dialog.child(monitor_output_index).is_some());
+        assert!(dialog.child(calibration_index).is_some());
+        assert!(dialog.child(icc_intent_index).is_some());
+        assert!(dialog.child(hdr_policy_index).is_some());
+        assert!(dialog.child(select_icc_index).is_some());
         assert!(dialog.child(search_index).is_none());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -1980,6 +2434,11 @@ mod tests {
         assert!(dialog.child(waveform_index).is_none());
         assert!(dialog.child(viewer_background_index).is_none());
         assert!(dialog.child(audio_output_device_index).is_none());
+        assert!(dialog.child(monitor_output_index).is_none());
+        assert!(dialog.child(calibration_index).is_none());
+        assert!(dialog.child(icc_intent_index).is_none());
+        assert!(dialog.child(hdr_policy_index).is_none());
+        assert!(dialog.child(select_icc_index).is_none());
         assert!(dialog.child(search_index).is_some());
         assert_eq!(dialog.child(close_index).map(Widget::id), Some(close_id));
         assert!(dialog.child(close_index).expect("close child").can_focus());
@@ -2476,6 +2935,37 @@ mod tests {
         assert_eq!(model.proxy_mode, "已启用");
         assert_eq!(model.export_range, "整个序列");
         assert_eq!(model.export_output, "E:/renders/cut.mp4");
+    }
+
+    #[test]
+    fn display_preferences_expose_engine_qualified_targets_and_structured_diagnostics() {
+        let state = AppState::new();
+        let mut model = AppUiPreferencesModel::from_app_state(
+            &state,
+            WorkspacePreset::Editing,
+            ThemePreference::System,
+            ThemePreset::Dark,
+        );
+        assert!(model
+            .monitor_output_choices
+            .iter()
+            .any(|choice| { matches!(choice.intent, MonitorOutputIntent::MatchProgramOutput) }));
+        assert!(model.monitor_output_choices.iter().any(|choice| {
+            matches!(
+                choice.intent,
+                MonitorOutputIntent::OcioDisplayView { ref display, ref view }
+                    if display == "Display P3 - Display" && view == "Mondrian Standard SDR v2"
+            )
+        }));
+
+        let snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        model.set_display_output_snapshot(Some(snapshot.clone()));
+        let mut dialog =
+            PreferencesDialog::with_model_and_tab(model, PreferencesDialogTab::Display);
+        dialog.layout(Rect::new(0.0, 0.0, 1024.0, 720.0));
+
+        assert_eq!(dialog.model().display_output_snapshot, Some(snapshot));
+        assert!(dialog.content_labels.iter().any(|label| label.text().contains("Surface")));
     }
 
     #[test]

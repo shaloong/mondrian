@@ -265,12 +265,19 @@ fn convert_decoded_to_float_rgba(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<FloatRgbaFrame> {
-    if !source_color.color_space.is_scene_linear() {
+    let Some(source_color_space) = source_color.color_space() else {
+        return Err(MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: "data-texture samples cannot enter the scene-linear color materializer"
+                .to_owned(),
+        });
+    };
+    if !source_color_space.is_scene_linear() {
         return Err(MondrianError::DecodeFailed {
             asset_id: path.display().to_string(),
             reason: format!(
                 "float preview materialization requires a scene-linear source identity, got {:?}",
-                source_color.color_space
+                source_color_space
             ),
         });
     }
@@ -729,7 +736,7 @@ fn materialize_decoded_to_cpu(
                 |frame| Ok(PreviewDecodedFramePayload::CpuYuv(frame)),
             );
         }
-        if source_color.color_space.is_scene_linear() {
+        if source_color.is_scene_linear() {
             return convert_decoded_to_float_rgba(
                 decoded,
                 target_width,
@@ -815,7 +822,7 @@ fn materialize_decoded_to_cpu(
             },
         );
     }
-    if source_color.color_space.is_scene_linear() {
+    if source_color.is_scene_linear() {
         return convert_decoded_to_float_rgba(
             &transferred,
             target_width,

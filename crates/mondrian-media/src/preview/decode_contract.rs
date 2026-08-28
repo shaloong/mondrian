@@ -388,6 +388,7 @@ impl PreviewDecodeRepresentation {
         if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
             && native_requested
             && source.permits_native_output()
+            && !source_color.is_data_texture()
         {
             return Ok(Self::NativeSurface);
         }
@@ -404,7 +405,8 @@ impl PreviewDecodeRepresentation {
             PreviewRepresentationQuality::Full
                 if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
                     && source.compact_cpu_yuv_hint().is_some()
-                    && !source_color.color_space.is_scene_linear() =>
+                    && !source_color.is_scene_linear()
+                    && !source_color.is_data_texture() =>
             {
                 Ok(Self::CompactCpuYuv)
             }
@@ -415,7 +417,8 @@ impl PreviewDecodeRepresentation {
             PreviewRepresentationQuality::Reduced { divisor }
                 if payload_requirement == PreviewDecodePayloadRequirement::NativeAllowed
                     && source.compact_cpu_yuv_hint().is_some()
-                    && !source_color.color_space.is_scene_linear() =>
+                    && !source_color.is_scene_linear()
+                    && !source_color.is_data_texture() =>
             {
                 Ok(Self::ReducedCompactCpuYuv { divisor })
             }
@@ -564,7 +567,9 @@ fn validate_representation_for_source(
 ) -> Result<(), PreviewDecodeContractError> {
     match representation {
         PreviewDecodeRepresentation::NativeSurface => {
-            if source.permits_native_output() {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else if source.permits_native_output() {
                 Ok(())
             } else {
                 Err(PreviewDecodeContractError::NativeSourceUnavailable {
@@ -581,18 +586,24 @@ fn validate_representation_for_source(
         }
         PreviewDecodeRepresentation::CompactCpuYuv
         | PreviewDecodeRepresentation::ReducedCompactCpuYuv { .. } => {
-            if source.compact_cpu_yuv_hint().is_some()
-                && !source_color.color_space.is_scene_linear()
-            {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else if source.compact_cpu_yuv_hint().is_some() && !source_color.is_scene_linear() {
                 Ok(())
             } else {
                 Err(PreviewDecodeContractError::CompactCpuYuvUnavailable {
                     compact_hint: source.compact_cpu_yuv_hint(),
-                    source_color_space: source_color.color_space,
+                    source_color_space: source_color.color_space(),
                 })
             }
         }
-        PreviewDecodeRepresentation::Proxy(extent) => validate_extent(extent),
+        PreviewDecodeRepresentation::Proxy(extent) => {
+            if source_color.is_data_texture() {
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb)
+            } else {
+                validate_extent(extent)
+            }
+        }
         PreviewDecodeRepresentation::NativeCpu | PreviewDecodeRepresentation::Reduced { .. } => {
             Ok(())
         }
@@ -670,8 +681,12 @@ pub enum PreviewDecodeContractError {
         /// Exact physical compact-layout evidence, when present.
         compact_hint: Option<PreviewCompactCpuYuvHint>,
         /// Resolved source color identity.
-        source_color_space: mondrian_core::ColorSpace,
+        source_color_space: Option<mondrian_core::ColorSpace>,
     },
+    /// Data textures require CPU-addressable RGB samples so no YCbCr or native
+    /// color conversion can silently alter their numeric channels.
+    #[error("data-texture Preview decode requires CPU-addressable RGB output")]
+    DataTextureRequiresCpuRgb,
     /// A required native request cannot be reconciled with source/output facts.
     #[error(
         "required native Preview output is unavailable for requirement={payload_requirement:?}, alpha={alpha_presence:?}, surface={native_surface_hint:?}"
@@ -1429,5 +1444,38 @@ mod tests {
             ),
             Err(PreviewDecodeContractError::SourceSampleBeforeOrigin { .. })
         ));
+    }
+
+    #[test]
+    fn data_texture_decode_key_accepts_only_cpu_rgb_representations() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/data-texture.mov"),
+            exact_fingerprint(42),
+            &video_stream(0, PixelFormat::Yuv422p10le, true),
+        )
+        .expect("valid source with compact-YUV evidence");
+        let sample = SourceSampleTarget::covering(TimelineTime::ZERO);
+        let data = PreviewSourceColorContract::data_texture(
+            super::super::DecodedVideoRangeContract::OverrideFull,
+        );
+
+        PreviewDecodeKey::new(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            data,
+        )
+        .expect("CPU-addressable RGB is the exact DataTexture route");
+        for representation in [
+            PreviewDecodeRepresentation::NativeSurface,
+            PreviewDecodeRepresentation::CompactCpuYuv,
+            PreviewDecodeRepresentation::Proxy(Resolution { width: 960, height: 540 }),
+        ] {
+            assert_eq!(
+                PreviewDecodeKey::new(source.clone(), sample, representation, data),
+                Err(PreviewDecodeContractError::DataTextureRequiresCpuRgb),
+                "{representation:?} must not reinterpret technical channels"
+            );
+        }
     }
 }

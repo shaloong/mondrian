@@ -52,7 +52,7 @@ fn to_premultiplied(sample: vec4<f32>) -> vec4<f32> {
 
 fn from_premultiplied(sample: vec4<f32>) -> vec4<f32> {
     let raw_alpha = sample.a;
-    if (raw_alpha <= 0.0000001) {
+    if (raw_alpha <= 0.0) {
         return vec4<f32>(0.0);
     }
     return vec4<f32>(sample.rgb / raw_alpha, clamp(raw_alpha, 0.0, 1.0));
@@ -1055,6 +1055,30 @@ mod tests {
         ];
         for (observed, reference) in actual.iter().zip(expected) {
             assert!((observed - reference).abs() < 1.0e-5);
+        }
+        assert_eq!(diagnostics.prefilter_passes, 0);
+        assert_eq!(diagnostics.lanczos_passes, 2);
+    }
+
+    #[tokio::test]
+    async fn gpu_spatial_round_trip_preserves_positive_sixteen_bit_coverage() {
+        let edge = 1.0 / 65_535.0;
+        let expected_pixel = [1.25, -0.25, 0.5, edge];
+        let Some((actual, diagnostics)) =
+            run_spatial(2, 2, expected_pixel.repeat(4), ViewerSourceRect::FULL, 2, 2).await
+        else {
+            return;
+        };
+
+        for (pixel_index, pixel) in actual.chunks_exact(4).enumerate() {
+            for channel in 0..4 {
+                assert!(
+                    (pixel[channel] - expected_pixel[channel]).abs() <= 2.0e-6,
+                    "pixel {pixel_index}, channel {channel}: expected {}, got {}",
+                    expected_pixel[channel],
+                    pixel[channel]
+                );
+            }
         }
         assert_eq!(diagnostics.prefilter_passes, 0);
         assert_eq!(diagnostics.lanczos_passes, 2);

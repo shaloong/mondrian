@@ -49,6 +49,10 @@ pub struct AppUiPreferences {
     /// Runtime output-device intent. This is a user preference, never Project state.
     #[serde(default)]
     pub audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection,
+    /// Machine-local Viewer monitor target, ICC calibration, and HDR policy.
+    /// This value never enters `.mdp` Project authoring state.
+    #[serde(default)]
+    pub display_management: mondrian_core::DisplayManagementPolicy,
 }
 
 impl Default for AppUiPreferences {
@@ -63,6 +67,7 @@ impl Default for AppUiPreferences {
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            display_management: mondrian_core::DisplayManagementPolicy::default(),
         }
     }
 }
@@ -208,6 +213,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             })
             .expect("serialize preferences"),
         )
@@ -240,6 +246,10 @@ mod tests {
                 )
                 .expect("fixture device identity"),
             },
+            display_management: mondrian_core::DisplayManagementPolicy::default()
+                .with_calibration(mondrian_core::DisplayCalibrationPolicy::OsDefault)
+                .expect("OS default ICC policy")
+                .with_icc_rendering_intent(mondrian_core::IccRenderingIntent::RelativeColorimetric),
             custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                 direction: SplitDirection::Horizontal,
                 ratio: 0.37,
@@ -271,6 +281,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preferences_without_display_policy_restore_safe_default() {
+        let path = temp_preferences_path("legacy-display-policy");
+        let mut value = serde_json::to_value(AppUiPreferences::default())
+            .expect("serialize current preferences");
+        value.as_object_mut().expect("preferences object").remove("display_management");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("serialize legacy preferences"),
+        )
+        .expect("write legacy preferences");
+
+        let loaded = load_app_ui_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(
+            loaded.display_management,
+            mondrian_core::DisplayManagementPolicy::default()
+        );
+    }
+
+    #[test]
     fn loading_preferences_sanitizes_custom_workspace_layout() {
         let path = temp_preferences_path("custom-layout-filter");
         fs::write(
@@ -284,6 +315,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Vertical,
                     ratio: 12.0,
@@ -346,6 +378,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
                     active_index: 0,
@@ -415,6 +448,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             })
             .expect("serialize preferences"),
         )
@@ -446,6 +480,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             })
             .expect("serialize preferences"),
         )

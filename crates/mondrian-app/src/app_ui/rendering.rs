@@ -6,7 +6,7 @@
 
 use mondrian_ui_renderer::{
     DrawCommand, ExternalTextureKey, ExternalTextureRegistrationError, ExternalTextureTransfer,
-    GlyphUpload, UiRenderer,
+    GlyphUpload, UiRenderer, UiSurfacePresentationError,
 };
 use mondrian_ui_text::{resolve_text_commands, TextRenderer};
 use std::time::Instant;
@@ -77,6 +77,14 @@ pub struct AppUiFrameMetrics {
     pub external_texture_failures: u32,
     /// Render batches that sampled an external GPU texture.
     pub external_texture_batches: usize,
+    /// Viewer batches decoded from target surface code values.
+    pub surface_code_value_batches: usize,
+    /// ICC/device-code batches carried through direct sRGB.
+    pub device_code_value_batches: usize,
+    /// Whether presentation used the wide-gamut/HDR linear carrier pass.
+    pub surface_carrier_active: bool,
+    /// Whether carrier attachments were rebuilt for this frame size.
+    pub surface_carrier_target_rebuilt: bool,
 }
 
 impl AppUiFrameMetrics {
@@ -109,6 +117,10 @@ impl AppUiFrameMetrics {
             external_texture_entries: render_stats.external_texture_entries,
             external_texture_failures: render_stats.failed_external_textures,
             external_texture_batches: render_stats.submitted_external_texture_batches,
+            surface_code_value_batches: render_stats.submitted_surface_code_value_batches,
+            device_code_value_batches: render_stats.submitted_device_code_value_batches,
+            surface_carrier_active: render_stats.surface_carrier_active,
+            surface_carrier_target_rebuilt: render_stats.surface_carrier_target_rebuilt,
         }
     }
 
@@ -324,6 +336,18 @@ impl AppUiFrameRenderer {
             ui_renderer: UiRenderer::new(device, surface_format),
             text_renderer: TextRenderer::new(),
         }
+    }
+
+    /// Create a renderer bound to the configured native surface carrier.
+    pub fn new_for_surface(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        surface_color_space: wgpu::SurfaceColorSpace,
+    ) -> Result<Self, UiSurfacePresentationError> {
+        Ok(Self {
+            ui_renderer: UiRenderer::new_for_surface(device, surface_format, surface_color_space)?,
+            text_renderer: TextRenderer::new(),
+        })
     }
 
     /// Register or replace a GPU texture view for viewer/UI external texture draws.

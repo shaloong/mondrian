@@ -104,7 +104,8 @@ pub use preview::{
     PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint,
     PreviewPlaybackDirection, PreviewRepresentationQuality, PreviewScrubAdaptiveClass,
     PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy,
-    PreviewSeekIndexSource, PreviewSourceColorContract, PreviewTemporalExtentSource, RgbaFrame,
+    PreviewSeekIndexSource, PreviewSourceColorContract, PreviewSourceSampleIdentity,
+    PreviewTemporalExtentSource, RgbaFrame,
 };
 #[cfg(target_os = "linux")]
 pub use preview::{

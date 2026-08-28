@@ -637,18 +637,75 @@ impl StaticHdrMetadataPolicy {
 /// per-media input tone mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramColorContext {
-    pub working_color_space: WorkingColorSpace,
-    pub output_color_space: OcioColorSpaceIdentity,
-    /// Whether the working-to-Program-Output boundary applies tone mapping.
-    pub output_tone_map: bool,
-    pub workflow: ColorWorkflow,
-    pub engine: ColorEngine,
+    working_color_space: WorkingColorSpace,
+    output: ProgramColorOutput,
+    workflow: ColorWorkflow,
+    engine: ColorEngine,
     /// Sequence input interpretation retained only to derive per-media input
     /// contexts while traversing nested Timelines; it never changes Program
     /// Output pixels by itself.
-    pub missing_metadata_policy: MissingColorMetadataPolicy,
-    /// Product-level final output transform selected for this context.
-    pub output_transform: mondrian_core::OutputTransformIntent,
+    missing_metadata_policy: MissingColorMetadataPolicy,
+    origin: ProgramColorContextOrigin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProgramColorOutput {
+    Encoded {
+        color_space: ColorSpace,
+        transform: mondrian_core::OutputTransformIntent,
+        rendering_view: bool,
+    },
+    Working(WorkingColorSpace),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProgramColorContextOrigin {
+    Root,
+    Nested,
+}
+
+/// Failure to construct a closed Program color context.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProgramColorContextError {
+    /// The selected Project engine cannot execute the requested working space.
+    #[error("working color space {working_color_space:?} is invalid for {engine}: {reason}")]
+    InvalidWorkingSpace {
+        /// Rejected working space.
+        working_color_space: WorkingColorSpace,
+        /// Selected engine name.
+        engine: String,
+        /// Engine validation diagnostic.
+        reason: String,
+    },
+    /// A root Program Output must name an encoded display/delivery space.
+    #[error("root Program Output {output_color_space:?} is not display-referred")]
+    InvalidRootOutput {
+        /// Rejected root target.
+        output_color_space: ColorSpace,
+    },
+    /// The selected engine/intent cannot resolve the encoded target.
+    #[error("cannot resolve Program Output {output_color_space:?}: {reason}")]
+    InvalidOutputTransform {
+        /// Rejected encoded target.
+        output_color_space: ColorSpace,
+        /// Intent-resolution diagnostic.
+        reason: String,
+    },
+    /// Tone-map policy and output-transform kind disagreed.
+    #[error(
+        "Program Output {output_color_space:?} tone_map={tone_map} disagrees with resolved rendering_view={rendering_view}"
+    )]
+    OutputTransformModeMismatch {
+        /// Rejected encoded target.
+        output_color_space: ColorSpace,
+        /// Requested tone-map behavior.
+        tone_map: bool,
+        /// Whether the intent resolved a rendering View.
+        rendering_view: bool,
+    },
+    /// Delivery/display output cannot be derived from a nested working-space context.
+    #[error("encoded output contexts may only be derived from a root Program context")]
+    EncodedOutputFromNestedContext,
 }
 
 /// Resolved media-input color context for one Timeline media contribution.
@@ -664,6 +721,111 @@ pub struct MediaInputColorContext {
 }
 
 impl ProgramColorContext {
+    fn validate_working_space(
+        working_color_space: WorkingColorSpace,
+        engine: &ColorEngine,
+    ) -> Result<(), ProgramColorContextError> {
+        engine.validate_working_space(working_color_space).map_err(|reason| {
+            ProgramColorContextError::InvalidWorkingSpace {
+                working_color_space,
+                engine: engine.name().to_owned(),
+                reason,
+            }
+        })
+    }
+
+    fn encoded_output(
+        output_color_space: ColorSpace,
+        tone_map: bool,
+        output_transform: mondrian_core::OutputTransformIntent,
+        engine: &ColorEngine,
+    ) -> Result<ProgramColorOutput, ProgramColorContextError> {
+        let rendering_view = output_transform
+            .resolve_display_view(output_color_space, engine)
+            .map_err(|error| ProgramColorContextError::InvalidOutputTransform {
+                output_color_space,
+                reason: error.to_string(),
+            })?
+            .is_some();
+        if tone_map != rendering_view {
+            return Err(ProgramColorContextError::OutputTransformModeMismatch {
+                output_color_space,
+                tone_map,
+                rendering_view,
+            });
+        }
+        Ok(ProgramColorOutput::Encoded {
+            color_space: output_color_space,
+            transform: output_transform,
+            rendering_view,
+        })
+    }
+
+    fn rendering_view_intent(
+        output_color_space: ColorSpace,
+        engine: &ColorEngine,
+    ) -> mondrian_core::OutputTransformIntent {
+        match engine {
+            ColorEngine::MondrianStandard { package } => {
+                mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
+            }
+            ColorEngine::Aces { preset } => {
+                mondrian_core::OutputTransformIntent::aces_preset(*preset)
+            }
+            ColorEngine::CustomOcio { .. } => {
+                mondrian_core::OutputTransformIntent::CustomOcio { output_color_space }
+            }
+        }
+    }
+
+    /// Working space in which Timeline pixels are composited.
+    pub const fn working_color_space(&self) -> WorkingColorSpace {
+        self.working_color_space
+    }
+
+    /// Output endpoint identity. Nested contexts end in their parent working space.
+    pub const fn output_color_space(&self) -> OcioColorSpaceIdentity {
+        match self.output {
+            ProgramColorOutput::Encoded { color_space, .. } => {
+                OcioColorSpaceIdentity::Color(color_space)
+            }
+            ProgramColorOutput::Working(color_space) => {
+                OcioColorSpaceIdentity::Working(color_space)
+            }
+        }
+    }
+
+    /// Whether the final encoded boundary resolves a rendering View.
+    pub const fn output_tone_map(&self) -> bool {
+        match self.output {
+            ProgramColorOutput::Encoded { rendering_view, .. } => rendering_view,
+            ProgramColorOutput::Working(_) => false,
+        }
+    }
+
+    /// Product-level final output transform selected for this context.
+    pub fn output_transform(&self) -> &mondrian_core::OutputTransformIntent {
+        match &self.output {
+            ProgramColorOutput::Encoded { transform, .. } => transform,
+            ProgramColorOutput::Working(_) => &mondrian_core::OutputTransformIntent::Colorimetric,
+        }
+    }
+
+    /// Sequence workflow that authored this evaluation context.
+    pub const fn workflow(&self) -> ColorWorkflow {
+        self.workflow
+    }
+
+    /// Project-owned color engine pinned into this execution context.
+    pub const fn engine(&self) -> &ColorEngine {
+        &self.engine
+    }
+
+    /// Missing-metadata policy used to derive media-input contexts.
+    pub const fn missing_metadata_policy(&self) -> MissingColorMetadataPolicy {
+        self.missing_metadata_policy
+    }
+
     /// Derive the source-to-working contract for one media contribution.
     pub fn media_input(&self, input_tone_map: bool) -> MediaInputColorContext {
         MediaInputColorContext {
@@ -672,6 +834,30 @@ impl ProgramColorContext {
             engine: self.engine.clone(),
             missing_metadata_policy: self.missing_metadata_policy,
         }
+    }
+
+    /// Derive a validated delivery context from a root Program context.
+    pub fn for_export_output(
+        &self,
+        output_color_space: ColorSpace,
+        tone_map: bool,
+        output_transform: mondrian_core::OutputTransformIntent,
+    ) -> Result<Self, ProgramColorContextError> {
+        if self.origin != ProgramColorContextOrigin::Root {
+            return Err(ProgramColorContextError::EncodedOutputFromNestedContext);
+        }
+        let output =
+            Self::encoded_output(output_color_space, tone_map, output_transform, &self.engine)?;
+        Ok(Self { output, ..self.clone() })
+    }
+
+    /// Derive a validated rendering-View display context from a root context.
+    pub fn for_rendering_view_output(
+        &self,
+        output_color_space: ColorSpace,
+    ) -> Result<Self, ProgramColorContextError> {
+        let intent = Self::rendering_view_intent(output_color_space, &self.engine);
+        self.for_export_output(output_color_space, true, intent)
     }
 }
 
@@ -931,16 +1117,7 @@ impl SequenceSettings {
                 reason,
             })?;
 
-        let output_context = self.root_color_context_for_output(
-            color_environment,
-            self.color.program_output.color_space,
-        );
-        output_context
-            .output_transform
-            .resolve_display_view(
-                self.color.program_output.color_space,
-                &output_context.engine,
-            )
+        self.root_program_color_context(color_environment)
             .map(|_| ())
             .map_err(|reason| mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_color_output_validate".to_owned(),
@@ -958,7 +1135,7 @@ impl SequenceSettings {
     pub fn root_program_color_context(
         &self,
         color_environment: &mondrian_core::ProjectColorEnvironment,
-    ) -> ProgramColorContext {
+    ) -> Result<ProgramColorContext, ProgramColorContextError> {
         self.root_color_context_for_output(color_environment, self.color.program_output.color_space)
     }
 
@@ -966,8 +1143,12 @@ impl SequenceSettings {
         &self,
         color_environment: &mondrian_core::ProjectColorEnvironment,
         output_color_space: ColorSpace,
-    ) -> ProgramColorContext {
+    ) -> Result<ProgramColorContext, ProgramColorContextError> {
         let engine = color_environment.engine().clone();
+        ProgramColorContext::validate_working_space(self.color.working_color_space, &engine)?;
+        if !output_color_space.is_display_referred() {
+            return Err(ProgramColorContextError::InvalidRootOutput { output_color_space });
+        }
 
         // Scene-referred workflows need the Project-owned engine's view
         // transform at a display-referred output. The engine alone decides
@@ -982,55 +1163,51 @@ impl SequenceSettings {
         // identity without consulting OCIO process-global state; ACES resolves
         // its target-aware preset and Custom OCIO carries the target used to
         // resolve exactly one project-pinned output binding.
-        let output_transform = match (&engine, tone_map) {
-            (ColorEngine::MondrianStandard { package }, true) => {
-                mondrian_core::OutputTransformIntent::mondrian_standard_package(*package)
-            }
-            (ColorEngine::Aces { preset }, true) => {
-                mondrian_core::OutputTransformIntent::aces_preset(*preset)
-            }
-            (ColorEngine::CustomOcio { .. }, true) => {
-                mondrian_core::OutputTransformIntent::CustomOcio { output_color_space }
-            }
-            _ => mondrian_core::OutputTransformIntent::Colorimetric,
+        let output_transform = if tone_map {
+            ProgramColorContext::rendering_view_intent(output_color_space, &engine)
+        } else {
+            mondrian_core::OutputTransformIntent::Colorimetric
         };
+        let output = ProgramColorContext::encoded_output(
+            output_color_space,
+            tone_map,
+            output_transform,
+            &engine,
+        )?;
 
-        ProgramColorContext {
+        Ok(ProgramColorContext {
             working_color_space: self.color.working_color_space,
-            output_color_space: OcioColorSpaceIdentity::Color(output_color_space),
-            output_tone_map: tone_map,
+            output,
             engine,
             missing_metadata_policy: self.color.input.missing_metadata_policy,
-            output_transform,
             workflow: self.color.program_output.workflow,
-        }
+            origin: ProgramColorContextOrigin::Root,
+        })
     }
 
     pub fn nested_render_color_context(
         &self,
-        parent: ProgramColorContext,
+        parent: &ProgramColorContext,
         processing: NestedColorProcessing,
-    ) -> ProgramColorContext {
-        match processing {
-            NestedColorProcessing::PreserveChildWorkingSpace => ProgramColorContext {
-                working_color_space: self.color.working_color_space,
-                output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                output_tone_map: false,
-                engine: parent.engine.clone(),
-                missing_metadata_policy: self.color.input.missing_metadata_policy,
-                output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
-                workflow: self.color.program_output.workflow,
-            },
-            NestedColorProcessing::ForceParentWorkingSpace => ProgramColorContext {
-                working_color_space: parent.working_color_space,
-                output_color_space: OcioColorSpaceIdentity::Working(parent.working_color_space),
-                output_tone_map: false,
-                engine: parent.engine.clone(),
-                missing_metadata_policy: self.color.input.missing_metadata_policy,
-                output_transform: mondrian_core::OutputTransformIntent::Colorimetric,
-                workflow: parent.workflow,
-            },
-        }
+    ) -> Result<ProgramColorContext, ProgramColorContextError> {
+        let (working_color_space, workflow) = match processing {
+            NestedColorProcessing::PreserveChildWorkingSpace => (
+                self.color.working_color_space,
+                self.color.program_output.workflow,
+            ),
+            NestedColorProcessing::ForceParentWorkingSpace => {
+                (parent.working_color_space, parent.workflow)
+            }
+        };
+        ProgramColorContext::validate_working_space(working_color_space, &parent.engine)?;
+        Ok(ProgramColorContext {
+            working_color_space,
+            output: ProgramColorOutput::Working(parent.working_color_space),
+            engine: parent.engine.clone(),
+            missing_metadata_policy: self.color.input.missing_metadata_policy,
+            workflow,
+            origin: ProgramColorContextOrigin::Nested,
+        })
     }
 
     pub fn with_resolution(mut self, width: u32, height: u32) -> Self {
@@ -4780,32 +4957,162 @@ mod tests {
             preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
         });
         let parent = SequenceSettings::default();
-        let parent_context = parent.root_program_color_context(&environment);
+        let parent_context = parent
+            .root_program_color_context(&environment)
+            .expect("valid parent color context");
         let mut child = SequenceSettings::default();
         child.color.working_color_space = WorkingColorSpace::AcesCg;
         child.color.input.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
 
-        let preserved = child.nested_render_color_context(
-            parent_context.clone(),
-            NestedColorProcessing::PreserveChildWorkingSpace,
-        );
-        assert_eq!(&preserved.engine, environment.engine());
-        assert_eq!(preserved.working_color_space, WorkingColorSpace::AcesCg);
+        let preserved = child
+            .nested_render_color_context(
+                &parent_context,
+                NestedColorProcessing::PreserveChildWorkingSpace,
+            )
+            .expect("valid preserved child context");
+        assert_eq!(preserved.engine(), environment.engine());
+        assert_eq!(preserved.working_color_space(), WorkingColorSpace::AcesCg);
 
-        let forced = child.nested_render_color_context(
-            parent_context.clone(),
-            NestedColorProcessing::ForceParentWorkingSpace,
-        );
-        assert_eq!(&forced.engine, environment.engine());
+        let forced = child
+            .nested_render_color_context(
+                &parent_context,
+                NestedColorProcessing::ForceParentWorkingSpace,
+            )
+            .expect("valid forced child context");
+        assert_eq!(forced.engine(), environment.engine());
         assert_eq!(
-            forced.working_color_space,
-            parent_context.working_color_space
+            forced.working_color_space(),
+            parent_context.working_color_space()
         );
         assert_eq!(
-            forced.missing_metadata_policy,
+            forced.missing_metadata_policy(),
             MissingColorMetadataPolicy::RejectMedia,
             "forcing the parent working space must not replace child media interpretation"
         );
+    }
+
+    #[test]
+    fn root_context_rejects_invalid_working_space_without_prior_settings_validation() {
+        let mut settings = SequenceSettings::default();
+        settings.color.working_color_space = WorkingColorSpace::AcesCg;
+
+        let error = settings
+            .root_program_color_context(&standard_environment())
+            .expect_err("root construction must validate the engine/working-space pair");
+
+        assert!(
+            matches!(error, ProgramColorContextError::InvalidWorkingSpace { .. }),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn export_context_rejects_tone_map_and_intent_disagreement() {
+        let root = SequenceSettings::default()
+            .root_program_color_context(&standard_environment())
+            .expect("valid root context");
+
+        let view_without_tone_map = root
+            .for_export_output(
+                ColorSpace::Rec709,
+                false,
+                mondrian_core::OutputTransformIntent::mondrian_standard(),
+            )
+            .expect_err("a rendering View cannot execute with tone mapping disabled");
+        assert!(matches!(
+            view_without_tone_map,
+            ProgramColorContextError::OutputTransformModeMismatch {
+                tone_map: false,
+                rendering_view: true,
+                ..
+            }
+        ));
+
+        let tone_map_without_view = root
+            .for_export_output(
+                ColorSpace::Rec709,
+                true,
+                mondrian_core::OutputTransformIntent::Colorimetric,
+            )
+            .expect_err("tone mapping requires a rendering View");
+        assert!(matches!(
+            tone_map_without_view,
+            ProgramColorContextError::OutputTransformModeMismatch {
+                tone_map: true,
+                rendering_view: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn export_context_rejects_engine_intent_identity_drift() {
+        let root = SequenceSettings::default()
+            .root_program_color_context(&standard_environment())
+            .expect("valid root context");
+
+        let error = root
+            .for_export_output(
+                ColorSpace::Rec709,
+                true,
+                mondrian_core::OutputTransformIntent::aces_preset(
+                    mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+                ),
+            )
+            .expect_err("an ACES intent cannot drift from the Standard engine");
+
+        assert!(matches!(
+            error,
+            ProgramColorContextError::InvalidOutputTransform { .. }
+        ));
+    }
+
+    #[test]
+    fn nested_context_is_working_only_and_cannot_become_delivery_output() {
+        let parent = SequenceSettings::default()
+            .root_program_color_context(&standard_environment())
+            .expect("valid parent context");
+        let nested = SequenceSettings::default()
+            .nested_render_color_context(&parent, NestedColorProcessing::ForceParentWorkingSpace)
+            .expect("valid nested context");
+
+        assert_eq!(
+            nested.output_color_space(),
+            OcioColorSpaceIdentity::Working(parent.working_color_space())
+        );
+        assert!(!nested.output_tone_map());
+        assert_eq!(
+            nested.output_transform(),
+            &mondrian_core::OutputTransformIntent::Colorimetric
+        );
+        assert_eq!(
+            nested
+                .for_export_output(
+                    ColorSpace::Rec709,
+                    false,
+                    mondrian_core::OutputTransformIntent::Colorimetric,
+                )
+                .expect_err("nested contexts cannot cross a delivery boundary"),
+            ProgramColorContextError::EncodedOutputFromNestedContext
+        );
+    }
+
+    #[test]
+    fn nested_context_rejects_child_working_space_unsupported_by_parent_engine() {
+        let parent = SequenceSettings::default()
+            .root_program_color_context(&standard_environment())
+            .expect("valid parent context");
+        let mut child = SequenceSettings::default();
+        child.color.working_color_space = WorkingColorSpace::AcesCg;
+
+        let error = child
+            .nested_render_color_context(&parent, NestedColorProcessing::PreserveChildWorkingSpace)
+            .expect_err("nested construction must validate the child working space");
+
+        assert!(matches!(
+            error,
+            ProgramColorContextError::InvalidWorkingSpace { .. }
+        ));
     }
 
     #[test]
@@ -4814,7 +5121,10 @@ mod tests {
         let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
 
         assert_eq!(
-            &settings.root_program_color_context(&environment).engine,
+            settings
+                .root_program_color_context(&environment)
+                .expect("valid context")
+                .engine(),
             environment.engine()
         );
     }
@@ -4827,13 +5137,22 @@ mod tests {
         settings.color.input.auto_tone_map_media = false;
 
         assert!(
-            settings.root_program_color_context(&environment).output_tone_map,
+            settings
+                .root_program_color_context(&environment)
+                .expect("valid context")
+                .output_tone_map(),
             "automatic policy maps scene-referred content to a display output"
         );
         settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Never;
-        assert!(!settings.root_program_color_context(&environment).output_tone_map);
+        assert!(!settings
+            .root_program_color_context(&environment)
+            .expect("valid context")
+            .output_tone_map());
         settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Always;
-        assert!(settings.root_program_color_context(&environment).output_tone_map);
+        assert!(settings
+            .root_program_color_context(&environment)
+            .expect("valid context")
+            .output_tone_map());
     }
 
     #[test]
@@ -4841,15 +5160,15 @@ mod tests {
         let environment = standard_environment();
         let mut settings = SequenceSettings::default();
         settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Never;
-        let program = settings.root_program_color_context(&environment);
+        let program = settings.root_program_color_context(&environment).expect("valid context");
 
-        assert!(!program.output_tone_map);
+        assert!(!program.output_tone_map());
         assert!(program.media_input(true).input_tone_map);
         assert!(!program.media_input(false).input_tone_map);
 
         settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Always;
-        let program = settings.root_program_color_context(&environment);
-        assert!(program.output_tone_map);
+        let program = settings.root_program_color_context(&environment).expect("valid context");
+        assert!(program.output_tone_map());
         assert!(!program.media_input(false).input_tone_map);
     }
 
@@ -4860,30 +5179,34 @@ mod tests {
         settings.color.program_output.workflow = ColorWorkflow::DisplayReferred;
         settings.color.program_output.tone_map_policy = DisplayToneMapPolicy::Automatic;
 
-        let context = settings.root_program_color_context(&standard_environment());
-        assert!(!context.output_tone_map);
+        let context = settings
+            .root_program_color_context(&standard_environment())
+            .expect("valid colorimetric context");
+        assert!(!context.output_tone_map());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::Colorimetric
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::Colorimetric
         );
     }
 
     #[test]
     fn default_standard_video_workflow_resolves_standard_rec709_view() {
         let settings = SequenceSettings::default();
-        let context = settings.root_program_color_context(&standard_environment());
+        let context = settings
+            .root_program_color_context(&standard_environment())
+            .expect("valid Standard context");
 
-        assert_eq!(context.workflow, ColorWorkflow::SceneReferred);
+        assert_eq!(context.workflow(), ColorWorkflow::SceneReferred);
         assert_eq!(
-            context.output_color_space,
+            context.output_color_space(),
             OcioColorSpaceIdentity::Color(ColorSpace::Rec709)
         );
-        assert!(context.output_tone_map);
+        assert!(context.output_tone_map());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
-        assert_eq!(context.engine, ColorEngine::mondrian_standard());
+        assert_eq!(context.engine(), &ColorEngine::mondrian_standard());
     }
 
     #[test]
@@ -4891,12 +5214,14 @@ mod tests {
         let settings = SequenceSettings::default();
         let environment = color_environment(pinned_custom_engine(OcioConfigSource::Environment));
 
-        let context = settings.root_program_color_context(&environment);
+        let context = settings
+            .root_program_color_context(&environment)
+            .expect("valid Custom OCIO context");
 
-        assert!(context.output_tone_map);
+        assert!(context.output_tone_map());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::CustomOcio {
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::CustomOcio {
                 output_color_space: ColorSpace::Rec709,
             }
         );
@@ -4953,10 +5278,12 @@ mod tests {
         let environment = color_environment(ColorEngine::Aces { preset });
         settings.color.program_output.color_space = ColorSpace::Rec2100Pq;
 
-        let pq = settings.root_program_color_context(&environment);
+        let pq = settings
+            .root_program_color_context(&environment)
+            .expect("valid ACES PQ context");
         assert_eq!(
-            pq.output_transform
-                .resolve_display_view(ColorSpace::Rec2100Pq, &pq.engine)
+            pq.output_transform()
+                .resolve_display_view(ColorSpace::Rec2100Pq, pq.engine())
                 .expect("target-specific ACES PQ View")
                 .expect("display/view"),
             (
@@ -4978,12 +5305,14 @@ mod tests {
         let settings = SequenceSettings::default();
         let environment =
             color_environment(ColorEngine::MondrianStandard { package: legacy_package });
-        let context = settings.root_program_color_context(&environment);
+        let context = settings
+            .root_program_color_context(&environment)
+            .expect("valid legacy Standard context");
 
-        assert_eq!(&context.engine, environment.engine());
+        assert_eq!(context.engine(), environment.engine());
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard_package(legacy_package)
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard_package(legacy_package)
         );
     }
 

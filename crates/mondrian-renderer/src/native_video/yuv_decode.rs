@@ -851,6 +851,57 @@ mod tests {
     }
 
     #[test]
+    fn shader_chroma_geometry_matches_independent_public_specification_corpus() {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/color/metadata/independent-colorimetric-oracle-v1.json"
+        ))
+        .expect("independent colorimetric oracle corpus");
+        assert_eq!(corpus["origin"], "public_specification");
+        let vectors = corpus["chroma_siting_vectors"].as_array().expect("chroma siting vectors");
+        for vector in vectors {
+            let location = match vector["location"].as_str().expect("location") {
+                "left" => GpuVideoChromaLocation::Left,
+                "center" => GpuVideoChromaLocation::Center,
+                "top_left" => GpuVideoChromaLocation::TopLeft,
+                unexpected => panic!("unknown independent chroma location {unexpected}"),
+            };
+            let mut plan = decode_plan(
+                GpuNativeDecodedFrameTextureFormat::Nv12,
+                GpuVideoRange::Limited,
+                ColorMatrixCoefficients::Bt709,
+                8,
+                location,
+            );
+            plan.chroma_subsampling = match vector["subsampling"].as_str().expect("subsampling") {
+                "420" => GpuYuvChromaSubsampling::Cs420,
+                "422" => GpuYuvChromaSubsampling::Cs422,
+                unexpected => panic!("unknown independent subsampling {unexpected}"),
+            };
+            let uniforms = GpuNativeYuvDecodeUniforms::from_plan(&plan);
+            let source_center = vector["source_center"].as_array().expect("source center");
+            let expected = vector["sample_coordinate"].as_array().expect("sample coordinate");
+            let actual = [
+                (source_center[0].as_f64().expect("source x")
+                    - f64::from(uniforms.chroma_matrix0[1]))
+                    * 0.5,
+                (source_center[1].as_f64().expect("source y")
+                    - f64::from(uniforms.chroma_matrix0[2]))
+                    * f64::from(uniforms.matrix1[3]),
+            ];
+            assert!(
+                (actual[0] - expected[0].as_f64().expect("expected x")).abs() < 1.0e-12,
+                "{vector:#?}: x={}",
+                actual[0]
+            );
+            assert!(
+                (actual[1] - expected[1].as_f64().expect("expected y")).abs() < 1.0e-12,
+                "{vector:#?}: y={}",
+                actual[1]
+            );
+        }
+    }
+
+    #[test]
     fn planar_chroma_layout_is_an_explicit_shader_contract() {
         let mut plan = decode_plan(
             GpuNativeDecodedFrameTextureFormat::P010,
@@ -968,9 +1019,17 @@ mod tests {
 
     #[tokio::test]
     async fn nv12_shader_decodes_limited_range_on_real_wgpu_device() {
-        let Ok(context) = crate::GpuContext::new().await else {
-            eprintln!("skipping native YUV shader test: no GPU adapter available");
-            return;
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .unwrap_or_else(|error| panic!("invalid GPU color qualification policy: {error}"));
+        let context = match policy
+            .admit_adapter("native-yuv-color-accuracy", crate::GpuContext::new().await)
+        {
+            Ok(Some(context)) => context,
+            Ok(None) => {
+                eprintln!("skipping diagnostic native YUV color gate: no GPU adapter available");
+                return;
+            }
+            Err(error) => panic!("{error}"),
         };
         let luma = context.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("mondrian-test-native-yuv-luma"),

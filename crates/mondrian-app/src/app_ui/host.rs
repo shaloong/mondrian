@@ -37,7 +37,8 @@ use crate::app::preview_runtime::{
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
-    AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload, PreferencesShortcutPayload,
+    AssetsOpenFolderPayload, PreferencesAudioOutputDevicePayload,
+    PreferencesDisplayManagementPayload, PreferencesShortcutPayload,
     PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
     PreferencesWaveformDisplayPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -46,6 +47,7 @@ use crate::app::ui_actions::{
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL,
     APP_SHELL_PENDING_CLOSE_DISCARD, APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE,
     APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
+    APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
     APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
     APP_SHELL_PREFERENCES_THEME_CHANGED, APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED,
@@ -199,15 +201,16 @@ impl AppUiHost {
 
     /// Create a host from explicit preferences and path.
     pub(crate) fn new_with_preferences_path(
-        app_state: AppState,
+        mut app_state: AppState,
         preferences: AppUiPreferences,
         preferences_path: PathBuf,
     ) -> Self {
         app_state.set_audio_output_device_selection(preferences.audio_output_device.clone());
+        app_state.set_viewer_display_management(preferences.display_management.clone());
         let system_theme_preset = ThemePreset::Dark;
         set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
         let asset_thumbnails = AssetThumbnailAdapter::new();
-        asset_thumbnails.set_color_context(Some(app_state.thumbnail_color_context()));
+        asset_thumbnails.set_color_context(app_state.thumbnail_color_context().ok());
         let waveform_service = AudioWaveformService::new();
         waveform_service.set_library(app_state.asset_library_handle());
         let preview_service = WindowPreviewAdapter::new();
@@ -323,6 +326,15 @@ impl AppUiHost {
         let state = self.app_state.borrow();
         let engine = state.project_color_environment().engine().clone();
         (engine, state.viewer_display_management().clone())
+    }
+
+    /// Current Program Output target that the machine-local monitor policy adapts.
+    pub(crate) fn active_program_output_color_space(&self) -> mondrian_core::ColorSpace {
+        let state = self.app_state.borrow();
+        state
+            .active_sequence()
+            .map(|sequence| sequence.settings.color.program_output.color_space)
+            .unwrap_or(state.new_sequence_defaults().color.program_output.color_space)
     }
 
     /// Build a GPU-output preview candidate for the current app state.
@@ -442,10 +454,11 @@ impl AppUiHost {
 
     /// Synchronize the current display output snapshot into preview scheduling.
     pub(crate) fn set_display_output_snapshot(
-        &self,
+        &mut self,
         snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
     ) {
         self.preview_service.set_display_output_snapshot(snapshot);
+        self.root.set_display_output_snapshot(snapshot.cloned());
     }
 
     /// Synchronize renderer native video import readiness into preview decode admission.
@@ -966,7 +979,7 @@ impl AppUiHost {
         }
         self.normalize_asset_folder_selection();
         self.asset_thumbnails
-            .set_color_context(Some(self.app_state.borrow().thumbnail_color_context()));
+            .set_color_context(self.app_state.borrow().thumbnail_color_context().ok());
         self.refresh_window_preview_state();
         let window_preview_state = self.window_preview_state.borrow().clone();
         let window_preview_snapshot =
@@ -1028,17 +1041,22 @@ impl AppUiHost {
         // Project-scoped worker result may commit while its Session admission
         // is frozen. Final close invalidates their generations in one place.
         let project_execution_frozen = self.app_state.borrow().project_close_blocks_actions();
-        let (media_imports_changed, media_asset_mutations_changed, proxy_generation_changed) =
-            if project_execution_frozen {
-                (false, false, false)
-            } else {
-                let mut state = self.app_state.borrow_mut();
-                (
-                    state.poll_media_imports(),
-                    state.poll_media_asset_mutations(),
-                    state.poll_proxy_generation(),
-                )
-            };
+        let (
+            media_imports_changed,
+            media_asset_mutations_changed,
+            proxy_generation_changed,
+            visual_tracking_changed,
+        ) = if project_execution_frozen {
+            (false, false, false, false)
+        } else {
+            let mut state = self.app_state.borrow_mut();
+            (
+                state.poll_media_imports(),
+                state.poll_media_asset_mutations(),
+                state.poll_proxy_generation(),
+                state.poll_visual_tracking(),
+            )
+        };
         let export_queue_changed = self.app_state.borrow_mut().poll_export_queue();
         let thumbnails_changed = self.asset_thumbnails.poll_finished();
         let audio_devices_changed = self.audio_device_catalog.poll_finished();
@@ -1061,6 +1079,7 @@ impl AppUiHost {
             || media_imports_changed
             || media_asset_mutations_changed
             || proxy_generation_changed
+            || visual_tracking_changed
             || export_queue_changed
             || thumbnails_changed
             || waveform_changed;
@@ -1538,6 +1557,10 @@ impl AppUiHost {
                         self.app_state
                             .borrow()
                             .set_audio_output_device_selection(payload.selection);
+                    }
+                    PreferencesUpdate::DisplayManagement(payload) => {
+                        self.preferences.display_management = payload.policy.clone();
+                        self.app_state.borrow_mut().set_viewer_display_management(payload.policy);
                     }
                     PreferencesUpdate::RefreshAudioOutputDevices => {
                         self.audio_device_catalog.request_refresh();
@@ -2177,6 +2200,7 @@ enum PreferencesUpdate {
     WaveformDisplay(PreferencesWaveformDisplayPayload),
     ViewerBackground(PreferencesViewerBackgroundPayload),
     AudioOutputDevice(PreferencesAudioOutputDevicePayload),
+    DisplayManagement(PreferencesDisplayManagementPayload),
     RefreshAudioOutputDevices,
     ShortcutDisabled(PreferencesShortcutPayload),
     ShortcutReset(PreferencesShortcutPayload),
@@ -2209,6 +2233,12 @@ fn parse_preferences_update(
                 && name == APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED =>
         {
             Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::AudioOutputDevice))
+        }
+        Action::Custom { namespace, name, payload }
+            if namespace == APP_SHELL_NAMESPACE
+                && name == APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED =>
+        {
+            Some(serde_json::from_value(payload.clone()).map(PreferencesUpdate::DisplayManagement))
         }
         Action::Custom { namespace, name, .. }
             if namespace == APP_SHELL_NAMESPACE
@@ -3813,6 +3843,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             },
             temp_preferences_path("initial-workspace"),
         );
@@ -3887,6 +3918,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             },
             temp_preferences_path("initial-custom-workspace"),
         );
@@ -4293,6 +4325,51 @@ mod tests {
     }
 
     #[test]
+    fn host_restores_applies_and_persists_machine_local_display_policy() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let path = temp_preferences_path("display-management-preferences");
+        let restored = mondrian_core::DisplayManagementPolicy::default()
+            .with_monitor_output(mondrian_core::MonitorOutputIntent::ColorSpace(
+                mondrian_core::ColorSpace::DisplayP3,
+            ))
+            .expect("Display P3 monitor target")
+            .with_calibration(mondrian_core::DisplayCalibrationPolicy::OsDefault)
+            .expect("OS default ICC calibration")
+            .with_icc_rendering_intent(mondrian_core::IccRenderingIntent::RelativeColorimetric);
+        let preferences = AppUiPreferences {
+            display_management: restored.clone(),
+            ..Default::default()
+        };
+        let mut host = AppUiHost::new_with_preferences_path(
+            AppState::new(),
+            preferences.clone(),
+            path.clone(),
+        );
+        assert_eq!(host.app_state().viewer_display_management(), &restored);
+
+        let next = restored.with_viewer_mode(mondrian_core::ViewerDisplayMode::HdrPq);
+        let pending = PendingUiActions::default();
+        pending.push(
+            crate::app::ui_actions::app_shell_preferences_display_management_changed_action(
+                next.clone(),
+            ),
+        );
+        host.drain_pending_actions(
+            &pending,
+            Rect::new(0.0, 0.0, 1280.0, 720.0),
+            &NoopPlatformService,
+        );
+
+        assert_eq!(host.app_state().viewer_display_management(), &next);
+        assert_eq!(host.preferences().display_management, next);
+        assert_eq!(
+            load_app_ui_preferences_from(&path).display_management,
+            host.preferences().display_management
+        );
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
     fn host_resolves_system_theme_preference_from_desktop_theme() {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let mut host = AppUiHost::new_with_preferences_path(
@@ -4402,6 +4479,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             },
             path.clone(),
         );
@@ -4504,6 +4582,7 @@ mod tests {
                 waveform_display: WaveformDisplay::BottomAligned,
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 audio_output_device: Default::default(),
+                display_management: Default::default(),
             },
             path.clone(),
         );

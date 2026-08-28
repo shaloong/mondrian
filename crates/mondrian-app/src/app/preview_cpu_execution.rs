@@ -296,7 +296,10 @@ pub(crate) fn composite_resolved_preview_working(
         height,
         &elements,
         TimelineCompositeOptions::default(),
-        TimelineEffectColorRuntime::new(&color_context.engine, color_context.working_color_space),
+        TimelineEffectColorRuntime::new(
+            color_context.engine(),
+            color_context.working_color_space(),
+        ),
         scratch,
     )?;
     let cpu_composite_us = duration_us(cpu_composite_started_at.elapsed());
@@ -386,17 +389,17 @@ fn lower_transition_input<'a>(
 pub(crate) fn output_boundary_from_color_context(
     color_context: &ProgramColorContext,
 ) -> Result<RenderOutputColorBoundary, PreviewCpuExecutionError> {
-    let output_color_space = color_context.output_color_space.color().ok_or({
+    let output_color_space = color_context.output_color_space().color().ok_or({
         PreviewCpuExecutionError::ProgramOutputIdentity {
-            identity: color_context.output_color_space,
+            identity: color_context.output_color_space(),
         }
     })?;
     RenderOutputColorBoundary::from_intent(
         mondrian_renderer::RenderOutputColorBoundaryTarget::Display,
         output_color_space,
-        &color_context.output_transform,
-        color_context.output_tone_map,
-        color_context.engine.clone(),
+        color_context.output_transform(),
+        color_context.output_tone_map(),
+        color_context.engine().clone(),
     )
     .map_err(PreviewCpuExecutionError::from)
 }
@@ -427,7 +430,7 @@ pub(crate) fn present_preview_working(
     let adaptation = RenderMonitorAdaptation::new(
         program_output,
         ColorSpace::Srgb,
-        color_context.engine.clone(),
+        color_context.engine().clone(),
     )?;
     mondrian_renderer::execute_cpu_program_monitor_presentation_rgba8_with_session(
         &composite.frame,

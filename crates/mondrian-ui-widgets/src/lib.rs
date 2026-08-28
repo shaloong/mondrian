@@ -94,6 +94,7 @@ pub use vector_icon::{VectorIcon, VectorIconError};
 pub use video_scopes_surface::{VideoScopesSurface, VideoScopesTextureSet};
 pub use viewer_surface::{
     ViewerCanvasBackground, ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
-    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage,
+    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow,
+    ViewerPowerWindowAction, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
     ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
 };

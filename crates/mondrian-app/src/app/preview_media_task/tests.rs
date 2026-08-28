@@ -5,8 +5,9 @@ use super::*;
 use crate::app::preview_access_mode::MediaPreviewJobEnqueueStatus;
 use crate::app::preview_decode_residency::PreviewDecodeResidencyFamily;
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace};
-use mondrian_core::{Resolution, TimelineTime};
+use mondrian_core::{Resolution, TimelineTime, WorkingColorSpace};
 use mondrian_media::{DecodedVideoRange, DecodedVideoRangeContract, PreviewSourceColorContract};
+use mondrian_renderer::RenderInputTransform;
 
 fn test_media_key(label: &str) -> MediaPreviewKey {
     test_media_key_at(label, TimelineTime::new(1, 2).expect("exact source time"))
@@ -100,6 +101,18 @@ fn test_decoded_frame_evidence(selected_pts: Option<i64>) -> MediaPreviewDecoded
 }
 
 #[test]
+fn preview_cpu_rgba_decode_delegates_to_source_frame_preparation() {
+    let task_source = include_str!("../preview_media_task.rs");
+    assert_eq!(
+        task_source.matches("prepare_decoded_cpu_source_frame(").count(),
+        2
+    );
+    assert!(!task_source.contains("CpuEncodedFloatColorFrame"));
+    assert!(!task_source.contains("LinearFloatSource"));
+    assert!(!task_source.contains("normalize_alpha"));
+}
+
+#[test]
 fn decoded_media_frame_identity_tracks_the_complete_media_preview_key() {
     let first = test_media_key("identity");
     let different_time = with_source_time(
@@ -107,9 +120,14 @@ fn decoded_media_frame_identity_tracks_the_complete_media_preview_key() {
         TimelineTime::new(3, 4).expect("different exact source time"),
     );
     let mut different_engine = first.clone();
-    different_engine.engine = ColorEngine::Aces {
-        preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
-    };
+    different_engine.preparation_intent = RenderInputTransform::to_working(
+        WorkingColorSpace::LinearRec709,
+        false,
+        ColorEngine::Aces {
+            preset: mondrian_core::AcesConfigPreset::StudioV4Aces2Ocio25,
+        },
+    )
+    .into();
 
     let evidence = test_decoded_frame_evidence(Some(24_000));
     let first_identity = media_preview_frame_identity(&first, evidence);

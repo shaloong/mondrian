@@ -41,13 +41,17 @@ $stressPath = Join-Path $contractRootAbsolute "stress-project.json"
 $machineProfilePath = Join-Path $contractRootAbsolute "windows-alpha-reference.json"
 $playbackPlanPath = Join-Path $contractRootAbsolute "playback-reference-gates.json"
 $commercialEnginePath = Join-Path $contractRootAbsolute "windows-commercial-engine.json"
+$gpuColorProfilePath = Join-Path $contractRootAbsolute "gpu-color-qualification.json"
+$viewerDisplayProfilePath = Join-Path $contractRootAbsolute "viewer-display-qualification.json"
 $contractPaths = @(
     $manifestPath,
     $goldenPath,
     $stressPath,
     $machineProfilePath,
     $playbackPlanPath,
-    $commercialEnginePath
+    $commercialEnginePath,
+    $gpuColorProfilePath,
+    $viewerDisplayProfilePath
 )
 
 foreach ($path in $contractPaths) {
@@ -63,10 +67,40 @@ $stress = Get-Content -LiteralPath $stressPath -Raw | ConvertFrom-Json
 $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Json
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
 $commercialEngine = Get-Content -LiteralPath $commercialEnginePath -Raw | ConvertFrom-Json
+$gpuColorProfile = Get-Content -LiteralPath $gpuColorProfilePath -Raw | ConvertFrom-Json
+$viewerDisplayProfile = Get-Content -LiteralPath $viewerDisplayProfilePath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
-if ($commercialEngine.schema_version -ne 1) { Add-Issue "error" "commercial-engine.schema-unsupported" "Unsupported commercial engine schema: $($commercialEngine.schema_version)" }
+if ($commercialEngine.schema_version -ne 2) { Add-Issue "error" "commercial-engine.schema-unsupported" "Unsupported commercial engine schema: $($commercialEngine.schema_version)" }
+if ($gpuColorProfile.schema_version -ne 1) { Add-Issue "error" "gpu-color.schema-unsupported" "Unsupported GPU color profile schema: $($gpuColorProfile.schema_version)" }
+if ($gpuColorProfile.execution_policy -ne "sealed-required") { Add-Issue "error" "gpu-color.policy" "GPU color qualification must use sealed-required execution" }
+$viewerDisplayScenarioIds = @($viewerDisplayProfile.scenarios | ForEach-Object { [string]$_.id })
+if ($viewerDisplayProfile.schema_version -ne 1) { Add-Issue "error" "viewer-display.schema-unsupported" "Unsupported Viewer display profile schema: $($viewerDisplayProfile.schema_version)" }
+if ($viewerDisplayProfile.execution_policy -ne "physical-display-hitl-required") { Add-Issue "error" "viewer-display.policy" "Viewer display qualification must remain physical-display HITL-required" }
+if (@(Compare-Object @("display-p3", "hdr-pq", "icc-sdr") ($viewerDisplayScenarioIds | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "viewer-display.scenarios" "Viewer display qualification must require exact P3, HDR-PQ, and ICC scenarios"
+}
+foreach ($field in @("ready_health_required", "valid_display_snapshot_required", "external_texture_presentation_required", "zero_readback_stages_required", "carrier_reuse_evidence_required", "operator_visual_observation_required", "capability_skip_forbidden")) {
+    if (-not (Has-Property $viewerDisplayProfile.acceptance $field) -or $viewerDisplayProfile.acceptance.$field -ne $true) {
+        Add-Issue "error" "viewer-display.acceptance" "Viewer display qualification must require '$field'"
+    }
+}
+$gpuColorGateIds = @($gpuColorProfile.gates | ForEach-Object { [string]$_.id })
+if ($gpuColorGateIds.Count -lt 1 -or @($gpuColorGateIds | Sort-Object -Unique).Count -ne $gpuColorGateIds.Count) {
+    Add-Issue "error" "gpu-color.gates" "GPU color qualification gates must be non-empty and unique"
+}
+if (-not (Has-Property $commercialEngine "gpu_color")) {
+    Add-Issue "error" "commercial-engine.gpu-color-missing" "Commercial engine contract must define sealed GPU color qualification"
+} else {
+    if ($commercialEngine.gpu_color.profile_id -ne $gpuColorProfile.id) {
+        Add-Issue "error" "commercial-engine.gpu-color-profile-mismatch" "Commercial engine contract must reference the current GPU color profile"
+    }
+    $commercialGpuGateIds = @($commercialEngine.gpu_color.required_gate_ids | ForEach-Object { [string]$_ })
+    if (@(Compare-Object ($gpuColorGateIds | Sort-Object) ($commercialGpuGateIds | Sort-Object)).Count -ne 0) {
+        Add-Issue "error" "commercial-engine.gpu-color-gates-mismatch" "Commercial engine GPU color gate set must exactly match the profile"
+    }
+}
 if (-not (Has-Property $commercialEngine "complete_golden")) {
     Add-Issue "error" "commercial-engine.complete-golden-missing" "Commercial engine contract must define Complete Golden qualification"
 } else {

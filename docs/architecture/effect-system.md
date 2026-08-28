@@ -89,6 +89,31 @@ interpretation are independent author facts. `unassigned` remains a valid
 recoverable author value but blocks execution; no filename heuristic may
 silently fill it.
 
+Color curves are a first-class `PropertyValue::Curve`, not JSON or an array of
+slider approximations. Core validates two through thirty-two finite normalized
+points, exact domain endpoints, and strictly increasing x coordinates. The ten
+`builtin.curves` curve parameters are deliberately non-animatable and retain
+their definition-stable `ParameterId` plus instance-local `AnimationTrackId`.
+Effects compiles Master/R/G/B and six Hue/Luma/Saturation secondary curves to
+one immutable 256-sample resource. RGB master mode applies per channel; YRGB
+mode applies a working-space CIE-Y delta before the channel curves. RGB curves
+use endpoint-slope extrapolation outside `[0,1]`, and an exactly neutral
+secondary set bypasses RGB/HSV conversion so negative scene-linear channels are
+not altered by an identity grade.
+
+`builtin.gamut_compression` and `builtin.highlight_recovery` are ordinary
+Definition-backed, animatable, pointwise grades. Gamut Compression compiles an
+`amount` in `[0,1]` and executes the fixed ACES 1.3 Reference Gamut Compression
+in ACEScg/AP1. Linear Rec.709, Rec.2020, and P3-D65 working pixels cross fixed,
+Bradford-adapted working/AP1 matrices; ACEScg is direct. Highlight Recovery
+compiles scene-linear `threshold`, positive `rolloff`, and `[0,1]` `strength`,
+then moves only above-threshold chroma toward the neutral axis while preserving
+the exact working-space CIE Y. It repairs clipped-channel false color; it does
+not claim to reconstruct RAW samples or missing spatial detail. Both operators
+retain alpha and extended Float32 RGB, validate all authored values before graph
+publication, require no scratch frame, and share one `EffectRenderOp` contract
+across Preview and Export.
+
 Parameter cache impact describes whether a value changes output, selects a
 resource, or changes topology. Processor capabilities are not copied into every
 parameter: color/alpha domain, CPU/GPU implementation, determinism, temporal
@@ -105,7 +130,16 @@ topology-impacting parameter forces those capabilities to be resolved again.
 - `Blend`
 - `Mask`
 - `MaskSource`
+- `MaskCombine`
+- `MatteMix`
 - ordered `MultiInput`
+
+`Mask` remains the generic picture-alpha primitive. Product Power Windows use a
+different, explicit grade-matte topology: each `MaskSource` produces an
+`AlphaMask`, `MaskCombine` reduces the ordered Window stack with Add, Subtract,
+Intersect, or Difference, and `MatteMix` combines the ungraded base and graded
+result. Its RGB equation is `mix(base.rgb, graded.rgb, matte.a)` and its output
+alpha is always `base.a`; Window coverage can never become Clip transparency.
 
 `CompiledEffectGraph` is immutable production IR. Its graph, compiler-owned
 schedule, node-use counts, cache profiles, subtree signatures, output-cache decision,
@@ -341,6 +375,14 @@ deliberately contains no whole-graph CPU fallback Interface. Before the CPU
 prefix starts, its GPU grant independently admits upload bytes, physical device
 bytes, physical texture count, and optional readback bytes. Byte limits never
 stand in for resource-count limits.
+The graph-value plan is dependency ordered, not a serialized backend timeline:
+an upload first required by a later topological consumer may appear in the plan
+list after an earlier independent GPU dispatch. Preparation accepts it only when
+it is an exact, non-converting CPU-Float32-to-GPU-Float32 transfer with matching
+value format and explicit CPU/GPU lanes. It collects every such frontier value
+before GPU submission, so execution remains one-way CPU-prefix→GPU-suffix. A GPU
+readback, CPU dispatch after GPU entry, representation conversion, or external
+lane remains rejected.
 Preparation compiles exact CPU materialization use counts, rejects any input
 that is not produced by the source-closed prefix, and proves that the only
 remaining live CPU values are the ordered transfer frontier. Runtime moves last-use values,
@@ -362,9 +404,15 @@ MultiInput lowers to a distinct, bit-preserving texture copy so graph-value
 identity and last-use lifetime remain exact without a shader or color-domain
 round trip. Multiple CPU-frontier uploads are supported within this one-way
 CPU-prefix→GPU-suffix shape. `MaskSource` remains a cancellable CPU raster;
-its `AlphaMask` frontier is transferred without an RGB reinterpretation and a
-GPU `Mask` dispatch applies Add/Subtract/Intersect/Difference plus inversion
-while preserving scene-linear RGB. A later backend transition or readback
+its execution contract admits CPU NormalizedU8, CPU Float32, and GPU Float32,
+while the current heterogeneous Power Window route rasterizes it in the CPU
+prefix and transfers its `AlphaMask` without an RGB reinterpretation. GPU
+`MaskCombine` evaluates all four Window operations, and GPU `MatteMix` applies
+the combined matte while preserving the ungraded base alpha. A legacy GPU
+`Mask` dispatch still applies its generic picture-alpha algebra. Real-wgpu
+tests compare the complete `MaskSource -> MaskCombine -> MatteMix` route with
+the CPU Float32 reference, including HDR/negative RGB and programme alpha. A
+later backend transition or readback
 inside the graph, color-domain conversion beyond these non-converting typed
 transfers, temporal/stateful work, and external lanes remain typed blockers rather than
 being flattened or silently rerun.
@@ -441,7 +489,8 @@ callers materialize any dependency. Preview and Export admit that aggregate
 against their CPU active-working-set grant first. A frozen coverage tile may
 then satisfy any contained execution subregion without another decode, nested
 render, color conversion, title evaluation, or hidden allocation. Missing or
-ambiguous coverage fails closed. Mask/MaskSource uses the same exact-region
+ambiguous coverage fails closed. Mask/MaskSource/MaskCombine/MatteMix use the
+same exact-region
 contract: `PreparedMaskRaster` binds one evaluated Mask to the complete frame
 extent, validates finite geometry, flattens cubic Path segments once, and
 builds the nearest-segment index once. Every direct or tiled raster uses
@@ -502,7 +551,8 @@ its expanded input tile rather than
 allocating a zero-filled complete-frame buffer, while a complete Preview or
 Export request now automatically uses this bounded scalar tiling when direct
 execution does not fit. Regression references require
-expanded Blur, Vignette, frame-seeded Grain, Mask/MaskSource, and a finite temporal
+expanded Blur, Vignette, frame-seeded Grain, Mask/MaskSource and Power Window
+`MaskCombine`/`MatteMix`, plus a finite temporal
 fan-out/Blend/MultiInput DAG (including coordinate-seeded Dissolve) to equal the
 corresponding full-frame/current-frame reference crop in direct and tiled
 production execution. Signed past/future and duplicate-sample multi-tap gates
@@ -654,9 +704,40 @@ time-domain transform, not visual parameter automation.
   Track and Mask locks are both enforced, and no string-path UUID parser is an
   authoring authority. Preview and Export consume the same persisted Mask
   state through the sole compiled Effect program.
+- Mask motion analysis is a pure Effects service over explicit finite luminance
+  frames. Deterministic bounded feature selection and normalized patch
+  correlation feed robust median translation or an actual 8-DOF homography
+  with checked solve/refit and deterministic RANSAC. The result carries match,
+  inlier, RMS and spatial-coverage evidence; weak texture, ambiguous matches,
+  low confidence, cancellation and degenerate/non-finite projective mappings
+  fail closed. Effects owns no decoder, worker, cache or author transaction.
 - Blend mode is clip/track compositing state, not a unary color effect.
 - Adjustment layers are clips whose effects apply to the accumulated lower image.
 - Mattes should be expressed as mask/graph inputs rather than hidden UI-only flags.
+
+### Qualifier matte pipeline
+
+`builtin.qualifier` is an executable General-DAG Definition, not a color filter
+that mutates a frame's alpha in place. Its prepared operation consumes
+`SceneLinearRgb` and produces an explicit Float32 `AlphaMask`. Normal output
+feeds that value into the canonical Mask node beside the unchanged source;
+Matte Preview instead uses a separate `AlphaMask -> SceneLinearRgb` domain
+operation that produces opaque grayscale. The preview switch therefore has
+`Topology` cache impact, while the structured sample set has ordinary `Value`
+impact. Preview and Export compile and execute the same graph.
+
+`PreparedQualifier` is the sole execution interpretation for both HSL and 3D
+selection. HSL uses circular hue plus bounded saturation/luminance ranges in
+the exact working-space luminance basis and safely maps negative/extended
+scene-linear samples. The 3D mode evaluates up to sixteen normalized RGB-cube
+Include/Exclude samples as include-union followed by exclude subtraction.
+Matte refinement applies bounded separable box denoise, Gaussian feather,
+Clean Black/White, and optional inversion with cooperative checkpoints. The
+complete prepared payload has one semantic fingerprint used by graph/GPU cache
+identity. CPU execution uses two bounded scalar scratch planes; GPU execution
+uses one, two, or four explicit passes according to the admitted refinement.
+No UI-private key color, hidden matte allocation, or Preview-only algorithm is
+allowed.
 
 ## Ordering
 
@@ -733,6 +814,17 @@ uses the graph frame seed, and LUT intensity blends back to the unbounded float
 source after normalized LUT sampling. These rules are shared by media, solid,
 and adjustment-layer execution.
 
+`coverage` owns the canonical Float32 Alpha algebra shared with Renderer. It
+defines positive coverage, premultiplied-to-straight conversion, and weighted
+straight-alpha interpolation without a semantic epsilon. Exact zero is the
+only transparent identity after clamping; all positive values remain
+observable through unary Effects, Blend/MultiInput joins, temporal sampling,
+Transitions, spatial filtering, and repeated source-over. The scalar corpus
+uses an independent f64 oracle at and below the smallest nonzero 16-bit UNORM
+code. Real-wgpu compositor and Viewer-spatial tests prove the matching WGSL
+policy; GPU absence remains addressed by the separate sealed qualification
+work rather than weakening this semantic contract.
+
 Gaussian Blur admits the full authored 0–200 pixel range without a hidden
 clamp or an algorithm switch at a common radius. Three separable fractional-box
 passes approximate the matching Gaussian variance with continuous edge
@@ -749,8 +841,25 @@ saturation, applies exposure as a power-of-two scene-linear gain, and pivots
 contrast at 0.18. CPU and GPU consume the same operation values. The old
 WhiteBalance operation used additive RGB offsets without an observer,
 illuminant, or chromatic-adaptation contract and was therefore capable of
-plausible-looking false color. Its persisted author type remains modeled for
-structured diagnosis, but it is not registered as selectable or executable.
+plausible-looking false color; that operation has been replaced rather than
+retained as an execution fallback.
+
+White Balance now compiles normalized temperature (±100 mired) and tint into a
+working-RGB 3×3 matrix. Tint follows the normal to the CIE 1960 UCS Planckian
+locus, and Bradford adaptation maps the native D65 or D60 white through the
+exact Linear Rec.709, Linear Rec.2020, Linear P3-D65, or ACEScg/AP1 matrices.
+The compiled matrix is the sole CPU/GPU payload, so neither backend reinterprets
+color temperature and extended scene-linear/HDR values are not clipped.
+
+Primaries retains the persisted compatibility identity `builtin.color_wheel`
+while presenting itself as `Primaries`. Its executable contract is
+shadow-preserving Lift, Gain, signed reciprocal Gamma, then final Offset. ASC
+CDL has the new stable identity `builtin.asc_cdl` and implements the v1.2
+no-clamp SOP formula followed by Saturation using the fixed ASC Rec.709
+coefficients `[0.2126, 0.7152, 0.0722]`. Both operations preserve positive HDR
+headroom. All three grade families use the same typed, animatable PropertyBag,
+CPU Float32 reference, GPU Float32 lowering, graph/cache identity, Preview, and
+Export path.
 
 Crop is one ordinary built-in Effect, not a second `Clip` geometry model. Its
 four stable, animatable percent parameters evaluate to normalized source-edge
@@ -847,10 +956,13 @@ propagate that error instead of substituting black or unchanged pixels.
 accepts only a compiled single-source unary chain and emits an immutable fused
 point plan without wgpu objects. One preserving scene-linear, log/perceptual,
 display-linear, or display-encoded processing domain is retained as part of the
-plan rather than interpreted by the effects crate. ColorAdjust, Vignette,
-Grain, and Crop are supported in source order with a bounded eight-op pass;
-neighborhood spatial operations,
-LUT resources, custom processors, and branching graph nodes return typed
+plan rather than interpreted by the effects crate. ColorAdjust, creative
+`Lut3D`, White Balance, Primaries, ASC CDL, Vignette, Grain, and Crop are
+supported in source order with a bounded sixteen-op pass. Each primary grade
+carries only Effects-compiled matrices/vectors; a LUT operation carries only
+the immutable `PreparedLut3D` and animated intensity. Neither contains a wgpu
+object and therefore neither can create a second renderer inside the effects
+Module. Neighborhood spatial operations, custom processors, and branching graph nodes return typed
 `EffectGpuPlanBlocker` values. This makes capability checks deterministic and
 keeps renderer ownership separate from effect graph semantics.
 `lower_effect_graph_nodes_to_gpu_plan(...)` lowers only an exact unary tail
@@ -889,6 +1001,18 @@ immutable payload within that owner. The cache is LRU bounded by both entry
 count and logical bytes; an individually oversized payload is returned to the
 requesting Program but is not retained. The frame hot path never polls the
 filesystem, and Preview residency cannot mutate an Export attempt's cache.
+
+The renderer materializes the LUT subset of one fused plan as one RGBA32F 3D
+atlas. Unique LUTs are sorted by complete semantic fingerprint and occupy
+separate blue-axis slabs, so graph order and animated intensity reuse the same
+immutable device upload. The shader applies the same declared-domain
+normalization, red-fastest addressing, six-way tetrahedral interpolation, and
+unbounded-source intensity blend as the CPU reference. Multiple LUT and point
+grade nodes therefore stay in one pass without trilinear substitution. The
+device cache is LRU bounded by both entry count and logical texture bytes;
+oversized sets execute once without residency. Cache hits, misses, uploads,
+evictions, bypasses, and current residency are exported as runtime evidence.
+No-op LUT intensity binds the dummy resource and performs no upload.
 
 ## Product qualification
 

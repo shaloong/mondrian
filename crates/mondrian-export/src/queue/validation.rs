@@ -37,7 +37,8 @@ pub fn export_visual_frame_validation(
     let color_context = timeline
         .sequence
         .settings
-        .root_program_color_context(&timeline.color_environment);
+        .root_program_color_context(&timeline.color_environment)
+        .map_err(|error| format!("invalid root Program color context: {error}"))?;
     let closure = prepare_export_visual_frame_closure(
         timeline,
         &mut visual_session,

@@ -43,12 +43,13 @@ use mondrian_renderer::{
     profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
     request_adapter_with_native_video_preference, GpuColorFrameWgpuResourcePoolDiagnostics,
     GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
-    GpuCompositorUniformArenaDiagnostics, GpuNativeDecodedFrameImportSupport,
-    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCandidateTimingReceipt,
-    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample,
-    RenderColorStageDiagnostics, ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage,
-    ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError,
-    ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
+    GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
+    NativeVideoImportCandidateTimingReceipt, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, RenderColorStageDiagnostics,
+    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
+    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
+    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
@@ -179,6 +180,8 @@ pub(crate) struct HeadlessViewerGpuExecution {
     pub compositor_uniform_arena: Option<GpuCompositorUniformArenaDiagnostics>,
     /// Cumulative compositor texture-binding reuse evidence after this frame.
     pub compositor_texture_bindings: Option<GpuCompositorTextureBindingDiagnostics>,
+    /// Cumulative bounded creative-LUT residency evidence after this frame.
+    pub compositor_creative_luts: Option<GpuCreativeLutCacheDiagnostics>,
     /// Cumulative spatial-runtime evidence after this frame.
     pub spatial_diagnostics: Option<GpuViewerSpatialRuntimeDiagnostics>,
     /// Cumulative exact-contract texture-pool evidence after this record.
@@ -1036,6 +1039,7 @@ impl HeadlessViewerGpuAdapter {
                 compositor_texture_bindings: Some(
                     self.runtime.compositor_texture_binding_diagnostics(),
                 ),
+                compositor_creative_luts: Some(self.runtime.compositor_creative_lut_diagnostics()),
                 spatial_diagnostics: Some(record.spatial_diagnostics),
                 resource_pool_diagnostics: self.runtime.color_output_diagnostics().resource_pool,
                 stage_diagnostics: Some(record.stage_diagnostics),

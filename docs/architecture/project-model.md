@@ -59,6 +59,13 @@ the exact Project engine. Mondrian Standard pins Linear Rec.2020; Custom OCIO
 pins the working and output routes covered by its saved processor identity;
 ACES permits its supported explicit working spaces. An incompatible candidate
 cannot enter a saved document or author transaction.
+Execution does not persist a second resolved color bag. It derives a closed
+`ProgramColorContext` from the validated `ProjectColorEnvironment` and exact
+Sequence settings. That context has private fields and a closed encoded-or-
+working output, so deserialization, restore, Preview, and Export cannot bypass
+Project validation by assembling an engine/working/output/intent combination.
+Root construction repeats the necessary engine-qualified checks at the
+execution boundary; nested construction consumes that proven parent context.
 `Sequence::validate_author_contract` is the sole local Sequence-body seam for
 revision, settings/color, author identities, Audio Program, Track/Clip time,
 Basic Title, Transform, Effect, and Mask validation. `ProjectDocument` adds
@@ -66,6 +73,47 @@ collection-wide nesting/reference validation around it. Selected-range Export
 admission reuses the local seam only for its exact captured root/nested closure;
 it neither requires unrelated Project Sequences nor duplicates these rules in
 an execution crate.
+
+Effect author state persists only the Core-owned stable type identity,
+definition-stable parameter schemas, instance addresses, static values, and
+exact animation curves. Executable grade math is deliberately absent from the
+document. In particular, `builtin.color_wheel` remains the persisted Primaries
+compatibility key and `builtin.asc_cdl` Vec3 keyframes round-trip through
+`project.json` inside the `.mdp` archive without label- or index-based identity
+translation. `builtin.curves` persists each non-animatable curve as a validated
+ordered `PropertyValue::Curve`; `.mdp` round-trip preserves every control point,
+the effect identity, the instance `AnimationTrackId`, and the definition
+`ParameterId`. The derived 256-sample CPU/GPU resource is never serialized.
+`builtin.qualifier` follows the same split: its non-animatable
+`PropertyValue::QualifierSamples` persists one to sixteen finite normalized RGB
+samples with explicit Include/Exclude operations and at least one Include.
+Archive save/reopen preserves sample order and values, EffectId,
+AnimationTrackId, and ParameterId, then revalidates the reopened author state.
+`PreparedQualifier`, normalized execution coordinates, fingerprints, matte
+planes, and GPU pass resources are derived runtime state and never enter
+`project.json`.
+
+Gamut Compression persists only `builtin.gamut_compression` plus its stable
+`amount` Parameter Schema and authored automation. Highlight Recovery persists
+only `builtin.highlight_recovery` plus `threshold`, `rolloff`, and `strength`.
+Archive save/reopen preserves EffectId, instance AnimationTrackId,
+definition-stable ParameterId, and values; working/AP1 matrices, luminance
+coefficients, compiled grades, GPU uniforms, and shader programs are rebuilt
+from the validated Sequence working-space context.
+
+Clip Mask author state follows the same persistence boundary. `.mdp`
+save/reopen retains the ordered masks, stable `MaskId`, shape-animation
+`KeyframeId`, exact `TimelineTime`, Rectangle/Ellipse geometry, every Bezier
+position and incoming/outgoing control, scalar parameters, and operation. It
+revalidates those identities and values on reopen. Prepared mask rasters,
+flattened paths/spatial indices, `AlphaMask` planes, combined mattes, compiled
+graph nodes, and GPU textures are execution state and are never serialized.
+An optional `MaskTrackingRecipe` additionally persists stable `TrackingId`,
+motion model/direction, exact anchor and generated range, bounded settings,
+complete admitted source fingerprint, physical video-stream index, and summary
+quality evidence. The generated shapes are the authoritative ordinary shape
+keys. Decoded frames, features, image pyramids, cancellation state and result
+cache are Session/runtime resources and never enter `project.json`.
 
 `ProjectDocument::prepare_authoring_validation_certificate` is the full
 validation Interface and `ProjectDocument::validate` invokes it and discards

@@ -97,12 +97,12 @@ impl ThumbnailColorContract {
                 )
             })?;
         let source_color_space = match context
-            .missing_metadata_policy
+            .missing_metadata_policy()
             .resolve_asset_input_decision(
                 None,
                 asset.interpretation,
                 primary_video.executable_color_space(),
-                context.working_color_space,
+                context.working_color_space(),
             )
             .resolved
         {
@@ -124,7 +124,7 @@ impl ThumbnailColorContract {
             asset.interpretation.range,
             primary_video.color_range,
         );
-        let output_color_space = context.output_color_space.color().ok_or_else(|| {
+        let output_color_space = context.output_color_space().color().ok_or_else(|| {
             failure(
                 ThumbnailFailureReason::InternalOutputIdentity,
                 "thumbnail presentation requires an encoded output identity",
@@ -140,11 +140,11 @@ impl ThumbnailColorContract {
             video_stream_index: primary_video.index,
             source_color_space,
             source_range,
-            working_color_space: context.working_color_space,
+            working_color_space: context.working_color_space(),
             output_color_space,
-            tone_map: context.output_tone_map,
-            engine: context.engine.clone(),
-            output_transform: context.output_transform.clone(),
+            tone_map: context.output_tone_map(),
+            engine: context.engine().clone(),
+            output_transform: context.output_transform().clone(),
         })
     }
 
@@ -314,6 +314,12 @@ fn color_manage_float_with_session(
             DecodedRgbaEncoding::SourceLinearRgb => CpuSourceColorFrame::from(
                 LinearFloatSource::new(width, height, color.source_color_space, rgba),
             ),
+            DecodedRgbaEncoding::DataTexture => {
+                return Err(failure(
+                    ThumbnailFailureReason::NonColorDataUnsupported,
+                    "thumbnail cannot color-manage a decoded data texture",
+                ));
+            }
         };
     let input =
         RenderInputTransform::to_working(color.working_color_space, false, color.engine.clone());

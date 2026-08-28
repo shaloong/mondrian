@@ -20,7 +20,9 @@ use super::*;
 fn color_context() -> ProgramColorContext {
     let mut settings = SequenceSettings::default();
     settings.color.program_output.color_space = ColorSpace::Srgb;
-    settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+    settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid thumbnail context")
 }
 
 fn color_contract() -> ThumbnailColorContract {
@@ -405,8 +407,13 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         interpretation.method = VideoColorDetectionMethod::MissingMetadata;
         interpretation.evidence.clear();
     });
-    let mut rejecting_context = context.clone();
-    rejecting_context.missing_metadata_policy = MissingColorMetadataPolicy::RejectMedia;
+    let mut rejecting_settings = SequenceSettings::default();
+    rejecting_settings.color.program_output.color_space = ColorSpace::Srgb;
+    rejecting_settings.color.input.missing_metadata_policy =
+        MissingColorMetadataPolicy::RejectMedia;
+    let rejecting_context = rejecting_settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid rejecting thumbnail context");
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &rejecting_context)
             .expect_err("missing metadata must be rejected")
@@ -434,10 +441,12 @@ fn color_contract_rejections_and_range_authority_remain_distinct() {
         DecodedVideoRangeContract::OverrideFull
     );
 
-    let mut internal_context = context.clone();
-    internal_context.output_color_space = mondrian_core::OcioColorSpaceIdentity::Working(
-        mondrian_core::WorkingColorSpace::LinearRec709,
-    );
+    let internal_context = SequenceSettings::default()
+        .nested_render_color_context(
+            &context,
+            mondrian_core::timeline_data::NestedColorProcessing::ForceParentWorkingSpace,
+        )
+        .expect("valid nested working context");
     assert_eq!(
         ThumbnailColorContract::resolve(&asset, &internal_context)
             .expect_err("internal identity cannot cross the raster boundary")
@@ -461,8 +470,9 @@ fn unsupported_encoded_output_is_rejected_before_decode() {
     let asset = missing_video_asset();
     let mut settings = SequenceSettings::default();
     settings.color.program_output.color_space = ColorSpace::DisplayP3;
-    let context =
-        settings.root_program_color_context(&mondrian_core::ProjectColorEnvironment::default());
+    let context = settings
+        .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid Display P3 context");
     let failure = ThumbnailColorContract::resolve(&asset, &context)
         .expect_err("Widget raster currently supports only sRGB");
     assert_eq!(

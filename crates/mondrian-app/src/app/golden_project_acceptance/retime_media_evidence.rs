@@ -971,8 +971,9 @@ fn render_program_reference_with_preference(
             "retime window contains no generated titles",
         ),
     };
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let resolved = match resolve_preview_timeline(
         sequence,
         std::slice::from_ref(sequence),
@@ -1030,15 +1031,15 @@ fn render_program_reference_with_preference(
     let program_output_color = resolved
         .plan
         .color_context
-        .output_color_space
+        .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
     let boundary = RenderOutputColorBoundary::from_intent(
         RenderOutputColorBoundaryTarget::Export,
         program_output_color,
-        &resolved.plan.color_context.output_transform,
-        resolved.plan.color_context.output_tone_map,
-        resolved.plan.color_context.engine.clone(),
+        resolved.plan.color_context.output_transform(),
+        resolved.plan.color_context.output_tone_map(),
+        resolved.plan.color_context.engine().clone(),
     )?;
     let rgba = execute_cpu_output_boundary(&CpuColorFrame::working(flattened), &boundary)?
         .result
@@ -1188,7 +1189,7 @@ fn reimport_and_compare<const N: usize>(
         .active_sequence()
         .context("active Sequence is absent")?
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
         asset_id: asset.id,

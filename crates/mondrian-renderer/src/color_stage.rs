@@ -4264,9 +4264,11 @@ impl RenderOutputColorBoundaryFloat {
 /// 10-bit delivery. It applies the working -> output color transform
 /// through OCIO float processors, preserving HDR/wide-gamut precision.
 ///
-/// For export use: the caller can flatten the float frame into `[f32]` and use
-/// `ExportFrameContract::pack_rgba_f32()` to produce `rgba64le` pipe bytes
-/// without an intermediate RGBA8 round-trip.
+/// For export use: the caller binds this encoded-float frame to an explicit
+/// Export-owned pipe storage contract. A 10/12-bit codec contract performs one
+/// final UNORM16 pack into `rgba64le`; true Float16/Float32 master contracts
+/// preserve their finite extended range. No path requires an intermediate
+/// RGBA8 round-trip.
 ///
 /// For display/view use: the caller receives the same float precision without
 /// an intermediate u8 boundary, but must still encode for presentation.
@@ -5094,6 +5096,19 @@ mod tests {
         device_type: String,
         driver: String,
         driver_info: String,
+    }
+
+    async fn qualification_gpu_context(gate: &'static str) -> Option<std::sync::Arc<GpuContext>> {
+        let policy = crate::GpuColorQualificationExecutionPolicy::from_environment()
+            .unwrap_or_else(|error| panic!("invalid GPU color qualification policy: {error}"));
+        match policy.admit_adapter(gate, GpuContext::new().await) {
+            Ok(Some(context)) => Some(context),
+            Ok(None) => {
+                eprintln!("skipping diagnostic GPU color gate '{gate}': no GPU adapter available");
+                None
+            }
+            Err(error) => panic!("{error}"),
+        }
     }
 
     #[test]
@@ -6076,8 +6091,7 @@ mod tests {
     #[tokio::test]
     async fn gpu_output_boundary_runtime_matches_cpu_for_all_standard_views_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping real wgpu display/view parity test: no GPU adapter available");
+        let Some(context) = qualification_gpu_context("standard-all-views-accuracy").await else {
             return;
         };
         let frame = standard_view_parity_working_frame();
@@ -6163,8 +6177,7 @@ mod tests {
     #[tokio::test]
     async fn gpu_standard_rec709_view_matches_cpu_rgba8_on_real_wgpu_device() {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping real wgpu Standard Rec.709 RGBA8 parity test: no GPU adapter");
+        let Some(context) = qualification_gpu_context("standard-rec709-accuracy").await else {
             return;
         };
         let frame = standard_view_parity_working_frame();
@@ -6218,13 +6231,13 @@ mod tests {
     }
 
     async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
+        gate: &'static str,
         engine: ColorEngine,
         intent: OutputTransformIntent,
         first_frame_id: u64,
     ) {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
-        let Ok(context) = GpuContext::new().await else {
-            eprintln!("skipping real wgpu PQ display/view accuracy test: no GPU adapter available");
+        let Some(context) = qualification_gpu_context(gate).await else {
             return;
         };
         let frame = pq_accuracy_working_frame();
@@ -6305,6 +6318,7 @@ mod tests {
     #[tokio::test]
     async fn gpu_standard_pq_view_meets_delta_e_itp_budget_on_real_wgpu_device() {
         assert_gpu_pq_view_meets_delta_e_itp_budget(
+            "standard-pq-delta-e-itp",
             ColorEngine::mondrian_standard(),
             OutputTransformIntent::mondrian_standard(),
             1_250,
@@ -6316,6 +6330,7 @@ mod tests {
     async fn gpu_aces_pq_intent_meets_delta_e_itp_budget_on_real_wgpu_device() {
         let preset = AcesConfigPreset::StudioV4Aces2Ocio25;
         assert_gpu_pq_view_meets_delta_e_itp_budget(
+            "aces-pq-delta-e-itp",
             ColorEngine::Aces { preset },
             OutputTransformIntent::aces_preset(preset),
             1_251,
@@ -6328,6 +6343,7 @@ mod tests {
     async fn gpu_output_boundary_runtime_smoke_report_on_real_wgpu_device() -> anyhow::Result<()> {
         ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
         let tolerance = 3;
+        let qualification_policy = crate::GpuColorQualificationExecutionPolicy::from_environment()?;
         let context = match GpuContext::new().await {
             Ok(context) => context,
             Err(err) => {
@@ -6368,6 +6384,11 @@ mod tests {
                     tolerance,
                 };
                 emit_gpu_output_smoke_report(&report)?;
+                qualification_policy.admit_capability(
+                    "output-smoke",
+                    "real-wgpu-adapter",
+                    false,
+                )?;
                 return Ok(());
             }
         };

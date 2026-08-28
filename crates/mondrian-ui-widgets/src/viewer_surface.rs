@@ -7,6 +7,10 @@
 
 mod model;
 mod paint;
+mod power_window;
+
+use power_window::PowerWindowEditor;
+pub use power_window::{ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape};
 
 use mondrian_core::{Color, SampleAspectRatio};
 use mondrian_editor_state::Action;
@@ -266,6 +270,9 @@ pub type ViewerPreviewQualityAction = dyn Fn(f32) -> Action;
 /// Maps a viewer zoom chip activation to an editor action.
 pub type ViewerZoomAction = dyn Fn(Option<f32>) -> Action;
 
+/// Maps one completed Viewer Power Window gesture to an authoring action.
+pub type ViewerPowerWindowAction = dyn Fn(ViewerPowerWindowShape) -> Action;
+
 /// One selectable viewer zoom mode.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewerZoomOption {
@@ -325,6 +332,8 @@ pub struct ViewerSurface {
     on_control: Option<Box<ViewerControlAction>>,
     on_zoom: Option<Box<ViewerZoomAction>>,
     on_preview_quality: Option<Box<ViewerPreviewQualityAction>>,
+    power_window_editor: Option<PowerWindowEditor>,
+    on_power_window_edit: Option<Box<ViewerPowerWindowAction>>,
     overlay_viewport: Cell<Option<Rect>>,
     control_icons: Vec<(ViewerControl, VectorIcon)>,
     play_pause_icon: Option<VectorIcon>,
@@ -368,6 +377,8 @@ impl ViewerSurface {
             on_control: None,
             on_zoom: None,
             on_preview_quality: None,
+            power_window_editor: None,
+            on_power_window_edit: None,
             overlay_viewport: Cell::new(None),
             control_icons: Vec::new(),
             play_pause_icon: None,
@@ -536,6 +547,21 @@ impl ViewerSurface {
     /// Set a custom action for selecting a viewer zoom option.
     pub fn on_zoom(mut self, action: impl Fn(Option<f32>) -> Action + 'static) -> Self {
         self.on_zoom = Some(Box::new(action));
+        self
+    }
+
+    /// Present one selected Power Window in normalized canvas coordinates.
+    pub fn with_power_window(mut self, window: ViewerPowerWindow) -> Self {
+        self.power_window_editor = Some(PowerWindowEditor::new(window));
+        self
+    }
+
+    /// Set the one-action commit mapper for completed Power Window gestures.
+    pub fn on_power_window_edit(
+        mut self,
+        action: impl Fn(ViewerPowerWindowShape) -> Action + 'static,
+    ) -> Self {
+        self.on_power_window_edit = Some(Box::new(action));
         self
     }
 
@@ -724,7 +750,8 @@ impl ViewerSurface {
             || self.hovered_dropdown_index.is_some()
             || self.pressed_dropdown_index.is_some()
             || self.focused
-            || self.focus_visible;
+            || self.focus_visible
+            || self.power_window_editor.as_mut().is_some_and(PowerWindowEditor::cancel);
         self.hovered_control = None;
         self.pressed_control = None;
         self.hovered_zoom = false;
@@ -764,6 +791,14 @@ impl Widget for ViewerSurface {
 
         match event {
             UiEvent::MouseMove { position, .. } => {
+                let canvas = self.canvas_rect();
+                if let Some(editor) = self.power_window_editor.as_mut()
+                    && (editor.is_dragging() || canvas.contains(*position))
+                    && editor.pointer_move(canvas, *position)
+                {
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let hovered = self.control_at(*position);
                 let hovered_zoom = self.zoom_at(*position);
                 let hovered_preview_quality = self.preview_quality_at(*position);
@@ -809,6 +844,14 @@ impl Widget for ViewerSurface {
                     return EventResult::Ignored;
                 }
                 self.focus_from_pointer(ctx);
+                let canvas = self.canvas_rect();
+                if let Some(editor) = self.power_window_editor.as_mut()
+                    && editor.pointer_down(canvas, *position)
+                {
+                    ctx.request_pointer_capture(self.id);
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 if let Some(control) = self.control_at(*position) {
                     self.open_dropdown = None;
                     self.hovered_dropdown_index = None;
@@ -850,6 +893,21 @@ impl Widget for ViewerSurface {
                 EventResult::Handled
             }
             UiEvent::MouseUp { position, button: MouseButton::Left, .. } => {
+                let canvas = self.canvas_rect();
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                    let committed = self
+                        .power_window_editor
+                        .as_mut()
+                        .and_then(|editor| editor.pointer_up(canvas, *position));
+                    ctx.release_pointer_capture(self.id);
+                    if let (Some(shape), Some(mapper)) =
+                        (committed, self.on_power_window_edit.as_ref())
+                    {
+                        (ctx.dispatch)(mapper(shape));
+                    }
+                    ctx.request_repaint();
+                    return EventResult::Handled;
+                }
                 let pressed_dropdown_index = self.pressed_dropdown_index.take();
                 if let Some((dropdown, hovered_index)) = self.dropdown_item_at(*position)
                     && pressed_dropdown_index == Some(hovered_index)
@@ -905,6 +963,9 @@ impl Widget for ViewerSurface {
                 EventResult::Ignored
             }
             UiEvent::FocusLost => {
+                if self.power_window_editor.as_ref().is_some_and(PowerWindowEditor::is_dragging) {
+                    ctx.release_pointer_capture(self.id);
+                }
                 if self.clear_interaction_state() {
                     ctx.request_repaint();
                 }
@@ -1024,6 +1085,9 @@ impl Widget for ViewerSurface {
             );
         }
         paint::paint_safe_guides(ctx, canvas, self.enabled);
+        if let Some(editor) = &self.power_window_editor {
+            editor.paint(ctx, canvas);
+        }
         ctx.pop_clip();
         ctx.pop_clip();
 
@@ -1420,7 +1484,7 @@ fn status_badge_colors(surface: &ViewerSurface, ctx: &PaintContext) -> (Color, C
 mod tests {
     use super::*;
     use crate::test_utils::{make_event_ctx, DummyFocus, DummyShortcut, DummyTooltip};
-    use mondrian_ui_core::widget::DrawCommandEncoder;
+    use mondrian_ui_core::widget::{DrawCommandEncoder, PointerCaptureRequest};
     use mondrian_ui_theme::ThemePreset;
     use std::cell::RefCell;
 
@@ -1815,6 +1879,79 @@ mod tests {
                 Action::GoToEnd
             ]
         );
+    }
+
+    #[test]
+    fn power_window_drag_captures_pointer_and_dispatches_once_on_release() {
+        let mut viewer = ViewerSurface::new("Scene 01", 1920, 1080)
+            .with_power_window(ViewerPowerWindow {
+                shape: ViewerPowerWindowShape::Rectangle {
+                    x: 0.2,
+                    y: 0.2,
+                    width: 0.4,
+                    height: 0.4,
+                    corner_radius: 0.05,
+                },
+                editable: true,
+            })
+            .on_power_window_edit(|_| Action::DeselectAll);
+        viewer.layout(Rect::new(0.0, 0.0, 500.0, 320.0));
+        let canvas = viewer.canvas_rect();
+        let start = Point::new(
+            canvas.x + canvas.width * 0.4,
+            canvas.y + canvas.height * 0.4,
+        );
+        let end = Point::new(start.x + 24.0, start.y + 12.0);
+        let actions = RefCell::new(Vec::<Action>::new());
+        let dispatch = |action| actions.borrow_mut().push(action);
+        let mut focus = DummyFocus;
+        let mut shortcut = DummyShortcut;
+        let mut tooltip = DummyTooltip;
+        let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
+
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseDown {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Capture(viewer.id()))
+        );
+        ctx.requests.pointer_capture = None;
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseMove { position: end, modifiers: Modifiers::none() },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert!(
+            actions.borrow().is_empty(),
+            "drag preview must not author intermediate actions"
+        );
+        assert_eq!(
+            viewer.event(
+                &UiEvent::MouseUp {
+                    position: end,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                },
+                &mut ctx,
+            ),
+            EventResult::Handled
+        );
+        assert_eq!(
+            ctx.requests.pointer_capture,
+            Some(PointerCaptureRequest::Release(viewer.id()))
+        );
+        assert_eq!(actions.borrow().as_slice(), &[Action::DeselectAll]);
     }
 
     #[test]

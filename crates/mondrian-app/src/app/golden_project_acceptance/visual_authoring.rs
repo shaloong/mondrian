@@ -820,8 +820,9 @@ fn effect_kernel_node_counts(graph: &mondrian_effects::CompiledEffectGraph) -> (
 
 fn execute_visual_frame(state: &AppState, frame: i64) -> anyhow::Result<VisualExecutionEvidence> {
     let sequence = state.active_sequence().context("active Sequence is absent")?;
-    let color_context =
-        sequence.settings.root_program_color_context(state.project_color_environment());
+    let color_context = sequence
+        .settings
+        .root_program_color_context(state.project_color_environment())?;
     let program = PreparedVisualProgram::prepare(sequence)?;
     let export_plan = evaluate_prepared_visual_program(
         &program,

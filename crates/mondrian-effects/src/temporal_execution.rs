@@ -11,7 +11,10 @@ mod schedule;
 use crate::adjustment::{
     apply_render_op_f32_region_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
 };
-use crate::execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled};
+use crate::execution::{
+    apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled,
+    combine_alpha_masks_f32_controlled, invert_alpha_mask_f32_in_place, matte_mix_f32_controlled,
+};
 use crate::execution_session::EffectTemporalCachedOutput;
 use crate::mask_raster::PreparedMaskRasterSet;
 use crate::{
@@ -1701,7 +1704,7 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             self.working.release_frame()?;
                             output
                         }
-                        EffectGraphNodeKind::MaskSource { .. } => {
+                        EffectGraphNodeKind::MaskSource { invert, .. } => {
                             let raster = self
                                 .mask_rasters
                                 .get(&context)
@@ -1718,14 +1721,59 @@ impl<'a> ScalarTemporalEvaluator<'a> {
                             }
                             self.working.reserve_frame()?;
                             self.working.ensure_transient(raster.max_scratch_bytes())?;
-                            raster
+                            let mut output = raster
                                 .rasterize_rgba_f32(
                                     self.input_roi.region(),
                                     &self.request.cancellation,
                                 )
-                                .map_err(|error| EffectTemporalExecutionError::MaskRasterFailed {
-                                    source: error,
-                                })?
+                                .map_err(|error| {
+                                    EffectTemporalExecutionError::MaskRasterFailed { source: error }
+                                })?;
+                            if invert {
+                                invert_alpha_mask_f32_in_place(&mut output);
+                            }
+                            output
+                        }
+                        EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                            let left = self.temporal_program.address_for_input(context, left)?;
+                            let right = self.temporal_program.address_for_input(context, right)?;
+                            let mut output = self.take_value(left)?;
+                            let right = self.take_value(right)?;
+                            if output.len() != right.len() {
+                                return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                                    reason: "MaskCombine values do not cover the same region",
+                                });
+                            }
+                            let cancellation = self.request.cancellation.clone();
+                            combine_alpha_masks_f32_controlled(
+                                &mut output,
+                                &right,
+                                mask_op,
+                                &mut || temporal_cancellation_checkpoint(&cancellation),
+                            )?;
+                            self.working.release_frame()?;
+                            output
+                        }
+                        EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                            let base = self.temporal_program.address_for_input(context, base)?;
+                            let graded =
+                                self.temporal_program.address_for_input(context, graded)?;
+                            let matte = self.temporal_program.address_for_input(context, matte)?;
+                            let mut output = self.take_value(base)?;
+                            let graded = self.take_value(graded)?;
+                            let matte = self.take_value(matte)?;
+                            if output.len() != graded.len() || output.len() != matte.len() {
+                                return Err(EffectTemporalExecutionError::InvalidRoiProjection {
+                                    reason: "MatteMix values do not cover the same region",
+                                });
+                            }
+                            let cancellation = self.request.cancellation.clone();
+                            matte_mix_f32_controlled(&mut output, &graded, &matte, &mut || {
+                                temporal_cancellation_checkpoint(&cancellation)
+                            })?;
+                            self.working.release_frame()?;
+                            self.working.release_frame()?;
+                            output
                         }
                         EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                             let Some(first) = inputs.first().copied() else {
@@ -2180,19 +2228,7 @@ fn temporal_cancellation_checkpoint(
 }
 
 fn mix_straight_rgba(current: [f32; 4], past: [f32; 4], mix: f32) -> [f32; 4] {
-    let current_alpha = current[3].clamp(0.0, 1.0);
-    let past_alpha = past[3].clamp(0.0, 1.0);
-    let inverse = 1.0 - mix;
-    let alpha = current_alpha.mul_add(inverse, past_alpha * mix);
-    if alpha <= f32::EPSILON {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
-    [
-        (current[0] * current_alpha * inverse + past[0] * past_alpha * mix) / alpha,
-        (current[1] * current_alpha * inverse + past[1] * past_alpha * mix) / alpha,
-        (current[2] * current_alpha * inverse + past[2] * past_alpha * mix) / alpha,
-        alpha,
-    ]
+    crate::coverage::mix_straight_rgba(current, past, mix)
 }
 
 fn mix_temporal_frames_in_place_controlled<E>(
@@ -2226,6 +2262,14 @@ fn mix_temporal_frames_controlled<E>(
 fn render_op_name(op: &crate::EffectRenderOp) -> &'static str {
     match op {
         crate::EffectRenderOp::ColorAdjust { .. } => "color_adjust",
+        crate::EffectRenderOp::WhiteBalance { .. } => "white_balance",
+        crate::EffectRenderOp::Primaries { .. } => "primaries",
+        crate::EffectRenderOp::AscCdl { .. } => "asc_cdl",
+        crate::EffectRenderOp::GamutCompression { .. } => "gamut_compression",
+        crate::EffectRenderOp::HighlightRecovery { .. } => "highlight_recovery",
+        crate::EffectRenderOp::ColorCurves { .. } => "color_curves",
+        crate::EffectRenderOp::Qualifier { .. } => "qualifier",
+        crate::EffectRenderOp::MattePreview { .. } => "matte_preview",
         crate::EffectRenderOp::GaussianBlur { .. } => "gaussian_blur",
         crate::EffectRenderOp::Sharpen { .. } => "sharpen",
         crate::EffectRenderOp::Vignette { .. } => "vignette",
@@ -2877,7 +2921,7 @@ mod tests {
     }
 
     #[test]
-    fn temporal_mask_dag_matches_full_frame_reference_in_direct_and_tiled_execution() {
+    fn temporal_power_window_dag_matches_full_frame_reference_in_direct_and_tiled_execution() {
         let offset = TimelineTime::new(1, 2).expect("offset");
         let mask_shape = crate::mask::MaskShape::Path {
             points: vec![
@@ -2887,6 +2931,10 @@ mod tests {
                 crate::mask::BezierPoint::new(glam::Vec2::new(0.18, 0.76)),
             ],
             closed: true,
+        };
+        let secondary_shape = crate::mask::MaskShape::Ellipse {
+            center: glam::Vec2::new(0.58, 0.48),
+            radii: glam::Vec2::new(0.24, 0.31),
         };
         let graph = bind_graph(
             EffectRenderGraph {
@@ -2912,19 +2960,37 @@ mod tests {
                             feather: 2.5,
                             expansion: 1.0,
                             opacity: 0.8,
+                            invert: false,
                         },
                     },
                     EffectGraphNode {
                         id: EffectGraphNodeId(3),
-                        kind: EffectGraphNodeKind::Mask {
-                            input: EffectGraphNodeId(1),
-                            mask: EffectGraphNodeId(2),
-                            invert: false,
-                            mask_op: crate::mask::MaskOp::Add,
+                        kind: EffectGraphNodeKind::MaskSource {
+                            shape: secondary_shape.clone(),
+                            feather: 1.25,
+                            expansion: -0.5,
+                            opacity: 0.65,
+                            invert: true,
+                        },
+                    },
+                    EffectGraphNode {
+                        id: EffectGraphNodeId(4),
+                        kind: EffectGraphNodeKind::MaskCombine {
+                            left: EffectGraphNodeId(2),
+                            right: EffectGraphNodeId(3),
+                            mask_op: crate::mask::MaskOp::Difference,
+                        },
+                    },
+                    EffectGraphNode {
+                        id: EffectGraphNodeId(5),
+                        kind: EffectGraphNodeKind::MatteMix {
+                            base: EffectGraphNodeId(0),
+                            graded: EffectGraphNodeId(1),
+                            matte: EffectGraphNodeId(4),
                         },
                     },
                 ],
-                output: Some(EffectGraphNodeId(3)),
+                output: Some(EffectGraphNodeId(5)),
             },
             dag_contract(EffectTemporalSpan::Finite(offset)),
         );
@@ -2942,37 +3008,12 @@ mod tests {
         let demands = collect_temporal_frame_demands(&graph, &request).expect("Mask demands");
         assert_eq!(demands.requests()[0].input_roi().region(), partial_roi);
 
-        let reference_graph = bind_graph(
-            EffectRenderGraph {
-                nodes: vec![
-                    EffectGraphNode {
-                        id: EffectGraphNodeId(0),
-                        kind: EffectGraphNodeKind::Source,
-                    },
-                    EffectGraphNode {
-                        id: EffectGraphNodeId(1),
-                        kind: EffectGraphNodeKind::MaskSource {
-                            shape: mask_shape,
-                            feather: 2.5,
-                            expansion: 1.0,
-                            opacity: 0.8,
-                        },
-                    },
-                    EffectGraphNode {
-                        id: EffectGraphNodeId(2),
-                        kind: EffectGraphNodeKind::Mask {
-                            input: EffectGraphNodeId(0),
-                            mask: EffectGraphNodeId(1),
-                            invert: false,
-                            mask_op: crate::mask::MaskOp::Add,
-                        },
-                    },
-                ],
-                output: Some(EffectGraphNodeId(2)),
-            },
-            dag_contract(EffectTemporalSpan::None),
-        );
         let past_time = output_time.checked_sub(offset).expect("past time");
+        let current = (0..extent.height())
+            .flat_map(|y| {
+                (0..extent.width()).map(move |x| GradientProvider::pixel(output_time, x, y))
+            })
+            .collect::<Vec<_>>();
         let mixed = (0..extent.height())
             .flat_map(|y| {
                 (0..extent.width()).map(move |x| {
@@ -2987,20 +3028,43 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
-        let reference = apply_compiled_effect_graph_rgba_f32(
-            &mixed,
+        let first_matte = crate::mask_raster::rasterize_mask_shape_f32(
+            &mask_shape,
             extent.width(),
             extent.height(),
-            &reference_graph,
-            0,
+            2.5,
+            1.0,
+            0.8,
         )
-        .expect("full-frame Mask reference");
+        .expect("first full-frame matte");
+        let second_matte = crate::mask_raster::rasterize_mask_shape_f32(
+            &secondary_shape,
+            extent.width(),
+            extent.height(),
+            1.25,
+            -0.5,
+            0.65,
+        )
+        .expect("second full-frame matte");
+        let mut combined_matte =
+            first_matte.into_iter().map(|alpha| [0.0, 0.0, 0.0, alpha]).collect::<Vec<_>>();
+        let inverted_secondary = second_matte
+            .into_iter()
+            .map(|alpha| [0.0, 0.0, 0.0, 1.0 - alpha])
+            .collect::<Vec<_>>();
+        crate::execution::combine_alpha_masks_f32_in_place(
+            &mut combined_matte,
+            &inverted_secondary,
+            crate::mask::MaskOp::Difference,
+        );
+        let mut reference = current;
+        crate::execution::matte_mix_f32_in_place(&mut reference, &mixed, &combined_matte);
 
         let mut direct_session = EffectExecutionSession::default();
         let mut direct_provider = GradientProvider::new(extent);
         let direct = direct_session
             .execute_temporal_roi_f32(&graph, &request, &mut direct_provider)
-            .expect("direct Mask tile");
+            .expect("direct Power Window tile");
         assert_eq!(
             direct.tile().pixels(),
             crop_frame(
@@ -3022,7 +3086,7 @@ mod tests {
         );
         let mask_rasters =
             PreparedMaskRasterSet::prepare(graph.graph(), extent, &full_request.cancellation)
-                .expect("prepared Mask geometry");
+                .expect("prepared Power Window geometry");
         let insufficient_budget = mask_rasters.retained_bytes() - 1;
         let mut rejected_session = EffectExecutionSession::new(
             EffectExecutionSessionConfig::uncached(insufficient_budget),
@@ -3047,7 +3111,7 @@ mod tests {
         let mut tiled_provider = GradientProvider::new(extent);
         let tiled = tiled_session
             .execute_temporal_f32(&graph, &full_request, &mut tiled_provider)
-            .expect("tiled Mask execution");
+            .expect("tiled Power Window execution");
         assert!(tiled.execution_tiles() > 1);
         assert!(tiled.peak_working_bytes() <= budget);
         assert_eq!(tiled.tile().pixels(), reference);

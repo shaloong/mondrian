@@ -4,13 +4,17 @@
 //! winit/wgpu display capabilities. It generates a `DisplayOutputSnapshot`
 //! from the live window, surface, adapter, and display management policy.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(test)]
 use crate::app::preview_display_contract::preview_blockers_from_snapshot;
-use mondrian_core::color_models::{DisplayManagementPolicy, MonitorProfileReference};
-use mondrian_core::display_calibration::DisplayCalibrationLut3d;
+use mondrian_core::color_models::{
+    DisplayCalibrationPolicy, DisplayManagementPolicy, DisplayManagementPolicyError,
+    MonitorOutputIntent,
+};
+use mondrian_core::display_calibration::{DisplayCalibrationLut3d, IccProfileFingerprint};
 use mondrian_core::display_contract::*;
 use mondrian_core::display_probe::{
     compute_display_blockers, resolve_hdr_status_with_monitor_evidence, MonitorHdrReadiness,
@@ -67,7 +71,11 @@ pub fn resolve_display_snapshot(
         DisplayIccProfileProbeResult::unsupported("ICC profile not requested")
     };
 
-    let resolved_output_color_space = resolve_output_color_space(policy, output_color_space);
+    let (resolved_output_color_space, policy_blocker) =
+        match policy.resolve_output_color_space(engine, output_color_space) {
+            Ok(color_space) => (color_space, None),
+            Err(error) => (output_color_space, Some(policy_resolution_blocker(error))),
+        };
     let (monitor_profile_status, calibration) =
         resolve_monitor_profile_status(policy, &profile_probe, resolved_output_color_space);
     let hdr_probe = display_hdr_state_probe(DisplayProfileProbeTarget::new(
@@ -86,7 +94,7 @@ pub fn resolve_display_snapshot(
     let monitor_hdr = resolve_monitor_hdr_capability(&hdr_probe, display_hdr_info);
 
     let hdr_status = resolve_hdr_status_with_monitor_evidence(
-        policy.viewer_mode,
+        policy.viewer_mode(),
         output_color_space,
         surface_supports_hdr,
         hdr_mode_str,
@@ -105,6 +113,9 @@ pub fn resolve_display_snapshot(
     if let Some(blocker) = ocio_blocker {
         blockers.push(blocker);
     }
+    if let Some(blocker) = policy_blocker {
+        blockers.push(blocker);
+    }
 
     let warnings = compute_display_warnings(&monitor_profile_status, &hdr_status);
 
@@ -116,12 +127,13 @@ pub fn resolve_display_snapshot(
         DisplayValidationStatus::Pass
     };
 
-    let requested_viewer_mode = format!("{:?}", policy.viewer_mode);
+    let requested_viewer_mode = format!("{:?}", policy.viewer_mode());
 
     let supported_color_space_names: Vec<String> =
         supported_surface_color_spaces.iter().map(|cs| format!("{cs:?}")).collect();
 
     let snapshot = DisplayOutputSnapshot {
+        display_management_policy: policy.clone(),
         display_id: DisplayId {
             name: display_name,
             position: display_position,
@@ -247,12 +259,71 @@ fn resolve_monitor_hdr_capability(
     }
 }
 
-fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
+/// Whether the active OS compositor and monitor are both ready to accept an
+/// HDR native-surface carrier now. Format/color-space enumeration alone is not
+/// sufficient: DXGI can enumerate PQ for a format while Advanced Color is off.
+pub(super) fn active_display_hdr_presentation_ready(
+    display_position: (i32, i32),
+    display_physical_size: (u32, u32),
+    display_hdr_info: wgpu::DisplayHdrInfo,
+) -> bool {
+    let target = DisplayProfileProbeTarget::new(display_position, display_physical_size);
+    let probe = display_hdr_state_probe(target);
     matches!(
-        &policy.monitor_profile,
-        MonitorProfileReference::IccProfile { profile_id }
-            if profile_id.trim().is_empty() || profile_id.trim().eq_ignore_ascii_case("os-default")
+        resolve_monitor_hdr_capability(&probe, display_hdr_info),
+        MonitorHdrReadiness::Ready { .. }
     )
+}
+
+fn should_probe_os_icc_profile(policy: &DisplayManagementPolicy) -> bool {
+    matches!(policy.calibration(), DisplayCalibrationPolicy::OsDefault)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DisplayCalibrationCacheKey {
+    source_color_space: ColorSpace,
+    profile_fingerprint: IccProfileFingerprint,
+    rendering_intent: mondrian_core::IccRenderingIntent,
+}
+
+const DISPLAY_CALIBRATION_CACHE_CAPACITY: usize = 8;
+type DisplayCalibrationCacheEntry = (DisplayCalibrationCacheKey, Arc<DisplayCalibrationLut3d>);
+type DisplayCalibrationCache = Mutex<VecDeque<DisplayCalibrationCacheEntry>>;
+static DISPLAY_CALIBRATION_CACHE: OnceLock<DisplayCalibrationCache> = OnceLock::new();
+
+fn cached_display_calibration(
+    policy: &DisplayManagementPolicy,
+    source_color_space: ColorSpace,
+    profile_bytes: &[u8],
+) -> Result<Arc<DisplayCalibrationLut3d>, mondrian_core::display_calibration::DisplayCalibrationError>
+{
+    let key = DisplayCalibrationCacheKey {
+        source_color_space,
+        profile_fingerprint: IccProfileFingerprint::from_bytes(profile_bytes),
+        rendering_intent: policy.icc_rendering_intent(),
+    };
+    let cache = DISPLAY_CALIBRATION_CACHE
+        .get_or_init(|| Mutex::new(VecDeque::with_capacity(DISPLAY_CALIBRATION_CACHE_CAPACITY)));
+    if let Ok(mut entries) = cache.lock()
+        && let Some(index) = entries.iter().position(|entry| entry.0 == key)
+        && let Some(entry) = entries.remove(index)
+    {
+        let calibration = Arc::clone(&entry.1);
+        entries.push_front(entry);
+        return Ok(calibration);
+    }
+
+    let calibration = Arc::new(DisplayCalibrationLut3d::from_icc_bytes_with_intent(
+        source_color_space,
+        profile_bytes,
+        policy.icc_rendering_intent(),
+    )?);
+    if let Ok(mut entries) = cache.lock() {
+        entries.retain(|entry| entry.0 != key);
+        entries.push_front((key, Arc::clone(&calibration)));
+        entries.truncate(DISPLAY_CALIBRATION_CACHE_CAPACITY);
+    }
+    Ok(calibration)
 }
 
 /// Resolve the monitor profile status from policy and the platform ICC probe.
@@ -261,26 +332,27 @@ fn resolve_monitor_profile_status(
     profile_probe: &DisplayIccProfileProbeResult,
     source_color_space: ColorSpace,
 ) -> (MonitorProfileStatus, Option<Arc<DisplayCalibrationLut3d>>) {
-    match &policy.monitor_profile {
-        MonitorProfileReference::MatchOutputColorSpace => {
-            (MonitorProfileStatus::NotRequested, None)
+    match policy.calibration() {
+        DisplayCalibrationPolicy::Disabled => {
+            let source = match policy.monitor_output() {
+                MonitorOutputIntent::MatchProgramOutput => {
+                    return (MonitorProfileStatus::NotRequested, None);
+                }
+                MonitorOutputIntent::ColorSpace(_) => MonitorProfileSource::UserConfigured,
+                MonitorOutputIntent::OcioDisplayView { .. } => MonitorProfileSource::OcioConfig,
+            };
+            (
+                MonitorProfileStatus::ManagedColorSpace { color_space: source_color_space, source },
+                None,
+            )
         }
-        MonitorProfileReference::ColorSpace(cs) => (
-            MonitorProfileStatus::ManagedColorSpace {
-                color_space: *cs,
-                source: MonitorProfileSource::UserConfigured,
-            },
-            None,
-        ),
-        MonitorProfileReference::OcioDisplay { display: _ } => (
-            MonitorProfileStatus::ManagedColorSpace {
-                color_space: ColorSpace::Rec709,
-                source: MonitorProfileSource::OcioConfig,
-            },
-            None,
-        ),
-        MonitorProfileReference::IccProfile { profile_id } => {
-            let (profile_reference, profile_bytes) = match explicit_profile_path(profile_id) {
+        DisplayCalibrationPolicy::OsDefault | DisplayCalibrationPolicy::IccProfilePath(_) => {
+            let profile_path = match policy.calibration() {
+                DisplayCalibrationPolicy::OsDefault => None,
+                DisplayCalibrationPolicy::IccProfilePath(path) => Some(path.as_str()),
+                DisplayCalibrationPolicy::Disabled => unreachable!("matched above"),
+            };
+            let (profile_reference, profile_bytes) = match explicit_profile_path(profile_path) {
                 ExplicitProfilePath::Path(path) => {
                     let reference = path.display().to_string();
                     let bytes = match std::fs::read(&path) {
@@ -299,7 +371,7 @@ fn resolve_monitor_profile_status(
                 }
                 ExplicitProfilePath::UseOsDefault => {
                     let reference =
-                        profile_probe.source_reference().unwrap_or_else(|| profile_id.clone());
+                        profile_probe.source_reference().unwrap_or_else(|| "os-default".to_owned());
                     let bytes = if let Some(bytes) = &profile_probe.profile_bytes {
                         bytes.clone()
                     } else if let Some(path) = &profile_probe.profile_path {
@@ -334,13 +406,6 @@ fn resolve_monitor_profile_status(
                     };
                     (reference, bytes)
                 }
-                ExplicitProfilePath::UnresolvedId => {
-                    return (MonitorProfileStatus::IccProfileUnsupported {
-                        feature_code: "icc_profile_registry".to_owned(),
-                        profile_path: Some(profile_id.clone()),
-                        reason: "ICC profile id registry is not implemented; use an absolute profile path or profile_id='os-default'".to_owned(),
-                    }, None);
-                }
             };
             let parsed = match mondrian_core::icc::parse_icc_display_profile(&profile_bytes) {
                 Ok(parsed) => parsed,
@@ -355,9 +420,8 @@ fn resolve_monitor_profile_status(
                 }
             };
 
-            match DisplayCalibrationLut3d::from_icc_bytes(source_color_space, &profile_bytes) {
+            match cached_display_calibration(policy, source_color_space, &profile_bytes) {
                 Ok(calibration) => {
-                    let calibration = Arc::new(calibration);
                     (
                         MonitorProfileStatus::ManagedIccCalibration {
                             source_color_space,
@@ -385,50 +449,14 @@ fn resolve_monitor_profile_status(
 enum ExplicitProfilePath {
     Path(PathBuf),
     UseOsDefault,
-    UnresolvedId,
 }
 
-fn explicit_profile_path(profile_id: &str) -> ExplicitProfilePath {
-    let trimmed = profile_id.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("os-default") {
+fn explicit_profile_path(profile_path: Option<&str>) -> ExplicitProfilePath {
+    let Some(profile_path) = profile_path else {
         return ExplicitProfilePath::UseOsDefault;
-    }
-
-    let path = Path::new(trimmed);
-    if path.is_absolute() {
-        ExplicitProfilePath::Path(path.to_path_buf())
-    } else {
-        ExplicitProfilePath::UnresolvedId
-    }
-}
-
-/// Resolve the output color space from the display management policy.
-fn resolve_output_color_space(
-    policy: &DisplayManagementPolicy,
-    sequence_output: ColorSpace,
-) -> ColorSpace {
-    let profile_space = match &policy.monitor_profile {
-        MonitorProfileReference::MatchOutputColorSpace => sequence_output,
-        MonitorProfileReference::ColorSpace(cs) => *cs,
-        MonitorProfileReference::OcioDisplay { .. } => sequence_output,
-        MonitorProfileReference::IccProfile { .. } => {
-            // ICC calibration consumes the explicit presentation/output space;
-            // it does not replace that OCIO boundary identity.
-            sequence_output
-        }
     };
 
-    match policy.viewer_mode.resolve(profile_space) {
-        mondrian_core::color_models::ResolvedViewerDisplayMode::Sdr => {
-            if profile_space.is_hdr() {
-                ColorSpace::Rec709
-            } else {
-                profile_space
-            }
-        }
-        mondrian_core::color_models::ResolvedViewerDisplayMode::HdrPq => ColorSpace::Rec2100Pq,
-        mondrian_core::color_models::ResolvedViewerDisplayMode::HdrHlg => ColorSpace::Rec2100Hlg,
-    }
+    ExplicitProfilePath::Path(Path::new(profile_path.trim()).to_path_buf())
 }
 
 /// Resolve the OCIO display/view pair from the exact selected color engine.
@@ -437,48 +465,31 @@ fn resolve_ocio_display_view(
     policy: &DisplayManagementPolicy,
     output_color_space: ColorSpace,
 ) -> (Option<String>, Option<String>, Option<DisplayOutputBlocker>) {
-    match &policy.monitor_profile {
-        MonitorProfileReference::OcioDisplay { display } => match engine {
-            ColorEngine::MondrianStandard { package } => {
-                match mondrian_core::mondrian_standard_display_view_for_package(*package, display) {
-                    Ok((display, view)) => (Some(display), Some(view), None),
-                    Err(_) => unresolved_ocio_display_view(Some(display.clone())),
-                }
+    match policy.resolve_display_view(engine, output_color_space) {
+        Ok((display, view)) => (Some(display), Some(view), None),
+        Err(error) => unresolved_ocio_display_view(match error {
+            DisplayManagementPolicyError::UnqualifiedOcioDisplayView { display, .. } => {
+                Some(display)
             }
-            ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                match engine.default_view_for_display(display) {
-                    Ok(Some(view)) => (Some(display.clone()), Some(view), None),
-                    Ok(None) | Err(_) => unresolved_ocio_display_view(Some(display.clone())),
-                }
+            _ => None,
+        }),
+    }
+}
+
+fn policy_resolution_blocker(error: DisplayManagementPolicyError) -> DisplayOutputBlocker {
+    match error {
+        DisplayManagementPolicyError::UnqualifiedOcioDisplayView { display, view, .. } => {
+            DisplayOutputBlocker::OcioDisplayViewMissing {
+                display: Some(display),
+                view: Some(view),
             }
-        },
-        _ => match engine {
-            ColorEngine::MondrianStandard { package } => {
-                match mondrian_core::mondrian_standard_output_display_view_for_package(
-                    *package,
-                    output_color_space,
-                ) {
-                    Ok((display, view)) => (Some(display), Some(view), None),
-                    Err(_) => {
-                        let display = mondrian_core::mondrian_standard_output_display_name(
-                            output_color_space,
-                        )
-                        .ok()
-                        .map(str::to_owned);
-                        unresolved_ocio_display_view(display)
-                    }
-                }
-            }
-            ColorEngine::Aces { .. } | ColorEngine::CustomOcio { .. } => {
-                if engine.ensure_loaded().is_err() {
-                    return unresolved_ocio_display_view(None);
-                }
-                match engine.output_display_view(output_color_space) {
-                    Ok((display, view)) => (Some(display), Some(view), None),
-                    Err(_) => unresolved_ocio_display_view(None),
-                }
-            }
-        },
+        }
+        DisplayManagementPolicyError::OutputViewUnavailable { .. }
+        | DisplayManagementPolicyError::InvalidMonitorColorSpace { .. }
+        | DisplayManagementPolicyError::EmptyOcioDisplayView
+        | DisplayManagementPolicyError::RelativeIccProfilePath { .. } => {
+            DisplayOutputBlocker::OcioConfigUnavailable
+        }
     }
 }
 
@@ -490,6 +501,16 @@ fn unresolved_ocio_display_view(
         None,
         Some(DisplayOutputBlocker::OcioDisplayViewMissing { display, view: None }),
     )
+}
+
+#[cfg(test)]
+fn resolve_output_color_space(
+    policy: &DisplayManagementPolicy,
+    sequence_output: ColorSpace,
+) -> ColorSpace {
+    policy
+        .resolve_output_color_space(&ColorEngine::mondrian_standard(), sequence_output)
+        .unwrap_or(sequence_output)
 }
 
 /// Compute non-blocking display warnings from resolved statuses.
@@ -590,12 +611,12 @@ mod tests {
 
     #[test]
     fn explicit_standard_display_cannot_select_an_aces_default_view() {
-        let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::OcioDisplay {
+        let policy = default_policy()
+            .with_monitor_output(MonitorOutputIntent::OcioDisplayView {
                 display: "Display P3 - Display".to_owned(),
-            },
-            ..default_policy()
-        };
+                view: "Mondrian Standard SDR v2".to_owned(),
+            })
+            .expect("qualified Standard display/view");
         let (display, view, blocker) = resolve_ocio_display_view(
             &ColorEngine::mondrian_standard(),
             &policy,
@@ -659,10 +680,7 @@ mod tests {
                 wgpu::SurfaceColorSpace::Bt2100Pq,
             ],
             no_hdr_info(),
-            &DisplayManagementPolicy {
-                viewer_mode: ViewerDisplayMode::HdrPq,
-                ..default_policy()
-            },
+            &default_policy().with_viewer_mode(ViewerDisplayMode::HdrPq),
             ColorSpace::Rec2100Pq,
             "TestHdr",
         );
@@ -687,12 +705,9 @@ mod tests {
             "SdrOnly",
             &[wgpu::SurfaceColorSpace::Srgb],
             no_hdr_info(),
-            &DisplayManagementPolicy {
-                monitor_profile: MonitorProfileReference::IccProfile {
-                    profile_id: "test.icc".to_owned(),
-                },
-                ..default_policy()
-            },
+            &default_policy()
+                .with_calibration(DisplayCalibrationPolicy::OsDefault)
+                .expect("OS default ICC policy"),
             ColorSpace::Rec709,
             "TestIcc",
         );
@@ -705,43 +720,24 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_icc_profile_id_does_not_fall_back_to_os_default() {
-        let (status, calibration) = resolve_monitor_profile_status(
-            &DisplayManagementPolicy {
-                monitor_profile: MonitorProfileReference::IccProfile {
-                    profile_id: "display-profile".to_owned(),
-                },
-                ..default_policy()
-            },
-            &DisplayIccProfileProbeResult::found_path(
-                DisplayProbeBackend::WindowsWcs,
-                Some(r"\\.\DISPLAY1".to_owned()),
-                PathBuf::from(
-                    r"C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm",
-                ),
-            ),
-            ColorSpace::Srgb,
-        );
-        assert!(calibration.is_none());
-
+    fn relative_icc_profile_path_is_rejected_before_runtime_resolution() {
+        let error = default_policy()
+            .with_calibration(DisplayCalibrationPolicy::IccProfilePath(
+                "display-profile.icc".to_owned(),
+            ))
+            .expect_err("relative ICC reference must fail closed");
         assert!(matches!(
-            status,
-            MonitorProfileStatus::IccProfileUnsupported {
-                ref feature_code,
-                ..
-            } if feature_code == "icc_profile_registry"
+            error,
+            DisplayManagementPolicyError::RelativeIccProfilePath { .. }
         ));
     }
 
     #[test]
     fn os_default_icc_profile_without_platform_probe_fails_closed() {
         let (status, calibration) = resolve_monitor_profile_status(
-            &DisplayManagementPolicy {
-                monitor_profile: MonitorProfileReference::IccProfile {
-                    profile_id: "os-default".to_owned(),
-                },
-                ..default_policy()
-            },
+            &default_policy()
+                .with_calibration(DisplayCalibrationPolicy::OsDefault)
+                .expect("OS default ICC policy"),
             &DisplayIccProfileProbeResult::unsupported("test probe unavailable"),
             ColorSpace::Srgb,
         );
@@ -776,10 +772,7 @@ mod tests {
                 wgpu::SurfaceColorSpace::Bt2100Pq,
             ],
             wgpu::DisplayHdrInfo::default(),
-            &DisplayManagementPolicy {
-                viewer_mode: ViewerDisplayMode::HdrPq,
-                ..default_policy()
-            },
+            &default_policy().with_viewer_mode(ViewerDisplayMode::HdrPq),
             ColorSpace::Rec2100Pq,
             "TestHdrKnown",
         );
@@ -902,12 +895,9 @@ mod tests {
             "SdrOnly",
             &[wgpu::SurfaceColorSpace::Srgb],
             no_hdr_info(),
-            &DisplayManagementPolicy {
-                monitor_profile: MonitorProfileReference::IccProfile {
-                    profile_id: "test.icc".to_owned(),
-                },
-                ..default_policy()
-            },
+            &default_policy()
+                .with_calibration(DisplayCalibrationPolicy::OsDefault)
+                .expect("OS default ICC policy"),
             ColorSpace::Rec709,
             "Test",
         );
@@ -927,20 +917,16 @@ mod tests {
 
     #[test]
     fn resolve_output_color_space_hdr_pq() {
-        let policy = DisplayManagementPolicy {
-            viewer_mode: ViewerDisplayMode::HdrPq,
-            ..default_policy()
-        };
+        let policy = default_policy().with_viewer_mode(ViewerDisplayMode::HdrPq);
         let result = super::resolve_output_color_space(&policy, ColorSpace::Rec2100Pq);
         assert_eq!(result, ColorSpace::Rec2100Pq);
     }
 
     #[test]
     fn resolve_output_color_space_color_space_override() {
-        let policy = DisplayManagementPolicy {
-            monitor_profile: MonitorProfileReference::ColorSpace(ColorSpace::DisplayP3),
-            ..default_policy()
-        };
+        let policy = default_policy()
+            .with_monitor_output(MonitorOutputIntent::ColorSpace(ColorSpace::DisplayP3))
+            .expect("Display P3 monitor output");
         let result = super::resolve_output_color_space(&policy, ColorSpace::Rec709);
         assert_eq!(result, ColorSpace::DisplayP3);
     }

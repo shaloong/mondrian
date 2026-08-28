@@ -16,9 +16,11 @@ pub mod color_stage;
 pub mod color_transform;
 pub mod context;
 mod cpu_yuv;
+mod creative_lut_gpu;
 pub mod display_calibration;
 pub mod gpu_compositor;
 pub mod gpu_output_working_set;
+pub mod gpu_qualification;
 mod heterogeneous_cpu;
 pub mod heterogeneous_gpu;
 pub mod native_video;
@@ -28,6 +30,7 @@ pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
+pub mod source_frame_preparation;
 pub mod timeline_composite;
 mod timeline_effect_routes;
 pub mod timeline_render_plan;
@@ -47,12 +50,14 @@ pub use heterogeneous_cpu::{
 pub mod viewer_spatial;
 
 pub use color_accuracy::{
-    compare_linear_rgba, compare_pq_hdr_display_rgba, compare_srgb_display_rgba8,
-    LinearAccuracyBudget, LinearAccuracyChannelGroup, LinearAccuracyError,
-    LinearAccuracyGroupReport, LinearAccuracyStatistics, LinearRgbaAccuracyBudget,
-    LinearRgbaAccuracyReport, PqHdrDisplayAccuracyBudget, PqHdrDisplayAccuracyError,
-    PqHdrDisplayAccuracyReport, PqHdrDisplayAccuracyStatistics, SrgbDisplayAccuracyBudget,
-    SrgbDisplayAccuracyError, SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
+    compare_code_values, compare_linear_rgba, compare_pq_hdr_display_rgba,
+    compare_srgb_display_rgba8, CodeValueAccuracyBudget, CodeValueAccuracyError,
+    CodeValueAccuracyReport, CodeValueAccuracyStatistics, LinearAccuracyBudget,
+    LinearAccuracyChannelGroup, LinearAccuracyError, LinearAccuracyGroupReport,
+    LinearAccuracyStatistics, LinearRgbaAccuracyBudget, LinearRgbaAccuracyReport,
+    PqHdrDisplayAccuracyBudget, PqHdrDisplayAccuracyError, PqHdrDisplayAccuracyReport,
+    PqHdrDisplayAccuracyStatistics, SrgbDisplayAccuracyBudget, SrgbDisplayAccuracyError,
+    SrgbDisplayAccuracyReport, SrgbDisplayAccuracyStatistics,
 };
 pub use color_frame::{
     execute_native_decoded_frame_import, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
@@ -137,6 +142,9 @@ pub use context::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference,
 };
+pub use creative_lut_gpu::{
+    GpuCreativeLutCacheConfig, GpuCreativeLutCacheDiagnostics, GpuCreativeLutError,
+};
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,
     GpuDisplayCalibrationPlan, GpuDisplayCalibrationPlanError, GpuDisplayCalibrationPrepareError,
@@ -156,6 +164,11 @@ pub use gpu_output_working_set::{
     RenderGpuOutputActiveWorkingSetAdmissionError, RenderGpuOutputActiveWorkingSetEstimate,
     RenderGpuOutputActiveWorkingSetEstimateError, RenderGpuOutputActiveWorkingSetStage,
     RenderGpuOutputExecutionResourceGrant,
+};
+pub use gpu_qualification::{
+    GpuColorQualificationError, GpuColorQualificationExecutionPolicy,
+    GpuColorQualificationPolicyError, GPU_COLOR_QUALIFICATION_POLICY_ENV,
+    SEALED_GPU_COLOR_QUALIFICATION_POLICY,
 };
 pub use heterogeneous_gpu::{
     record_heterogeneous_gpu_continuation, HeterogeneousGpuBatchId,
@@ -267,6 +280,10 @@ pub use prepared_visual_range_closure::{
 pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
     GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+};
+pub use source_frame_preparation::{
+    prepare_decoded_cpu_source_frame, DecodedCpuSourceFrame, PreparedSourceFrame,
+    PreparedSourceFrameExecution, SourceFramePreparationError, SourceFramePreparationIntent,
 };
 pub use timeline_composite::{
     admit_timeline_render_plan_for_cpu_compositor, composite_path_diagnostics,

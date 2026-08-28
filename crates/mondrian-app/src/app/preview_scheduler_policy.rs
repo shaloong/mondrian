@@ -64,7 +64,9 @@ impl MediaPreviewResidencyReservation {
                 || pixels.saturating_mul(2 * 4 * std::mem::size_of::<f32>()),
                 |hint| hint.retained_bytes_for_extent(resolution),
             )
-        } else if key.decode.source_color().color_space.is_scene_linear() {
+        } else if key.decode.source_color().is_scene_linear()
+            || key.decode.source_color().is_data_texture()
+        {
             // Retained RGBA f32 source plus a possible working RGBA f32 frame.
             pixels.saturating_mul(2 * 4 * std::mem::size_of::<f32>())
         } else {
@@ -501,9 +503,12 @@ mod tests {
             picture_geometry: mondrian_core::ResolvedPictureGeometry::square(resolution)
                 .expect("valid source geometry"),
             alpha_interpretation: mondrian_core::timeline_data::AlphaInterpretation::Straight,
-            working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
-            input_tone_map: false,
-            engine: mondrian_core::types::ColorEngine::mondrian_standard(),
+            preparation_intent: mondrian_renderer::RenderInputTransform::to_working(
+                mondrian_core::WorkingColorSpace::LinearRec709,
+                false,
+                mondrian_core::types::ColorEngine::mondrian_standard(),
+            )
+            .into(),
         }
     }
 

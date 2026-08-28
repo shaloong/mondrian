@@ -64,6 +64,19 @@ persists the definition-stable `ParameterId`. It must not recreate ranges,
 accept enum keys absent from the schema, or flatten a resource reference into a
 generic text parameter.
 
+White Balance, Primaries, and ASC CDL are ordinary Definition-backed Inspector
+effects. Their Float and Vec3 controls retain stable `ParameterId` and
+`AnimationParameterAddress` identities, including `builtin.color_wheel` as the
+backward-compatible Primaries author key. Static writes, keyframe writes,
+selection, add/remove/reorder, and Undo/Redo all cross the same
+`VisualEffectProductAction` author transaction; the panel owns no private grade
+math. Gamut Compression and Highlight Recovery follow the same projection:
+their `amount`, `threshold`, `rolloff`, and `strength` rows come directly from
+the registered Parameter Schema, retain stable animation addresses, and use the
+ordinary add/select/set-value/undo Product Actions. The Inspector neither
+duplicates ACES constants, decides a working space, owns a private parameter
+pack, nor creates an alternate animation model.
+
 Basic Title Inspector rows use the same definition-backed property projection
 and `ClipProductAction` parameter-write Interface as Transform/Opacity; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the
@@ -95,6 +108,14 @@ explicit interaction policy: virtual Clip-boundary samples are fixed and
 non-deletable, while real author keys remain movable and deletable even when
 their time lies exactly on a boundary. Escape cancels widget-local preview
 state and publishes no author mutation.
+
+The same `CurveEditor` also edits a static structured effect curve without
+pretending it is timeline automation. The Inspector converts its complete
+normalized point set to a validated `NormalizedCurve` and dispatches the normal
+stable-address `VisualEffectSetParameterValue` action. Core rejects invalid or
+over-limit sets, while the App author transaction supplies ordinary Undo/Redo.
+`builtin.curves` exposes one mode row plus ten 150-pixel curve rows; no panel
+owns a parallel curve draft or execution interpretation.
 
 Single-line `TextInput` has two mutually exclusive dispatch policies. Live
 change mode emits after each committed text/IME edit and is reserved for draft
@@ -431,6 +452,16 @@ existing unlocked tracks are occupied, and commits placement plus any new
 Track as one Undo transaction. Timeline presentation uses dedicated semantic
 title colors and the ordinary Clip selection/trim/drag model.
 
+Qualifier sample authoring is a structured Inspector control over
+`PropertyValue::QualifierSamples`. Each row edits one bounded RGB sample and
+its Include/Exclude operation; add/remove actions build and validate a complete
+`QualifierSampleSet` before dispatch. Empty sets, exclude-only sets, removal of
+the last Include sample, and additions beyond sixteen never cross the Action
+Seam. A successful edit carries the stable `AnimationParameterAddress` and the
+whole typed set through the ordinary Visual Effect product action, so the
+authoring transaction and project-wide snapshot history restore the complete
+set in one Undo/Redo step. Widgets retain no parallel sample authority.
+
 ## Authoring Commit Consumption
 
 Every successful Sequence or Project transaction returns one
@@ -637,9 +668,29 @@ App Adapter. Payloads carry `ClipId`, `MaskId`, stable parameter addresses, and
 relative Mask anchors only; current Track placement and exact Clip-local author
 time are re-derived from the Authoring Session. Track lock and Mask lock remain
 separate authorities. The Inspector projects the same Interface for rectangle
-or ellipse creation, shape animation, order, enable/lock/removal, feather,
+ellipse, or Bezier creation, shape animation, order, enable/lock/removal, feather,
 opacity, expansion, invert, and operation. It never mutates `clip.masks`, parses
 a Mask UUID from a property path, or writes a Mask enum as arbitrary text.
+
+The Viewer owns Power Window gesture state and pointer capture. Rectangle body
+and corners edit translation/extent, Ellipse body and axis handles edit
+translation/radii, and Bezier anchors plus incoming/outgoing handles edit the
+complete path. Pointer motion updates only a widget-local preview; pointer-up
+releases capture and dispatches exactly one complete-shape Action, while Escape
+or capture loss publishes no partial author state. Playback, Track lock, or
+Window edit lock makes every overlay read-only. The App mapping preserves all
+Bezier controls, and Undo/Redo therefore restores the exact `MaskId`, shape
+`KeyframeId`, and geometry rather than reconstructing a new Window.
+
+The Mask Inspector also projects the closed Start/Cancel/Recompute tracking
+actions. Start carries stable Clip/Mask identity plus model, direction and
+bounded settings; it never carries decoded pixels or a projected Track/index.
+Availability is read-only while playback runs, the Track or Mask is locked, or
+that target already has a queued/analyzing/canceling attempt. AppState exposes
+one bounded status projection (`Queued`, `Analyzing`, `Canceling`, `Canceled`,
+`Completed`, `Failed`, `Stale`, or `CacheHit`) and the host pumps completion in
+the normal background tick. Widgets own no worker, decode Session, tracking
+cache, publication logic, or alternate shape-key writer.
 
 `app_ui::audio_processor_rack` is the shared read-only Rack projection Module.
 It deduplicates Clip bindings by Processing Scope, consumes Timeline's binding
@@ -1251,8 +1302,20 @@ defaults are resolved only after their exact engine
 config has loaded, and changing the engine alone refreshes the display contract
 and invalidates display-dependent GPU preview state. A failed custom config may
 not reuse whichever Standard or ACES config happened to be globally current.
-An explicit display selected under Standard still resolves the versioned
-Standard View under that display; it never inherits that display's ACES default.
+The user-level Preferences `显示` page exposes the active engine's qualified
+monitor target catalog, exact OCIO display/view identity, HDR policy, ICC
+disabled/OS-default/absolute-file selection, and all four ICC rendering
+intents. Changes dispatch one complete validated policy, persist it through
+`AppUiPreferences`, install it in `AppState`, and trigger Window contract refresh
+plus display-dependent Preview invalidation. Startup restores the same policy
+before the Preview service is constructed. The dialog projects the complete
+latest `DisplayOutputSnapshot`: monitor identity, surface format/color
+space/HDR carrier, requested and resolved output, OCIO pair, ICC/HDR status,
+warnings, and blockers.
+
+An explicit display/view selected under Standard is accepted only when it is
+the package-qualified pair for a standardized target; it never inherits that
+display's ACES default or accepts an arbitrary creative View.
 Viewer layout exposes a pixel-aligned `ViewerPresentationGeometry` after the
 dirty widget tree has been refreshed. It separates the complete sequence canvas
 from its visible intersection and derives a stable
@@ -1663,6 +1726,12 @@ app-owned worker performs color transforms before `RasterImage` construction
 and only the latest active request for an asset may publish a completion.
 Color-context changes clear visible cache state and invalidate request ownership
 so stale asynchronous results cannot overwrite a new display contract.
+Thumbnail presentation derives its encoded sRGB rendering-View context only
+from a validated root `ProgramColorContext`. Context fields cannot be patched by
+the Host. If root construction or rendering-View derivation fails, the Host
+publishes no thumbnail color context and the request fails closed; it does not
+manufacture a colorimetric or engine-mismatched fallback. Preview request and
+prefetch setup apply the same rule before work admission.
 
 UI raster images are typed presentation payloads. `RasterImage`,
 `DrawCommandEncoder::draw_raster_image`, and `DrawCommand::RasterImage` carry
@@ -1672,6 +1741,30 @@ fail visibly and are reported through `unsupported_raster_color_spaces`, which
 the app promotes into frame diagnostics and resource-failure logs. Adding a P3
 atlas later requires a separate compatible texture/pipeline path; it must not
 silently reinterpret P3 bytes through the sRGB atlas.
+
+Native Viewer surfaces use a separate typed presentation carrier. Production
+windows construct `UiRenderer` with the exact swapchain format plus
+`SurfaceColorSpace`; renderer-only/offscreen callers cannot register encoded
+Viewer payloads against an untyped linear attachment. Ordinary sRGB remains the
+single-pass fast path. Display P3, Rec.2100 PQ, and Rec.2100 HLG render UI and
+Viewer content into one reusable `Rgba16Float` target-primary display-linear
+composition, then run one cached full-screen carrier pass into the swapchain.
+UI tokens enter as linear sRGB and use an explicit sRGB-to-P3 or
+sRGB-to-Rec.2020 matrix. HDR composition defines `1.0 == 100 nits`; PQ and HLG
+Viewer code values are decoded before alpha blending and re-encoded only in the
+final pass. Encoded Viewer scaling performs manual four-tap interpolation after
+per-tap transfer decoding, avoiding nonlinear PQ/HLG/P3 code-space filtering.
+
+ICC calibration remains a distinct opaque device-code contract. It is admitted
+only on a direct sRGB native carrier, uses code-space filtering followed by an
+sRGB round-trip carrier decode, and fails closed if combined with a P3/HDR
+surface authority. Frame diagnostics distinguish target-transfer batches from
+ICC/device-code batches and report whether the wide-gamut/HDR carrier ran or
+reallocated. Composition/MSAA textures, the carrier bind group, and the carrier
+pipeline survive steady frames and rebuild only on presentation-contract or
+size changes. Batch construction also resets texture authority when returning
+from an external/raster image to an ordinary UI primitive; a shape can never
+inherit the preceding Viewer pipeline.
 The application-layer `PreviewRasterPresentationContract` resolves the CPU
 boundary before any Widget object exists: Rec.709, sRGB, and Display P3 SDR
 requests are monitor-adapted to an sRGB atlas payload; PQ/HLG requests fail
@@ -1680,6 +1773,10 @@ maps the proven encoding to `RasterImageColorSpace::Srgb`; the widget layer neve
 tone-maps or relabels bytes. GPU Viewer candidates retain the original
 monitor/output contract and continue through the native output/surface
 validation path.
+Preview Viewer-plan lowering treats only clamped zero opacity as
+non-contributing. Every positive Float32 opacity, including sub-16-bit values,
+must produce the same layer/adjustment/Transition obligation as CPU execution;
+the App cannot apply an epsilon cull before Renderer admission.
 
 GPU preview candidate counters are intentionally scoped to the headless service
 boundary: they prove that a working-space frame was produced for the app-window

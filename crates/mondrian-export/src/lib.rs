@@ -6,6 +6,7 @@ mod artifact_identity;
 mod audio_stems;
 pub mod capture;
 pub mod delivery;
+pub mod frame_contract;
 mod hardware_encoding;
 mod image_sequence;
 pub mod preset;
@@ -27,6 +28,7 @@ pub use delivery::{
     resolve_export_delivery, ExportDeliveryError, ExportDeliveryIssueCode,
     ResolvedExportDeliveryContract,
 };
+pub use frame_contract::{ExportFrameContract, ExportFramePackingError};
 pub use preset::{
     AudioStemFormat, BuiltinExportPreset, ExportAudioProgramSelection, ExportConfig,
     ExportFrameSampling, ExportMediaDependency, ExportOutputPolicy, ExportPreset,

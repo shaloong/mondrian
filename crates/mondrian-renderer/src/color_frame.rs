@@ -4,6 +4,7 @@ use mondrian_core::{
     types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
     WorkingRgbaF32Frame,
 };
+use mondrian_effects::straight_rgba_from_premultiplied;
 use mondrian_media::{
     DecodedGpuFrameHandleKind, DecodedVideoSurfaceFormat, PreviewNativeDecodedFrame,
 };
@@ -3096,7 +3097,7 @@ impl CpuSourceColorFrame {
     }
 }
 
-fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
+pub(crate) fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
     for pixel in rgba.chunks_exact_mut(4) {
         match interpretation {
             AlphaInterpretation::Straight => {}
@@ -3117,7 +3118,7 @@ fn normalize_rgba8_alpha(rgba: &mut [u8], interpretation: AlphaInterpretation) {
     }
 }
 
-fn normalize_rgba_f32_alpha(
+pub(crate) fn normalize_rgba_f32_alpha(
     rgba: &mut [f32],
     interpretation: AlphaInterpretation,
 ) -> Result<(), SourceAlphaInterpretationError> {
@@ -3133,12 +3134,10 @@ fn normalize_rgba_f32_alpha(
                         value: alpha,
                     });
                 }
-                if alpha <= f32::EPSILON {
-                    pixel[..3].fill(0.0);
-                } else if alpha < 1.0 {
-                    for channel in &mut pixel[..3] {
-                        *channel /= alpha;
-                    }
+                if alpha < 1.0 {
+                    let straight =
+                        straight_rgba_from_premultiplied([pixel[0], pixel[1], pixel[2], alpha]);
+                    pixel.copy_from_slice(&straight);
                 }
             }
         }
@@ -3327,6 +3326,37 @@ mod tests {
             normalized.descriptor().alpha,
             ColorFrameAlpha::StraightCoverage
         );
+    }
+
+    #[test]
+    fn source_alpha_normalization_preserves_the_smallest_sixteen_bit_edge() {
+        let alpha = 1.0 / 65_535.0;
+        let expected = [1.25, -0.125, 0.5, alpha];
+        let source = CpuSourceColorFrame::from(LinearFloatSource::new(
+            1,
+            1,
+            ColorSpace::LinearRec2020,
+            vec![
+                expected[0] * alpha,
+                expected[1] * alpha,
+                expected[2] * alpha,
+                alpha,
+            ],
+        ));
+
+        let normalized = source
+            .normalize_alpha(AlphaInterpretation::Premultiplied)
+            .expect("valid low-coverage premultiplied source");
+        let CpuSourceColorFrame::LinearFloat(normalized) = normalized else {
+            panic!("float source must stay float");
+        };
+
+        for (channel, (actual, expected)) in normalized.data().iter().zip(expected).enumerate() {
+            assert!(
+                (*actual - expected).abs() <= 2.0 * f32::EPSILON,
+                "channel {channel}: expected {expected}, got {actual}"
+            );
+        }
     }
 
     #[test]

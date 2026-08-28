@@ -953,6 +953,9 @@ impl Clip {
         }
         for mask in &mut self.masks {
             mask.id = MaskId::new();
+            if let Some(tracking) = &mut mask.tracking {
+                tracking.id = mondrian_core::TrackingId::new();
+            }
             for shape_key in &mut mask.shape_keyframes {
                 shape_key.id = mondrian_core::KeyframeId::new();
             }
@@ -1277,6 +1280,20 @@ impl Clip {
             return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
         }
         mask.write_shape(time, shape, interpolation)
+    }
+
+    /// Atomically publish one completed tracking result on an unlocked Mask.
+    pub fn apply_mask_tracking_result(
+        &mut self,
+        mask_id: MaskId,
+        recipe: mondrian_core::mask_data::MaskTrackingRecipe,
+        generated: Vec<(TimelineTime, MaskShape)>,
+    ) -> Result<bool> {
+        let mask = self.mask_mut(mask_id)?;
+        if mask.locked {
+            return Err(mask_author_error(format!("Mask is locked: {mask_id}")));
+        }
+        mask.apply_tracking_result(recipe, generated)
     }
 
     fn mask_mut(&mut self, mask_id: MaskId) -> Result<&mut MaskComponent> {

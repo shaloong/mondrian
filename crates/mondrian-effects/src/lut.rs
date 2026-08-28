@@ -1,5 +1,6 @@
 //! 3D LUT 加载、校验与 CPU 采样。
 
+use crate::coverage::has_positive_coverage;
 use crate::effect::PreparedLut3D;
 use mondrian_core::{MondrianError, Result};
 use serde::{Deserialize, Serialize};
@@ -329,7 +330,7 @@ impl Lut3D {
         for chunk in rgba.chunks_mut(4_096) {
             checkpoint()?;
             for pixel in chunk {
-                if pixel[3] <= 1.0e-6 {
+                if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
                     continue;
                 }
                 let source = [pixel[0], pixel[1], pixel[2]];

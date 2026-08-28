@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "windows-commercial-engine-v1",
   "release_artifact": "windows-x86_64-msvc",
   "source": {
@@ -26,6 +26,22 @@
     "required_gate_ids": [
       "video",
       "audio"
+    ]
+  },
+  "gpu_color": {
+    "profile_id": "windows-gpu-color-v1",
+    "report_schema_version": 1,
+    "required_status": "passed",
+    "execution_policy": "sealed-required",
+    "required_gate_ids": [
+      "output-smoke",
+      "standard-all-views-accuracy",
+      "standard-rec709-accuracy",
+      "standard-pq-delta-e-itp",
+      "aces-pq-delta-e-itp",
+      "native-yuv-color-accuracy",
+      "standard-view-4k-performance",
+      "standard-input-4k-performance"
     ]
   }
 }

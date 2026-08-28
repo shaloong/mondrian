@@ -13,7 +13,11 @@ use crate::{
     adjustment::{
         apply_render_op_f32_controlled, render_op_f32_scratch_frames, EffectRasterRegion,
     },
-    execution::{apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled},
+    execution::{
+        apply_alpha_mask_f32_region_controlled, blend_rgba_f32_region_controlled,
+        combine_alpha_masks_f32_controlled, invert_alpha_mask_f32_in_place,
+        matte_mix_f32_controlled,
+    },
     lower_effect_graph_node_to_gpu_point_plan, lower_effect_graph_nodes_to_gpu_plan,
     mask_raster::{ControlledMaskRasterError, PreparedMaskRasterSet},
     CompiledEffectGpuPlan, CompiledEffectGraph, EffectColorDomain, EffectExecutionEnvironment,
@@ -1734,6 +1738,36 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Backend-neutral point program.
         plan: Arc<CompiledEffectGpuPlan>,
     },
+    /// Scene-linear RGB to refined AlphaMask qualifier kernel.
+    Qualifier {
+        /// Exact semantic DomainEffect node.
+        node: EffectGraphNodeId,
+        /// Scene-linear input materialization.
+        input: EffectMaterializationId,
+        /// AlphaMask output materialization.
+        output: EffectMaterializationId,
+        /// Producer-completion dependency.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the qualifier dispatch.
+        signal: EffectCompletionToken,
+        /// Immutable shared qualifier semantics.
+        qualifier: Arc<crate::PreparedQualifier>,
+    },
+    /// AlphaMask to opaque black/white working-RGB observation transform.
+    MattePreview {
+        /// Exact semantic DomainEffect node.
+        node: EffectGraphNodeId,
+        /// AlphaMask input materialization.
+        input: EffectMaterializationId,
+        /// Scene-linear output materialization.
+        output: EffectMaterializationId,
+        /// Producer-completion dependency.
+        waits: Arc<[EffectCompletionToken]>,
+        /// Completion token proved by the preview dispatch.
+        signal: EffectCompletionToken,
+        /// Whether preview luminance is inverted.
+        invert: bool,
+    },
     /// Bit-preserving materialization copy for an identity-shaped semantic
     /// node whose output must retain a distinct graph-value lifetime.
     Copy {
@@ -1804,6 +1838,26 @@ pub enum PreparedHeterogeneousGpuDispatch {
         /// Canonical authored alpha combination operation.
         mask_op: crate::mask::MaskOp,
     },
+    /// Combine two AlphaMask-domain materializations.
+    MaskCombine {
+        node: EffectGraphNodeId,
+        left: EffectMaterializationId,
+        right: EffectMaterializationId,
+        output: EffectMaterializationId,
+        waits: Arc<[EffectCompletionToken]>,
+        signal: EffectCompletionToken,
+        mask_op: crate::mask::MaskOp,
+    },
+    /// Mix base/graded working RGB through an AlphaMask-domain materialization.
+    MatteMix {
+        node: EffectGraphNodeId,
+        base: EffectMaterializationId,
+        graded: EffectMaterializationId,
+        matte: EffectMaterializationId,
+        output: EffectMaterializationId,
+        waits: Arc<[EffectCompletionToken]>,
+        signal: EffectCompletionToken,
+    },
 }
 
 impl PreparedHeterogeneousGpuDispatch {
@@ -1811,10 +1865,14 @@ impl PreparedHeterogeneousGpuDispatch {
     pub const fn output(&self) -> EffectMaterializationId {
         match self {
             Self::PointChain { output, .. }
+            | Self::Qualifier { output, .. }
+            | Self::MattePreview { output, .. }
             | Self::Copy { output, .. }
             | Self::Blend { output, .. }
             | Self::MultiInput { output, .. }
-            | Self::Mask { output, .. } => *output,
+            | Self::Mask { output, .. }
+            | Self::MaskCombine { output, .. }
+            | Self::MatteMix { output, .. } => *output,
         }
     }
 
@@ -1822,10 +1880,14 @@ impl PreparedHeterogeneousGpuDispatch {
     pub fn waits(&self) -> &[EffectCompletionToken] {
         match self {
             Self::PointChain { waits, .. }
+            | Self::Qualifier { waits, .. }
+            | Self::MattePreview { waits, .. }
             | Self::Copy { waits, .. }
             | Self::Blend { waits, .. }
             | Self::MultiInput { waits, .. }
-            | Self::Mask { waits, .. } => waits,
+            | Self::Mask { waits, .. }
+            | Self::MaskCombine { waits, .. }
+            | Self::MatteMix { waits, .. } => waits,
         }
     }
 
@@ -1833,20 +1895,28 @@ impl PreparedHeterogeneousGpuDispatch {
     pub const fn signal(&self) -> EffectCompletionToken {
         match self {
             Self::PointChain { signal, .. }
+            | Self::Qualifier { signal, .. }
+            | Self::MattePreview { signal, .. }
             | Self::Copy { signal, .. }
             | Self::Blend { signal, .. }
             | Self::MultiInput { signal, .. }
-            | Self::Mask { signal, .. } => *signal,
+            | Self::Mask { signal, .. }
+            | Self::MaskCombine { signal, .. }
+            | Self::MatteMix { signal, .. } => *signal,
         }
     }
 
     fn append_nodes(&self, output: &mut Vec<EffectGraphNodeId>) {
         match self {
             Self::PointChain { nodes, .. } => output.extend(nodes.iter().copied()),
-            Self::Copy { node, .. }
+            Self::Qualifier { node, .. }
+            | Self::MattePreview { node, .. }
+            | Self::Copy { node, .. }
             | Self::Blend { node, .. }
             | Self::MultiInput { node, .. }
-            | Self::Mask { node, .. } => output.push(*node),
+            | Self::Mask { node, .. }
+            | Self::MaskCombine { node, .. }
+            | Self::MatteMix { node, .. } => output.push(*node),
         }
     }
 
@@ -1855,7 +1925,10 @@ impl PreparedHeterogeneousGpuDispatch {
         mut visit: impl FnMut(EffectMaterializationId) -> Result<(), E>,
     ) -> Result<(), E> {
         match self {
-            Self::PointChain { input, .. } | Self::Copy { input, .. } => visit(*input)?,
+            Self::PointChain { input, .. }
+            | Self::Qualifier { input, .. }
+            | Self::MattePreview { input, .. }
+            | Self::Copy { input, .. } => visit(*input)?,
             Self::Blend { base, overlay, .. } => {
                 visit(*base)?;
                 visit(*overlay)?;
@@ -1868,6 +1941,15 @@ impl PreparedHeterogeneousGpuDispatch {
             Self::Mask { input, mask, .. } => {
                 visit(*input)?;
                 visit(*mask)?;
+            }
+            Self::MaskCombine { left, right, .. } => {
+                visit(*left)?;
+                visit(*right)?;
+            }
+            Self::MatteMix { base, graded, matte, .. } => {
+                visit(*base)?;
+                visit(*graded)?;
+                visit(*matte)?;
             }
         }
         Ok(())
@@ -2316,6 +2398,8 @@ fn hash_effect_operation_shape(
         EffectGraphNodeKind::Mask { .. } => hasher.update([4]),
         EffectGraphNodeKind::MaskSource { .. } => hasher.update([5]),
         EffectGraphNodeKind::MultiInput { .. } => hasher.update([6]),
+        EffectGraphNodeKind::MaskCombine { .. } => hasher.update([7]),
+        EffectGraphNodeKind::MatteMix { .. } => hasher.update([8]),
         EffectGraphNodeKind::Source => {
             return Err(
                 PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
@@ -2339,6 +2423,14 @@ const fn effect_operation_shape_tag(operation: &EffectRenderOp) -> u8 {
         EffectRenderOp::Lut3D { .. } => 8,
         EffectRenderOp::Custom { .. } => 9,
         EffectRenderOp::Crop { .. } => 10,
+        EffectRenderOp::WhiteBalance { .. } => 11,
+        EffectRenderOp::Primaries { .. } => 12,
+        EffectRenderOp::AscCdl { .. } => 13,
+        EffectRenderOp::ColorCurves { .. } => 14,
+        EffectRenderOp::Qualifier { .. } => 15,
+        EffectRenderOp::MattePreview { .. } => 16,
+        EffectRenderOp::GamutCompression { .. } => 17,
+        EffectRenderOp::HighlightRecovery { .. } => 18,
     }
 }
 
@@ -2428,8 +2520,7 @@ impl PreparedHeterogeneousEffectWork {
                     wait,
                     signal,
                     ..
-                } if !entered_gpu
-                    && from.format.precision == EffectWorkingPrecision::Float32
+                } if from.format.precision == EffectWorkingPrecision::Float32
                     && to.format.precision == EffectWorkingPrecision::Float32
                     && from.format == to.format
                     && lane_by_id(environment, from.lane)
@@ -2889,6 +2980,54 @@ fn execute_cpu_dag_prefix(
                 )?;
                 output
             }
+            EffectGraphNodeKind::MaskCombine { mask_op, .. } => {
+                if inputs.len() != 2 {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let right =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let mut left =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                if left.len() != right.len() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                combine_alpha_masks_f32_controlled(&mut left, &right, mask_op, checkpoint)?;
+                left
+            }
+            EffectGraphNodeKind::MatteMix { .. } => {
+                if inputs.len() != 3 {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                let matte =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let graded =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                let mut base =
+                    inputs.pop().ok_or(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    })?;
+                if base.len() != graded.len() || base.len() != matte.len() {
+                    return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
+                        node: dispatch.node,
+                    });
+                }
+                matte_mix_f32_controlled(&mut base, &graded, &matte, checkpoint)?;
+                base
+            }
             EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
                 if inputs.is_empty() {
                     return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
@@ -2916,7 +3055,7 @@ fn execute_cpu_dag_prefix(
                 }
                 output
             }
-            EffectGraphNodeKind::MaskSource { .. } => {
+            EffectGraphNodeKind::MaskSource { invert, .. } => {
                 if !inputs.is_empty() {
                     return Err(PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix {
                         node: dispatch.node,
@@ -2925,9 +3064,13 @@ fn execute_cpu_dag_prefix(
                 let raster = prepared_masks.get(dispatch.node).ok_or(
                     PreparedHeterogeneousEffectWorkError::InvalidCpuPrefix { node: dispatch.node },
                 )?;
-                raster
+                let mut output = raster
                     .rasterize_rgba_f32_controlled(extent.full_frame_roi(), checkpoint)
-                    .map_err(map_controlled_mask_error)?
+                    .map_err(map_controlled_mask_error)?;
+                if invert {
+                    invert_alpha_mask_f32_in_place(&mut output);
+                }
+                output
             }
             EffectGraphNodeKind::Source => {
                 return Err(
@@ -3263,7 +3406,10 @@ fn prepare_gpu_suffix(
         Err(
             EffectGpuPlanBlocker::UnsupportedTopology { .. }
             | EffectGpuPlanBlocker::DisconnectedChain { .. }
-            | EffectGpuPlanBlocker::TooManyOperations { .. },
+            | EffectGpuPlanBlocker::TooManyOperations { .. }
+            | EffectGpuPlanBlocker::NonPreservingColorDomain { .. }
+            | EffectGpuPlanBlocker::UnsupportedColorDomainPlan { .. }
+            | EffectGpuPlanBlocker::UnsupportedOperation { .. },
         ) => gpu_dispatches
             .iter()
             .map(|(node_id, inputs, output, waits, signal)| {
@@ -3273,6 +3419,108 @@ fn prepare_gpu_suffix(
                     },
                 )?;
                 match &node.kind {
+                    EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::Qualifier { qualifier },
+                        domain_contract,
+                        ..
+                    } => {
+                        if inputs.len() != 1 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_qualifier_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        let input_format = plan
+                            .materialization(inputs[0])
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let output_format = plan
+                            .materialization(*output)
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let scene_linear = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                        );
+                        let alpha_mask = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::AlphaMask,
+                        );
+                        if *domain_contract
+                            != (crate::EffectColorDomainContract {
+                                input: EffectColorDomain::SceneLinearRgb,
+                                output: EffectColorDomain::AlphaMask,
+                            })
+                            || input_format != Some(scene_linear)
+                            || output_format != Some(alpha_mask)
+                        {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_qualifier_dispatch_domain_mismatch",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::Qualifier {
+                            node: *node_id,
+                            input: inputs[0],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            qualifier: Arc::clone(qualifier),
+                        })
+                    }
+                    EffectGraphNodeKind::DomainEffect {
+                        op: EffectRenderOp::MattePreview { invert },
+                        domain_contract,
+                        ..
+                    } => {
+                        if inputs.len() != 1 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_preview_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        let input_format = plan
+                            .materialization(inputs[0])
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let output_format = plan
+                            .materialization(*output)
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        let scene_linear = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                        );
+                        let alpha_mask = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::AlphaMask,
+                        );
+                        if *domain_contract
+                            != (crate::EffectColorDomainContract {
+                                input: EffectColorDomain::AlphaMask,
+                                output: EffectColorDomain::SceneLinearRgb,
+                            })
+                            || input_format != Some(alpha_mask)
+                            || output_format != Some(scene_linear)
+                        {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_preview_dispatch_domain_mismatch",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::MattePreview {
+                            node: *node_id,
+                            input: inputs[0],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            invert: *invert,
+                        })
+                    }
                     EffectGraphNodeKind::UnaryEffect { .. }
                     | EffectGraphNodeKind::DomainEffect { .. } => {
                         if inputs.len() != 1 {
@@ -3359,6 +3607,93 @@ fn prepare_gpu_suffix(
                             signal: *signal,
                             invert: *invert,
                             mask_op: *mask_op,
+                        })
+                    }
+                    EffectGraphNodeKind::MaskCombine { mask_op, .. } => {
+                        if inputs.len() != 2 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_mask_combine_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        let alpha_mask = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::AlphaMask,
+                        );
+                        if inputs.iter().copied().any(|input| {
+                            plan.materialization(input)
+                                .map(EffectValueMaterialization::residency)
+                                .map(EffectValueResidency::format)
+                                != Some(alpha_mask)
+                        }) || plan
+                            .materialization(*output)
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format)
+                            != Some(alpha_mask)
+                        {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_mask_combine_dispatch_domain_mismatch",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::MaskCombine {
+                            node: *node_id,
+                            left: inputs[0],
+                            right: inputs[1],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
+                            mask_op: *mask_op,
+                        })
+                    }
+                    EffectGraphNodeKind::MatteMix { .. } => {
+                        if inputs.len() != 3 {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_mix_dispatch_input_arity",
+                                },
+                            );
+                        }
+                        let scene_linear = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::SceneLinearRgb,
+                        );
+                        let alpha_mask = EffectValueFormat::new(
+                            EffectWorkingPrecision::Float32,
+                            EffectColorDomain::AlphaMask,
+                        );
+                        let formats = inputs
+                            .iter()
+                            .map(|input| {
+                                plan.materialization(*input)
+                                    .map(EffectValueMaterialization::residency)
+                                    .map(EffectValueResidency::format)
+                            })
+                            .collect::<Vec<_>>();
+                        let output_format = plan
+                            .materialization(*output)
+                            .map(EffectValueMaterialization::residency)
+                            .map(EffectValueResidency::format);
+                        if formats.as_slice()
+                            != [Some(scene_linear), Some(scene_linear), Some(alpha_mask)]
+                            || output_format != Some(scene_linear)
+                        {
+                            return Err(
+                                PreparedHeterogeneousEffectWorkError::UnsupportedRouteShape {
+                                    reason: "gpu_matte_mix_dispatch_domain_mismatch",
+                                },
+                            );
+                        }
+                        Ok(PreparedHeterogeneousGpuDispatch::MatteMix {
+                            node: *node_id,
+                            base: inputs[0],
+                            graded: inputs[1],
+                            matte: inputs[2],
+                            output: *output,
+                            waits: Arc::clone(waits),
+                            signal: *signal,
                         })
                     }
                     EffectGraphNodeKind::MultiInput { blend_mode, opacity, .. } => {
@@ -3614,6 +3949,14 @@ fn cpu_node_scratch_frames(
             | crate::EffectRenderOp::Sharpen { .. }
             | crate::EffectRenderOp::ChromaticAberration { .. }
             | crate::EffectRenderOp::ColorAdjust { .. }
+            | crate::EffectRenderOp::WhiteBalance { .. }
+            | crate::EffectRenderOp::Primaries { .. }
+            | crate::EffectRenderOp::AscCdl { .. }
+            | crate::EffectRenderOp::GamutCompression { .. }
+            | crate::EffectRenderOp::HighlightRecovery { .. }
+            | crate::EffectRenderOp::ColorCurves { .. }
+            | crate::EffectRenderOp::Qualifier { .. }
+            | crate::EffectRenderOp::MattePreview { .. }
             | crate::EffectRenderOp::Vignette { .. }
             | crate::EffectRenderOp::Grain { .. }
             | crate::EffectRenderOp::Crop { .. }
@@ -3625,7 +3968,9 @@ fn cpu_node_scratch_frames(
         },
         EffectGraphNodeKind::Blend { .. }
         | EffectGraphNodeKind::Mask { .. }
-        | EffectGraphNodeKind::MaskSource { .. } => Ok(0),
+        | EffectGraphNodeKind::MaskSource { .. }
+        | EffectGraphNodeKind::MaskCombine { .. }
+        | EffectGraphNodeKind::MatteMix { .. } => Ok(0),
         EffectGraphNodeKind::MultiInput { inputs, .. } if !inputs.is_empty() => Ok(0),
         EffectGraphNodeKind::Source | EffectGraphNodeKind::MultiInput { .. } => {
             Err(PreparedHeterogeneousEffectWorkError::UnsupportedCpuOperation { node: node.id })

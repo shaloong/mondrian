@@ -16,6 +16,9 @@ use crate::command::{
 };
 use crate::pipeline::UiPipeline;
 use crate::shape::RectVertex;
+use crate::surface_presentation::{
+    UiSurfaceCarrier, UiSurfacePresentation, UiSurfacePresentationError,
+};
 use crate::CornerRadii;
 
 #[repr(C)]
@@ -23,6 +26,9 @@ use crate::CornerRadii;
 struct Uniforms {
     screen_size: [f32; 2],
     _pad: [f32; 2],
+    ui_to_surface_rows: [[f32; 4]; 3],
+    external_decode_mode: u32,
+    _decode_pad: [u32; 3],
 }
 
 const UI_SAMPLE_COUNT: u32 = 4;
@@ -50,23 +56,50 @@ pub struct ExternalTextureRegistration {
 pub enum ExternalTextureTransfer {
     /// Texture samples already represent linear attachment values.
     Linear,
-    /// Preserve opaque encoded/device code values through an sRGB attachment.
-    SrgbSurfaceCodeValuesOpaque,
+    /// Decode opaque code values from the configured target transfer into the
+    /// target-primary linear composition domain.
+    SurfaceCodeValuesOpaque,
+    /// Preserve opaque ICC/device code values through the ordinary sRGB
+    /// swapchain carrier without assigning target-colorimetry semantics.
+    DeviceCodeValuesOpaque,
 }
 
 /// External texture registration failed before any renderer state changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalTextureRegistrationError {
-    /// Code-value preservation requires an sRGB attachment OETF.
-    CodeValuesRequireSrgbSurface { surface_format: wgpu::TextureFormat },
+    /// Code-value presentation requires a validated native-surface contract.
+    SurfaceCodeValuesRequirePresentationCarrier {
+        /// Renderer attachment format.
+        surface_format: wgpu::TextureFormat,
+        /// Native color-space authority, absent for legacy offscreen renderers.
+        surface_color_space: Option<wgpu::SurfaceColorSpace>,
+    },
+    /// ICC/device code values can only round-trip through the direct sRGB
+    /// carrier; a wide-gamut/HDR carrier would assign conflicting semantics.
+    DeviceCodeValuesRequireDirectSrgbCarrier {
+        /// Renderer attachment format.
+        surface_format: wgpu::TextureFormat,
+        /// Native surface color-space authority.
+        surface_color_space: Option<wgpu::SurfaceColorSpace>,
+    },
 }
 
 impl std::fmt::Display for ExternalTextureRegistrationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CodeValuesRequireSrgbSurface { surface_format } => write!(
+            Self::SurfaceCodeValuesRequirePresentationCarrier {
+                surface_format,
+                surface_color_space,
+            } => write!(
                 formatter,
-                "encoded code-value preservation requires an sRGB surface, got {surface_format:?}"
+                "surface code-value presentation requires a validated native carrier, got {surface_format:?} / {surface_color_space:?}"
+            ),
+            Self::DeviceCodeValuesRequireDirectSrgbCarrier {
+                surface_format,
+                surface_color_space,
+            } => write!(
+                formatter,
+                "ICC/device code-value presentation requires a direct sRGB carrier, got {surface_format:?} / {surface_color_space:?}"
             ),
         }
     }
@@ -187,6 +220,14 @@ pub struct UiRenderFrameStats {
     pub failed_external_textures: u32,
     /// Submitted batches that sampled an external GPU texture.
     pub submitted_external_texture_batches: usize,
+    /// Submitted Viewer batches decoded from target surface code values.
+    pub submitted_surface_code_value_batches: usize,
+    /// Submitted ICC/device-code batches carried opaquely through direct sRGB.
+    pub submitted_device_code_value_batches: usize,
+    /// Whether this frame used the wide-gamut/HDR linear carrier pass.
+    pub surface_carrier_active: bool,
+    /// Whether this frame recreated carrier targets because dimensions changed.
+    pub surface_carrier_target_rebuilt: bool,
 }
 
 /// GPU 2D UI 渲染器
@@ -200,7 +241,8 @@ pub struct UiRenderer {
     image_cache: HashMap<String, ImageCacheEntry>,
     external_texture_sampler: wgpu::Sampler,
     external_textures: HashMap<String, ExternalTextureRegistration>,
-    surface_format: wgpu::TextureFormat,
+    presentation: UiSurfacePresentation,
+    surface_carrier: Option<UiSurfaceCarrier>,
     msaa_target: Option<MsaaTarget>,
 }
 
@@ -302,8 +344,32 @@ fn external_texture_failure_fallback(
 }
 
 impl UiRenderer {
+    /// Create a compatibility renderer for an offscreen attachment.
+    ///
+    /// Production windows should call [`Self::new_for_surface`] so encoded
+    /// Viewer payloads have an exact surface color-space authority.
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
-        let pipeline = UiPipeline::new(device, surface_format, UI_SAMPLE_COUNT);
+        Self::from_presentation(
+            device,
+            UiSurfacePresentation::legacy_for_attachment(surface_format),
+        )
+    }
+
+    /// Create a renderer bound to one validated native-surface presentation.
+    pub fn new_for_surface(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        surface_color_space: wgpu::SurfaceColorSpace,
+    ) -> Result<Self, UiSurfacePresentationError> {
+        Ok(Self::from_presentation(
+            device,
+            UiSurfacePresentation::for_surface(surface_format, surface_color_space)?,
+        ))
+    }
+
+    fn from_presentation(device: &wgpu::Device, presentation: UiSurfacePresentation) -> Self {
+        let pipeline =
+            UiPipeline::new(device, presentation.ui_attachment_format(), UI_SAMPLE_COUNT);
 
         let glyph_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("glyph_atlas"),
@@ -404,7 +470,8 @@ impl UiRenderer {
             image_cache: HashMap::new(),
             external_texture_sampler,
             external_textures: HashMap::new(),
-            surface_format,
+            presentation,
+            surface_carrier: UiSurfaceCarrier::new(device, presentation),
             msaa_target: None,
         }
     }
@@ -430,7 +497,7 @@ impl UiRenderer {
                 mip_level_count: 1,
                 sample_count: UI_SAMPLE_COUNT,
                 dimension: wgpu::TextureDimension::D2,
-                format: self.surface_format,
+                format: self.presentation.ui_attachment_format(),
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             });
@@ -497,12 +564,23 @@ impl UiRenderer {
         texture_view: &wgpu::TextureView,
         transfer: ExternalTextureTransfer,
     ) -> Result<(), ExternalTextureRegistrationError> {
-        if transfer == ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque
-            && !self.surface_format.is_srgb()
+        if transfer == ExternalTextureTransfer::SurfaceCodeValuesOpaque
+            && !self.presentation.supports_surface_code_values()
         {
             return Err(
-                ExternalTextureRegistrationError::CodeValuesRequireSrgbSurface {
-                    surface_format: self.surface_format,
+                ExternalTextureRegistrationError::SurfaceCodeValuesRequirePresentationCarrier {
+                    surface_format: self.presentation.surface_format(),
+                    surface_color_space: self.presentation.surface_color_space(),
+                },
+            );
+        }
+        if transfer == ExternalTextureTransfer::DeviceCodeValuesOpaque
+            && !self.presentation.supports_device_code_values()
+        {
+            return Err(
+                ExternalTextureRegistrationError::DeviceCodeValuesRequireDirectSrgbCarrier {
+                    surface_format: self.presentation.surface_format(),
+                    surface_color_space: self.presentation.surface_color_space(),
                 },
             );
         }
@@ -755,16 +833,25 @@ impl UiRenderer {
         }
     }
 
-    fn pipeline_for_batch_key(&self, texture_key: Option<&str>) -> &wgpu::RenderPipeline {
-        let transfer = texture_key
+    fn external_transfer_for_batch_key(
+        &self,
+        texture_key: Option<&str>,
+    ) -> ExternalTextureTransfer {
+        texture_key
             .and_then(|key| key.strip_prefix(EXTERNAL_TEXTURE_KEY_PREFIX))
             .and_then(|key| self.external_textures.get(key))
             .map(|registration| registration.transfer)
-            .unwrap_or(ExternalTextureTransfer::Linear);
-        match transfer {
+            .unwrap_or(ExternalTextureTransfer::Linear)
+    }
+
+    fn pipeline_for_batch_key(&self, texture_key: Option<&str>) -> &wgpu::RenderPipeline {
+        match self.external_transfer_for_batch_key(texture_key) {
             ExternalTextureTransfer::Linear => &self.pipeline.render_pipeline,
-            ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque => {
+            ExternalTextureTransfer::SurfaceCodeValuesOpaque => {
                 &self.pipeline.encoded_code_value_pipeline
+            }
+            ExternalTextureTransfer::DeviceCodeValuesOpaque => {
+                &self.pipeline.device_code_value_pipeline
             }
         }
     }
@@ -813,12 +900,24 @@ impl UiRenderer {
         let batches = build_batches(&commands, screen_size);
         stats.batch_count = batches.len();
         stats.vertex_count = batches.iter().map(|batch| batch.vertices.len()).sum();
-        self.ensure_msaa_target(device, screen_size);
+        if let Some(carrier) = self.surface_carrier.as_mut() {
+            stats.surface_carrier_active = true;
+            stats.surface_carrier_target_rebuilt =
+                carrier.ensure_target(device, screen_size, UI_SAMPLE_COUNT);
+            self.msaa_target = None;
+        } else {
+            self.ensure_msaa_target(device, screen_size);
+        }
         let msaa_view = self.msaa_target.as_ref().map(|target| &target.view);
+        let carrier_views =
+            self.surface_carrier.as_ref().and_then(UiSurfaceCarrier::attachment_views);
 
         let uniform_data = Uniforms {
             screen_size: [screen_size.0 as f32, screen_size.1 as f32],
             _pad: [0.0; 2],
+            ui_to_surface_rows: self.presentation.ui_to_surface_rows(),
+            external_decode_mode: self.presentation.external_decode_mode(),
+            _decode_pad: [0; 3],
         };
         stats.uniform_upload_bytes = std::mem::size_of::<Uniforms>() as u64;
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -840,7 +939,10 @@ impl UiRenderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("ui_encoder") });
 
         {
-            let (attachment_view, resolve_target) = if let Some(msaa_view) = msaa_view {
+            let (attachment_view, resolve_target) = if let Some((msaa, composition)) = carrier_views
+            {
+                (msaa, Some(composition))
+            } else if let Some(msaa_view) = msaa_view {
                 (msaa_view, Some(view))
             } else {
                 (view, None)
@@ -891,6 +993,17 @@ impl UiRenderer {
                 {
                     stats.submitted_external_texture_batches =
                         stats.submitted_external_texture_batches.saturating_add(1);
+                    match self.external_transfer_for_batch_key(batch.texture_key.as_deref()) {
+                        ExternalTextureTransfer::SurfaceCodeValuesOpaque => {
+                            stats.submitted_surface_code_value_batches =
+                                stats.submitted_surface_code_value_batches.saturating_add(1);
+                        }
+                        ExternalTextureTransfer::DeviceCodeValuesOpaque => {
+                            stats.submitted_device_code_value_batches =
+                                stats.submitted_device_code_value_batches.saturating_add(1);
+                        }
+                        ExternalTextureTransfer::Linear => {}
+                    }
                 }
                 rpass.set_bind_group(1, texture_bind_group, &[]);
 
@@ -909,6 +1022,10 @@ impl UiRenderer {
                 stats.vertex_buffer_upload_bytes =
                     stats.vertex_buffer_upload_bytes.saturating_add(vertex_bytes);
             }
+        }
+
+        if let Some(carrier) = self.surface_carrier.as_ref() {
+            carrier.record(&mut encoder, view);
         }
 
         queue.submit(std::iter::once(encoder.finish()));
@@ -1670,17 +1787,92 @@ mod tests {
                 &harness.device,
                 key,
                 &view,
-                ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                ExternalTextureTransfer::SurfaceCodeValuesOpaque,
             )
             .expect_err("non-sRGB target must fail closed");
 
         assert_eq!(
             error,
-            ExternalTextureRegistrationError::CodeValuesRequireSrgbSurface {
-                surface_format: wgpu::TextureFormat::Rgba8Unorm
+            ExternalTextureRegistrationError::SurfaceCodeValuesRequirePresentationCarrier {
+                surface_format: wgpu::TextureFormat::Rgba8Unorm,
+                surface_color_space: None,
             }
         );
         assert_eq!(harness.renderer.external_texture_count(), 0);
+    }
+
+    #[test]
+    fn device_code_values_require_direct_srgb_carrier() {
+        let Some(mut harness) = OffscreenHarness::with_surface(
+            16,
+            16,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::DisplayP3,
+        ) else {
+            return;
+        };
+        let key = ExternalTextureKey::new("viewer.icc.invalid").expect("external texture key");
+        let texture = harness.external_texture_with_format(
+            1,
+            1,
+            &[128, 64, 192, 255],
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        assert_eq!(
+            harness
+                .renderer
+                .register_external_texture_view(
+                    &harness.device,
+                    key,
+                    &view,
+                    ExternalTextureTransfer::DeviceCodeValuesOpaque,
+                )
+                .expect_err("ICC device codes must reject P3 carrier"),
+            ExternalTextureRegistrationError::DeviceCodeValuesRequireDirectSrgbCarrier {
+                surface_format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                surface_color_space: Some(wgpu::SurfaceColorSpace::DisplayP3),
+            }
+        );
+    }
+
+    #[test]
+    fn device_code_values_round_trip_through_direct_srgb_carrier() {
+        let Some(mut harness) = OffscreenHarness::with_surface(
+            16,
+            16,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::Srgb,
+        ) else {
+            return;
+        };
+        let expected = [128, 64, 192, 17];
+        let key = ExternalTextureKey::new("viewer.icc.codes").expect("external texture key");
+        let texture =
+            harness.external_texture_with_format(1, 1, &expected, wgpu::TextureFormat::Rgba8Unorm);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        harness
+            .renderer
+            .register_external_texture_view(
+                &harness.device,
+                key.clone(),
+                &view,
+                ExternalTextureTransfer::DeviceCodeValuesOpaque,
+            )
+            .expect("direct sRGB ICC device-code registration");
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_external_texture(
+            key,
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::WHITE,
+        );
+        let pixels = harness.render(encoder.finish());
+        let actual = pixel(&pixels, 16, 8, 8);
+        for channel in 0..3 {
+            assert!(actual[channel].abs_diff(expected[channel]) <= 1);
+        }
+        assert_eq!(actual[3], 255);
     }
 
     #[test]
@@ -1701,7 +1893,7 @@ mod tests {
                 &harness.device,
                 key.clone(),
                 &view,
-                ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                ExternalTextureTransfer::SurfaceCodeValuesOpaque,
             )
             .expect("sRGB surface code-value registration");
         let mut encoder = DrawEncoder::new();
@@ -1721,6 +1913,148 @@ mod tests {
             );
         }
         assert_eq!(actual[3], 255, "code-value presentation must be opaque");
+    }
+
+    #[test]
+    fn p3_surface_carrier_converts_ui_primaries_and_reuses_targets() {
+        let Some(mut harness) = OffscreenHarness::with_surface(
+            16,
+            16,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::DisplayP3,
+        ) else {
+            return;
+        };
+        let mut encoder = DrawEncoder::new();
+        encoder.draw_rect(
+            Rect::new(0.0, 0.0, 16.0, 16.0),
+            Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 },
+            0.0,
+        );
+        let pixels = harness.render(encoder.finish());
+        let actual = pixel(&pixels, 16, 8, 8);
+        let expected_linear = [0.822_592_9, 0.033_199_5, 0.017_085_3];
+        for channel in 0..3 {
+            let expected = (linear_channel_to_srgb(expected_linear[channel]) * 255.0).round() as u8;
+            assert!(
+                actual[channel].abs_diff(expected) <= 2,
+                "P3 UI-primary channel {channel} mismatch: expected {expected}, got {actual:?}"
+            );
+        }
+        let first = harness.last_stats.expect("first carrier frame stats");
+        assert!(first.surface_carrier_active);
+        assert!(first.surface_carrier_target_rebuilt);
+
+        let _ = harness.render(Vec::new());
+        let second = harness.last_stats.expect("second carrier frame stats");
+        assert!(second.surface_carrier_active);
+        assert!(!second.surface_carrier_target_rebuilt);
+        let carrier = harness.renderer.surface_carrier.as_mut().expect("P3 carrier");
+        assert!(carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
+        assert!(!carrier.ensure_target(&harness.device, (17, 16), UI_SAMPLE_COUNT));
+    }
+
+    #[test]
+    fn p3_surface_code_values_round_trip_through_linear_carrier() {
+        let Some(mut harness) = OffscreenHarness::with_surface(
+            16,
+            16,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::SurfaceColorSpace::DisplayP3,
+        ) else {
+            return;
+        };
+        let expected = [128, 64, 192, 255];
+        let raw = harness.render_surface_code_texture(expected, 4);
+        let actual = pixel(&raw, 16, 8, 8);
+        for channel in 0..3 {
+            assert!(actual[channel].abs_diff(expected[channel]) <= 2);
+        }
+        assert_eq!(actual[3], 255);
+    }
+
+    #[test]
+    fn pq_and_hlg_surface_code_values_round_trip_on_real_adapter() {
+        for color_space in [
+            wgpu::SurfaceColorSpace::Bt2100Pq,
+            wgpu::SurfaceColorSpace::Bt2100Hlg,
+        ] {
+            let Some(mut harness) = OffscreenHarness::with_surface(
+                16,
+                16,
+                wgpu::TextureFormat::Rgb10a2Unorm,
+                color_space,
+            ) else {
+                return;
+            };
+            let expected = [0.5, 0.25, 0.75, 1.0];
+            let raw = harness.render_surface_code_texture_f16(expected, 4);
+            let actual = rgb10a2_pixel(&raw, 16, 8, 8);
+            for channel in 0..3 {
+                let expected_10 = (expected[channel] * 1023.0).round() as u16;
+                assert!(
+                    actual[channel].abs_diff(expected_10) <= 3,
+                    "{color_space:?} channel {channel} changed: expected {expected_10}, got {actual:?}"
+                );
+            }
+            assert_eq!(actual[3], 3);
+        }
+    }
+
+    #[test]
+    fn hdr_ui_overlay_blends_in_linear_100_nit_domain() {
+        for (color_space, expected_code) in [
+            (
+                wgpu::SurfaceColorSpace::Bt2100Pq,
+                pq_from_linear_100_nits(0.5),
+            ),
+            (
+                wgpu::SurfaceColorSpace::Bt2100Hlg,
+                hlg_from_linear_100_nits(0.5),
+            ),
+        ] {
+            let Some(mut harness) = OffscreenHarness::with_surface(
+                16,
+                16,
+                wgpu::TextureFormat::Rgb10a2Unorm,
+                color_space,
+            ) else {
+                return;
+            };
+            let key = ExternalTextureKey::new("viewer.hdr.black").expect("external texture key");
+            let texture = harness.external_texture_f16([0.0, 0.0, 0.0, 1.0]);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            harness
+                .renderer
+                .register_external_texture_view(
+                    &harness.device,
+                    key.clone(),
+                    &view,
+                    ExternalTextureTransfer::SurfaceCodeValuesOpaque,
+                )
+                .expect("HDR surface registration");
+            let mut encoder = DrawEncoder::new();
+            encoder.draw_external_texture(
+                key,
+                Rect::new(0.0, 0.0, 16.0, 16.0),
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                Color::WHITE,
+            );
+            encoder.draw_rect(
+                Rect::new(0.0, 0.0, 16.0, 16.0),
+                Color { r: 1.0, g: 1.0, b: 1.0, a: 0.5 },
+                0.0,
+            );
+            let raw = harness.render_raw(encoder.finish(), 4);
+            let actual = rgb10a2_pixel(&raw, 16, 8, 8);
+            let expected_10 = (expected_code * 1023.0).round() as u16;
+            for channel in 0..3 {
+                assert!(
+                    actual[channel].abs_diff(expected_10) <= 4,
+                    "{color_space:?} must encode the 50-nit linear blend; expected {expected_10}, got {actual:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1790,6 +2124,24 @@ mod tests {
         }
 
         fn with_format(width: u32, height: u32, format: wgpu::TextureFormat) -> Option<Self> {
+            Self::with_presentation(width, height, format, None)
+        }
+
+        fn with_surface(
+            width: u32,
+            height: u32,
+            format: wgpu::TextureFormat,
+            color_space: wgpu::SurfaceColorSpace,
+        ) -> Option<Self> {
+            Self::with_presentation(width, height, format, Some(color_space))
+        }
+
+        fn with_presentation(
+            width: u32,
+            height: u32,
+            format: wgpu::TextureFormat,
+            color_space: Option<wgpu::SurfaceColorSpace>,
+        ) -> Option<Self> {
             let instance = wgpu::Instance::new(
                 wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
             );
@@ -1814,7 +2166,12 @@ mod tests {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             });
-            let renderer = UiRenderer::new(&device, format);
+            let renderer = match color_space {
+                Some(color_space) => {
+                    UiRenderer::new_for_surface(&device, format, color_space).ok()?
+                }
+                None => UiRenderer::new(&device, format),
+            };
 
             Some(Self {
                 device,
@@ -1827,6 +2184,10 @@ mod tests {
         }
 
         fn render(&mut self, commands: Vec<DrawCommand>) -> Vec<u8> {
+            self.render_raw(commands, 4)
+        }
+
+        fn render_raw(&mut self, commands: Vec<DrawCommand>, bytes_per_pixel: u32) -> Vec<u8> {
             let view = self.texture.create_view(&wgpu::TextureViewDescriptor::default());
             let stats = self.renderer.render_resolved_commands(
                 &self.device,
@@ -1836,7 +2197,62 @@ mod tests {
                 self.size,
             );
             self.last_stats = Some(stats);
-            self.readback()
+            self.readback(bytes_per_pixel)
+        }
+
+        fn render_surface_code_texture(
+            &mut self,
+            expected: [u8; 4],
+            bytes_per_pixel: u32,
+        ) -> Vec<u8> {
+            let key =
+                ExternalTextureKey::new("viewer.surface.codes").expect("external texture key");
+            let texture =
+                self.external_texture_with_format(1, 1, &expected, wgpu::TextureFormat::Rgba8Unorm);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.renderer
+                .register_external_texture_view(
+                    &self.device,
+                    key.clone(),
+                    &view,
+                    ExternalTextureTransfer::SurfaceCodeValuesOpaque,
+                )
+                .expect("surface code-value registration");
+            let mut encoder = DrawEncoder::new();
+            encoder.draw_external_texture(
+                key,
+                Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                Color::WHITE,
+            );
+            self.render_raw(encoder.finish(), bytes_per_pixel)
+        }
+
+        fn render_surface_code_texture_f16(
+            &mut self,
+            expected: [f32; 4],
+            bytes_per_pixel: u32,
+        ) -> Vec<u8> {
+            let key =
+                ExternalTextureKey::new("viewer.surface.codes.f16").expect("external texture key");
+            let texture = self.external_texture_f16(expected);
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            self.renderer
+                .register_external_texture_view(
+                    &self.device,
+                    key.clone(),
+                    &view,
+                    ExternalTextureTransfer::SurfaceCodeValuesOpaque,
+                )
+                .expect("float surface code-value registration");
+            let mut encoder = DrawEncoder::new();
+            encoder.draw_external_texture(
+                key,
+                Rect::new(0.0, 0.0, self.size.0 as f32, self.size.1 as f32),
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                Color::WHITE,
+            );
+            self.render_raw(encoder.finish(), bytes_per_pixel)
         }
 
         fn external_texture(&self, width: u32, height: u32, rgba: &[u8; 4]) -> wgpu::Texture {
@@ -1887,9 +2303,38 @@ mod tests {
             texture
         }
 
-        fn readback(&self) -> Vec<u8> {
+        fn external_texture_f16(&self, rgba: [f32; 4]) -> wgpu::Texture {
+            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("ui_offscreen_external_texture_f16"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let half = rgba.map(f32_to_f16_bits);
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&half),
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(8),
+                    rows_per_image: Some(1),
+                },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            texture
+        }
+
+        fn readback(&self, bytes_per_pixel: u32) -> Vec<u8> {
             let (width, height) = self.size;
-            let bytes_per_pixel = 4u32;
             let unpadded_bytes_per_row = width * bytes_per_pixel;
             let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
             let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
@@ -1935,7 +2380,7 @@ mod tests {
                 .expect("readback map should succeed");
 
             let mapped = slice.get_mapped_range().expect("ui readback mapped range");
-            let mut out = vec![0u8; width as usize * height as usize * 4];
+            let mut out = vec![0u8; width as usize * height as usize * bytes_per_pixel as usize];
             for row in 0..height as usize {
                 let src_start = row * padded_bytes_per_row as usize;
                 let src_end = src_start + unpadded_bytes_per_row as usize;
@@ -1957,6 +2402,63 @@ mod tests {
             pixels[index + 2],
             pixels[index + 3],
         ]
+    }
+
+    fn rgb10a2_pixel(pixels: &[u8], width: u32, x: u32, y: u32) -> [u16; 4] {
+        let index = ((y * width + x) * 4) as usize;
+        let packed =
+            u32::from_le_bytes(pixels[index..index + 4].try_into().expect("RGB10A2 pixel"));
+        [
+            (packed & 0x3ff) as u16,
+            ((packed >> 10) & 0x3ff) as u16,
+            ((packed >> 20) & 0x3ff) as u16,
+            ((packed >> 30) & 0x3) as u16,
+        ]
+    }
+
+    fn linear_channel_to_srgb(value: f32) -> f32 {
+        if value <= 0.003_130_8 {
+            value * 12.92
+        } else {
+            1.055 * value.powf(1.0 / 2.4) - 0.055
+        }
+    }
+
+    fn pq_from_linear_100_nits(value: f32) -> f32 {
+        let m1 = 2610.0 / 16_384.0;
+        let m2 = 2523.0 / 32.0;
+        let c1 = 3424.0 / 4096.0;
+        let c2 = 2413.0 / 128.0;
+        let c3 = 2392.0 / 128.0;
+        let powered = (value / 100.0).clamp(0.0, 1.0).powf(m1);
+        ((c1 + c2 * powered) / (1.0 + c3 * powered)).powf(m2)
+    }
+
+    fn hlg_from_linear_100_nits(value: f32) -> f32 {
+        let scene_linear = (value / 10.0).clamp(0.0, 1.0).powf(1.0 / 1.2);
+        if scene_linear <= 1.0 / 12.0 {
+            (3.0 * scene_linear).sqrt()
+        } else {
+            0.178_832_77 * (12.0 * scene_linear - 0.284_668_92).ln() + 0.559_910_7
+        }
+    }
+
+    fn f32_to_f16_bits(value: f32) -> u16 {
+        let bits = value.to_bits();
+        let sign = ((bits >> 16) & 0x8000) as u16;
+        let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+        let mantissa = bits & 0x7f_ffff;
+        if exponent <= 0 {
+            if exponent < -10 {
+                return sign;
+            }
+            let shifted = (mantissa | 0x80_0000) >> (1 - exponent);
+            return sign | ((shifted + 0x1000) >> 13) as u16;
+        }
+        if exponent >= 31 {
+            return sign | 0x7c00;
+        }
+        sign | ((exponent as u16) << 10) | ((mantissa + 0x1000) >> 13) as u16
     }
 
     fn max_alpha_in_square(pixels: &[u8], width: u32, x: u32, y: u32, radius: u32) -> u8 {

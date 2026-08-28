@@ -1,4 +1,7 @@
-use crate::{EffectExecutionError, EffectRenderOp};
+use crate::{
+    coverage::{has_positive_coverage, straight_rgba_from_premultiplied},
+    EffectExecutionError, EffectRenderOp,
+};
 use mondrian_core::types::{BlendMode, WorkingColorSpace};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
@@ -155,6 +158,30 @@ pub(crate) fn apply_render_op(
                 },
             );
         }
+        EffectRenderOp::WhiteBalance { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
+        EffectRenderOp::Primaries { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
+        EffectRenderOp::AscCdl { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
+        EffectRenderOp::GamutCompression { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
+        EffectRenderOp::HighlightRecovery { grade } => {
+            apply_point_grade_rgba8(working, |rgb| grade.apply(rgb));
+        }
+        EffectRenderOp::ColorCurves { curves } => {
+            apply_point_grade_rgba8(working, |rgb| curves.apply(rgb));
+        }
+        EffectRenderOp::Qualifier { .. } | EffectRenderOp::MattePreview { .. } => {
+            return Err(EffectExecutionError::InvalidRenderParameter {
+                op: "qualifier",
+                parameter: "requires_float32",
+            });
+        }
         EffectRenderOp::GaussianBlur { radius } => {
             let Some(radius) = valid_gaussian_radius(*radius) else {
                 return Err(EffectExecutionError::InvalidRenderParameter {
@@ -278,10 +305,17 @@ pub(crate) fn apply_render_op_f32(
 /// implementation rather than maintaining a parallel memory model.
 pub(crate) const fn render_op_f32_scratch_frames(op: &EffectRenderOp) -> usize {
     match op {
-        EffectRenderOp::GaussianBlur { .. } => 1,
+        EffectRenderOp::GaussianBlur { .. } | EffectRenderOp::Qualifier { .. } => 1,
         EffectRenderOp::Sharpen { .. } => 2,
         EffectRenderOp::ChromaticAberration { .. } => 1,
         EffectRenderOp::ColorAdjust { .. }
+        | EffectRenderOp::WhiteBalance { .. }
+        | EffectRenderOp::Primaries { .. }
+        | EffectRenderOp::AscCdl { .. }
+        | EffectRenderOp::GamutCompression { .. }
+        | EffectRenderOp::HighlightRecovery { .. }
+        | EffectRenderOp::ColorCurves { .. }
+        | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Grain { .. }
         | EffectRenderOp::Crop { .. }
@@ -418,6 +452,48 @@ pub(crate) fn apply_render_op_f32_region_controlled<E>(
                     working_color_space: *working_color_space,
                     ..AdjustmentLayerParams::default()
                 },
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::WhiteBalance { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::Primaries { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::AscCdl { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::GamutCompression { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::HighlightRecovery { grade } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| grade.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::ColorCurves { curves } => {
+            apply_point_grade_rgba_f32_controlled(working, checkpoint, |rgb| curves.apply(rgb))?;
+            Ok(true)
+        }
+        EffectRenderOp::Qualifier { qualifier } => {
+            crate::qualifier::apply_qualifier_rgba_f32_controlled(
+                working.as_mut_slice(),
+                width as usize,
+                height as usize,
+                qualifier,
+                checkpoint,
+            )?;
+            Ok(true)
+        }
+        EffectRenderOp::MattePreview { invert } => {
+            crate::qualifier::apply_matte_preview_rgba_f32_controlled(
+                working.as_mut_slice(),
+                *invert,
                 checkpoint,
             )?;
             Ok(true)
@@ -583,7 +659,10 @@ pub fn blend_adjustment_result(
     }
 
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-4 || base.len() != required_len || processed.len() != required_len {
+    if !has_positive_coverage(opacity)
+        || base.len() != required_len
+        || processed.len() != required_len
+    {
         out.copy_from_slice(base);
         return;
     }
@@ -628,7 +707,7 @@ pub fn blend_rgba_pixel_seeded(
     dither_seed: u32,
 ) -> [u8; 4] {
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-4 {
+    if !has_positive_coverage(opacity) {
         return base_px;
     }
 
@@ -642,10 +721,10 @@ pub fn blend_rgba_pixel_seeded(
 
     let base_alpha = base_px[3] as f32 / 255.0;
     let blend_alpha = (blend_px[3] as f32 / 255.0) * opacity;
-    if blend_alpha <= 1.0e-4 {
+    if !has_positive_coverage(blend_alpha) {
         return base_px;
     }
-    if base_alpha <= 1.0e-4 {
+    if !has_positive_coverage(base_alpha) {
         return [
             blend_px[0],
             blend_px[1],
@@ -658,7 +737,7 @@ pub fn blend_rgba_pixel_seeded(
     let blend_rgb = rgb_to_unit(&blend_px);
     let blended_rgb = blend_mode_rgb(blend_mode, base_rgb, blend_rgb);
     let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
-    if out_alpha <= 1.0e-4 {
+    if !has_positive_coverage(out_alpha) {
         return [0, 0, 0, 0];
     }
 
@@ -698,7 +777,7 @@ pub fn blend_rgba_f32_pixel_seeded(
     dither_seed: u32,
 ) -> [f32; 4] {
     let opacity = opacity.clamp(0.0, 1.0);
-    if opacity <= 1.0e-4 {
+    if !has_positive_coverage(opacity) {
         return base_px;
     }
 
@@ -712,10 +791,10 @@ pub fn blend_rgba_f32_pixel_seeded(
 
     let base_alpha = base_px[3].clamp(0.0, 1.0);
     let blend_alpha = (blend_px[3] * opacity).clamp(0.0, 1.0);
-    if blend_alpha <= 1.0e-4 {
+    if !has_positive_coverage(blend_alpha) {
         return base_px;
     }
-    if base_alpha <= 1.0e-4 {
+    if !has_positive_coverage(base_alpha) {
         return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
     }
 
@@ -723,7 +802,7 @@ pub fn blend_rgba_f32_pixel_seeded(
     let blend_rgb = [blend_px[0], blend_px[1], blend_px[2]];
     let blended_rgb = blend_mode_rgb(blend_mode, base_rgb, blend_rgb);
     let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
-    if out_alpha <= 1.0e-4 {
+    if !has_positive_coverage(out_alpha) {
         return [0.0, 0.0, 0.0, 0.0];
     }
 
@@ -766,7 +845,7 @@ pub fn apply_adjustment_pass(
         return Ok(());
     }
 
-    if opacity <= 1.0e-4 || params.is_identity() {
+    if !has_positive_coverage(opacity) || params.is_identity() {
         out.copy_from_slice(base);
         return Ok(());
     }
@@ -805,6 +884,38 @@ fn apply_primary_color_adjustments(buffer: &mut [u8], params: AdjustmentLayerPar
     }
 }
 
+fn apply_point_grade_rgba8(buffer: &mut [u8], grade: impl Fn([f32; 3]) -> [f32; 3]) {
+    for pixel in buffer.chunks_exact_mut(4) {
+        if pixel[3] == 0 {
+            continue;
+        }
+        let rgb = grade(rgb_to_unit(pixel));
+        pixel[0] = unit_to_u8(rgb[0]);
+        pixel[1] = unit_to_u8(rgb[1]);
+        pixel[2] = unit_to_u8(rgb[2]);
+    }
+}
+
+fn apply_point_grade_rgba_f32_controlled<E>(
+    buffer: &mut [[f32; 4]],
+    checkpoint: &mut impl FnMut() -> Result<(), E>,
+    grade: impl Fn([f32; 3]) -> [f32; 3],
+) -> Result<(), E> {
+    for chunk in buffer.chunks_mut(4_096) {
+        checkpoint()?;
+        for pixel in chunk {
+            if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
+                continue;
+            }
+            let rgb = grade([pixel[0], pixel[1], pixel[2]]);
+            pixel[0] = rgb[0];
+            pixel[1] = rgb[1];
+            pixel[2] = rgb[2];
+        }
+    }
+    checkpoint()
+}
+
 fn apply_primary_color_adjustments_f32_controlled<E>(
     buffer: &mut [[f32; 4]],
     params: AdjustmentLayerParams,
@@ -819,7 +930,7 @@ fn apply_primary_color_adjustments_f32_controlled<E>(
     for chunk in buffer.chunks_mut(4_096) {
         checkpoint()?;
         for px in chunk {
-            if px[3] <= 1.0e-6 {
+            if !has_positive_coverage(px[3].clamp(0.0, 1.0)) {
                 continue;
             }
 
@@ -1084,17 +1195,7 @@ fn unpremultiply_rgba_controlled<E>(
     for chunk in pixels.chunks_mut(4_096) {
         checkpoint()?;
         for pixel in chunk {
-            let alpha = pixel[3].clamp(0.0, 1.0);
-            if alpha > 1.0e-6 {
-                pixel[0] /= alpha;
-                pixel[1] /= alpha;
-                pixel[2] /= alpha;
-            } else {
-                pixel[0] = 0.0;
-                pixel[1] = 0.0;
-                pixel[2] = 0.0;
-            }
-            pixel[3] = alpha;
+            *pixel = straight_rgba_from_premultiplied(*pixel);
         }
     }
     checkpoint()
@@ -1109,7 +1210,7 @@ fn apply_unsharp_mask_f32_controlled<E>(
     for (buffer_chunk, blurred_chunk) in buffer.chunks_mut(4_096).zip(blurred.chunks(4_096)) {
         checkpoint()?;
         for (pixel, softened) in buffer_chunk.iter_mut().zip(blurred_chunk) {
-            if pixel[3] <= 1.0e-6 {
+            if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
                 continue;
             }
             for channel in 0..3 {
@@ -1138,7 +1239,7 @@ fn apply_vignette_f32_region_controlled<E>(
         checkpoint()?;
         for x in 0..width {
             let pixel = &mut buffer[y * width + x];
-            if pixel[3] <= 1.0e-6 {
+            if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
                 continue;
             }
             let frame_x = region.x as f32 + x as f32;
@@ -1173,7 +1274,7 @@ fn apply_chromatic_aberration_f32_controlled<E>(
         checkpoint()?;
         for x in 0..width {
             let index = y * width + x;
-            if input[index][3] <= 1.0e-6 {
+            if !has_positive_coverage(input[index][3].clamp(0.0, 1.0)) {
                 continue;
             }
             let dx = x as f32 - center_x;
@@ -1240,7 +1341,7 @@ fn sample_premultiplied_channel_f32(
         interpolate(alpha_bottom_left, alpha_bottom_right, fraction_x),
         fraction_y,
     );
-    if alpha > 1.0e-6 {
+    if has_positive_coverage(alpha) {
         premultiplied / alpha
     } else {
         0.0
@@ -1260,7 +1361,7 @@ fn apply_grain_f32_region_controlled<E>(
         checkpoint()?;
         for x in 0..width {
             let pixel = &mut buffer[y * width + x];
-            if pixel[3] <= 1.0e-6 {
+            if !has_positive_coverage(pixel[3].clamp(0.0, 1.0)) {
                 continue;
             }
             let noise =
@@ -1721,6 +1822,76 @@ mod tests {
     }
 
     #[test]
+    fn normal_source_over_preserves_sixteen_bit_and_smaller_positive_coverage() {
+        fn f64_reference(base: [f32; 4], source: [f32; 4], opacity: f32) -> [f64; 4] {
+            let base_alpha = f64::from(base[3].clamp(0.0, 1.0));
+            let source_alpha =
+                f64::from(source[3].clamp(0.0, 1.0)) * f64::from(opacity.clamp(0.0, 1.0));
+            let alpha = source_alpha + base_alpha * (1.0 - source_alpha);
+            if alpha == 0.0 {
+                return [0.0; 4];
+            }
+            [
+                (f64::from(source[0]) * source_alpha
+                    + f64::from(base[0]) * base_alpha * (1.0 - source_alpha))
+                    / alpha,
+                (f64::from(source[1]) * source_alpha
+                    + f64::from(base[1]) * base_alpha * (1.0 - source_alpha))
+                    / alpha,
+                (f64::from(source[2]) * source_alpha
+                    + f64::from(base[2]) * base_alpha * (1.0 - source_alpha))
+                    / alpha,
+                alpha,
+            ]
+        }
+
+        let corpus = [
+            ([0.0; 4], [1.25, -0.25, 0.5, 1.0 / 65_535.0], 1.0),
+            (
+                [0.2, 0.4, 0.6, 1.0 / 32_768.0],
+                [1.5, -0.5, 0.125, 1.0 / 65_535.0],
+                0.375,
+            ),
+            ([0.1, 0.3, 0.7, 1.0], [2.0, -1.0, 0.5, 1.0], 1.0e-8),
+        ];
+
+        for (base, source, opacity) in corpus {
+            let actual = blend_rgba_f32_pixel(base, source, opacity, BlendMode::Normal);
+            let expected = f64_reference(base, source, opacity);
+            for channel in 0..4 {
+                let error = (f64::from(actual[channel]) - expected[channel]).abs();
+                assert!(
+                    error <= 8.0 * f64::from(f32::EPSILON) * expected[channel].abs().max(1.0),
+                    "channel {channel}: expected {}, got {}, error {error}",
+                    expected[channel],
+                    actual[channel]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_sixteen_bit_edges_accumulate_instead_of_disappearing() {
+        const LAYERS: usize = 4_096;
+        let edge_alpha = 1.0 / 65_535.0;
+        let source = [1.25, -0.25, 0.5, edge_alpha];
+        let mut actual = [0.0; 4];
+        for _ in 0..LAYERS {
+            actual = blend_rgba_f32_pixel(actual, source, 1.0, BlendMode::Normal);
+        }
+
+        let expected_alpha = 1.0 - (1.0 - f64::from(edge_alpha)).powi(LAYERS as i32);
+        assert!((f64::from(actual[3]) - expected_alpha).abs() <= 2.0e-5);
+        for channel in 0..3 {
+            assert!((actual[channel] - source[channel]).abs() <= 2.0e-5);
+        }
+        assert!(
+            actual[3] > 0.06,
+            "positive edges must accumulate: {actual:?}"
+        );
+    }
+
+    #[test]
     fn dissolve_gates_full_source_over_instead_of_squaring_opacity() {
         let base_u8 = [0, 0, 0, 255];
         let blend_u8 = [255, 0, 0, 128];
@@ -2056,6 +2227,7 @@ mod tests {
                         feather: 0.0,
                         expansion: 0.0,
                         opacity: 0.5,
+                        invert: false,
                     },
                 },
                 EffectGraphNode {
@@ -2106,6 +2278,7 @@ mod tests {
                         feather: 0.0,
                         expansion: 0.0,
                         opacity: 1.0,
+                        invert: false,
                     },
                 },
                 EffectGraphNode {

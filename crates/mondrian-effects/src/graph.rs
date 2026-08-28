@@ -50,6 +50,28 @@ pub enum EffectGraphNodeKind {
         feather: f32,
         expansion: f32,
         opacity: f32,
+        /// Whether coverage is inverted at the AlphaMask producer boundary.
+        ///
+        /// Keeping inversion on the matte value lets the same prepared window
+        /// feed mask combination and grade-matte mixing without smuggling the
+        /// operation through picture alpha.
+        invert: bool,
+    },
+    /// Combine two AlphaMask-domain values without interpreting either as RGB.
+    MaskCombine {
+        left: EffectGraphNodeId,
+        right: EffectGraphNodeId,
+        mask_op: crate::mask::MaskOp,
+    },
+    /// Mix an ungraded base and graded result through one AlphaMask value.
+    ///
+    /// RGB is interpolated in the current working domain and coverage alpha is
+    /// retained from `base`; a Power Window therefore cannot accidentally
+    /// become Clip transparency.
+    MatteMix {
+        base: EffectGraphNodeId,
+        graded: EffectGraphNodeId,
+        matte: EffectGraphNodeId,
     },
     /// Ordered N-input visual compositing node.
     ///
@@ -77,6 +99,8 @@ impl EffectGraphNode {
             EffectGraphNodeKind::Blend { base, overlay, .. } => vec![base, overlay],
             EffectGraphNodeKind::Mask { input, mask, .. } => vec![input, mask],
             EffectGraphNodeKind::MaskSource { .. } => Vec::new(),
+            EffectGraphNodeKind::MaskCombine { left, right, .. } => vec![left, right],
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => vec![base, graded, matte],
             EffectGraphNodeKind::MultiInput { ref inputs, .. } => inputs.clone(),
         }
     }
@@ -137,12 +161,25 @@ impl EffectGraphIdentity {
                     invert.hash(&mut writer);
                     mask_op.hash(&mut writer);
                 }
-                EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
+                EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
                     6u8.hash(&mut writer);
                     shape_variant_hash(shape, &mut writer);
                     feather.to_bits().hash(&mut writer);
                     expansion.to_bits().hash(&mut writer);
                     opacity.to_bits().hash(&mut writer);
+                    invert.hash(&mut writer);
+                }
+                EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                    9u8.hash(&mut writer);
+                    left.hash(&mut writer);
+                    right.hash(&mut writer);
+                    mask_op.hash(&mut writer);
+                }
+                EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                    10u8.hash(&mut writer);
+                    base.hash(&mut writer);
+                    graded.hash(&mut writer);
+                    matte.hash(&mut writer);
                 }
                 EffectGraphNodeKind::MultiInput { inputs, blend_mode, opacity } => {
                     7u8.hash(&mut writer);
@@ -270,6 +307,8 @@ impl EffectRenderGraph {
                 EffectGraphNodeKind::Source
                 | EffectGraphNodeKind::Blend { .. }
                 | EffectGraphNodeKind::Mask { .. }
+                | EffectGraphNodeKind::MaskCombine { .. }
+                | EffectGraphNodeKind::MatteMix { .. }
                 | EffectGraphNodeKind::MaskSource { .. } => 0,
             })
             .fold(0_usize, usize::saturating_add);
@@ -284,6 +323,7 @@ impl EffectRenderGraph {
 fn render_op_retained_bytes_estimate(op: &EffectRenderOp) -> usize {
     match op {
         EffectRenderOp::Lut3D { lut, .. } => lut.retained_bytes_estimate(),
+        EffectRenderOp::Qualifier { qualifier } => qualifier.retained_bytes_estimate(),
         EffectRenderOp::Custom { key, params, cache_key, processor, .. } => {
             let params_bytes = serde_json::to_vec(params).map_or(512, |bytes| bytes.len().max(512));
             std::mem::size_of::<EffectRenderOp>()
@@ -602,6 +642,17 @@ enum EffectGraphNodeShape {
     MaskSource {
         id: EffectGraphNodeId,
     },
+    MaskCombine {
+        id: EffectGraphNodeId,
+        left: EffectGraphNodeId,
+        right: EffectGraphNodeId,
+    },
+    MatteMix {
+        id: EffectGraphNodeId,
+        base: EffectGraphNodeId,
+        graded: EffectGraphNodeId,
+        matte: EffectGraphNodeId,
+    },
     MultiInput {
         id: EffectGraphNodeId,
         inputs: Vec<EffectGraphNodeId>,
@@ -896,6 +947,17 @@ fn derive_implementation_requirements<'a>(
                 .merge_branches(requirement_for(*mask, &requirements))
                 .compose_node(gpu_mask_node_requirements()),
             EffectGraphNodeKind::MaskSource { .. } => compositing_node_requirements(),
+            EffectGraphNodeKind::MaskCombine { left, right, .. } => {
+                requirement_for(*left, &requirements)
+                    .merge_branches(requirement_for(*right, &requirements))
+                    .compose_node(gpu_mask_node_requirements())
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                requirement_for(*base, &requirements)
+                    .merge_branches(requirement_for(*graded, &requirements))
+                    .merge_branches(requirement_for(*matte, &requirements))
+                    .compose_node(gpu_blend_node_requirements())
+            }
             EffectGraphNodeKind::MultiInput { inputs, .. } => inputs
                 .iter()
                 .map(|input| requirement_for(*input, &requirements))
@@ -974,6 +1036,8 @@ fn raw_node_implementation_requirements(
             Some(gpu_blend_node_requirements())
         }
         EffectGraphNodeKind::Mask { .. } => Some(gpu_mask_node_requirements()),
+        EffectGraphNodeKind::MaskCombine { .. } => Some(gpu_mask_node_requirements()),
+        EffectGraphNodeKind::MatteMix { .. } => Some(gpu_blend_node_requirements()),
         EffectGraphNodeKind::MaskSource { .. } | EffectGraphNodeKind::MultiInput { .. } => {
             Some(compositing_node_requirements())
         }
@@ -1312,10 +1376,53 @@ impl EffectGraphBuilderState {
         expansion: f32,
         opacity: f32,
     ) -> EffectGraphNodeId {
+        self.add_mask_source_with_invert(shape, feather, expansion, opacity, false)
+    }
+
+    /// Add one synthetic Mask raster whose inversion is part of the produced
+    /// AlphaMask value rather than a later picture-alpha operation.
+    pub fn add_mask_source_with_invert(
+        &mut self,
+        shape: crate::mask::MaskShape,
+        feather: f32,
+        expansion: f32,
+        opacity: f32,
+        invert: bool,
+    ) -> EffectGraphNodeId {
         let id = self.alloc_id();
         self.graph.nodes.push(EffectGraphNode {
             id,
-            kind: EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity },
+            kind: EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert },
+        });
+        id
+    }
+
+    /// Combine two AlphaMask-domain values with canonical window-stack algebra.
+    pub fn add_mask_combine(
+        &mut self,
+        left: EffectGraphNodeId,
+        right: EffectGraphNodeId,
+        mask_op: crate::mask::MaskOp,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::MaskCombine { left, right, mask_op },
+        });
+        id
+    }
+
+    /// Apply a grade matte while preserving the base picture coverage alpha.
+    pub fn add_matte_mix(
+        &mut self,
+        base: EffectGraphNodeId,
+        graded: EffectGraphNodeId,
+        matte: EffectGraphNodeId,
+    ) -> EffectGraphNodeId {
+        let id = self.alloc_id();
+        self.graph.nodes.push(EffectGraphNode {
+            id,
+            kind: EffectGraphNodeKind::MatteMix { base, graded, matte },
         });
         id
     }
@@ -1378,9 +1485,24 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
     };
     match op {
         EffectRenderOp::ColorAdjust { .. }
+        | EffectRenderOp::WhiteBalance { .. }
+        | EffectRenderOp::Primaries { .. }
+        | EffectRenderOp::AscCdl { .. }
+        | EffectRenderOp::GamutCompression { .. }
+        | EffectRenderOp::HighlightRecovery { .. }
+        | EffectRenderOp::ColorCurves { .. }
+        | EffectRenderOp::MattePreview { .. }
         | EffectRenderOp::Vignette { .. }
         | EffectRenderOp::Crop { .. } => EffectImplementationRequirements {
             execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
+            ..cpu_float
+        },
+        EffectRenderOp::Qualifier { qualifier } => EffectImplementationRequirements {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_from_effect_input: EffectRoiPropagation::Expand {
+                horizontal_pixels: qualifier.input_halo(),
+                vertical_pixels: qualifier.input_halo(),
+            },
             ..cpu_float
         },
         EffectRenderOp::GaussianBlur { radius } => EffectImplementationRequirements {
@@ -1408,6 +1530,7 @@ fn render_op_requirements(op: &EffectRenderOp) -> EffectImplementationRequiremen
             }
         }
         EffectRenderOp::Lut3D { .. } => EffectImplementationRequirements {
+            execution_modes: cpu_float.execution_modes.union(EffectExecutionModes::GPU_F32),
             resource_lifetime: EffectResourceLifetime::PreparedProgram,
             ..cpu_float
         },
@@ -1631,6 +1754,44 @@ pub(crate) fn compile_effect_domain_plan(
                 input_domain
             }
             EffectGraphNodeKind::MaskSource { .. } => EffectColorDomain::AlphaMask,
+            EffectGraphNodeKind::MaskCombine { left, right, .. } => {
+                for input in [*left, *right] {
+                    let input_domain = *plan.node_output_domains.get(&input)?;
+                    if input_domain != EffectColorDomain::AlphaMask {
+                        plan.blockers.push(EffectDomainBlocker {
+                            consumer: Some(node.id),
+                            input,
+                            from: input_domain,
+                            to: EffectColorDomain::AlphaMask,
+                            kind: EffectDomainBlockerKind::MaskInputIsNotAlpha,
+                        });
+                    }
+                }
+                EffectColorDomain::AlphaMask
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                let base_domain = *plan.node_output_domains.get(base)?;
+                let graded_domain = *plan.node_output_domains.get(graded)?;
+                plan_domain_edge(
+                    &mut plan,
+                    Some(node.id),
+                    *graded,
+                    graded_domain,
+                    base_domain,
+                    EffectDomainBlockerKind::NonRgbDomainTransition,
+                );
+                let matte_domain = *plan.node_output_domains.get(matte)?;
+                if matte_domain != EffectColorDomain::AlphaMask {
+                    plan.blockers.push(EffectDomainBlocker {
+                        consumer: Some(node.id),
+                        input: *matte,
+                        from: matte_domain,
+                        to: EffectColorDomain::AlphaMask,
+                        kind: EffectDomainBlockerKind::MaskInputIsNotAlpha,
+                    });
+                }
+                base_domain
+            }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 let first = *inputs.first()?;
                 let target_domain = *plan.node_output_domains.get(&first)?;
@@ -1835,6 +1996,17 @@ fn effect_graph_shape(graph: &EffectRenderGraph) -> Option<EffectGraphShape> {
             }
             EffectGraphNodeKind::MaskSource { .. } => {
                 EffectGraphNodeShape::MaskSource { id: node.id }
+            }
+            EffectGraphNodeKind::MaskCombine { left, right, .. } => {
+                EffectGraphNodeShape::MaskCombine { id: node.id, left: *left, right: *right }
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                EffectGraphNodeShape::MatteMix {
+                    id: node.id,
+                    base: *base,
+                    graded: *graded,
+                    matte: *matte,
+                }
             }
             EffectGraphNodeKind::MultiInput { inputs, .. } => {
                 EffectGraphNodeShape::MultiInput { id: node.id, inputs: inputs.clone() }
@@ -2065,17 +2237,60 @@ pub(crate) fn compile_effect_node_profiles(
                     output_cache_enabled,
                 }
             }
-            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity } => {
+            EffectGraphNodeKind::MaskSource { shape, feather, expansion, opacity, invert } => {
                 let mut hasher = std::collections::hash_map::DefaultHasher::new();
                 6u8.hash(&mut hasher);
                 shape_variant_hash(shape, &mut hasher);
                 feather.to_bits().hash(&mut hasher);
                 expansion.to_bits().hash(&mut hasher);
                 opacity.to_bits().hash(&mut hasher);
+                invert.hash(&mut hasher);
                 CompiledEffectNodeProfile {
                     subtree_signature: hasher.finish(),
                     cache_policy: EffectCachePolicy::Deterministic,
                     estimated_cost: 4,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::MaskCombine { left, right, mask_op } => {
+                let left_profile = profiles.get(left)?;
+                let right_profile = profiles.get(right)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                9u8.hash(&mut hasher);
+                left_profile.subtree_signature.hash(&mut hasher);
+                right_profile.subtree_signature.hash(&mut hasher);
+                mask_op.hash(&mut hasher);
+                let cache_policy = left_profile.cache_policy.combine(right_profile.cache_policy);
+                let estimated_cost = left_profile.estimated_cost + right_profile.estimated_cost + 1;
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy,
+                    estimated_cost,
+                    output_cache_enabled: false,
+                }
+            }
+            EffectGraphNodeKind::MatteMix { base, graded, matte } => {
+                let base_profile = profiles.get(base)?;
+                let graded_profile = profiles.get(graded)?;
+                let matte_profile = profiles.get(matte)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                10u8.hash(&mut hasher);
+                base_profile.subtree_signature.hash(&mut hasher);
+                graded_profile.subtree_signature.hash(&mut hasher);
+                matte_profile.subtree_signature.hash(&mut hasher);
+                let cache_policy = base_profile
+                    .cache_policy
+                    .combine(graded_profile.cache_policy)
+                    .combine(matte_profile.cache_policy);
+                let estimated_cost = base_profile
+                    .estimated_cost
+                    .saturating_add(graded_profile.estimated_cost)
+                    .saturating_add(matte_profile.estimated_cost)
+                    .saturating_add(1);
+                CompiledEffectNodeProfile {
+                    subtree_signature: hasher.finish(),
+                    cache_policy,
+                    estimated_cost,
                     output_cache_enabled: false,
                 }
             }
@@ -2322,6 +2537,7 @@ mod tests {
                     feather: 0.0,
                     expansion: 0.0,
                     opacity: 1.0,
+                    invert: false,
                 },
             }],
             output: Some(EffectGraphNodeId(0)),
@@ -2686,6 +2902,7 @@ mod tests {
                     feather: 0.0,
                     expansion: 0.0,
                     opacity: 1.0,
+                    invert: false,
                 },
             }],
             output: Some(EffectGraphNodeId(0)),
@@ -2719,6 +2936,7 @@ mod tests {
                         feather: 2.0,
                         expansion: 0.0,
                         opacity: 1.0,
+                        invert: false,
                     },
                 },
                 EffectGraphNode {

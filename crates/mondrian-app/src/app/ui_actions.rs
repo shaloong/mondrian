@@ -6,8 +6,8 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, JobId};
 use mondrian_core::{
-    ColorEngine, ColorSpace, DisplayToneMapPolicy, FramePosition, Rational, Resolution,
-    TimelineDisplayFormat, WorkingColorSpace,
+    ColorEngine, ColorSpace, DisplayManagementPolicy, DisplayToneMapPolicy, FramePosition,
+    Rational, Resolution, TimelineDisplayFormat, WorkingColorSpace,
 };
 use mondrian_editor_state::state::PanelKind;
 use mondrian_editor_state::Action;
@@ -51,30 +51,32 @@ pub use super::product_action::{
     VisualEffectSetParameterValuePayload, VisualEffectTargetPayload, VisualMaskAddToClipPayload,
     VisualMaskReorderPayload, VisualMaskSetEnabledPayload, VisualMaskSetLockedPayload,
     VisualMaskSetParameterValuePayload, VisualMaskSetShapeAnimationEnabledPayload,
-    VisualMaskTargetPayload, VisualMaskWriteShapePayload, ASSET_CREATE_FOLDER,
-    ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES, ASSET_NAMESPACE,
-    ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT, ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK,
-    ASSET_REMOVE_ENTRIES, ASSET_RENAME, ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION,
-    ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT, AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE,
-    CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE, CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR,
-    CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL, EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT,
-    EXPORT_ENQUEUE, EXPORT_NAMESPACE, PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE,
-    PROJECT_RECOVER_FROM_AUTOSAVE, PROJECT_UPDATE_COLOR_ENVIRONMENT,
-    PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE, SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE,
-    SEQUENCE_NEW, SEQUENCE_OPEN_NESTED, SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT,
-    SEQUENCE_SWITCH_ACTIVE, SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT,
-    TIMELINE_CLEAR_IN_OUT_POINTS, TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION,
-    TIMELINE_INSERT_ASSET, TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET,
-    TIMELINE_PRECOMPOSE_SELECTION, TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT,
-    TIMELINE_TRIM_CLIPS, TRACK_ADD, TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL,
-    TRACK_SET_EDIT_POLICY, VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE,
-    VIDEO_TRANSITION_REMOVE, VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
+    VisualMaskStartTrackingPayload, VisualMaskTargetPayload, VisualMaskWriteShapePayload,
+    ASSET_CREATE_FOLDER, ASSET_CREATE_GENERATED, ASSET_IMPORT_FILES, ASSET_MOVE_ENTRIES,
+    ASSET_NAMESPACE, ASSET_PREPARE_DRAG, ASSET_REBIND_AUDIO_COMPONENT,
+    ASSET_REFRESH_AUDIO_COMPONENTS, ASSET_RELINK, ASSET_REMOVE_ENTRIES, ASSET_RENAME,
+    ASSET_RENAME_FOLDER, ASSET_SET_INTERPRETATION, ASSET_SET_PROXY_MODE, AUDIO_EDIT_COMPONENT,
+    AUDIO_EDIT_PROCESSOR_RACK, AUDIO_NAMESPACE, CLIP_EDIT_NUMERIC_CURVE, CLIP_NAMESPACE,
+    CLIP_SET_ENABLED, CLIP_SET_SOLID_COLOR, CLIP_WRITE_PARAMETER_VALUES, EXPORT_CANCEL,
+    EXPORT_CLEAR_TERMINAL_HISTORY, EXPORT_EDIT_DRAFT, EXPORT_ENQUEUE, EXPORT_NAMESPACE,
+    PROJECT_CREATE_WITH_SETTINGS, PROJECT_NAMESPACE, PROJECT_RECOVER_FROM_AUTOSAVE,
+    PROJECT_UPDATE_COLOR_ENVIRONMENT, PROJECT_UPDATE_NEW_SEQUENCE_DEFAULTS, SEQUENCE_DELETE,
+    SEQUENCE_DUPLICATE, SEQUENCE_NAMESPACE, SEQUENCE_NEW, SEQUENCE_OPEN_NESTED,
+    SEQUENCE_RETURN_TO_PARENT, SEQUENCE_SET_ACTIVE_DEFAULT, SEQUENCE_SWITCH_ACTIVE,
+    SEQUENCE_UPDATE_SETTINGS, TIMELINE_APPLY_RANGE_EDIT, TIMELINE_CLEAR_IN_OUT_POINTS,
+    TIMELINE_CREATE_BASIC_TITLE, TIMELINE_EDIT_SELECTION, TIMELINE_INSERT_ASSET,
+    TIMELINE_MOVE_CLIP, TIMELINE_NAMESPACE, TIMELINE_PLACE_ASSET, TIMELINE_PRECOMPOSE_SELECTION,
+    TIMELINE_SEEK, TIMELINE_SELECT_CLIP, TIMELINE_SET_IN_OUT_POINT, TIMELINE_TRIM_CLIPS, TRACK_ADD,
+    TRACK_MOVE, TRACK_NAMESPACE, TRACK_SET_AUTHOR_CONTROL, TRACK_SET_EDIT_POLICY,
+    VIDEO_TRANSITION_CREATE_CROSS_DISSOLVE, VIDEO_TRANSITION_NAMESPACE, VIDEO_TRANSITION_REMOVE,
+    VIDEO_TRANSITION_SELECT, VIDEO_TRANSITION_SET_RANGE, VIEWER_NAMESPACE,
     VISUAL_EFFECT_ADD_TO_CLIP, VISUAL_EFFECT_NAMESPACE, VISUAL_EFFECT_REMOVE,
     VISUAL_EFFECT_REORDER, VISUAL_EFFECT_SELECT, VISUAL_EFFECT_SET_ENABLED,
-    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_NAMESPACE,
-    VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER, VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED,
-    VISUAL_MASK_SET_LOCKED, VISUAL_MASK_SET_PARAMETER_VALUE,
-    VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED, VISUAL_MASK_WRITE_SHAPE,
+    VISUAL_EFFECT_SET_PARAMETER_VALUE, VISUAL_MASK_ADD_TO_CLIP, VISUAL_MASK_CANCEL_TRACKING,
+    VISUAL_MASK_NAMESPACE, VISUAL_MASK_RECOMPUTE_TRACKING, VISUAL_MASK_REMOVE, VISUAL_MASK_REORDER,
+    VISUAL_MASK_SELECT, VISUAL_MASK_SET_ENABLED, VISUAL_MASK_SET_LOCKED,
+    VISUAL_MASK_SET_PARAMETER_VALUE, VISUAL_MASK_SET_SHAPE_ANIMATION_ENABLED,
+    VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
     AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
@@ -161,6 +163,12 @@ pub const APP_SHELL_PREFERENCES_VIEWER_BACKGROUND_CHANGED: &str =
 /// App-shell request to switch the runtime audio output-device intent.
 pub const APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED: &str =
     "preferences_audio_output_device_changed";
+/// App-shell request to apply one validated machine-local display policy.
+pub const APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED: &str =
+    "preferences_display_management_changed";
+/// App-shell request to choose an explicit monitor ICC profile.
+pub const APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE: &str =
+    "preferences_select_display_icc_profile";
 /// App-shell request to rediscover physical audio output devices.
 pub const APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES: &str =
     "preferences_refresh_audio_output_devices";
@@ -196,6 +204,7 @@ pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 pub enum PreferencesTabPayload {
     General,
     Media,
+    Display,
     Shortcuts,
     Developer,
 }
@@ -230,6 +239,12 @@ pub struct PreferencesViewerBackgroundPayload {
 pub struct PreferencesAudioOutputDevicePayload {
     /// Follow-system-default or exact stable-device selection.
     pub selection: RealtimeAudioOutputDeviceSelection,
+}
+
+/// Validated machine-local display policy selected by Preferences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreferencesDisplayManagementPayload {
+    pub policy: DisplayManagementPolicy,
 }
 
 /// Stable shortcut descriptor selected in the app UI preferences UI.
@@ -868,6 +883,24 @@ pub fn visual_mask_set_parameter_value_action(
     .into_external_action()
 }
 
+/// Build an action that starts one bounded Mask tracking analysis.
+pub fn visual_mask_start_tracking_action(payload: VisualMaskStartTrackingPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::StartTracking(payload))
+        .into_external_action()
+}
+
+/// Build an action that cancels the target's latest tracking attempt.
+pub fn visual_mask_cancel_tracking_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::CancelTracking(payload))
+        .into_external_action()
+}
+
+/// Build an action that recomputes the target's persisted tracking recipe.
+pub fn visual_mask_recompute_tracking_action(payload: VisualMaskTargetPayload) -> Action {
+    ProductAction::VisualMask(VisualMaskProductAction::RecomputeTracking(payload))
+        .into_external_action()
+}
+
 /// Build an action that prepares one Asset for Timeline drag/drop.
 pub fn asset_prepare_drag_action(payload: AssetTargetPayload) -> Action {
     ProductAction::Asset(AssetProductAction::PrepareDrag(payload)).into_external_action()
@@ -1361,6 +1394,21 @@ pub fn app_shell_preferences_audio_output_device_changed_action(
         APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
         PreferencesAudioOutputDevicePayload { selection },
     )
+}
+
+/// Build an action that applies and persists a complete display policy.
+pub fn app_shell_preferences_display_management_changed_action(
+    policy: DisplayManagementPolicy,
+) -> Action {
+    custom_app_shell_action_with_payload(
+        APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
+        PreferencesDisplayManagementPayload { policy },
+    )
+}
+
+/// Build a request for selecting an explicit monitor ICC profile file.
+pub fn app_shell_preferences_select_display_icc_profile_action() -> Action {
+    custom_app_shell_action(APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE)
 }
 
 /// Build an app-shell request for a fresh physical output-device observation.

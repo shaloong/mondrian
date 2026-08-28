@@ -133,6 +133,10 @@ pub enum PropertyValue {
     Vec3(Vec3),
     Color(Color),
     Vec4([f32; 4]),
+    /// A bounded normalized transfer curve edited as stable ordered control points.
+    Curve(NormalizedCurve),
+    /// A bounded set of include/exclude samples for a three-dimensional color qualifier.
+    QualifierSamples(QualifierSampleSet),
     Enum(String),
     Resource(ParameterResourceReference),
     Text(String),
@@ -148,9 +152,226 @@ pub enum PropertyValueType {
     Vec3,
     Color,
     Vec4,
+    Curve,
+    QualifierSamples,
     Enum,
     Resource,
     Text,
+}
+
+/// Maximum authored control points in one normalized transfer curve.
+pub const MAX_NORMALIZED_CURVE_POINTS: usize = 32;
+
+/// One finite normalized transfer-curve control point.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedCurvePoint {
+    /// Normalized domain coordinate in `0..=1`.
+    pub x: f32,
+    /// Normalized output value in `0..=1`.
+    pub y: f32,
+}
+
+impl NormalizedCurvePoint {
+    /// Construct one control point; the owning curve performs validation.
+    pub const fn new(x: f32, y: f32) -> Self {
+        Self { x, y }
+    }
+}
+
+/// A bounded normalized curve with fixed domain endpoints and ordered author points.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NormalizedCurve {
+    points: Vec<NormalizedCurvePoint>,
+}
+
+impl NormalizedCurve {
+    /// Construct and validate one curve.
+    pub fn new(
+        points: Vec<NormalizedCurvePoint>,
+    ) -> std::result::Result<Self, NormalizedCurveError> {
+        let curve = Self { points };
+        curve.validate()?;
+        Ok(curve)
+    }
+
+    /// Linear identity curve.
+    pub fn identity() -> Self {
+        Self {
+            points: vec![
+                NormalizedCurvePoint::new(0.0, 0.0),
+                NormalizedCurvePoint::new(1.0, 1.0),
+            ],
+        }
+    }
+
+    /// Flat curve used by neutral delta-style controls.
+    pub fn flat(value: f32) -> std::result::Result<Self, NormalizedCurveError> {
+        Self::new(vec![
+            NormalizedCurvePoint::new(0.0, value),
+            NormalizedCurvePoint::new(1.0, value),
+        ])
+    }
+
+    /// Ordered control points including exact x=0 and x=1 endpoints.
+    pub fn points(&self) -> &[NormalizedCurvePoint] {
+        &self.points
+    }
+
+    /// Validate serialized or newly authored curve state.
+    pub fn validate(&self) -> std::result::Result<(), NormalizedCurveError> {
+        if !(2..=MAX_NORMALIZED_CURVE_POINTS).contains(&self.points.len()) {
+            return Err(NormalizedCurveError::PointCount { actual: self.points.len() });
+        }
+        if self.points.first().is_none_or(|point| point.x != 0.0)
+            || self.points.last().is_none_or(|point| point.x != 1.0)
+        {
+            return Err(NormalizedCurveError::MissingDomainEndpoints);
+        }
+        for (index, point) in self.points.iter().enumerate() {
+            if !point.x.is_finite()
+                || !point.y.is_finite()
+                || !(0.0..=1.0).contains(&point.x)
+                || !(0.0..=1.0).contains(&point.y)
+            {
+                return Err(NormalizedCurveError::InvalidPoint { index });
+            }
+            if index > 0 && self.points[index - 1].x >= point.x {
+                return Err(NormalizedCurveError::NonIncreasingDomain { index });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Invalid normalized curve author state.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum NormalizedCurveError {
+    /// The curve has fewer than two or more than the supported maximum points.
+    #[error("normalized curve requires 2..={MAX_NORMALIZED_CURVE_POINTS} points, got {actual}")]
+    PointCount {
+        /// Observed number of control points.
+        actual: usize,
+    },
+    /// The first or last control point does not anchor the normalized domain.
+    #[error("normalized curve must contain exact x=0 and x=1 endpoints")]
+    MissingDomainEndpoints,
+    /// One point is non-finite or outside the normalized square.
+    #[error("normalized curve point {index} is non-finite or outside [0, 1]")]
+    InvalidPoint {
+        /// Index of the invalid point.
+        index: usize,
+    },
+    /// Control-point domain coordinates are not strictly increasing.
+    #[error("normalized curve point {index} does not have a strictly increasing x coordinate")]
+    NonIncreasingDomain {
+        /// Index of the first point that does not follow its predecessor.
+        index: usize,
+    },
+}
+
+/// Maximum authored samples retained by one three-dimensional qualifier.
+pub const MAX_QUALIFIER_SAMPLES: usize = 16;
+
+/// Boolean operation contributed by one three-dimensional qualifier sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualifierSampleOperation {
+    /// Grow the selected color volume around this sample.
+    Include,
+    /// Remove the selected color volume around this sample.
+    Exclude,
+}
+
+/// One finite normalized RGB sample in qualifier space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QualifierSample {
+    /// Normalized RGB coordinate in `0..=1` for each channel.
+    pub rgb: [f32; 3],
+    /// Whether this sample includes or excludes its neighbourhood.
+    pub operation: QualifierSampleOperation,
+}
+
+impl QualifierSample {
+    /// Construct one sample; the owning set performs validation.
+    pub const fn new(rgb: [f32; 3], operation: QualifierSampleOperation) -> Self {
+        Self { rgb, operation }
+    }
+}
+
+/// Bounded, ordered three-dimensional qualifier samples.
+///
+/// Order is persisted for stable authoring and UI projection but does not
+/// change selection algebra: include samples form a union and exclude samples
+/// subtract another union.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct QualifierSampleSet(Vec<QualifierSample>);
+
+impl QualifierSampleSet {
+    /// Construct and validate one sample set.
+    pub fn new(
+        samples: Vec<QualifierSample>,
+    ) -> std::result::Result<Self, QualifierSampleSetError> {
+        let set = Self(samples);
+        set.validate()?;
+        Ok(set)
+    }
+
+    /// Default green-screen include sample.
+    pub fn green_screen() -> Self {
+        Self(vec![QualifierSample::new(
+            [0.0, 1.0, 0.0],
+            QualifierSampleOperation::Include,
+        )])
+    }
+
+    /// Ordered authored samples.
+    pub fn samples(&self) -> &[QualifierSample] {
+        &self.0
+    }
+
+    /// Validate serialized or newly authored sample state.
+    pub fn validate(&self) -> std::result::Result<(), QualifierSampleSetError> {
+        if !(1..=MAX_QUALIFIER_SAMPLES).contains(&self.0.len()) {
+            return Err(QualifierSampleSetError::SampleCount { actual: self.0.len() });
+        }
+        let mut has_include = false;
+        for (index, sample) in self.0.iter().enumerate() {
+            if sample
+                .rgb
+                .iter()
+                .any(|channel| !channel.is_finite() || !(0.0..=1.0).contains(channel))
+            {
+                return Err(QualifierSampleSetError::InvalidSample { index });
+            }
+            has_include |= sample.operation == QualifierSampleOperation::Include;
+        }
+        if !has_include {
+            return Err(QualifierSampleSetError::MissingIncludeSample);
+        }
+        Ok(())
+    }
+}
+
+/// Invalid three-dimensional qualifier sample author state.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum QualifierSampleSetError {
+    /// The set is empty or exceeds the bounded authoring limit.
+    #[error("qualifier requires 1..={MAX_QUALIFIER_SAMPLES} samples, got {actual}")]
+    SampleCount {
+        /// Observed number of samples.
+        actual: usize,
+    },
+    /// One sample contains a non-finite or out-of-range channel.
+    #[error("qualifier sample {index} is non-finite or outside [0, 1]")]
+    InvalidSample {
+        /// Index of the invalid sample.
+        index: usize,
+    },
+    /// Exclude-only sample sets cannot create a selected volume.
+    #[error("qualifier sample set requires at least one include sample")]
+    MissingIncludeSample,
 }
 
 /// Stable choice exposed by an enum parameter.
@@ -231,6 +452,8 @@ impl ParameterSchema {
             value_type,
             PropertyValueType::Bool
                 | PropertyValueType::Int
+                | PropertyValueType::Curve
+                | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
                 | PropertyValueType::Text
@@ -320,6 +543,8 @@ impl ParameterSchema {
             self.value_type,
             PropertyValueType::Bool
                 | PropertyValueType::Int
+                | PropertyValueType::Curve
+                | PropertyValueType::QualifierSamples
                 | PropertyValueType::Enum
                 | PropertyValueType::Resource
                 | PropertyValueType::Text
@@ -353,6 +578,8 @@ impl ParameterSchema {
             && matches!(
                 self.value_type,
                 PropertyValueType::Bool
+                    | PropertyValueType::Curve
+                    | PropertyValueType::QualifierSamples
                     | PropertyValueType::Enum
                     | PropertyValueType::Resource
                     | PropertyValueType::Text
@@ -367,6 +594,15 @@ impl ParameterSchema {
             )
         {
             return Err(ParameterSchemaError::ResourceCacheImpactRequired);
+        }
+        match &self.default_value {
+            PropertyValue::Curve(curve) if curve.validate().is_err() => {
+                return Err(ParameterSchemaError::InvalidCurveDefaultValue);
+            }
+            PropertyValue::QualifierSamples(samples) if samples.validate().is_err() => {
+                return Err(ParameterSchemaError::InvalidQualifierSamplesDefaultValue);
+            }
+            _ => {}
         }
         for value in self.default_value.to_channel_values() {
             if !value.is_finite() {
@@ -510,6 +746,10 @@ pub enum ParameterSchemaError {
     DefaultValueOutsideHardRange,
     #[error("resource parameters must declare resource cache impact")]
     ResourceCacheImpactRequired,
+    #[error("curve parameter default must be a valid normalized curve")]
+    InvalidCurveDefaultValue,
+    #[error("qualifier-samples parameter default must be a valid bounded sample set")]
+    InvalidQualifierSamplesDefaultValue,
     #[error("parameter range endpoints must be finite")]
     NonFiniteRange,
     #[error("parameter range minimum exceeds maximum")]
@@ -545,6 +785,8 @@ impl PropertyValue {
             Self::Vec3(_) => "vec3",
             Self::Color(_) => "color",
             Self::Vec4(_) => "vec4",
+            Self::Curve(_) => "curve",
+            Self::QualifierSamples(_) => "qualifier_samples",
             Self::Enum(_) => "enum",
             Self::Resource(_) => "resource",
             Self::Text(_) => "text",
@@ -561,6 +803,8 @@ impl PropertyValue {
             Self::Vec3(_) => PropertyValueType::Vec3,
             Self::Color(_) => PropertyValueType::Color,
             Self::Vec4(_) => PropertyValueType::Vec4,
+            Self::Curve(_) => PropertyValueType::Curve,
+            Self::QualifierSamples(_) => PropertyValueType::QualifierSamples,
             Self::Enum(_) => PropertyValueType::Enum,
             Self::Resource(_) => PropertyValueType::Resource,
             Self::Text(_) => PropertyValueType::Text,
@@ -626,7 +870,11 @@ impl PropertyValue {
                 value.a as f64,
             ],
             Self::Vec4(value) => value.iter().map(|component| *component as f64).collect(),
-            Self::Enum(_) | Self::Resource(_) | Self::Text(_) => vec![],
+            Self::Curve(_)
+            | Self::QualifierSamples(_)
+            | Self::Enum(_)
+            | Self::Resource(_)
+            | Self::Text(_) => vec![],
         }
     }
 
@@ -669,9 +917,11 @@ impl PropertyValue {
                 channel_values.get(2).copied().unwrap_or(0.0) as f32,
                 channel_values.get(3).copied().unwrap_or(0.0) as f32,
             ]),
-            PropertyValueType::Enum | PropertyValueType::Resource | PropertyValueType::Text => {
-                fallback.clone()
-            }
+            PropertyValueType::Curve
+            | PropertyValueType::QualifierSamples
+            | PropertyValueType::Enum
+            | PropertyValueType::Resource
+            | PropertyValueType::Text => fallback.clone(),
         }
     }
 }
@@ -684,19 +934,26 @@ impl PropertyValueType {
             Self::Vec3 => 3,
             Self::Color | Self::Vec4 => 4,
             Self::Enum => 1,
-            Self::Resource | Self::Text => 0,
+            Self::Curve | Self::QualifierSamples | Self::Resource | Self::Text => 0,
         }
     }
 
     pub fn supports_animation(self) -> bool {
-        !matches!(self, Self::Resource | Self::Text)
+        !matches!(
+            self,
+            Self::Curve | Self::QualifierSamples | Self::Resource | Self::Text
+        )
     }
 
     pub fn normalized_interpolation(self, interpolation: InterpolationType) -> InterpolationType {
         match self {
-            Self::Bool | Self::Int | Self::Enum | Self::Resource | Self::Text => {
-                InterpolationType::Hold
-            }
+            Self::Bool
+            | Self::Int
+            | Self::Curve
+            | Self::QualifierSamples
+            | Self::Enum
+            | Self::Resource
+            | Self::Text => InterpolationType::Hold,
             _ => interpolation,
         }
     }
@@ -1935,6 +2192,16 @@ impl AnimatedProperty {
             &self.descriptor.schema.default_value,
             &value,
         )?;
+        if let PropertyValue::Curve(curve) = &value {
+            curve.validate().map_err(|error| {
+                parameter_value_error(&self.descriptor.path, &error.to_string())
+            })?;
+        }
+        if let PropertyValue::QualifierSamples(samples) = &value {
+            samples.validate().map_err(|error| {
+                parameter_value_error(&self.descriptor.path, &error.to_string())
+            })?;
+        }
         if let PropertyValue::Enum(key) = &value
             && !self.descriptor.schema.enum_options.iter().any(|option| option.key == *key)
         {
@@ -2969,6 +3236,8 @@ impl crate::AuthoringFootprint for PropertyValueType {
             | Self::Vec3
             | Self::Color
             | Self::Vec4
+            | Self::Curve
+            | Self::QualifierSamples
             | Self::Enum
             | Self::Resource
             | Self::Text => Ok(()),
@@ -3052,6 +3321,8 @@ impl crate::AuthoringFootprint for PropertyValue {
         match self {
             Self::Enum(value) | Self::Text(value) => collector.collect(value),
             Self::Resource(reference) => collector.collect(reference),
+            Self::Curve(curve) => collector.collect(&curve.points),
+            Self::QualifierSamples(samples) => collector.collect(&samples.0),
             Self::Bool(_)
             | Self::Int(_)
             | Self::Float(_)
@@ -3061,6 +3332,37 @@ impl crate::AuthoringFootprint for PropertyValue {
             | Self::Color(_)
             | Self::Vec4(_) => Ok(()),
         }
+    }
+}
+
+impl crate::AuthoringFootprint for NormalizedCurvePoint {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { x: _, y: _ } = self;
+        Ok(())
+    }
+}
+
+impl crate::AuthoringFootprint for QualifierSampleOperation {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        match self {
+            Self::Include | Self::Exclude => Ok(()),
+        }
+    }
+}
+
+impl crate::AuthoringFootprint for QualifierSample {
+    fn collect_authoring_footprint(
+        &self,
+        _collector: &mut crate::AuthoringFootprintCollector,
+    ) -> std::result::Result<(), crate::AuthoringFootprintError> {
+        let Self { rgb: _, operation: _ } = self;
+        Ok(())
     }
 }
 
@@ -3291,6 +3593,44 @@ mod tests {
         assert_eq!(
             decoded.descriptor.path,
             "effect.instance-renamed.radius_alias"
+        );
+    }
+
+    #[test]
+    fn qualifier_samples_and_schema_defaults_fail_closed_on_invalid_serialized_state() {
+        assert!(matches!(
+            QualifierSampleSet::new(Vec::new()),
+            Err(QualifierSampleSetError::SampleCount { actual: 0 })
+        ));
+        assert!(matches!(
+            QualifierSampleSet::new(vec![QualifierSample::new(
+                [0.5, 0.5, 0.5],
+                QualifierSampleOperation::Exclude,
+            )]),
+            Err(QualifierSampleSetError::MissingIncludeSample)
+        ));
+        assert!(matches!(
+            QualifierSampleSet::new(vec![QualifierSample::new(
+                [f32::NAN, 0.5, 0.5],
+                QualifierSampleOperation::Include,
+            )]),
+            Err(QualifierSampleSetError::InvalidSample { index: 0 })
+        ));
+
+        let invalid_samples: QualifierSampleSet = serde_json::from_value(serde_json::json!([
+            {
+                "rgb": [0.5, 0.5, 0.5],
+                "operation": "exclude"
+            }
+        ]))
+        .expect("structurally deserialize invalid legacy/plugin sample set");
+        let schema = ParameterSchema::v1(
+            ParameterId::new_static("mondrian.test.qualifier.samples"),
+            PropertyValue::QualifierSamples(invalid_samples),
+        );
+        assert_eq!(
+            schema.validate(),
+            Err(ParameterSchemaError::InvalidQualifierSamplesDefaultValue)
         );
     }
 

@@ -612,6 +612,7 @@ pub(crate) fn resolve_app_state_proxy_color_contract(
     let input_color = sequence
         .settings
         .root_program_color_context(state.project_color_environment())
+        .map_err(|error| format!("proxy generation color context is invalid: {error}"))?
         .media_input(sequence.settings.color.input.auto_tone_map_media);
     resolve_asset_proxy_color_contract(asset, &input_color)
 }

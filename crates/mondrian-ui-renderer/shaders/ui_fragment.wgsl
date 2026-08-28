@@ -8,6 +8,14 @@ const RENDER_MODE_LINE: u32 = 2u;
 const RENDER_MODE_IMAGE: u32 = 3u;
 const RENDER_MODE_SOFT_SHADOW: u32 = 4u;
 
+struct UiUniforms {
+    screen_size: vec2<f32>,
+    ui_to_surface_row_0: vec4<f32>,
+    ui_to_surface_row_1: vec4<f32>,
+    ui_to_surface_row_2: vec4<f32>,
+    external_decode_mode: u32,
+};
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) tex_coord: vec2<f32>,
@@ -20,6 +28,19 @@ struct VertexOutput {
 
 @group(1) @binding(0) var glyph_sampler: sampler;
 @group(1) @binding(1) var glyph_texture: texture_2d<f32>;
+@group(0) @binding(0) var<uniform> ui_uniforms: UiUniforms;
+
+fn ui_linear_to_surface_linear(value: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(ui_uniforms.ui_to_surface_row_0.xyz, value),
+        dot(ui_uniforms.ui_to_surface_row_1.xyz, value),
+        dot(ui_uniforms.ui_to_surface_row_2.xyz, value),
+    );
+}
+
+fn ui_output(value: vec4<f32>) -> vec4<f32> {
+    return vec4<f32>(ui_linear_to_surface_linear(value.rgb), value.a);
+}
 
 /// Uniform corner radius (original path for shadows & lines).
 fn sd_rounded_box_px(p: vec2<f32>, size: vec2<f32>, r: f32) -> f32 {
@@ -65,12 +86,12 @@ fn sd_segment_px(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
 fn main(in: VertexOutput) -> @location(0) vec4<f32> {
     if in.render_mode == RENDER_MODE_GLYPH {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
-        return vec4<f32>(in.color.rgb, in.color.a * sampled.a);
+        return ui_output(vec4<f32>(in.color.rgb, in.color.a * sampled.a));
     }
 
     if in.render_mode == RENDER_MODE_IMAGE {
         let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
-        return sampled * in.color;
+        return ui_output(sampled * in.color);
     }
 
     if in.render_mode == RENDER_MODE_LINE {
@@ -83,7 +104,7 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
         let aa = clamp(fwidth(d), 0.75, 1.5);
         let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
         if alpha <= 0.001 { discard; }
-        return vec4<f32>(in.color.rgb, in.color.a * alpha);
+        return ui_output(vec4<f32>(in.color.rgb, in.color.a * alpha));
     }
 
     if in.render_mode == RENDER_MODE_SOFT_SHADOW {
@@ -95,21 +116,21 @@ fn main(in: VertexOutput) -> @location(0) vec4<f32> {
         let falloff = 1.0 - smoothstep(0.0, blur, outside);
         let alpha = in.color.a * falloff * falloff * falloff;
         if alpha <= 0.001 { discard; }
-        return vec4<f32>(in.color.rgb, alpha);
+        return ui_output(vec4<f32>(in.color.rgb, alpha));
     }
 
     // RENDER_MODE_SHAPE
     let clamp_half = min(in.rect_size.x, in.rect_size.y) * 0.5;
     let r = clamp(in.corner_radius_px, vec4(0.0), vec4(clamp_half));
     let all_zero = r.x <= 0.0 && r.y <= 0.0 && r.z <= 0.0 && r.w <= 0.0;
-    if all_zero { return in.color; }
+    if all_zero { return ui_output(in.color); }
 
     let p = in.tex_coord * in.rect_size;
     let d = sd_rounded_box_per_corner(p, in.rect_size, r);
     let aa = clamp(fwidth(d), 0.75, 1.5);
     let alpha = smoothstep(aa * 0.5, -aa * 0.5, d);
     if alpha <= 0.001 { discard; }
-    return vec4<f32>(in.color.rgb, in.color.a * alpha);
+    return ui_output(vec4<f32>(in.color.rgb, in.color.a * alpha));
 }
 
 fn srgb_carrier_to_linear(value: vec3<f32>) -> vec3<f32> {
@@ -118,10 +139,67 @@ fn srgb_carrier_to_linear(value: vec3<f32>) -> vec3<f32> {
     return select(high, low, value <= vec3<f32>(0.04045));
 }
 
-// Preserve opaque encoded/device code values through an sRGB attachment. The
-// attachment OETF reverses this carrier decode during the final store.
+fn pq_to_linear_100_nits(value: vec3<f32>) -> vec3<f32> {
+    let m1 = 2610.0 / 16384.0;
+    let m2 = 2523.0 / 32.0;
+    let c1 = 3424.0 / 4096.0;
+    let c2 = 2413.0 / 128.0;
+    let c3 = 2392.0 / 128.0;
+    let powered = pow(clamp(value, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / m2));
+    let numerator = max(powered - vec3<f32>(c1), vec3<f32>(0.0));
+    let denominator = max(vec3<f32>(c2) - vec3<f32>(c3) * powered, vec3<f32>(0.000001));
+    return pow(numerator / denominator, vec3<f32>(1.0 / m1)) * vec3<f32>(100.0);
+}
+
+fn hlg_to_linear_100_nits(value: vec3<f32>) -> vec3<f32> {
+    let a = 0.17883277;
+    let b = 0.28466892;
+    let c = 0.55991073;
+    let low = value * value / vec3<f32>(3.0);
+    let high = (exp((value - vec3<f32>(c)) / vec3<f32>(a)) + vec3<f32>(b)) / vec3<f32>(12.0);
+    let scene_linear = select(high, low, value <= vec3<f32>(0.5));
+    return pow(max(scene_linear, vec3<f32>(0.0)), vec3<f32>(1.2)) * vec3<f32>(10.0);
+}
+
+fn surface_code_to_linear(value: vec3<f32>) -> vec3<f32> {
+    if ui_uniforms.external_decode_mode == 1u {
+        return pq_to_linear_100_nits(value);
+    }
+    if ui_uniforms.external_decode_mode == 2u {
+        return hlg_to_linear_100_nits(value);
+    }
+    return srgb_carrier_to_linear(value);
+}
+
+fn sample_surface_code_linear(uv: vec2<f32>) -> vec3<f32> {
+    let dimensions = vec2<i32>(textureDimensions(glyph_texture));
+    let texel_position = uv * vec2<f32>(dimensions) - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(texel_position));
+    let fraction = fract(texel_position);
+    let maximum = dimensions - vec2<i32>(1);
+    let p00 = clamp(base, vec2<i32>(0), maximum);
+    let p10 = clamp(base + vec2<i32>(1, 0), vec2<i32>(0), maximum);
+    let p01 = clamp(base + vec2<i32>(0, 1), vec2<i32>(0), maximum);
+    let p11 = clamp(base + vec2<i32>(1, 1), vec2<i32>(0), maximum);
+    let c00 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p00, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let c10 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p10, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let c01 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p01, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    let c11 = surface_code_to_linear(clamp(textureLoad(glyph_texture, p11, 0).rgb, vec3<f32>(0.0), vec3<f32>(1.0)));
+    return mix(mix(c00, c10, fraction.x), mix(c01, c11, fraction.x), fraction.y);
+}
+
+// Decode opaque Viewer target code values into the target-primary linear
+// composition. This path deliberately does not apply the UI-primary matrix.
 @fragment
 fn main_encoded_code_values(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(sample_surface_code_linear(in.tex_coord), 1.0);
+}
+
+// ICC/device code values have no target-colorimetry transfer to invert. The
+// direct sRGB attachment OETF reverses this carrier decode after code-space
+// filtering, preserving the opaque device payload.
+@fragment
+fn main_device_code_values(in: VertexOutput) -> @location(0) vec4<f32> {
     let sampled = textureSample(glyph_texture, glyph_sampler, in.tex_coord);
     let code_value = clamp(sampled.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
     return vec4<f32>(srgb_carrier_to_linear(code_value), 1.0);

@@ -27,7 +27,7 @@ permissions:
 jobs:
   qualify:
     name: qualify / windows-reference-engine
-    runs-on: [self-hosted, Windows, X64, mondrian-reference]
+    runs-on: [self-hosted, Windows, X64, mondrian-reference, mondrian-gpu-color]
     # Cold release builds plus two independently bounded 45-minute playback
     # observations can legitimately exceed three hours on the reference host.
     timeout-minutes: 360
@@ -195,18 +195,35 @@ jobs:
           & scripts/validation/invoke-playback-reference-gates.ps1 @parameters
           if ($LASTEXITCODE -ne 0) { throw 'Playback reference gate failed.' }
 
+      - name: Run sealed GPU color qualification
+        shell: pwsh
+        run: |
+          $root = 'target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}'
+          $machines = @(Get-ChildItem "$root/playback" -Recurse -Filter 'reference-machine.json')
+          if ($machines.Count -ne 1) {
+            throw "Expected one playback-bound machine report; found $($machines.Count)."
+          }
+          pwsh -File scripts/validation/invoke-gpu-color-qualification.ps1 `
+            -MachineReportPath $machines[0].FullName `
+            -MachineId $env:QUALIFICATION_MACHINE_ID `
+            -ExpectedSourceSha $env:QUALIFICATION_SOURCE_SHA `
+            -OutputDirectory "$root/gpu-color"
+          if ($LASTEXITCODE -ne 0) { throw 'Sealed GPU color qualification failed.' }
+
       - name: Seal exact-source evidence
         shell: pwsh
         run: |
           $root = 'target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}'
           $golden = @(Get-ChildItem "$root/golden" -Recurse -Filter 'complete-golden-consecutive-report.json')
           $playback = @(Get-ChildItem "$root/playback" -Recurse -Filter 'evidence.json')
-          if ($golden.Count -ne 1 -or $playback.Count -ne 1) {
-            throw "Expected one Golden and one Playback report; found $($golden.Count) and $($playback.Count)."
+          $gpuColor = @(Get-ChildItem "$root/gpu-color" -Filter 'gpu-color-qualification.json')
+          if ($golden.Count -ne 1 -or $playback.Count -ne 1 -or $gpuColor.Count -ne 1) {
+            throw "Expected one Golden, Playback, and GPU color report; found $($golden.Count), $($playback.Count), and $($gpuColor.Count)."
           }
           pwsh -File scripts/validation/resolve-commercial-engine-evidence.ps1 `
             -GoldenReportPath $golden[0].FullName `
             -PlaybackReportPath $playback[0].FullName `
+            -GpuColorReportPath $gpuColor[0].FullName `
             -OutputDirectory "$root/sealed" `
             -ExpectedSourceSha $env:QUALIFICATION_SOURCE_SHA
           if ($LASTEXITCODE -ne 0) { throw 'Commercial engine evidence sealing failed.' }
@@ -234,5 +251,6 @@ jobs:
             target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/*decode-progress.jsonl
             target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/reference-*.json
             target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/playback/**/evidence.json
+            target/validation/commercial/${{ github.run_id }}-${{ github.run_attempt }}/gpu-color/**/*
           if-no-files-found: warn
           retention-days: 30

@@ -366,12 +366,16 @@ pub(crate) fn record_cpu_yuv_frame(
     queue: &wgpu::Queue,
     encoder: &mut wgpu::CommandEncoder,
 ) -> Result<GpuColorFrameHandle, CpuYuvMaterializationError> {
+    let source_color_space = frame
+        .source_color
+        .color_space()
+        .ok_or(CpuYuvMaterializationError::InvalidVideoSampling)?;
     let source_texture_format = match frame.sample_format {
         CpuYuvSampleFormat::Unorm8 => GpuNativeDecodedFrameTextureFormat::Nv12,
         CpuYuvSampleFormat::Unorm16Lsb10 => GpuNativeDecodedFrameTextureFormat::P010,
     };
     let video_sampling = native_video_sampling_from_decoded(
-        frame.source_color.color_space,
+        source_color_space,
         source_texture_format,
         frame.video_sampling,
     )
@@ -381,7 +385,7 @@ pub(crate) fn record_cpu_yuv_frame(
         ColorFrameDescriptor {
             width: output_width,
             height: output_height,
-            color_space: frame.source_color.color_space.into(),
+            color_space: source_color_space.into(),
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,

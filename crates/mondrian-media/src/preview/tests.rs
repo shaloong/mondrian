@@ -41,7 +41,7 @@ use crate::decoder::{
     DecodedVideoMatrix, DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
     HwAccelBackend,
 };
-use crate::DecodedRgbaEncoding;
+use crate::{DecodedRgbaEncoding, DecodedVideoRangeContract};
 use ffmpeg_next as ffmpeg;
 use mondrian_core::types::ColorSpace;
 use mondrian_core::{
@@ -371,6 +371,30 @@ fn covering_decode_request<'a>(
 
 fn test_linear_source_color() -> PreviewSourceColorContract {
     PreviewSourceColorContract::automatic(ColorSpace::Aces2065_1, DecodedVideoRange::Full)
+}
+
+#[test]
+fn data_texture_source_contract_round_trips_and_is_a_distinct_cache_identity() {
+    let data = PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull)
+        .with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
+    let color = PreviewSourceColorContract::new(
+        ColorSpace::LinearRec2020,
+        DecodedVideoRangeContract::OverrideFull,
+    );
+    let encoded = serde_json::to_string(&data).expect("serialize DataTexture contract");
+    let decoded: PreviewSourceColorContract =
+        serde_json::from_str(&encoded).expect("deserialize DataTexture contract");
+
+    assert_eq!(decoded, data);
+    assert!(decoded.is_data_texture());
+    assert_eq!(decoded.color_space(), None);
+    assert!(!decoded.is_scene_linear());
+    assert_eq!(
+        decoded.yuv_matrix_fallback, None,
+        "numeric RGB never accepts a YUV color-matrix fallback"
+    );
+    let identities = std::collections::HashSet::from([data, color]);
+    assert_eq!(identities.len(), 2);
 }
 
 fn test_rgba_contract() -> DecodedRgbaFrameContract {
@@ -1576,7 +1600,26 @@ fn cpu_rgba_contract_uses_explicit_bt2020_matrix_and_limited_range() {
         DecodedVideoMatrix::Bt2020NonConstant
     );
     assert_eq!(contract.applied_range, DecodedVideoRange::Limited);
-    assert_eq!(contract.source.color_space, ColorSpace::Rec2100Pq);
+    assert_eq!(contract.source.color_space(), Some(ColorSpace::Rec2100Pq));
+}
+
+#[test]
+fn data_texture_cpu_contract_accepts_rgb_and_rejects_yuv_before_swscale() {
+    let data = PreviewSourceColorContract::data_texture(DecodedVideoRangeContract::OverrideFull);
+    let rgb =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::RGB24, 16, 16);
+    let contract = resolve_cpu_rgba_contract(&rgb, data, Path::new("technical-rgb.exr"))
+        .expect("RGB technical channels require no color matrix");
+    assert_eq!(contract.encoding, DecodedRgbaEncoding::DataTexture);
+    assert_eq!(contract.applied_matrix, DecodedVideoMatrix::Rgb);
+
+    let mut yuv =
+        ffmpeg::util::frame::video::Video::new(ffmpeg::util::format::pixel::Pixel::YUV420P, 16, 16);
+    yuv.set_color_space(ffmpeg::util::color::Space::BT709);
+    yuv.set_color_range(ffmpeg::util::color::Range::MPEG);
+    let error = resolve_cpu_rgba_contract(&yuv, data, Path::new("technical-yuv.mov"))
+        .expect_err("a YCbCr matrix would change technical channels");
+    assert!(error.to_string().contains("data-texture materialization requires RGB/GBR"));
 }
 
 #[test]

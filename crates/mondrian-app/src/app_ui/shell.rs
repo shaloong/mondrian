@@ -22,16 +22,16 @@ use mondrian_ui_widgets::{
 use std::path::Path;
 
 use crate::app::ui_actions::{
-    assets_import_files_action, assets_relink_asset_action, assets_set_interpretation_action,
-    export_edit_draft_action, project_create_with_settings_action,
-    project_recover_from_autosave_action, project_update_color_environment_action,
-    sequence_update_settings_action, AppShellCopySystemInfoPayload,
-    AppShellInterpretAssetDialogPayload, AppShellOpenRecentProjectPayload,
-    AppShellRelinkAssetDialogPayload, AppShellRelocatePanelPayload,
-    AppShellRevealInFileManagerPayload, AssetsImportFilesPayload, AssetsRelinkAssetPayload,
-    DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload, ImportMediaDialogPayload,
-    InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload, PreferencesTabPayload,
-    ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
+    app_shell_preferences_display_management_changed_action, assets_import_files_action,
+    assets_relink_asset_action, assets_set_interpretation_action, export_edit_draft_action,
+    project_create_with_settings_action, project_recover_from_autosave_action,
+    project_update_color_environment_action, sequence_update_settings_action,
+    AppShellCopySystemInfoPayload, AppShellInterpretAssetDialogPayload,
+    AppShellOpenRecentProjectPayload, AppShellRelinkAssetDialogPayload,
+    AppShellRelocatePanelPayload, AppShellRevealInFileManagerPayload, AssetsImportFilesPayload,
+    AssetsRelinkAssetPayload, DockDropAreaPayload, ExportDraftEdit, ExportOutputDialogPayload,
+    ImportMediaDialogPayload, InterpretAssetDraftUpdatePayload, NewProjectDraftUpdatePayload,
+    PreferencesTabPayload, ProjectRecoverFromAutosavePayload, ProjectSettingsDraftUpdatePayload,
     ProjectUpdateColorEnvironmentPayload, SequenceSettingsDraftUpdatePayload,
     SequenceSettingsTabPayload, ViewerSetZoomScalePayload, APP_SHELL_ABOUT,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
@@ -41,13 +41,13 @@ use crate::app::ui_actions::{
     APP_SHELL_INTERPRET_ASSET_DIALOG, APP_SHELL_INTERPRET_ASSET_DRAFT_CHANGED, APP_SHELL_NAMESPACE,
     APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
     APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PREFERENCES,
-    APP_SHELL_PREFERENCES_TAB_CHANGED, APP_SHELL_PROJECT_SETTINGS,
-    APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED, APP_SHELL_RECOVER_PROJECT,
-    APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL, APP_SHELL_REVEAL_IN_FILE_MANAGER,
-    APP_SHELL_SAVE_PROJECT_AS_DIALOG, APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG,
-    APP_SHELL_SEQUENCE_SETTINGS, APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED,
-    APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED, VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE,
-    VIEWER_SET_ZOOM_SCALE,
+    APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE, APP_SHELL_PREFERENCES_TAB_CHANGED,
+    APP_SHELL_PROJECT_SETTINGS, APP_SHELL_PROJECT_SETTINGS_DRAFT_CHANGED,
+    APP_SHELL_RECOVER_PROJECT, APP_SHELL_RELINK_ASSET_DIALOG, APP_SHELL_RELOCATE_PANEL,
+    APP_SHELL_REVEAL_IN_FILE_MANAGER, APP_SHELL_SAVE_PROJECT_AS_DIALOG,
+    APP_SHELL_SELECT_CUSTOM_OCIO_CONFIG, APP_SHELL_SEQUENCE_SETTINGS,
+    APP_SHELL_SEQUENCE_SETTINGS_DRAFT_CHANGED, APP_SHELL_SEQUENCE_SETTINGS_TAB_CHANGED,
+    VIEWER_CYCLE_ZOOM, VIEWER_NAMESPACE, VIEWER_SET_ZOOM_SCALE,
 };
 use crate::app::waveform_service::AudioWaveformSource;
 use crate::app::AppState;
@@ -114,6 +114,11 @@ pub fn media_import_filters() -> Vec<FileFilter> {
         FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
         FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
+}
+
+/// File dialog filter for monitor calibration profiles.
+pub fn display_icc_profile_filters() -> Vec<FileFilter> {
+    vec![FileFilter::new("ICC 显示配置文件", vec!["icc", "icm"])]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -946,6 +951,7 @@ impl AppUiAppRoot {
             waveform_display: WaveformDisplay::BottomAligned,
             viewer_canvas_background: self.models.viewer.canvas_background,
             audio_output_device: Default::default(),
+            display_management: self.preferences_model.display_management.clone(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);
     }
@@ -1058,6 +1064,9 @@ impl AppUiAppRoot {
                 preferences.audio_output_device.clone(),
                 self.audio_output_device_catalog.clone(),
             );
+        let mut preferences_model = preferences_model;
+        preferences_model
+            .set_display_output_snapshot(self.preferences_model.display_output_snapshot.clone());
         self.preferences_model = preferences_model.clone();
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(preferences_model);
@@ -1072,6 +1081,20 @@ impl AppUiAppRoot {
         }
         self.audio_output_device_catalog = catalog.clone();
         self.preferences_model.set_audio_output_device_catalog(catalog);
+        if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
+            dialog.set_model(self.preferences_model.clone());
+        }
+    }
+
+    /// Publish the latest structured display diagnosis into Preferences.
+    pub fn set_display_output_snapshot(
+        &mut self,
+        snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    ) {
+        if self.preferences_model.display_output_snapshot == snapshot {
+            return;
+        }
+        self.preferences_model.set_display_output_snapshot(snapshot);
         if let Some(dialog) = self.modal.as_mut().and_then(ShellModal::as_preferences_mut) {
             dialog.set_model(self.preferences_model.clone());
         }
@@ -1420,6 +1443,32 @@ impl AppUiAppRoot {
                     self.layout(self.bounds);
                 }
                 Ok(None)
+            }
+            Action::Custom { namespace, name, .. }
+                if namespace == APP_SHELL_NAMESPACE
+                    && name == APP_SHELL_PREFERENCES_SELECT_DISPLAY_ICC_PROFILE =>
+            {
+                let Some(path) = platform
+                    .open_file_dialog("选择显示器 ICC 配置文件", &display_icc_profile_filters())
+                    .map_err(|error| native_shell_error(&name, error))?
+                    .into_selection()
+                    .and_then(|paths| paths.into_iter().next())
+                else {
+                    return Ok(None);
+                };
+                let policy = self
+                    .preferences_model
+                    .display_management
+                    .with_calibration(mondrian_core::DisplayCalibrationPolicy::IccProfilePath(
+                        path.display().to_string(),
+                    ))
+                    .map_err(|error| MondrianError::WorkflowStepFailed {
+                        step_id: "display_management.select_icc_profile".to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                Ok(Some(
+                    app_shell_preferences_display_management_changed_action(policy),
+                ))
             }
             Action::Custom { namespace, name, payload }
                 if namespace == APP_SHELL_NAMESPACE && name == APP_SHELL_INTERPRET_ASSET_DIALOG =>
@@ -2967,15 +3016,17 @@ mod tests {
             payload.sequence_settings.color.program_output.workflow,
             ColorWorkflow::SceneReferred
         );
-        let context =
-            payload.sequence_settings.root_program_color_context(&payload.color_environment);
+        let context = payload
+            .sequence_settings
+            .root_program_color_context(&payload.color_environment)
+            .expect("valid context");
         assert_eq!(
-            context.engine,
-            mondrian_core::ColorEngine::mondrian_standard()
+            context.engine(),
+            &mondrian_core::ColorEngine::mondrian_standard()
         );
         assert_eq!(
-            context.output_transform,
-            mondrian_core::OutputTransformIntent::mondrian_standard()
+            context.output_transform(),
+            &mondrian_core::OutputTransformIntent::mondrian_standard()
         );
     }
 

@@ -56,7 +56,8 @@ use crate::app_ui::product_logging::DEFAULT_APP_UI_LOG_FILTER;
 #[cfg(not(test))]
 use crate::app_ui::product_logging::FORCED_PROCESS_EXIT_CODE;
 use crate::app_ui::rendering::{
-    AppUiBackendEvent, AppUiFramePressure, AppUiFrameRenderer, AppUiRenderDiagnosticReporter,
+    AppUiBackendEvent, AppUiFrameMetrics, AppUiFramePressure, AppUiFrameRenderer,
+    AppUiRenderDiagnosticReporter,
 };
 use crate::app_ui::runtime::{
     winit_cursor_icon_for_ui_state, winit_modifiers_to_ui_modifiers,
@@ -247,6 +248,7 @@ struct AppUiViewerGpuOutputTelemetry {
     last_compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     last_compositor_texture_bindings:
         Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
+    last_compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     last_frame_context: Option<AppUiViewerGpuOutputFrameContext>,
     last_preview_candidate_id: Option<u64>,
     last_preview_candidate_state: Option<AppUiViewerGpuOutputPreviewCandidateState>,
@@ -273,6 +275,16 @@ struct AppUiViewerGpuOutputDiagnostics {
     display_presentation_payload_blockers: u64,
     display_presentation_unsupported_contracts: u64,
     display_contract_refreshes: u64,
+    /// Actual UI presentation path observed on the reported frame.
+    ui_surface_carrier_active: bool,
+    /// Whether the cached carrier attachments were rebuilt on this frame.
+    ui_surface_carrier_target_rebuilt: bool,
+    /// External-texture batches actually submitted to the UI composition pass.
+    presented_external_texture_batches: usize,
+    /// Target-transfer Viewer batches actually submitted.
+    presented_surface_code_value_batches: usize,
+    /// ICC/device-code Viewer batches actually submitted.
+    presented_device_code_value_batches: usize,
     prepare_attempts_timed: u64,
     accumulated_prepare_duration_us: u64,
     max_prepare_duration_us: u64,
@@ -299,6 +311,8 @@ struct AppUiViewerGpuOutputDiagnostics {
     compositor_uniform_arena: Option<mondrian_renderer::GpuCompositorUniformArenaDiagnostics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compositor_texture_bindings: Option<mondrian_renderer::GpuCompositorTextureBindingDiagnostics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compositor_creative_luts: Option<mondrian_renderer::GpuCreativeLutCacheDiagnostics>,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     health: AppUiViewerGpuOutputHealthSummary,
     health_counts: AppUiViewerGpuOutputHealthCounts,
@@ -475,7 +489,7 @@ struct AppUiSurfaceFormatColorSpacesDiagnostic {
 enum AppUiDisplayIssueReason {
     HdrOutputRequiresHdrSurface,
     OutputColorSpaceRequiresSurfaceColorSpace,
-    ReconfigureBlockedByPayload,
+    ReconfigurationRequired,
     UnsupportedPresentationIntent,
     UnsupportedSurfaceContract,
     /// OS-level ICC profile, EDR, or HDR behavior is not supported on this
@@ -539,6 +553,11 @@ impl AppUiViewerGpuOutputTelemetry {
             display_presentation_unsupported_contracts: self
                 .display_presentation_unsupported_contracts,
             display_contract_refreshes: self.display_contract_refreshes,
+            ui_surface_carrier_active: false,
+            ui_surface_carrier_target_rebuilt: false,
+            presented_external_texture_batches: 0,
+            presented_surface_code_value_batches: 0,
+            presented_device_code_value_batches: 0,
             prepare_attempts_timed: self.prepare_attempts_timed,
             accumulated_prepare_duration_us: self.accumulated_prepare_duration_us,
             max_prepare_duration_us: self.max_prepare_duration_us,
@@ -574,6 +593,7 @@ impl AppUiViewerGpuOutputTelemetry {
             spatial_runtime: self.last_spatial_runtime,
             compositor_uniform_arena: self.last_compositor_uniform_arena,
             compositor_texture_bindings: self.last_compositor_texture_bindings,
+            compositor_creative_luts: self.last_compositor_creative_luts,
             runtime_report,
             health,
             health_counts: self.health_counts,
@@ -597,6 +617,7 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_spatial_runtime = None;
         self.last_compositor_uniform_arena = None;
         self.last_compositor_texture_bindings = None;
+        self.last_compositor_creative_luts = None;
         self.last_frame_context = None;
         self.last_preview_candidate_id = None;
         self.last_preview_candidate_state = None;
@@ -676,6 +697,13 @@ impl AppUiViewerGpuOutputTelemetry {
         self.last_compositor_texture_bindings = Some(diagnostics);
     }
 
+    fn record_compositor_creative_luts(
+        &mut self,
+        diagnostics: mondrian_renderer::GpuCreativeLutCacheDiagnostics,
+    ) {
+        self.last_compositor_creative_luts = Some(diagnostics);
+    }
+
     fn record_non_workspace_skip(&mut self) {
         self.non_workspace_skips = self.non_workspace_skips.saturating_add(1);
         self.last_outcome = Some(AppUiViewerGpuOutputOutcome::NonWorkspace);
@@ -733,11 +761,9 @@ impl AppUiViewerGpuOutputTelemetry {
             AppUiDisplayPresentationReadinessStatus::Current => {
                 self.last_display_issue_refresh_generation = None;
             }
-            AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload => {
+            AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired => {
                 self.display_presentation_reconfigure_candidates =
                     self.display_presentation_reconfigure_candidates.saturating_add(1);
-                self.display_presentation_payload_blockers =
-                    self.display_presentation_payload_blockers.saturating_add(1);
                 self.last_display_issue_refresh_generation =
                     Some(self.display_contract_refresh_generation);
             }
@@ -900,8 +926,8 @@ impl AppUiDisplayIssueSummary {
     ) -> Option<Self> {
         let reason = match readiness.status {
             AppUiDisplayPresentationReadinessStatus::Current => return None,
-            AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload => {
-                AppUiDisplayIssueReason::ReconfigureBlockedByPayload
+            AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired => {
+                AppUiDisplayIssueReason::ReconfigurationRequired
             }
             AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent => {
                 AppUiDisplayIssueReason::UnsupportedPresentationIntent
@@ -1757,6 +1783,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &session.display_output_contract.display_target,
                             session.viewer_gpu_execution.color_output_diagnostics().into(),
                             session.display_snapshot.as_ref(),
+                            frame_result.metrics(),
                         );
                         if frame_result.needs_follow_up_redraw() {
                             session.window.request_redraw();
@@ -1812,7 +1839,7 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &adapter,
                             &device,
                             &mut session,
-                            &host,
+                            &mut host,
                         );
                     }
 
@@ -2161,18 +2188,66 @@ fn app_ui_display_output_contract(
     window: &winit::window::Window,
     surface: &wgpu::Surface<'static>,
     adapter: &wgpu::Adapter,
+    intent: AppUiSurfacePresentationIntent,
 ) -> Result<AppUiDisplayOutputContract, AppUiSurfaceColorContractError> {
     let capabilities = surface.get_capabilities(adapter);
-    let surface_color = choose_app_ui_surface_format(&capabilities)?;
+    let display_target = app_ui_display_target_for_window(window);
+    let display_hdr_info = surface.display_hdr_info(adapter);
+    let qualified_intent = match intent {
+        AppUiSurfacePresentationIntent::DisplayOutput(output_color_space)
+            if output_color_space.is_hdr()
+                && !super::display_probe_impl::active_display_hdr_presentation_ready(
+                    display_target.position,
+                    display_target.physical_size,
+                    display_hdr_info.clone(),
+                ) =>
+        {
+            tracing::warn!(
+                ?intent,
+                display_target = ?display_target,
+                "HDR format/color-space enumeration is not backed by an active HDR compositor and monitor; retaining fail-closed SDR UI carrier"
+            );
+            AppUiSurfacePresentationIntent::SdrSrgb
+        }
+        _ => intent,
+    };
+    let surface_color = choose_app_ui_surface_color_contract(&capabilities, qualified_intent).or_else(
+        |requested_error| {
+            tracing::warn!(
+                ?intent,
+                "requested display surface contract is unavailable; retaining fail-closed SDR UI carrier: {requested_error}"
+            );
+            choose_app_ui_surface_format(&capabilities)
+        },
+    )?;
     Ok(AppUiDisplayOutputContract {
         surface_color,
-        display_target: app_ui_display_target_for_window(window),
-        display_hdr_info: surface.display_hdr_info(adapter),
+        display_target,
+        display_hdr_info,
         available_formats: capabilities.formats.clone(),
         format_color_spaces: app_ui_surface_format_color_spaces(&capabilities),
         present_modes: capabilities.present_modes,
         alpha_modes: capabilities.alpha_modes,
     })
+}
+
+fn app_ui_surface_presentation_intent_for_role(
+    role: AppUiWindowRole,
+    host: &AppUiHost,
+) -> AppUiSurfacePresentationIntent {
+    if role == AppUiWindowRole::Startup {
+        return AppUiSurfacePresentationIntent::SdrSrgb;
+    }
+    let (engine, policy) = host.resolved_display_color_management();
+    match policy.resolve_output_color_space(&engine, host.active_program_output_color_space()) {
+        Ok(output_color_space) => AppUiSurfacePresentationIntent::DisplayOutput(output_color_space),
+        Err(error) => {
+            tracing::warn!(
+                "display policy cannot resolve a monitor target; retaining fail-closed SDR UI carrier: {error}"
+            );
+            AppUiSurfacePresentationIntent::SdrSrgb
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2246,7 +2321,7 @@ impl AppUiDisplayOutputContract {
             choose_app_ui_surface_color_contract(&self.surface_capabilities_snapshot(), intent);
         match desired {
             Ok(desired_surface) => AppUiDisplayPresentationReadinessDiagnostics {
-                status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+                status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
                 output_color_space,
                 current_surface_format: app_ui_surface_format_diagnostic(self.surface_color.format),
                 current_surface_color_space: app_ui_surface_color_space_diagnostic(
@@ -2266,17 +2341,14 @@ impl AppUiDisplayOutputContract {
                     desired_surface.encoding,
                 )),
                 desired_surface_hdr_mode: Some(desired_surface.hdr_mode),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
             },
-            Err(err) if err.required_color_space.is_none() => {
-                self.display_presentation_readiness_unsupported(
+            Err(err) if err.required_color_space.is_none() => self
+                .display_presentation_readiness_unsupported(
                     output_color_space,
                     AppUiDisplayPresentationReadinessStatus::UnsupportedPresentationIntent,
                     None,
-                )
-            }
+                ),
             Err(err) => self.display_presentation_readiness_unsupported(
                 output_color_space,
                 AppUiDisplayPresentationReadinessStatus::UnsupportedSurfaceContract,
@@ -2497,13 +2569,16 @@ enum AppUiSurfaceEncodingDiagnostic {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayPresentationReadinessStatus {
     Current,
-    ReconfigureBlockedByPayload,
+    ReconfigurationRequired,
     UnsupportedPresentationIntent,
     UnsupportedSurfaceContract,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 enum AppUiDisplayPresentationPayloadBlocker {
+    /// Legacy diagnostic retained so persisted qualification evidence remains
+    /// readable; the production carrier no longer emits this blocker.
+    #[allow(dead_code)]
     UiExternalTextureCompositingRequiresSdrSrgb,
 }
 
@@ -2976,16 +3051,6 @@ fn app_ui_surface_hdr_mode(color_space: wgpu::SurfaceColorSpace) -> AppUiSurface
     }
 }
 
-fn surface_color_space_to_color_space(cs: wgpu::SurfaceColorSpace) -> ColorSpace {
-    match cs {
-        wgpu::SurfaceColorSpace::Srgb => ColorSpace::Srgb,
-        wgpu::SurfaceColorSpace::DisplayP3 => ColorSpace::DisplayP3,
-        wgpu::SurfaceColorSpace::Bt2100Pq => ColorSpace::Rec2100Pq,
-        wgpu::SurfaceColorSpace::Bt2100Hlg => ColorSpace::Rec2100Hlg,
-        _ => ColorSpace::Rec709,
-    }
-}
-
 fn is_srgb_surface_format(format: wgpu::TextureFormat) -> bool {
     matches!(
         format,
@@ -3160,6 +3225,7 @@ fn viewer_gpu_output_diagnostics(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    frame_metrics: AppUiFrameMetrics,
 ) -> AppUiViewerGpuOutputDiagnostics {
     let mut diagnostics = telemetry.diagnostics(runtime_report);
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
@@ -3167,6 +3233,11 @@ fn viewer_gpu_output_diagnostics(
         issue.display_target = Some(display_target.clone());
     }
     diagnostics.display_snapshot = display_snapshot.map(DisplaySnapshotDiagnostics::from_snapshot);
+    diagnostics.ui_surface_carrier_active = frame_metrics.surface_carrier_active;
+    diagnostics.ui_surface_carrier_target_rebuilt = frame_metrics.surface_carrier_target_rebuilt;
+    diagnostics.presented_external_texture_batches = frame_metrics.external_texture_batches;
+    diagnostics.presented_surface_code_value_batches = frame_metrics.surface_code_value_batches;
+    diagnostics.presented_device_code_value_batches = frame_metrics.device_code_value_batches;
     diagnostics
 }
 
@@ -3176,6 +3247,7 @@ fn trace_viewer_gpu_output_telemetry(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    frame_metrics: AppUiFrameMetrics,
 ) {
     let diagnostics = viewer_gpu_output_diagnostics(
         host,
@@ -3183,6 +3255,7 @@ fn trace_viewer_gpu_output_telemetry(
         display_target,
         runtime_report,
         display_snapshot,
+        frame_metrics,
     );
     tracing::trace!(
         invocations = diagnostics.invocations,
@@ -3200,6 +3273,26 @@ fn trace_viewer_gpu_output_telemetry(
         display_presentation_payload_blockers = diagnostics.display_presentation_payload_blockers,
         display_presentation_unsupported_contracts =
             diagnostics.display_presentation_unsupported_contracts,
+        ui_surface_carrier_active = diagnostics.ui_surface_carrier_active,
+        ui_surface_carrier_target_rebuilt = diagnostics.ui_surface_carrier_target_rebuilt,
+        presented_external_texture_batches = diagnostics.presented_external_texture_batches,
+        presented_surface_code_value_batches = diagnostics.presented_surface_code_value_batches,
+        presented_device_code_value_batches = diagnostics.presented_device_code_value_batches,
+        creative_lut_cache_hits = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.cache_hits),
+        creative_lut_cache_misses = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.cache_misses),
+        creative_lut_texture_uploads = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.texture_uploads),
+        creative_lut_resident_entries = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.resident_entries),
+        creative_lut_resident_texture_bytes = diagnostics
+            .compositor_creative_luts
+            .map_or(0, |value| value.resident_texture_bytes),
         record_failures = diagnostics.record_failures,
         missing_output_textures = diagnostics.missing_output_textures,
         registered_frames = diagnostics.registered_frames,
@@ -4428,6 +4521,10 @@ fn prepare_viewer_gpu_preview(
     session
         .viewer_gpu_output_telemetry
         .record_compositor_texture_bindings(texture_bindings);
+    let creative_luts = session.viewer_gpu_execution.compositor_creative_lut_diagnostics();
+    session
+        .viewer_gpu_output_telemetry
+        .record_compositor_creative_luts(creative_luts);
     session
         .viewer_gpu_output_telemetry
         .record_spatial_runtime(record.spatial_diagnostics);
@@ -4572,7 +4669,11 @@ fn prepare_viewer_gpu_preview(
                             .map(|owner| owner.texture_key.clone())
                             .ok_or_else(|| "submitted Window owner is missing".to_owned())?,
                         lease.texture_view(),
-                        ExternalTextureTransfer::SrgbSurfaceCodeValuesOpaque,
+                        if session.display_calibration.is_some() {
+                            ExternalTextureTransfer::DeviceCodeValuesOpaque
+                        } else {
+                            ExternalTextureTransfer::SurfaceCodeValuesOpaque
+                        },
                     )
                     .map_err(|error| error.to_string())
             })
@@ -5145,20 +5246,22 @@ fn refresh_display_output_contract(
     adapter: &wgpu::Adapter,
     device: &wgpu::Device,
     session: &mut AppUiWindowSession,
-    host: &AppUiHost,
+    host: &mut AppUiHost,
 ) {
     let previous = session.display_output_contract.clone();
-    let next = match app_ui_display_output_contract(&session.window, &session.surface, adapter) {
-        Ok(contract) => contract,
-        Err(err) => {
-            tracing::warn!(
-                ?reason,
-                "app UI display output contract refresh failed: {err}"
-            );
-            invalidate_display_dependent_gpu_preview(session, host);
-            return;
-        }
-    };
+    let intent = app_ui_surface_presentation_intent_for_role(session.role, host);
+    let next =
+        match app_ui_display_output_contract(&session.window, &session.surface, adapter, intent) {
+            Ok(contract) => contract,
+            Err(err) => {
+                tracing::warn!(
+                    ?reason,
+                    "app UI display output contract refresh failed: {err}"
+                );
+                invalidate_display_dependent_gpu_preview(session, host);
+                return;
+            }
+        };
 
     let contract_requires_invalidation =
         display_output_contract_requires_gpu_preview_invalidation(&previous, &next);
@@ -5172,6 +5275,27 @@ fn refresh_display_output_contract(
 
     let renderer_rebuilt = contract_requires_invalidation
         && display_output_contract_requires_renderer_rebuild(&previous, &next);
+    let replacement_renderer = if renderer_rebuilt {
+        match AppUiFrameRenderer::new_for_surface(
+            device,
+            next.surface_color.format,
+            next.surface_color.color_space,
+        ) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                tracing::error!(
+                    ?reason,
+                    surface_format = ?next.surface_color.format,
+                    surface_color_space = ?next.surface_color.color_space,
+                    "refusing invalid UI surface presentation carrier: {error}"
+                );
+                invalidate_display_dependent_gpu_preview(session, host);
+                return;
+            }
+        }
+    } else {
+        None
+    };
     let (color_engine, display_management_policy) = host.resolved_display_color_management();
 
     let reason_str = format!("{reason:?}");
@@ -5190,7 +5314,7 @@ fn refresh_display_output_contract(
         next.display_hdr_info.clone(),
         &color_engine,
         &display_management_policy,
-        surface_color_space_to_color_space(next.surface_color.color_space),
+        host.active_program_output_color_space(),
         &reason_str,
     );
     let snapshot = display_resolution.snapshot;
@@ -5238,7 +5362,9 @@ fn refresh_display_output_contract(
     }
     if renderer_rebuilt {
         session.surface.configure(device, &session.config);
-        session.frame_renderer = AppUiFrameRenderer::new(device, session.config.format);
+        if let Some(renderer) = replacement_renderer {
+            session.frame_renderer = renderer;
+        }
         host.set_native_decoded_frame_import_support(
             session.viewer_gpu_execution.native_import_support(),
         );
@@ -5295,7 +5421,9 @@ impl AppUiWindowSession {
         let mut config = surface
             .get_default_config(adapter, size.width, size.height)
             .ok_or("Failed surface config")?;
-        let display_output_contract = app_ui_display_output_contract(&window, &surface, adapter)?;
+        let intent = app_ui_surface_presentation_intent_for_role(role, host);
+        let display_output_contract =
+            app_ui_display_output_contract(&window, &surface, adapter, intent)?;
         let surface_color_contract = display_output_contract.surface_color;
         config.format = surface_color_contract.format;
         config.color_space = surface_color_contract.color_space;
@@ -5332,13 +5460,14 @@ impl AppUiWindowSession {
             display_output_contract.display_hdr_info.clone(),
             &color_engine,
             &display_management_policy,
-            surface_color_space_to_color_space(display_output_contract.surface_color.color_space),
+            host.active_program_output_color_space(),
             "Startup",
         );
         let initial_snapshot = initial_display_resolution.snapshot;
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
-        let frame_renderer = AppUiFrameRenderer::new(device, config.format);
+        let frame_renderer =
+            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
         let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
         viewer_gpu_execution
             .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
@@ -5415,6 +5544,7 @@ fn drain_actions_and_sync_window_session(
     let stage_started = Instant::now();
     let previous_color_engine = session.color_engine.clone();
     let previous_display_policy = session.display_management_policy.clone();
+    let previous_program_output = host.active_program_output_color_space();
     let commands =
         host.drain_pending_actions(pending_actions, session.current_bounds.get(), platform);
     rebuild_global_shortcuts(&mut session.router, &host.preferences().shortcut_overrides);
@@ -5429,7 +5559,8 @@ fn drain_actions_and_sync_window_session(
                 &previous_display_policy,
                 &next_color_engine,
                 &next_display_policy,
-            ) {
+            ) || previous_program_output != host.active_program_output_color_space()
+            {
                 refresh_display_output_contract(
                     DisplayOutputContractRefreshReason::DisplayPolicyChanged,
                     adapter,
@@ -6464,7 +6595,7 @@ mod tests {
     }
 
     #[test]
-    fn display_presentation_readiness_reports_supported_p3_reconfigure_payload_blocker() {
+    fn display_presentation_readiness_reports_supported_p3_reconfiguration_required() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
         let boundary = RenderOutputColorBoundary::display(
@@ -6476,7 +6607,7 @@ mod tests {
         assert_eq!(
             contract.presentation_readiness_for_boundary(&boundary),
             AppUiDisplayPresentationReadinessDiagnostics {
-                status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+                status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
                 output_color_space: ColorSpace::DisplayP3,
                 current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
                 current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6486,9 +6617,7 @@ mod tests {
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
                 desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
             }
         );
     }
@@ -6884,7 +7013,7 @@ mod tests {
     fn viewer_gpu_output_telemetry_records_display_presentation_readiness() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6894,9 +7023,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
 
         telemetry.record_display_presentation_readiness(readiness);
@@ -6905,10 +7032,9 @@ mod tests {
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default()),
             AppUiViewerGpuOutputDiagnostics {
                 display_presentation_reconfigure_candidates: 1,
-                display_presentation_payload_blockers: 1,
                 last_display_presentation_readiness: Some(readiness),
                 display_issue_summary: Some(AppUiDisplayIssueSummary {
-                    reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
+                    reason: AppUiDisplayIssueReason::ReconfigurationRequired,
                     output_color_space: ColorSpace::DisplayP3,
                     preceding_display_contract_refresh: None,
                     display_target: None,
@@ -6920,14 +7046,10 @@ mod tests {
                     selected_surface_encoding: None,
                     surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
                     desired_surface_format: Some(AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb),
-                    desired_surface_color_space: Some(
-                        AppUiSurfaceColorSpaceDiagnostic::DisplayP3,
-                    ),
+                    desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3,),
                     desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                     desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                    payload_blocker: Some(
-                        AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                    ),
+                    payload_blocker: None,
                     supported_surface_color_space_count: None,
                     target_surface_color_space_supported: Some(true),
                 }),
@@ -6981,10 +7103,10 @@ mod tests {
     }
 
     #[test]
-    fn viewer_gpu_output_diagnostics_summarize_presentation_payload_blocker() {
+    fn viewer_gpu_output_diagnostics_summarize_reconfiguration_required() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -6994,9 +7116,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
         telemetry.record_display_presentation_readiness(readiness);
 
@@ -7005,7 +7125,7 @@ mod tests {
                 .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
                 .display_issue_summary,
             Some(AppUiDisplayIssueSummary {
-                reason: AppUiDisplayIssueReason::ReconfigureBlockedByPayload,
+                reason: AppUiDisplayIssueReason::ReconfigurationRequired,
                 output_color_space: ColorSpace::DisplayP3,
                 preceding_display_contract_refresh: None,
                 display_target: None,
@@ -7020,9 +7140,7 @@ mod tests {
                 desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
                 desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
                 desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-                payload_blocker: Some(
-                    AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-                ),
+                payload_blocker: None,
                 supported_surface_color_space_count: None,
                 target_surface_color_space_supported: Some(true),
             })
@@ -7061,6 +7179,7 @@ mod tests {
             &display_target,
             RenderGpuOutputRuntimeDiagnosticsReport::default(),
             None,
+            AppUiFrameMetrics::default(),
         );
 
         assert_eq!(
@@ -7338,6 +7457,33 @@ mod tests {
     }
 
     #[test]
+    fn viewer_gpu_output_diagnostics_include_creative_lut_residency_evidence() {
+        let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
+        let creative_luts = mondrian_renderer::GpuCreativeLutCacheDiagnostics {
+            cache_hits: 5,
+            cache_misses: 2,
+            texture_uploads: 2,
+            evictions: 1,
+            oversized_bypasses: 1,
+            resident_entries: 1,
+            resident_texture_bytes: 32_768,
+        };
+        telemetry.record_compositor_creative_luts(creative_luts);
+
+        let diagnostics = telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        assert_eq!(diagnostics.compositor_creative_luts, Some(creative_luts));
+        assert!(serde_json::to_string(&diagnostics)
+            .expect("serialize Viewer diagnostics")
+            .contains("\"compositor_creative_luts\""));
+
+        telemetry.record_invocation();
+        assert!(telemetry
+            .diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default())
+            .compositor_creative_luts
+            .is_none());
+    }
+
+    #[test]
     fn viewer_gpu_output_telemetry_records_prepare_duration() {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
 
@@ -7598,7 +7744,7 @@ mod tests {
         let mut telemetry = AppUiViewerGpuOutputTelemetry::default();
         telemetry.record_invocation();
         let readiness = AppUiDisplayPresentationReadinessDiagnostics {
-            status: AppUiDisplayPresentationReadinessStatus::ReconfigureBlockedByPayload,
+            status: AppUiDisplayPresentationReadinessStatus::ReconfigurationRequired,
             output_color_space: ColorSpace::DisplayP3,
             current_surface_format: AppUiSurfaceFormatDiagnostic::Bgra8UnormSrgb,
             current_surface_color_space: AppUiSurfaceColorSpaceDiagnostic::Srgb,
@@ -7608,9 +7754,7 @@ mod tests {
             desired_surface_color_space: Some(AppUiSurfaceColorSpaceDiagnostic::DisplayP3),
             desired_surface_encoding: Some(AppUiSurfaceEncodingDiagnostic::Srgb),
             desired_surface_hdr_mode: Some(AppUiSurfaceHdrMode::SdrOnly),
-            payload_blocker: Some(
-                AppUiDisplayPresentationPayloadBlocker::UiExternalTextureCompositingRequiresSdrSrgb,
-            ),
+            payload_blocker: None,
         };
         telemetry.record_display_presentation_readiness(readiness);
         telemetry.record_registered_frame(RenderColorStageDiagnostics {

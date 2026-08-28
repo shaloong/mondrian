@@ -2444,7 +2444,9 @@ name = "mondrian-export"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "bytemuck",
  "chrono",
+ "half",
  "image",
  "mondrian-audio",
  "mondrian-core",

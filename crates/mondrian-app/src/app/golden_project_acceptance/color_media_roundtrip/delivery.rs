@@ -94,7 +94,7 @@ pub(super) fn execute_export_roundtrip(
         .active_sequence()
         .context("active Sequence is absent")?
         .settings
-        .root_program_color_context(state.project_color_environment())
+        .root_program_color_context(state.project_color_environment())?
         .media_input(false);
     let request = PreviewTimelineMediaRequest {
         asset_id: asset.id,

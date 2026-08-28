@@ -32,7 +32,7 @@ foundation:
   Asset Library snapshots, Project, Recovery, Export, and regenerable media
   products add their own policy above it. See
   [Storage Publication](storage-publication.md).
-- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data, mask/effect data, and timeline render-plan data traits. It owns no executable Render Graph; visual graph definition/compilation lives only in `mondrian-effects`, and frame-plan evaluation lives in `mondrian-renderer`. It must not depend on UI, platform, media, renderer, or app crates.
+- `mondrian-core`: shared value types, strong IDs, project settings, canonical audio signal layouts, color primitives, automation/keyframe data (including validated structured Qualifier samples), mask/effect data, and timeline render-plan data traits. Effect types and parameter identities are stable persisted author data only; executable grade/Qualifier mathematics remains in `mondrian-effects`. Core owns no executable Render Graph; visual graph definition/compilation lives only in `mondrian-effects`, and frame-plan evaluation lives in `mondrian-renderer`. It must not depend on UI, platform, media, renderer, or app crates.
 - `mondrian-editor-state`: the UI-independent `AuthoringSession`, editor
   actions, selection/navigation state, and bounded project-wide Undo/Redo.
   Transactions validate and atomically install detached candidates. History
@@ -72,6 +72,11 @@ foundation:
   failure enters one bounded background CPU Viewer Adapter, never an inline UI
   thread composite, and leaves it only after a replacement GPU generation is
   ready.
+  Visual Mask tracking is another instance-owned execution domain: its bounded
+  dedicated worker freezes exact author/media input, decodes exact stills,
+  delegates only image analysis to Effects, and returns through one
+  revision-checked author transaction. It does not share realtime Preview work
+  admission or create a second Mask interpretation.
 - `mondrian-assets`: SQLite-backed Project asset-library index and durable
   file/generated-source records. It consumes only the foundation-owned media
   probe contract; FFmpeg and generated-pixel execution cannot enter this
@@ -99,9 +104,13 @@ foundation:
   it owns no Preview scheduling, Viewer display transform or implicit Export
   substitution. See [Timeline Render Cache](timeline-render-cache.md).
 - `mondrian-effects`: visual-effect registry, typed execution contracts,
-  definition/resource-bound Effect preparation, RGBA graph
-  compilation/execution, mask rasterization, and visual plugin-effect
-  contracts; it is not the audio processor host.
+  definition/resource-bound Effect preparation, backend-neutral primary-grade
+  ACES 1.3 gamut compression, scene-linear highlight chroma reconstruction,
+  and HSL/3D Qualifier/matte-refinement mathematics, explicit RGB/AlphaMask
+  domain graph compilation/execution, mask rasterization, deterministic bounded
+  object/planar tracking analysis, and visual
+  plugin-effect contracts; it is not the audio processor host and owns no wgpu
+  objects.
 - `mondrian-renderer`: revision-bound Prepared Visual Program compilation,
   per-Clip Effect and visual Transition readiness, per-Sequence render-plan
   lowering, and the transient canonical `PreparedVisualFrameClosure` that
@@ -117,6 +126,14 @@ foundation:
   alternatives are intentionally absent. Its frame-lowering Interface consumes
   flat visual items; only preparation reads immutable Sequence revisions, and
   the recursive closure owns no pixels or consumer scheduling.
+  Dedicated heterogeneous GPU passes execute explicit Qualifier
+  `SceneLinearRgb -> AlphaMask` and Matte Preview
+  `AlphaMask -> SceneLinearRgb` operations, with private refinement textures
+  included in physical admission rather than hidden behind semantic outputs.
+  The same route executes product Power Windows as CPU-rasterized
+  `MaskSource` values followed by GPU `MaskCombine` and `MatteMix`; the latter
+  changes graded RGB while preserving programme alpha. Preview and Export bind
+  the same compiled graph and physical admission evidence.
 - `mondrian-export`: export presets, queue, canonical selected-range visual
   closure preflight, job-local materialization/FFmpeg encoding, and timeline
   export orchestration. Raw Sequence snapshots stop at closure preparation;
@@ -146,6 +163,10 @@ Lower layers cannot depend on higher layers:
   one immutable Sequence revision to bind the schedule and Effect programs,
   then repeated execution returns to the flat Interface.
 - Effects own effect evaluation, but pure effect data lives in core so timeline can store effects without depending on the evaluator.
+- Structured RGB/YRGB and secondary curve authoring likewise lives in Core as
+  validated normalized points. Effects alone compiles sampled execution
+  resources, Renderer alone owns device residency/WGSL, and App UI only lowers
+  `CurveEditor` gestures to stable-address author actions.
 - UI widgets dispatch `Action`; app decides what actions mean. `AppState`
   rejects shell-only, unknown-namespace, and unimplemented Actions with a
   structured error. Empty Undo/Redo history likewise returns typed

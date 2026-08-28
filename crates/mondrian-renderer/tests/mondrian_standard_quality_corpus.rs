@@ -4,9 +4,10 @@ use mondrian_core::{
     OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_renderer::{
-    execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
-    execute_cpu_source_input_stage, CpuColorFrame, CpuEncodedColorFrame, CpuSourceColorFrame,
-    RenderInputTransform, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    compare_code_values, execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
+    execute_cpu_source_input_stage, CodeValueAccuracyBudget, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, RenderInputTransform, RenderOutputColorBoundary,
+    RenderOutputColorBoundaryTarget,
 };
 use std::collections::BTreeSet;
 
@@ -273,29 +274,35 @@ fn standard_sdr_view_preserves_normal_rec709_within_one_code_value() {
         .expect("production colorimetric Rec.709 output boundary")
         .rgba;
 
-    let mut max_code_delta = 0_u8;
-    let mut worst_pixel = 0_usize;
-    for (pixel_index, (expected, observed)) in
-        source_rgba.chunks_exact(4).zip(observed.chunks_exact(4)).enumerate()
-    {
-        assert_eq!(
-            expected[3], observed[3],
-            "alpha changed at pixel {pixel_index}"
-        );
-        for channel in 0..3 {
-            let delta = expected[channel].abs_diff(observed[channel]);
-            if delta > max_code_delta {
-                max_code_delta = delta;
-                worst_pixel = pixel_index;
-            }
-        }
-    }
-    assert!(
-        max_code_delta <= 1,
-        "Rec.709 round trip exceeded one code value: max={max_code_delta}, pixel={worst_pixel}, source={:?}, observed={:?}",
-        &source_rgba[worst_pixel * 4..worst_pixel * 4 + 4],
-        &observed[worst_pixel * 4..worst_pixel * 4 + 4]
-    );
+    let expected_rgb = source_rgba
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].iter().copied().map(u16::from))
+        .collect::<Vec<_>>();
+    let observed_rgb = observed
+        .chunks_exact(4)
+        .flat_map(|pixel| pixel[..3].iter().copied().map(u16::from))
+        .collect::<Vec<_>>();
+    let rgb_report = compare_code_values(
+        &expected_rgb,
+        &observed_rgb,
+        8,
+        CodeValueAccuracyBudget::new(1, 0.11, 1),
+    )
+    .expect("Rec.709 RGB code-value gate");
+    assert!(rgb_report.within_budget, "{rgb_report:#?}");
+
+    let expected_alpha =
+        source_rgba.chunks_exact(4).map(|pixel| u16::from(pixel[3])).collect::<Vec<_>>();
+    let observed_alpha =
+        observed.chunks_exact(4).map(|pixel| u16::from(pixel[3])).collect::<Vec<_>>();
+    let alpha_report = compare_code_values(
+        &expected_alpha,
+        &observed_alpha,
+        8,
+        CodeValueAccuracyBudget::new(0, 0.0, 0),
+    )
+    .expect("Rec.709 alpha code-value gate");
+    assert!(alpha_report.within_budget, "{alpha_report:#?}");
 }
 
 fn normal_rec709_stimulus() -> Vec<u8> {

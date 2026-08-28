@@ -7,6 +7,7 @@
 //! fall back to the CPU reference compositor without losing diagnostic evidence.
 
 use crate::color_frame::GpuColorFrameBindGroupCacheKey;
+use crate::creative_lut_gpu::{GpuCreativeLutPreparedBinding, GpuCreativeLutRuntime};
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
@@ -16,9 +17,13 @@ use crate::{
     GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
-use mondrian_core::types::{BlendMode, Color};
+use mondrian_core::{
+    automation::QualifierSampleOperation,
+    types::{BlendMode, Color},
+};
 use mondrian_effects::{
-    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp, MAX_FUSED_GPU_EFFECT_OPS,
+    CompiledEffectGpuPlan, EffectColorDomain, EffectGpuPointOp, MaskOp, PreparedQualifier,
+    QualifierMode, MAX_FUSED_GPU_EFFECT_OPS,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -44,19 +49,22 @@ struct CompositeUniforms {
     inv_transform0: vec4<f32>,
     inv_transform1: vec4<f32>,
     geometry: vec4<f32>,
-    effects: array<EffectUniform, 8>,
+    effects: array<EffectUniform, 16>,
 };
 
 struct EffectUniform {
     header: vec4<u32>,
     params: vec4<f32>,
     color: vec4<f32>,
+    extra0: vec4<f32>,
+    extra1: vec4<f32>,
 };
 
 @group(0) @binding(0) var layer_tex: texture_2d<f32>;
 @group(0) @binding(1) var linear_sampler: sampler;
 @group(1) @binding(0) var accum_tex: texture_2d<f32>;
 @group(2) @binding(0) var<uniform> uniforms: CompositeUniforms;
+@group(3) @binding(0) var creative_lut_tex: texture_3d<f32>;
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
@@ -219,7 +227,7 @@ fn blend_straight_alpha(
     pixel_index: u32,
 ) -> vec4<f32> {
     var opacity = clamp(requested_opacity, 0.0, 1.0);
-    if (opacity <= 0.0001) { return base_px; }
+    if (opacity <= 0.0) { return base_px; }
     var effective_mode = mode;
     if (mode == 1u) {
         let threshold = f32(hash_u32(effect_graph_dither_seed(pixel_index))) / 4294967295.0;
@@ -229,14 +237,14 @@ fn blend_straight_alpha(
     }
     let base_alpha = clamp(base_px.a, 0.0, 1.0);
     let blend_alpha = clamp(blend_px.a * opacity, 0.0, 1.0);
-    if (blend_alpha <= 0.0001) {
+    if (blend_alpha <= 0.0) {
         return base_px;
     }
-    if (base_alpha <= 0.0001) {
+    if (base_alpha <= 0.0) {
         return vec4<f32>(blend_px.rgb, blend_alpha);
     }
     let out_alpha = blend_alpha + base_alpha * (1.0 - blend_alpha);
-    if (out_alpha <= 0.0001) {
+    if (out_alpha <= 0.0) {
         return vec4<f32>(0.0);
     }
     let blended_rgb = blend_rgb(effective_mode, base_px.rgb, blend_px.rgb);
@@ -252,7 +260,7 @@ fn cross_dissolve_straight_alpha(
     let right_weight = clamp(progress, 0.0, 1.0);
     let left_weight = 1.0 - right_weight;
     let out_alpha = left_px.a * left_weight + right_px.a * right_weight;
-    if (out_alpha <= 0.00000011920929) {
+    if (out_alpha <= 0.0) {
         return vec4<f32>(0.0);
     }
     let premul = left_px.rgb * left_px.a * left_weight +
@@ -277,6 +285,192 @@ fn apply_alpha_mask(source_px: vec4<f32>, mask_px: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(source_px.rgb, output_alpha);
 }
 
+fn combine_alpha_masks(left_px: vec4<f32>, right_px: vec4<f32>) -> vec4<f32> {
+    let left = clamp(left_px.a, 0.0, 1.0);
+    let right = clamp(right_px.a, 0.0, 1.0);
+    var output = max(left, right);
+    if (uniforms.mask_op == 1u) {
+        output = left * (1.0 - right);
+    } else if (uniforms.mask_op == 2u) {
+        output = min(left, right);
+    } else if (uniforms.mask_op == 3u) {
+        output = abs(left - right);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, output);
+}
+
+fn qualifier_safe_smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    if (edge1 <= edge0) {
+        return select(0.0, 1.0, value >= edge1);
+    }
+    let t = clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);
+}
+
+fn qualifier_tone_map_positive(value: f32) -> f32 {
+    let positive = max(value, 0.0);
+    return positive / (1.0 + positive);
+}
+
+fn qualifier_normalized_rgb(rgb: vec3<f32>) -> vec3<f32> {
+    let positive = max(rgb, vec3<f32>(0.0));
+    let peak = max(positive.r, max(positive.g, positive.b));
+    return positive / (1.0 + peak);
+}
+
+fn qualifier_hue_saturation(rgb: vec3<f32>) -> vec2<f32> {
+    let maximum = max(rgb.r, max(rgb.g, rgb.b));
+    let minimum = min(rgb.r, min(rgb.g, rgb.b));
+    let chroma = maximum - minimum;
+    if (chroma <= 1.1920929e-7 || maximum <= 1.1920929e-7) {
+        return vec2<f32>(0.0);
+    }
+    var sector: f32;
+    if (maximum == rgb.r) {
+        sector = positive_mod((rgb.g - rgb.b) / chroma, 6.0);
+    } else if (maximum == rgb.g) {
+        sector = (rgb.b - rgb.r) / chroma + 2.0;
+    } else {
+        sector = (rgb.r - rgb.g) / chroma + 4.0;
+    }
+    return vec2<f32>(sector / 6.0, clamp(chroma / maximum, 0.0, 1.0));
+}
+
+fn qualifier_range_matte(value: f32, low: f32, high: f32, softness: f32) -> f32 {
+    return qualifier_safe_smoothstep(low - softness, low, value) *
+        (1.0 - qualifier_safe_smoothstep(high, high + softness, value));
+}
+
+fn qualifier_sample(index: u32) -> vec4<f32> {
+    let packed = uniforms.effects[2u + index / 4u];
+    let lane = index % 4u;
+    var coordinate: vec3<f32>;
+    if (lane == 0u) {
+        coordinate = packed.params.xyz;
+    } else if (lane == 1u) {
+        coordinate = packed.color.xyz;
+    } else if (lane == 2u) {
+        coordinate = packed.extra0.xyz;
+    } else {
+        coordinate = packed.extra1.xyz;
+    }
+    let excluded = (packed.header.x & (1u << lane)) != 0u;
+    return vec4<f32>(coordinate, select(0.0, 1.0, excluded));
+}
+
+fn raw_qualifier_matte(rgb: vec3<f32>) -> f32 {
+    let controls = uniforms.effects[0];
+    if (controls.header.x == 0u) {
+        let positive = max(rgb, vec3<f32>(0.0));
+        let hue_saturation = qualifier_hue_saturation(positive);
+        let luminance = qualifier_tone_map_positive(
+            dot(positive, uniforms.effects[1].params.xyz),
+        );
+        let hue_delta = abs(hue_saturation.x - controls.params.x);
+        let hue_distance = min(hue_delta, 1.0 - hue_delta);
+        var hue_matte = 1.0;
+        if (controls.params.y < 0.5) {
+            hue_matte = 1.0 - qualifier_safe_smoothstep(
+                controls.params.y,
+                min(controls.params.y + controls.params.z, 0.5),
+                hue_distance,
+            );
+        }
+        return hue_matte *
+            qualifier_range_matte(
+                hue_saturation.y,
+                controls.color.x,
+                controls.color.y,
+                controls.color.z,
+            ) *
+            qualifier_range_matte(
+                luminance,
+                controls.extra0.x,
+                controls.extra0.y,
+                controls.extra0.z,
+            );
+    }
+    let coordinate = qualifier_normalized_rgb(rgb);
+    var included = 0.0;
+    var excluded = 0.0;
+    for (var index = 0u; index < 16u; index = index + 1u) {
+        if (index >= controls.header.y) { break; }
+        let sample = qualifier_sample(index);
+        let distance = length(coordinate - sample.xyz);
+        let contribution = 1.0 - qualifier_safe_smoothstep(
+            controls.extra1.x,
+            controls.extra1.x + controls.extra1.y,
+            distance,
+        );
+        if (sample.w > 0.5) {
+            excluded = max(excluded, contribution);
+        } else {
+            included = max(included, contribution);
+        }
+    }
+    return included * (1.0 - excluded);
+}
+
+fn qualifier_clamped_coordinate(coordinate: vec2<i32>) -> vec2<i32> {
+    return clamp(
+        coordinate,
+        vec2<i32>(0),
+        vec2<i32>(i32(uniforms.geometry.x) - 1, i32(uniforms.geometry.y) - 1),
+    );
+}
+
+fn qualifier_filter_radius(filter_kind: u32) -> i32 {
+    if (filter_kind == 1u) {
+        return i32(uniforms.effects[0].header.z);
+    }
+    if (filter_kind == 2u) {
+        return i32(ceil(uniforms.effects[1].params.w * 3.0));
+    }
+    return 0;
+}
+
+fn qualifier_filter_weight(filter_kind: u32, offset: i32, radius: i32) -> f32 {
+    if (filter_kind == 1u) {
+        return 1.0 / f32(radius * 2 + 1);
+    }
+    if (filter_kind == 2u) {
+        let sigma = max(uniforms.effects[1].params.w, 0.001);
+        let normalized = f32(offset) / sigma;
+        let raw = exp(-0.5 * normalized * normalized);
+        var total = 1.0;
+        for (var sample = 1; sample <= 36; sample = sample + 1) {
+            if (sample > radius) { break; }
+            let value = f32(sample) / sigma;
+            total = total + 2.0 * exp(-0.5 * value * value);
+        }
+        return raw / total;
+    }
+    return 1.0;
+}
+
+fn qualifier_filtered_matte(position: vec2<i32>, raw_source: bool) -> f32 {
+    let filter_kind = uniforms.mask_op;
+    let vertical = (uniforms.mask_invert & 1u) != 0u;
+    let radius = qualifier_filter_radius(filter_kind);
+    var sum = 0.0;
+    for (var offset = -36; offset <= 36; offset = offset + 1) {
+        if (abs(offset) > radius) { continue; }
+        let coordinate = qualifier_clamped_coordinate(
+            position + select(vec2<i32>(offset, 0), vec2<i32>(0, offset), vertical),
+        );
+        var value = textureLoad(layer_tex, coordinate, 0).a;
+        if (raw_source) {
+            value = raw_qualifier_matte(textureLoad(layer_tex, coordinate, 0).rgb);
+        }
+        sum = sum + value * qualifier_filter_weight(filter_kind, offset, radius);
+    }
+    if ((uniforms.mask_invert & 2u) != 0u) {
+        let clean = uniforms.effects[0].extra1.zw;
+        return qualifier_safe_smoothstep(clean.x, 1.0 - clean.y, sum);
+    }
+    return sum;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let base_px = textureSample(accum_tex, linear_sampler, in.uv);
@@ -287,6 +481,20 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     if (uniforms.source_kind == 6u) {
         let mask_px = textureSample(layer_tex, linear_sampler, in.uv);
         return apply_alpha_mask(base_px, mask_px);
+    }
+    if (uniforms.source_kind == 10u) {
+        let right_px = textureSample(layer_tex, linear_sampler, in.uv);
+        return combine_alpha_masks(base_px, right_px);
+    }
+    if (uniforms.source_kind == 7u || uniforms.source_kind == 8u) {
+        let position = vec2<i32>(floor(in.position.xy));
+        let matte = qualifier_filtered_matte(position, uniforms.source_kind == 7u);
+        return vec4<f32>(0.0, 0.0, 0.0, matte);
+    }
+    if (uniforms.source_kind == 9u) {
+        let sampled = textureSample(layer_tex, linear_sampler, in.uv).a;
+        let matte = select(sampled, 1.0 - sampled, uniforms.mask_invert != 0u);
+        return vec4<f32>(matte, matte, matte, 1.0);
     }
     let source_position = source_coordinate(in.uv);
     var layer_px: vec4<f32>;
@@ -355,10 +563,261 @@ fn grain_noise(position: vec2<f32>) -> f32 {
     return f32(value) / 4294967295.0 * 2.0 - 1.0;
 }
 
+fn creative_lut_texel(base_layer: u32, coordinate: vec3<u32>) -> vec3<f32> {
+    return textureLoad(
+        creative_lut_tex,
+        vec3<i32>(
+            i32(coordinate.x),
+            i32(coordinate.y),
+            i32(base_layer + coordinate.z),
+        ),
+        0,
+    ).rgb;
+}
+
+fn sample_creative_lut(effect: EffectUniform, rgb: vec3<f32>) -> vec3<f32> {
+    let base_layer = effect.header.y;
+    let edge = effect.header.z;
+    let maximum = f32(edge - 1u);
+    let normalized = clamp(
+        (rgb - effect.params.yzw) / (effect.color.xyz - effect.params.yzw),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let scaled = normalized * maximum;
+    let lower = vec3<u32>(floor(scaled));
+    let upper = min(lower + vec3<u32>(1u), vec3<u32>(edge - 1u));
+    let fraction = scaled - vec3<f32>(lower);
+    let r = fraction.x;
+    let g = fraction.y;
+    let b = fraction.z;
+    let c000 = creative_lut_texel(base_layer, vec3<u32>(lower.x, lower.y, lower.z));
+    let c100 = creative_lut_texel(base_layer, vec3<u32>(upper.x, lower.y, lower.z));
+    let c010 = creative_lut_texel(base_layer, vec3<u32>(lower.x, upper.y, lower.z));
+    let c110 = creative_lut_texel(base_layer, vec3<u32>(upper.x, upper.y, lower.z));
+    let c001 = creative_lut_texel(base_layer, vec3<u32>(lower.x, lower.y, upper.z));
+    let c101 = creative_lut_texel(base_layer, vec3<u32>(upper.x, lower.y, upper.z));
+    let c011 = creative_lut_texel(base_layer, vec3<u32>(lower.x, upper.y, upper.z));
+    let c111 = creative_lut_texel(base_layer, vec3<u32>(upper.x, upper.y, upper.z));
+    if (r >= g) {
+        if (g >= b) {
+            return c000 + (c100 - c000) * r + (c110 - c100) * g + (c111 - c110) * b;
+        }
+        if (r >= b) {
+            return c000 + (c100 - c000) * r + (c101 - c100) * b + (c111 - c101) * g;
+        }
+        return c000 + (c001 - c000) * b + (c101 - c001) * r + (c111 - c101) * g;
+    }
+    if (b >= g) {
+        return c000 + (c001 - c000) * b + (c011 - c001) * g + (c111 - c011) * r;
+    }
+    if (b >= r) {
+        return c000 + (c010 - c000) * g + (c011 - c010) * b + (c111 - c011) * r;
+    }
+    return c000 + (c010 - c000) * g + (c110 - c010) * r + (c111 - c110) * b;
+}
+
+fn color_curve_texel(effect: EffectUniform, row: u32, sample: u32) -> vec4<f32> {
+    return textureLoad(
+        creative_lut_tex,
+        vec3<i32>(i32(sample), i32(row), i32(effect.header.y)),
+        0,
+    );
+}
+
+fn sample_color_curve(effect: EffectUniform, row: u32, component: u32, x: f32) -> f32 {
+    let last = effect.header.z - 1u;
+    let scale = f32(last);
+    if (x <= 0.0) {
+        let first = color_curve_texel(effect, row, 0u)[component];
+        let second = color_curve_texel(effect, row, 1u)[component];
+        return first + (second - first) * x * scale;
+    }
+    if (x >= 1.0) {
+        let before = color_curve_texel(effect, row, last - 1u)[component];
+        let endpoint = color_curve_texel(effect, row, last)[component];
+        return endpoint + (endpoint - before) * (x - 1.0) * scale;
+    }
+    let position = x * scale;
+    let lower = u32(floor(position));
+    let fraction = position - f32(lower);
+    let left = color_curve_texel(effect, row, lower)[component];
+    let right = color_curve_texel(effect, row, lower + 1u)[component];
+    return left + (right - left) * fraction;
+}
+
+fn positive_mod(value: f32, modulus: f32) -> f32 {
+    return value - floor(value / modulus) * modulus;
+}
+
+fn color_curve_rgb_to_hsv(rgb: vec3<f32>) -> vec3<f32> {
+    let maximum = max(rgb.r, max(rgb.g, rgb.b));
+    let minimum = min(rgb.r, min(rgb.g, rgb.b));
+    let chroma = maximum - minimum;
+    if (abs(chroma) <= 1.1920929e-7) {
+        return vec3<f32>(0.0, 0.0, maximum);
+    }
+    var sector: f32;
+    if (maximum == rgb.r) {
+        sector = positive_mod((rgb.g - rgb.b) / chroma, 6.0);
+    } else if (maximum == rgb.g) {
+        sector = (rgb.b - rgb.r) / chroma + 2.0;
+    } else {
+        sector = (rgb.r - rgb.g) / chroma + 4.0;
+    }
+    var saturation = 0.0;
+    if (abs(maximum) > 1.1920929e-7) {
+        saturation = clamp(chroma / maximum, 0.0, 1.0);
+    }
+    return vec3<f32>(sector / 6.0, saturation, maximum);
+}
+
+fn color_curve_hsv_to_rgb(hue: f32, saturation: f32, value: f32) -> vec3<f32> {
+    let sector = positive_mod(hue, 1.0) * 6.0;
+    let chroma = value * saturation;
+    let x = chroma * (1.0 - abs(positive_mod(sector, 2.0) - 1.0));
+    var base: vec3<f32>;
+    let index = i32(floor(sector));
+    if (index == 0) {
+        base = vec3<f32>(chroma, x, 0.0);
+    } else if (index == 1) {
+        base = vec3<f32>(x, chroma, 0.0);
+    } else if (index == 2) {
+        base = vec3<f32>(0.0, chroma, x);
+    } else if (index == 3) {
+        base = vec3<f32>(0.0, x, chroma);
+    } else if (index == 4) {
+        base = vec3<f32>(x, 0.0, chroma);
+    } else {
+        base = vec3<f32>(chroma, 0.0, x);
+    }
+    return base + vec3<f32>(value - chroma);
+}
+
+fn apply_color_curves(effect: EffectUniform, input: vec3<f32>) -> vec3<f32> {
+    var rgb = input;
+    if (effect.header.w == 0u) {
+        rgb = vec3<f32>(
+            sample_color_curve(effect, 0u, 0u, rgb.r),
+            sample_color_curve(effect, 0u, 0u, rgb.g),
+            sample_color_curve(effect, 0u, 0u, rgb.b),
+        );
+    } else {
+        let luminance = dot(rgb, effect.params.xyz);
+        let delta = sample_color_curve(effect, 0u, 0u, luminance) - luminance;
+        rgb = rgb + vec3<f32>(delta);
+    }
+    rgb = vec3<f32>(
+        sample_color_curve(effect, 0u, 1u, rgb.r),
+        sample_color_curve(effect, 0u, 2u, rgb.g),
+        sample_color_curve(effect, 0u, 3u, rgb.b),
+    );
+    if (effect.params.w < 0.5) {
+        return rgb;
+    }
+    let hsv = color_curve_rgb_to_hsv(rgb);
+    let luminance = clamp(dot(rgb, effect.params.xyz), 0.0, 1.0);
+    let hue_delta = sample_color_curve(effect, 1u, 0u, hsv.x) - 0.5;
+    let saturation_delta =
+        sample_color_curve(effect, 1u, 1u, hsv.x) - 0.5 +
+        sample_color_curve(effect, 1u, 3u, luminance) - 0.5 +
+        sample_color_curve(effect, 2u, 0u, hsv.y) - 0.5;
+    let value_delta =
+        sample_color_curve(effect, 1u, 2u, hsv.x) - 0.5 +
+        sample_color_curve(effect, 2u, 1u, hsv.y) - 0.5;
+    return color_curve_hsv_to_rgb(
+        positive_mod(hsv.x + hue_delta, 1.0),
+        clamp(hsv.y + saturation_delta, 0.0, 1.0),
+        hsv.z + value_delta,
+    );
+}
+
+fn working_to_ap1(rgb: vec3<f32>, space: u32) -> vec3<f32> {
+    if (space == 0u) {
+        return vec3<f32>(
+            dot(vec3<f32>(0.6130974, 0.33952308, 0.047379527), rgb),
+            dot(vec3<f32>(0.07019375, 0.91635394, 0.013452331), rgb),
+            dot(vec3<f32>(0.020615578, 0.109569736, 0.86981463), rgb),
+        );
+    }
+    if (space == 1u) {
+        return vec3<f32>(
+            dot(vec3<f32>(0.974895, 0.019599026, 0.005506001), rgb),
+            dot(vec3<f32>(0.002179594, 0.99553555, 0.00228489), rgb),
+            dot(vec3<f32>(0.004797217, 0.024531983, 0.97067076), rgb),
+        );
+    }
+    if (space == 2u) {
+        return vec3<f32>(
+            dot(vec3<f32>(0.7357979, 0.21216641, 0.052035686), rgb),
+            dot(vec3<f32>(0.047179915, 0.9380458, 0.01477434), rgb),
+            dot(vec3<f32>(0.003563646, 0.04114185, 0.95529443), rgb),
+        );
+    }
+    return rgb;
+}
+
+fn ap1_to_working(rgb: vec3<f32>, space: u32) -> vec3<f32> {
+    if (space == 0u) {
+        return vec3<f32>(
+            dot(vec3<f32>(1.705051, -0.6217919, -0.083259076), rgb),
+            dot(vec3<f32>(-0.13025646, 1.1408046, -0.010548215), rgb),
+            dot(vec3<f32>(-0.024003327, -0.12896892, 1.1529723), rgb),
+        );
+    }
+    if (space == 1u) {
+        return vec3<f32>(
+            dot(vec3<f32>(1.0258248, -0.020053102, -0.005771651), rgb),
+            dot(vec3<f32>(-0.002234402, 1.0045865, -0.002352051), rgb),
+            dot(vec3<f32>(-0.005013327, -0.025290035, 1.0303034), rgb),
+        );
+    }
+    if (space == 2u) {
+        return vec3<f32>(
+            dot(vec3<f32>(1.3792142, -0.308864, -0.07035013), rgb),
+            dot(vec3<f32>(-0.069334894, 1.0822966, -0.012961794), rgb),
+            dot(vec3<f32>(-0.002158984, -0.045459285, 1.0476183), rgb),
+        );
+    }
+    return rgb;
+}
+
+fn aces_gamut_compress_channel(
+    channel: f32,
+    achromatic: f32,
+    achromatic_abs: f32,
+    limit: f32,
+    threshold: f32,
+) -> f32 {
+    let distance = (achromatic - channel) / achromatic_abs;
+    if (distance < threshold) { return channel; }
+    let power = 1.2;
+    let ratio = (1.0 - threshold) / (limit - threshold);
+    let scale = (limit - threshold) / pow(pow(ratio, -power) - 1.0, 1.0 / power);
+    let normalized = (distance - threshold) / scale;
+    var compressed_distance = threshold + scale;
+    if (normalized <= 1.0e20) {
+        compressed_distance = threshold +
+            scale * normalized / pow(1.0 + pow(normalized, power), 1.0 / power);
+    }
+    return achromatic - compressed_distance * achromatic_abs;
+}
+
+fn aces_gamut_compress(rgb: vec3<f32>) -> vec3<f32> {
+    let achromatic = max(rgb.r, max(rgb.g, rgb.b));
+    let achromatic_abs = abs(achromatic);
+    if (achromatic_abs <= 1.17549435e-38) { return rgb; }
+    return vec3<f32>(
+        aces_gamut_compress_channel(rgb.r, achromatic, achromatic_abs, 1.147, 0.815),
+        aces_gamut_compress_channel(rgb.g, achromatic, achromatic_abs, 1.264, 0.803),
+        aces_gamut_compress_channel(rgb.b, achromatic, achromatic_abs, 1.312, 0.880),
+    );
+}
+
 fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
-    if (input.a <= 0.000001) { return input; }
+    if (input.a <= 0.0) { return input; }
     var pixel = input;
-    for (var index = 0u; index < 8u; index = index + 1u) {
+    for (var index = 0u; index < 16u; index = index + 1u) {
         if (index >= uniforms.effect_count) { break; }
         let effect = uniforms.effects[index];
         if (effect.header.x == 1u) {
@@ -369,6 +828,12 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
             var rgb = (pixel.rgb * exposure - pivot) * contrast + pivot;
             let luma = dot(rgb, effect.color.xyz);
             pixel = vec4<f32>(vec3<f32>(luma) + (rgb - vec3<f32>(luma)) * saturation, pixel.a);
+        } else if (effect.header.x == 2u) {
+            let intensity = clamp(effect.params.x, 0.0, 1.0);
+            if (intensity > 0.0001) {
+                let graded = sample_creative_lut(effect, pixel.rgb);
+                pixel = vec4<f32>(pixel.rgb + (graded - pixel.rgb) * intensity, pixel.a);
+            }
         } else if (effect.header.x == 3u) {
             let center = max((uniforms.geometry.zw - vec2<f32>(1.0)) * 0.5, vec2<f32>(1.0));
             let normalized = (position - center) / center;
@@ -389,9 +854,91 @@ fn apply_effects(input: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
                 normalized_center.y < top || normalized_center.y >= bottom) {
                 pixel = vec4<f32>(0.0);
             }
+        } else if (effect.header.x == 6u) {
+            let rgb = vec3<f32>(
+                dot(effect.params.xyz, pixel.rgb),
+                dot(effect.color.xyz, pixel.rgb),
+                dot(effect.extra0.xyz, pixel.rgb),
+            );
+            pixel = vec4<f32>(rgb, pixel.a);
+        } else if (effect.header.x == 7u) {
+            let lifted = pixel.rgb + effect.color.xyz * (vec3<f32>(1.0) - pixel.rgb);
+            let gained = lifted * effect.extra1.xyz;
+            let powered = sign(gained) * pow(abs(gained), effect.extra0.xyz);
+            pixel = vec4<f32>(powered + effect.params.xyz, pixel.a);
+        } else if (effect.header.x == 8u) {
+            let sop = pow(
+                max(pixel.rgb * effect.params.xyz + effect.color.xyz, vec3<f32>(0.0)),
+                effect.extra0.xyz,
+            );
+            let luma = dot(sop, vec3<f32>(0.2126, 0.7152, 0.0722));
+            pixel = vec4<f32>(vec3<f32>(luma) + (sop - vec3<f32>(luma)) * effect.extra1.x, pixel.a);
+        } else if (effect.header.x == 9u) {
+            pixel = vec4<f32>(apply_color_curves(effect, pixel.rgb), pixel.a);
+        } else if (effect.header.x == 10u) {
+            let amount = clamp(effect.params.x, 0.0, 1.0);
+            let maximum = max(abs(pixel.r), max(abs(pixel.g), abs(pixel.b)));
+            let normalization = select(1.0, maximum, maximum > 1.0e20);
+            let ap1 = working_to_ap1(pixel.rgb / normalization, effect.header.y);
+            let normalized_compressed =
+                ap1_to_working(aces_gamut_compress(ap1), effect.header.y);
+            let output_maximum = max(
+                abs(normalized_compressed.r),
+                max(abs(normalized_compressed.g), abs(normalized_compressed.b)),
+            );
+            let safe_normalization = select(
+                normalization,
+                min(normalization, 3.402823466e38 / output_maximum),
+                output_maximum > 1.0,
+            );
+            let compressed = normalized_compressed * safe_normalization;
+            pixel = vec4<f32>(mix(pixel.rgb, compressed, amount), pixel.a);
+        } else if (effect.header.x == 11u) {
+            let threshold = effect.params.x;
+            let rolloff = effect.params.y;
+            let strength = clamp(effect.params.z, 0.0, 1.0);
+            let peak = max(pixel.r, max(pixel.g, pixel.b));
+            if (peak > threshold && strength > 0.000001) {
+                let transition = clamp((peak - threshold) / rolloff, 0.0, 1.0);
+                let weight = transition * transition * (3.0 - 2.0 * transition) * strength;
+                let luminance = dot(pixel.rgb, effect.color.xyz);
+                pixel = vec4<f32>(mix(pixel.rgb, vec3<f32>(luminance), weight), pixel.a);
+            }
         }
     }
     return pixel;
+}
+"#;
+
+const GPU_MATTE_MIX_SHADER: &str = r#"
+struct VsOut {
+    @builtin(position) position: vec4<f32>,
+};
+
+@group(0) @binding(0) var base_tex: texture_2d<f32>;
+@group(0) @binding(1) var graded_tex: texture_2d<f32>;
+@group(0) @binding(2) var matte_tex: texture_2d<f32>;
+
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VsOut {
+    var positions = array<vec2<f32>, 4>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var out: VsOut;
+    out.position = vec4<f32>(positions[vertex_index], 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let coordinate = vec2<i32>(floor(in.position.xy));
+    let base = textureLoad(base_tex, coordinate, 0);
+    let graded = textureLoad(graded_tex, coordinate, 0);
+    let matte = clamp(textureLoad(matte_tex, coordinate, 0).a, 0.0, 1.0);
+    return vec4<f32>(mix(base.rgb, graded.rgb, matte), base.a);
 }
 "#;
 
@@ -582,6 +1129,14 @@ pub struct GpuPointEffectRecord {
     pub processed_pixels: u64,
 }
 
+/// Result of recording one refined GPU qualifier dispatch.
+pub(crate) struct GpuQualifierRecord {
+    /// AlphaMask-domain output retained in the shared resource table.
+    pub output: GpuColorFrameHandle,
+    /// Internal pass targets that must live until command submission.
+    pub scratch: Vec<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+}
+
 /// Result of materializing one procedural solid into a GPU working frame.
 pub struct GpuSolidSourceRecord {
     /// GPU-resident working-linear frame containing the unblended solid color.
@@ -617,6 +1172,9 @@ pub struct GpuCompositorTextureBindingDiagnostics {
 /// Errors returned by native GPU working-space compositing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuCompositeError {
+    /// A creative LUT could not be materialized under the device/cache contract.
+    #[error(transparent)]
+    CreativeLut(#[from] crate::GpuCreativeLutError),
     /// Output dimensions must be non-zero.
     #[error("GPU composite output dimensions must be non-zero, got {width}x{height}")]
     EmptyExtent {
@@ -680,6 +1238,9 @@ pub enum GpuCompositeError {
         /// Unsupported source or mask texture format.
         texture_format: GpuColorFrameTextureFormat,
     },
+    /// Internal qualifier pass planning produced no output target.
+    #[error("GPU qualifier pass plan is empty")]
+    QualifierPassPlanEmpty,
     /// Renderer frame identity allocation is exhausted.
     #[error(transparent)]
     FrameId(#[from] GpuColorFrameIdAllocationError),
@@ -703,6 +1264,8 @@ pub enum GpuCompositeError {
 /// Runtime for recording GPU working-space composites.
 pub struct GpuFrameCompositor {
     pipeline: wgpu::RenderPipeline,
+    matte_mix_pipeline: wgpu::RenderPipeline,
+    matte_mix_texture_layout: wgpu::BindGroupLayout,
     layer_texture_layout: wgpu::BindGroupLayout,
     accum_texture_layout: wgpu::BindGroupLayout,
     layer_texture_cache_key: GpuColorFrameBindGroupCacheKey,
@@ -716,6 +1279,7 @@ pub struct GpuFrameCompositor {
     sampler: wgpu::Sampler,
     procedural_layer_bind_group: wgpu::BindGroup,
     procedural_accum_bind_group: wgpu::BindGroup,
+    creative_luts: GpuCreativeLutRuntime,
 }
 
 #[derive(Clone, Copy)]
@@ -785,6 +1349,8 @@ struct GpuEffectUniform {
     header: [u32; 4],
     params: [f32; 4],
     color: [f32; 4],
+    extra0: [f32; 4],
+    extra1: [f32; 4],
 }
 
 impl GpuFrameCompositor {
@@ -792,8 +1358,17 @@ impl GpuFrameCompositor {
     pub fn new(
         device: &wgpu::Device,
     ) -> Result<Self, GpuColorFrameBindGroupCacheKeyAllocationError> {
+        Self::new_with_creative_lut_cache(device, crate::GpuCreativeLutCacheConfig::default())
+    }
+
+    /// Create a compositor with explicit bounded creative-LUT residency.
+    pub fn new_with_creative_lut_cache(
+        device: &wgpu::Device,
+        creative_lut_cache_config: crate::GpuCreativeLutCacheConfig,
+    ) -> Result<Self, GpuColorFrameBindGroupCacheKeyAllocationError> {
         let layer_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate()?;
         let accum_texture_cache_key = GpuColorFrameBindGroupCacheKey::allocate()?;
+        let creative_luts = GpuCreativeLutRuntime::new(device, creative_lut_cache_config);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mondrian_gpu_working_compositor_shader"),
             source: wgpu::ShaderSource::Wgsl(GPU_COMPOSITOR_SHADER.into()),
@@ -837,6 +1412,7 @@ impl GpuFrameCompositor {
                 Some(&layer_texture_layout),
                 Some(&accum_texture_layout),
                 Some(&uniform_layout),
+                Some(creative_luts.layout()),
             ],
             immediate_size: 0,
         });
@@ -851,6 +1427,51 @@ impl GpuFrameCompositor {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba32Float,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                ..wgpu::PrimitiveState::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let matte_mix_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mondrian_gpu_matte_mix_shader"),
+            source: wgpu::ShaderSource::Wgsl(GPU_MATTE_MIX_SHADER.into()),
+        });
+        let matte_mix_texture_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mondrian_gpu_matte_mix_textures"),
+                entries: &[texture_binding(0), texture_binding(1), texture_binding(2)],
+            });
+        let matte_mix_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mondrian_gpu_matte_mix_layout"),
+            bind_group_layouts: &[Some(&matte_mix_texture_layout)],
+            immediate_size: 0,
+        });
+        let matte_mix_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mondrian_gpu_matte_mix_pipeline"),
+            layout: Some(&matte_mix_layout),
+            vertex: wgpu::VertexState {
+                module: &matte_mix_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &matte_mix_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -923,6 +1544,8 @@ impl GpuFrameCompositor {
         });
         Ok(Self {
             pipeline,
+            matte_mix_pipeline,
+            matte_mix_texture_layout,
             layer_texture_layout,
             accum_texture_layout,
             layer_texture_cache_key,
@@ -943,6 +1566,7 @@ impl GpuFrameCompositor {
             sampler,
             procedural_layer_bind_group,
             procedural_accum_bind_group,
+            creative_luts,
         })
     }
 
@@ -964,6 +1588,11 @@ impl GpuFrameCompositor {
             bind_group_creations: self.texture_bind_group_creations.load(Ordering::Relaxed),
             cache_hits: self.texture_bind_group_cache_hits.load(Ordering::Relaxed),
         }
+    }
+
+    /// Return device-resident creative-LUT upload and cache evidence.
+    pub fn creative_lut_diagnostics(&self) -> crate::GpuCreativeLutCacheDiagnostics {
+        self.creative_luts.diagnostics()
     }
 
     /// Record a GPU working-space composite into the supplied command encoder
@@ -1108,8 +1737,9 @@ impl GpuFrameCompositor {
                     ],
                     inv_transform1: [inv_transform[4], inv_transform[5], 0.0, 0.0],
                     geometry: [width as f32, height as f32, source_size[0], source_size[1]],
-                    effects: effect_uniforms(layer.effect_plan),
+                    effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
                 },
+                layer.effect_plan,
             )?;
             src_is_a = !src_is_a;
         }
@@ -1181,8 +1811,9 @@ impl GpuFrameCompositor {
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
                 geometry: [width as f32, height as f32, width as f32, height as f32],
-                effects: effect_uniforms(Some(plan)),
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
+            Some(plan),
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -1310,8 +1941,9 @@ impl GpuFrameCompositor {
                     descriptor.width as f32,
                     descriptor.height as f32,
                 ],
-                effects: effect_uniforms(None),
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
+            None,
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -1406,8 +2038,9 @@ impl GpuFrameCompositor {
                     descriptor.width as f32,
                     descriptor.height as f32,
                 ],
-                effects: effect_uniforms(None),
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
+            None,
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -1476,8 +2109,9 @@ impl GpuFrameCompositor {
                     descriptor.width as f32,
                     descriptor.height as f32,
                 ],
-                effects: effect_uniforms(None),
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
+            None,
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -1489,6 +2123,312 @@ impl GpuFrameCompositor {
                     .saturating_mul(u64::from(descriptor.height)),
                 ..GpuCompositingDiagnostics::default()
             },
+        })
+    }
+
+    /// Combine two AlphaMask-domain textures without crossing into picture RGB.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_alpha_mask_combine_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        left: &GpuColorFrameHandle,
+        right: &GpuColorFrameHandle,
+        mask_op: MaskOp,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_alpha_mask_pair(left, right)?;
+        let descriptor = left.descriptor();
+        let left_resource = table.get(left).map_err(GpuCompositeError::ResourceTable)?;
+        let right_resource = table.get(right).map_err(GpuCompositeError::ResourceTable)?;
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-alpha-mask-combine-output",
+            resource_pool,
+        )?;
+        self.record_layer_pass(
+            device,
+            queue,
+            encoder,
+            GpuCompositeTextureBinding::Resource(left_resource.resource()),
+            &output_resource.resource().texture_view,
+            GpuCompositeTextureBinding::Resource(right_resource.resource()),
+            GpuCompositeUniforms {
+                opacity: 1.0,
+                source_kind: 10,
+                effect_count: 0,
+                blend_mode: gpu_blend_mode_id(BlendMode::Normal),
+                frame_seed_lo: 0,
+                frame_seed_hi: 0,
+                mask_controls: [gpu_mask_op_id(mask_op), 0],
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                    descriptor.width as f32,
+                    descriptor.height as f32,
+                ],
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
+            },
+            None,
+        )?;
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                gpu_native_composites: 1,
+                gpu_composited_pixels: u64::from(descriptor.width)
+                    .saturating_mul(u64::from(descriptor.height)),
+                ..GpuCompositingDiagnostics::default()
+            },
+        })
+    }
+
+    /// Mix working-RGB base/graded values through one AlphaMask while retaining
+    /// base coverage alpha exactly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_matte_mix_pass(
+        &self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        base: &GpuColorFrameHandle,
+        graded: &GpuColorFrameHandle,
+        matte: &GpuColorFrameHandle,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuCompositeRecord, GpuCompositeError> {
+        validate_matte_mix_inputs(base, graded, matte, working_color_space)?;
+        let descriptor = base.descriptor();
+        let base_resource = table.get(base).map_err(GpuCompositeError::ResourceTable)?;
+        let graded_resource = table.get(graded).map_err(GpuCompositeError::ResourceTable)?;
+        let matte_resource = table.get(matte).map_err(GpuCompositeError::ResourceTable)?;
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            descriptor,
+            "gpu-matte-mix-output",
+            resource_pool,
+        )?;
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mondrian_gpu_matte_mix_binding"),
+            layout: &self.matte_mix_texture_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(
+                        &base_resource.resource().texture_view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(
+                        &graded_resource.resource().texture_view,
+                    ),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        &matte_resource.resource().texture_view,
+                    ),
+                },
+            ],
+        });
+        self.texture_bind_group_creations.fetch_add(1, Ordering::Relaxed);
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("mondrian_gpu_matte_mix_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &output_resource.resource().texture_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.matte_mix_pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..4, 0..1);
+        drop(pass);
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuCompositeRecord {
+            output,
+            diagnostics: GpuCompositingDiagnostics {
+                gpu_native_composites: 1,
+                gpu_composited_pixels: u64::from(descriptor.width)
+                    .saturating_mul(u64::from(descriptor.height)),
+                ..GpuCompositingDiagnostics::default()
+            },
+        })
+    }
+
+    /// Generate one refined AlphaMask from a scene-linear working frame.
+    ///
+    /// Denoise and Gaussian feather are exact separable passes. Every private
+    /// target is returned to the caller so its physical residency remains
+    /// charged and alive until the owning command buffer is submitted.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_qualifier_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        qualifier: &PreparedQualifier,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuQualifierRecord, GpuCompositeError> {
+        validate_qualifier_input(input, working_color_space)?;
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let input_descriptor = input.descriptor();
+        let output_descriptor = ColorFrameDescriptor {
+            color_space: crate::ColorFrameSpace::NonColorData,
+            domain: ColorFrameDomain::AlphaMask,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            ..input_descriptor
+        };
+        let mut stages = Vec::with_capacity(4);
+        if qualifier.denoise_radius() > 0 {
+            stages.push((1_u32, false));
+            stages.push((1_u32, true));
+        }
+        if qualifier.blur_radius() > f32::EPSILON {
+            stages.push((2_u32, false));
+            stages.push((2_u32, true));
+        }
+        if stages.is_empty() {
+            stages.push((0_u32, false));
+        }
+
+        let mut current = None::<GpuColorFrameResource<GpuColorFrameWgpuResource>>;
+        let mut scratch = Vec::with_capacity(stages.len().saturating_sub(1));
+        for (index, (filter_kind, vertical)) in stages.iter().copied().enumerate() {
+            let target = create_working_resource(
+                device,
+                ids,
+                output_descriptor,
+                "gpu-qualifier-pass",
+                resource_pool,
+            )?;
+            let source = current
+                .as_ref()
+                .map_or(input_resource.resource(), |resource| resource.resource());
+            let final_stage = index + 1 == stages.len();
+            self.record_layer_pass(
+                device,
+                queue,
+                encoder,
+                GpuCompositeTextureBinding::Resource(source),
+                &target.resource().texture_view,
+                GpuCompositeTextureBinding::ProceduralDummy,
+                qualifier_uniforms(
+                    qualifier,
+                    input_descriptor.width,
+                    input_descriptor.height,
+                    index == 0,
+                    filter_kind,
+                    vertical,
+                    final_stage,
+                ),
+                None,
+            )?;
+            if let Some(previous) = current.replace(target) {
+                scratch.push(previous);
+            }
+        }
+        let Some(output_resource) = current else {
+            return Err(GpuCompositeError::QualifierPassPlanEmpty);
+        };
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuQualifierRecord { output, scratch })
+    }
+
+    /// Observe one AlphaMask as opaque black/white scene-linear RGB.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_matte_preview_pass(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        ids: &mut GpuColorFrameIdAllocator,
+        table: &mut GpuColorFrameResourceTable<GpuColorFrameWgpuResource>,
+        resource_pool: Option<&GpuColorFrameWgpuResourcePool>,
+        input: &GpuColorFrameHandle,
+        invert: bool,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Result<GpuPointEffectRecord, GpuCompositeError> {
+        validate_matte_preview_input(input)?;
+        let input_resource = table.get(input).map_err(GpuCompositeError::ResourceTable)?;
+        let input_descriptor = input.descriptor();
+        let output_descriptor = ColorFrameDescriptor {
+            color_space: working_color_space.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+            ..input_descriptor
+        };
+        let output_resource = create_working_resource(
+            device,
+            ids,
+            output_descriptor,
+            "gpu-matte-preview-output",
+            resource_pool,
+        )?;
+        self.record_layer_pass(
+            device,
+            queue,
+            encoder,
+            GpuCompositeTextureBinding::Resource(input_resource.resource()),
+            &output_resource.resource().texture_view,
+            GpuCompositeTextureBinding::ProceduralDummy,
+            GpuCompositeUniforms {
+                opacity: 1.0,
+                source_kind: 9,
+                effect_count: 0,
+                blend_mode: 0,
+                frame_seed_lo: 0,
+                frame_seed_hi: 0,
+                mask_controls: [0, u32::from(invert)],
+                solid_color: [0.0; 4],
+                inv_transform0: [1.0, 0.0, 0.0, 0.0],
+                inv_transform1: [1.0, 0.0, 0.0, 0.0],
+                geometry: [
+                    input_descriptor.width as f32,
+                    input_descriptor.height as f32,
+                    input_descriptor.width as f32,
+                    input_descriptor.height as f32,
+                ],
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
+            },
+            None,
+        )?;
+        let output = output_resource.handle().clone();
+        table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
+        Ok(GpuPointEffectRecord {
+            output,
+            processed_pixels: u64::from(input_descriptor.width)
+                .saturating_mul(u64::from(input_descriptor.height)),
         })
     }
 
@@ -1548,8 +2488,9 @@ impl GpuFrameCompositor {
                 inv_transform0: [1.0, 0.0, 0.0, 0.0],
                 inv_transform1: [1.0, 0.0, 0.0, 0.0],
                 geometry: [width as f32, height as f32, width as f32, height as f32],
-                effects: effect_uniforms(None),
+                effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
             },
+            None,
         )?;
         let output = output_resource.handle().clone();
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
@@ -1567,8 +2508,12 @@ impl GpuFrameCompositor {
         accum_binding: GpuCompositeTextureBinding<'_>,
         dst_view: &wgpu::TextureView,
         layer_binding: GpuCompositeTextureBinding<'_>,
-        uniforms: GpuCompositeUniforms,
+        mut uniforms: GpuCompositeUniforms,
+        effect_plan: Option<&CompiledEffectGpuPlan>,
     ) -> Result<(), GpuCompositeError> {
+        let creative_lut_binding = self.creative_luts.prepare_plan(device, queue, effect_plan)?;
+        uniforms.effect_count = effect_plan.map_or(0, |plan| plan.operations().len() as u32);
+        uniforms.effects = effect_uniforms(effect_plan, Some(&creative_lut_binding))?;
         let (uniform_buffer, uniform_bind_group, uniform_offset) = {
             let mut arena = self.uniform_arena.lock();
             let slot = arena.next_slot;
@@ -1674,6 +2619,7 @@ impl GpuFrameCompositor {
         pass.set_bind_group(0, &layer_bind_group, &[]);
         pass.set_bind_group(1, &accum_bind_group, &[]);
         pass.set_bind_group(2, &uniform_bind_group, &[uniform_offset as u32]);
+        pass.set_bind_group(3, creative_lut_binding.bind_group(), &[]);
         pass.draw(0..4, 0..1);
         Ok(())
     }
@@ -1794,6 +2740,208 @@ fn validate_alpha_mask_inputs(
     Ok(())
 }
 
+fn validate_alpha_mask_pair(
+    left: &GpuColorFrameHandle,
+    right: &GpuColorFrameHandle,
+) -> Result<(), GpuCompositeError> {
+    let left_actual = left.descriptor();
+    let expected = ColorFrameDescriptor {
+        width: left_actual.width,
+        height: left_actual.height,
+        color_space: crate::ColorFrameSpace::NonColorData,
+        domain: ColorFrameDomain::AlphaMask,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    for actual in [left_actual, right.descriptor()] {
+        require_straight_compatible_alpha(actual.alpha)?;
+        if actual != expected {
+            return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+        }
+    }
+    for texture_format in [left.texture_format(), right.texture_format()] {
+        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
+        }
+    }
+    Ok(())
+}
+
+fn validate_matte_mix_inputs(
+    base: &GpuColorFrameHandle,
+    graded: &GpuColorFrameHandle,
+    matte: &GpuColorFrameHandle,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> Result<(), GpuCompositeError> {
+    let base_actual = base.descriptor();
+    let working_expected = ColorFrameDescriptor {
+        width: base_actual.width,
+        height: base_actual.height,
+        color_space: working_color_space.into(),
+        domain: ColorFrameDomain::Working,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    for actual in [base_actual, graded.descriptor()] {
+        require_straight_compatible_alpha(actual.alpha)?;
+        if actual != working_expected {
+            return Err(GpuCompositeError::SourceDescriptorMismatch {
+                expected: working_expected,
+                actual,
+            });
+        }
+    }
+    let matte_expected = ColorFrameDescriptor {
+        width: base_actual.width,
+        height: base_actual.height,
+        color_space: crate::ColorFrameSpace::NonColorData,
+        domain: ColorFrameDomain::AlphaMask,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    let matte_actual = matte.descriptor();
+    require_straight_compatible_alpha(matte_actual.alpha)?;
+    if matte_actual != matte_expected {
+        return Err(GpuCompositeError::SourceDescriptorMismatch {
+            expected: matte_expected,
+            actual: matte_actual,
+        });
+    }
+    for texture_format in [
+        base.texture_format(),
+        graded.texture_format(),
+        matte.texture_format(),
+    ] {
+        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+            return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
+        }
+    }
+    Ok(())
+}
+
+fn validate_qualifier_input(
+    input: &GpuColorFrameHandle,
+    working_color_space: mondrian_core::WorkingColorSpace,
+) -> Result<(), GpuCompositeError> {
+    let actual = input.descriptor();
+    let expected = ColorFrameDescriptor {
+        width: actual.width,
+        height: actual.height,
+        color_space: working_color_space.into(),
+        domain: ColorFrameDomain::Working,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    require_straight_compatible_alpha(actual.alpha)?;
+    if actual != expected {
+        return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+    }
+    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+        return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported {
+            texture_format: input.texture_format(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_matte_preview_input(input: &GpuColorFrameHandle) -> Result<(), GpuCompositeError> {
+    let actual = input.descriptor();
+    let expected = ColorFrameDescriptor {
+        width: actual.width,
+        height: actual.height,
+        color_space: crate::ColorFrameSpace::NonColorData,
+        domain: ColorFrameDomain::AlphaMask,
+        encoding: ColorFrameEncoding::LinearFloat,
+        residency: ColorFrameResidency::Gpu,
+        alpha: crate::ColorFrameAlpha::StraightCoverage,
+    };
+    require_straight_compatible_alpha(actual.alpha)?;
+    if actual != expected {
+        return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
+    }
+    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+        return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported {
+            texture_format: input.texture_format(),
+        });
+    }
+    Ok(())
+}
+
+fn qualifier_uniforms(
+    qualifier: &PreparedQualifier,
+    width: u32,
+    height: u32,
+    raw_source: bool,
+    filter_kind: u32,
+    vertical: bool,
+    final_stage: bool,
+) -> GpuCompositeUniforms {
+    let mut effects = [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS];
+    let hue = qualifier.hue_controls();
+    let saturation = qualifier.saturation_controls();
+    let luminance = qualifier.luminance_controls();
+    let three_d = qualifier.three_d_controls();
+    let clean = qualifier.clean_controls();
+    let sample_count = qualifier.samples().len();
+    effects[0] = GpuEffectUniform {
+        header: [
+            match qualifier.mode() {
+                QualifierMode::Hsl => 0,
+                QualifierMode::ThreeDimensional => 1,
+            },
+            sample_count as u32,
+            qualifier.denoise_radius(),
+            0,
+        ],
+        params: [hue[0], hue[1], hue[2], 0.0],
+        color: [saturation[0], saturation[1], saturation[2], 0.0],
+        extra0: [luminance[0], luminance[1], luminance[2], 0.0],
+        extra1: [three_d[0], three_d[1], clean[0], clean[1]],
+    };
+    let coefficients = qualifier.luminance_coefficients();
+    effects[1].params = [
+        coefficients[0],
+        coefficients[1],
+        coefficients[2],
+        qualifier.blur_radius(),
+    ];
+    for (index, (coordinate, operation)) in qualifier.samples().enumerate() {
+        let slot = 2 + index / 4;
+        let lane = index % 4;
+        let packed = [coordinate[0], coordinate[1], coordinate[2], 0.0];
+        match lane {
+            0 => effects[slot].params = packed,
+            1 => effects[slot].color = packed,
+            2 => effects[slot].extra0 = packed,
+            _ => effects[slot].extra1 = packed,
+        }
+        if operation == QualifierSampleOperation::Exclude {
+            effects[slot].header[0] |= 1_u32 << lane;
+        }
+    }
+    GpuCompositeUniforms {
+        opacity: 1.0,
+        source_kind: if raw_source { 7 } else { 8 },
+        effect_count: (2 + sample_count.div_ceil(4)) as u32,
+        blend_mode: 0,
+        frame_seed_lo: 0,
+        frame_seed_hi: 0,
+        mask_controls: [
+            filter_kind,
+            u32::from(vertical) | (u32::from(final_stage) << 1),
+        ],
+        solid_color: [0.0; 4],
+        inv_transform0: [1.0, 0.0, 0.0, 0.0],
+        inv_transform1: [1.0, 0.0, 0.0, 0.0],
+        geometry: [width as f32, height as f32, width as f32, height as f32],
+        effects,
+    }
+}
+
 const fn gpu_mask_op_id(mask_op: MaskOp) -> u32 {
     match mask_op {
         MaskOp::Add => 0,
@@ -1860,11 +3008,14 @@ fn gpu_blend_mode_id(mode: BlendMode) -> u32 {
 
 fn effect_uniforms(
     plan: Option<&CompiledEffectGpuPlan>,
-) -> [GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS] {
+    creative_luts: Option<&GpuCreativeLutPreparedBinding>,
+) -> Result<[GpuEffectUniform; MAX_FUSED_GPU_EFFECT_OPS], GpuCompositeError> {
     let mut uniforms = [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS];
-    let Some(plan) = plan else { return uniforms };
+    let Some(plan) = plan else {
+        return Ok(uniforms);
+    };
     for (target, operation) in uniforms.iter_mut().zip(plan.operations()) {
-        *target = match *operation {
+        *target = match operation {
             EffectGpuPointOp::ColorAdjust {
                 exposure,
                 contrast,
@@ -1872,32 +3023,158 @@ fn effect_uniforms(
                 luminance_coefficients,
             } => GpuEffectUniform {
                 header: [1, 0, 0, 0],
-                params: [exposure, contrast, saturation, 0.0],
+                params: [*exposure, *contrast, *saturation, 0.0],
                 color: [
                     luminance_coefficients[0],
                     luminance_coefficients[1],
                     luminance_coefficients[2],
                     0.0,
                 ],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
             },
+            EffectGpuPointOp::WhiteBalance { grade } => {
+                let matrix = grade.matrix();
+                GpuEffectUniform {
+                    header: [6, 0, 0, 0],
+                    params: [matrix[0][0], matrix[0][1], matrix[0][2], 0.0],
+                    color: [matrix[1][0], matrix[1][1], matrix[1][2], 0.0],
+                    extra0: [matrix[2][0], matrix[2][1], matrix[2][2], 0.0],
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::Primaries { grade } => {
+                let offset = grade.offset();
+                let lift_delta = grade.lift_delta();
+                let inverse_gamma = grade.inverse_gamma();
+                let gain = grade.gain();
+                GpuEffectUniform {
+                    header: [7, 0, 0, 0],
+                    params: [offset[0], offset[1], offset[2], 0.0],
+                    color: [lift_delta[0], lift_delta[1], lift_delta[2], 0.0],
+                    extra0: [inverse_gamma[0], inverse_gamma[1], inverse_gamma[2], 0.0],
+                    extra1: [gain[0], gain[1], gain[2], 0.0],
+                }
+            }
+            EffectGpuPointOp::AscCdl { grade } => {
+                let slope = grade.slope();
+                let offset = grade.offset();
+                let power = grade.power();
+                GpuEffectUniform {
+                    header: [8, 0, 0, 0],
+                    params: [slope[0], slope[1], slope[2], 0.0],
+                    color: [offset[0], offset[1], offset[2], 0.0],
+                    extra0: [power[0], power[1], power[2], 0.0],
+                    extra1: [grade.saturation(), 0.0, 0.0, 0.0],
+                }
+            }
+            EffectGpuPointOp::GamutCompression { grade } => {
+                let working_space = match grade.working_color_space() {
+                    mondrian_core::WorkingColorSpace::LinearRec709 => 0,
+                    mondrian_core::WorkingColorSpace::LinearRec2020 => 1,
+                    mondrian_core::WorkingColorSpace::LinearP3D65 => 2,
+                    mondrian_core::WorkingColorSpace::AcesCg => 3,
+                };
+                GpuEffectUniform {
+                    header: [10, working_space, 0, 0],
+                    params: [grade.amount(), 0.0, 0.0, 0.0],
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::HighlightRecovery { grade } => {
+                let luminance = grade.luminance_coefficients();
+                GpuEffectUniform {
+                    header: [11, 0, 0, 0],
+                    params: [grade.threshold(), grade.rolloff(), grade.strength(), 0.0],
+                    color: [luminance[0], luminance[1], luminance[2], 0.0],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
+            EffectGpuPointOp::ColorCurves { curves } => {
+                let location = creative_luts
+                    .and_then(|binding| binding.curve_location(curves))
+                    .ok_or_else(|| {
+                        GpuCompositeError::CreativeLut(
+                            crate::GpuCreativeLutError::PreparedCurveBindingMissing {
+                                fingerprint: *curves.semantic_fingerprint(),
+                            },
+                        )
+                    })?;
+                let luminance = curves.luminance_coefficients();
+                GpuEffectUniform {
+                    header: [
+                        9,
+                        location.base_layer,
+                        location.sample_count,
+                        u32::from(matches!(
+                            curves.mode(),
+                            mondrian_effects::ColorCurvesMode::YRgb
+                        )),
+                    ],
+                    params: [
+                        luminance[0],
+                        luminance[1],
+                        luminance[2],
+                        f32::from(!curves.secondary_identity()),
+                    ],
+                    color: [0.0; 4],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
             EffectGpuPointOp::Vignette { intensity, feather } => GpuEffectUniform {
                 header: [3, 0, 0, 0],
-                params: [intensity, feather, 0.0, 0.0],
+                params: [*intensity, *feather, 0.0, 0.0],
                 color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
             },
             EffectGpuPointOp::Grain { amount } => GpuEffectUniform {
                 header: [4, 0, 0, 0],
-                params: [amount, 0.0, 0.0, 0.0],
+                params: [*amount, 0.0, 0.0, 0.0],
                 color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
             },
             EffectGpuPointOp::Crop { left, top, right, bottom } => GpuEffectUniform {
                 header: [5, 0, 0, 0],
-                params: [left, top, right, bottom],
+                params: [*left, *top, *right, *bottom],
                 color: [0.0; 4],
+                extra0: [0.0; 4],
+                extra1: [0.0; 4],
             },
+            EffectGpuPointOp::Lut3D { lut, intensity } => {
+                let effective_intensity = intensity.clamp(0.0, 1.0);
+                let location = if effective_intensity <= 1.0e-4 {
+                    crate::creative_lut_gpu::GpuCreativeLutLocation { base_layer: 0, edge_size: 2 }
+                } else {
+                    creative_luts.and_then(|binding| binding.location(lut)).ok_or_else(|| {
+                        GpuCompositeError::CreativeLut(
+                            crate::GpuCreativeLutError::PreparedBindingMissing {
+                                fingerprint: *lut.semantic_fingerprint(),
+                            },
+                        )
+                    })?
+                };
+                GpuEffectUniform {
+                    header: [2, location.base_layer, location.edge_size, 0],
+                    params: [
+                        *intensity,
+                        lut.domain_min[0],
+                        lut.domain_min[1],
+                        lut.domain_min[2],
+                    ],
+                    color: [lut.domain_max[0], lut.domain_max[1], lut.domain_max[2], 0.0],
+                    extra0: [0.0; 4],
+                    extra1: [0.0; 4],
+                }
+            }
         };
     }
-    uniforms
+    Ok(uniforms)
 }
 
 fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuCompositeError> {
@@ -2094,12 +3371,15 @@ fn clear_working_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
+    use mondrian_core::{
+        NormalizedCurve, NormalizedCurvePoint, WorkingColorSpace, WorkingRgbaF32Frame,
+    };
 
     #[test]
-    fn gpu_compositor_shader_parses_as_wgsl() {
+    fn gpu_compositor_and_matte_mix_shaders_parse_as_wgsl() {
         naga::front::wgsl::parse_str(GPU_COMPOSITOR_SHADER)
             .expect("GPU compositor WGSL should parse");
+        naga::front::wgsl::parse_str(GPU_MATTE_MIX_SHADER).expect("GPU MatteMix WGSL should parse");
     }
 
     #[test]
@@ -2241,7 +3521,7 @@ mod tests {
         let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
         let plan = lower_effect_graph_to_gpu_plan(&graph).expect("supported point chain");
 
-        let uniforms = effect_uniforms(Some(&plan));
+        let uniforms = effect_uniforms(Some(&plan), None).expect("uniforms without LUT resources");
 
         assert_eq!(uniforms[0].header[0], 1);
         assert_eq!(uniforms[0].params, [0.25, 1.1, 0.8, 0.0]);
@@ -2251,6 +3531,61 @@ mod tests {
         assert_eq!(uniforms[2].header[0], 5);
         assert_eq!(uniforms[2].params, [0.25, 0.0, 0.0, 0.25]);
         assert!(uniforms[3..].iter().all(|uniform| uniform.header[0] == 0));
+    }
+
+    #[test]
+    fn gpu_effect_uniforms_preserve_complete_primary_grade_contracts() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, AscCdlGrade,
+            EffectGraphBuilderState, EffectRenderOp, GamutCompressionGrade, HighlightRecoveryGrade,
+            PrimariesGrade, WhiteBalanceGrade,
+        };
+
+        let white_balance = WhiteBalanceGrade::new(0.4, -0.2, WorkingColorSpace::LinearP3D65)
+            .expect("white balance");
+        let primaries = PrimariesGrade::new(
+            [0.01, 0.02, 0.03],
+            [1.1, 0.9, 1.0],
+            [1.2, 0.8, 1.4],
+            [0.7, 1.1, 0.95],
+        )
+        .expect("Primaries");
+        let cdl = AscCdlGrade::new([1.1, 1.2, 1.3], [-0.1, 0.0, 0.1], [0.8, 1.0, 1.2], 0.75)
+            .expect("ASC CDL");
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::WhiteBalance { grade: white_balance });
+        builder.append_unary(EffectRenderOp::Primaries { grade: primaries });
+        builder.append_unary(EffectRenderOp::AscCdl { grade: cdl });
+        let gamut = GamutCompressionGrade::new(0.6, WorkingColorSpace::LinearP3D65)
+            .expect("gamut compression");
+        let highlight = HighlightRecoveryGrade::new(1.0, 0.75, 0.8, WorkingColorSpace::LinearP3D65)
+            .expect("highlight recovery");
+        builder.append_unary(EffectRenderOp::GamutCompression { grade: gamut });
+        builder.append_unary(EffectRenderOp::HighlightRecovery { grade: highlight });
+        let graph = compile_reference_render_graph(builder.finish()).expect("grade graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU grade plan");
+
+        let uniforms = effect_uniforms(Some(&plan), None).expect("primary uniforms");
+        let matrix = white_balance.matrix();
+        assert_eq!(uniforms[0].header[0], 6);
+        assert_eq!(uniforms[0].params[..3], matrix[0]);
+        assert_eq!(uniforms[0].color[..3], matrix[1]);
+        assert_eq!(uniforms[0].extra0[..3], matrix[2]);
+        assert_eq!(uniforms[1].header[0], 7);
+        assert_eq!(uniforms[1].params[..3], primaries.offset());
+        assert_eq!(uniforms[1].color[..3], primaries.lift_delta());
+        assert_eq!(uniforms[1].extra0[..3], primaries.inverse_gamma());
+        assert_eq!(uniforms[1].extra1[..3], primaries.gain());
+        assert_eq!(uniforms[2].header[0], 8);
+        assert_eq!(uniforms[2].params[..3], cdl.slope());
+        assert_eq!(uniforms[2].color[..3], cdl.offset());
+        assert_eq!(uniforms[2].extra0[..3], cdl.power());
+        assert_eq!(uniforms[2].extra1[0], cdl.saturation());
+        assert_eq!(uniforms[3].header, [10, 2, 0, 0]);
+        assert_eq!(uniforms[3].params[0], gamut.amount());
+        assert_eq!(uniforms[4].header[0], 11);
+        assert_eq!(uniforms[4].params[..3], [1.0, 0.75, 0.8]);
+        assert_eq!(uniforms[4].color[..3], highlight.luminance_coefficients());
     }
 
     #[test]
@@ -2398,8 +3733,10 @@ mod tests {
         };
         use mondrian_effects::{
             apply_compiled_effect_graph_pass_rgba_f32, apply_compiled_effect_graph_rgba_f32,
-            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
-            EffectGraphBuilderState, EffectRenderOp,
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan, AscCdlGrade,
+            ColorCurvesAuthoring, ColorCurvesMode, EffectGraphBuilderState, EffectRenderOp,
+            GamutCompressionGrade, HighlightRecoveryGrade, Lut3D, PreparedColorCurves,
+            PreparedLut3D, PrimariesGrade, WhiteBalanceGrade,
         };
 
         let Ok(context) = crate::GpuContext::new().await else {
@@ -2430,7 +3767,141 @@ mod tests {
             saturation: 0.8,
             working_color_space: WorkingColorSpace::LinearRec709,
         });
+        builder.append_unary(EffectRenderOp::WhiteBalance {
+            grade: WhiteBalanceGrade::new(0.42, -0.18, WorkingColorSpace::LinearRec709)
+                .expect("valid white balance"),
+        });
+        builder.append_unary(EffectRenderOp::Primaries {
+            grade: PrimariesGrade::new(
+                [0.01, -0.015, 0.02],
+                [1.08, 0.94, 1.02],
+                [1.15, 0.92, 1.3],
+                [1.1, 0.85, 1.05],
+            )
+            .expect("valid Primaries"),
+        });
+        builder.append_unary(EffectRenderOp::AscCdl {
+            grade: AscCdlGrade::new(
+                [1.05, 0.95, 1.1],
+                [-0.02, 0.01, 0.0],
+                [0.9, 1.1, 1.05],
+                0.88,
+            )
+            .expect("valid ASC CDL"),
+        });
+        builder.append_unary(EffectRenderOp::GamutCompression {
+            grade: GamutCompressionGrade::new(0.82, WorkingColorSpace::LinearRec709)
+                .expect("valid gamut compression"),
+        });
+        builder.append_unary(EffectRenderOp::HighlightRecovery {
+            grade: HighlightRecoveryGrade::new(0.72, 0.9, 0.65, WorkingColorSpace::LinearRec709)
+                .expect("valid highlight recovery"),
+        });
+        let identity_curve = NormalizedCurve::identity();
+        let neutral_secondary = NormalizedCurve::flat(0.5).expect("neutral secondary curve");
+        let master_curve = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.03),
+            NormalizedCurvePoint::new(0.32, 0.24),
+            NormalizedCurvePoint::new(0.72, 0.81),
+            NormalizedCurvePoint::new(1.0, 0.97),
+        ])
+        .expect("master curve");
+        let red_curve = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.0),
+            NormalizedCurvePoint::new(0.45, 0.51),
+            NormalizedCurvePoint::new(1.0, 1.0),
+        ])
+        .expect("red curve");
+        let hue_vs_hue = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.5),
+            NormalizedCurvePoint::new(0.5, 0.56),
+            NormalizedCurvePoint::new(1.0, 0.5),
+        ])
+        .expect("hue-vs-hue curve");
+        let hue_vs_saturation = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.48),
+            NormalizedCurvePoint::new(0.65, 0.55),
+            NormalizedCurvePoint::new(1.0, 0.48),
+        ])
+        .expect("hue-vs-saturation curve");
+        let luma_vs_saturation = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.46),
+            NormalizedCurvePoint::new(0.5, 0.54),
+            NormalizedCurvePoint::new(1.0, 0.5),
+        ])
+        .expect("luma-vs-saturation curve");
+        let saturation_vs_luma = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.5),
+            NormalizedCurvePoint::new(0.4, 0.47),
+            NormalizedCurvePoint::new(1.0, 0.53),
+        ])
+        .expect("saturation-vs-luma curve");
+        builder.append_unary(EffectRenderOp::ColorCurves {
+            curves: std::sync::Arc::new(PreparedColorCurves::new(
+                ColorCurvesAuthoring {
+                    mode: ColorCurvesMode::YRgb,
+                    master: &master_curve,
+                    red: &red_curve,
+                    green: &identity_curve,
+                    blue: &identity_curve,
+                    hue_vs_hue: &hue_vs_hue,
+                    hue_vs_saturation: &hue_vs_saturation,
+                    hue_vs_luma: &neutral_secondary,
+                    luma_vs_saturation: &luma_vs_saturation,
+                    saturation_vs_saturation: &neutral_secondary,
+                    saturation_vs_luma: &saturation_vs_luma,
+                },
+                WorkingColorSpace::LinearRec709,
+            )),
+        });
+        let mut lut_data = Vec::new();
+        for blue in 0..3 {
+            for green in 0..3 {
+                for red in 0..3 {
+                    let r = red as f32 * 0.5;
+                    let g = green as f32 * 0.5;
+                    let b = blue as f32 * 0.5;
+                    lut_data.push([
+                        0.03 + 0.82 * r + 0.06 * g,
+                        0.01 + 0.88 * g + 0.04 * b,
+                        0.02 + 0.84 * b + 0.05 * r,
+                    ]);
+                }
+            }
+        }
+        builder.append_unary(EffectRenderOp::Lut3D {
+            lut: std::sync::Arc::new(PreparedLut3D::new(Lut3D {
+                name: "gpu-parity-domain-lut".to_owned(),
+                size: 3,
+                domain_min: [-0.2, -0.1, 0.0],
+                domain_max: [1.2, 1.1, 1.0],
+                data: lut_data,
+            })),
+            intensity: 0.63,
+        });
         builder.append_unary(EffectRenderOp::Vignette { intensity: 0.45, feather: 0.7 });
+        let mut second_lut_data = Vec::new();
+        for blue in 0..2 {
+            for green in 0..2 {
+                for red in 0..2 {
+                    second_lut_data.push([
+                        1.0 - red as f32,
+                        green as f32 * 0.9,
+                        blue as f32 * 0.85,
+                    ]);
+                }
+            }
+        }
+        builder.append_unary(EffectRenderOp::Lut3D {
+            lut: std::sync::Arc::new(PreparedLut3D::new(Lut3D {
+                name: "gpu-parity-second-lut".to_owned(),
+                size: 2,
+                domain_min: [0.0; 3],
+                domain_max: [1.0; 3],
+                data: second_lut_data,
+            })),
+            intensity: 0.27,
+        });
         builder.append_unary(EffectRenderOp::Grain { amount: 0.1 });
         builder.append_unary(EffectRenderOp::Crop {
             left: 0.25,
@@ -2485,6 +3956,49 @@ mod tests {
         let actual_adjustment = readback_test_composite(&context, &[base_layer, adjustment_layer]);
         assert_test_pixels_accurate(&expected_adjustment, &actual_adjustment);
 
+        let aces_frame = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 2,
+            color_space: WorkingColorSpace::AcesCg,
+            data: vec![
+                [0.966_634_1, 0.048_190_45, 0.007_193, 0.25],
+                [0.001_423_957, 1.312_399_1, -0.223_322_99, 0.5],
+                [-0.081_868_97, -0.279_064_9, 1.386_940_2, 0.75],
+                [3.0, 1.0, 0.2, 1.0],
+            ],
+        });
+        let mut aces_builder = EffectGraphBuilderState::new();
+        aces_builder.append_unary(EffectRenderOp::GamutCompression {
+            grade: GamutCompressionGrade::new(1.0, WorkingColorSpace::AcesCg)
+                .expect("ACES gamut compression"),
+        });
+        aces_builder.append_unary(EffectRenderOp::HighlightRecovery {
+            grade: HighlightRecoveryGrade::new(1.0, 1.0, 0.7, WorkingColorSpace::AcesCg)
+                .expect("ACES highlight recovery"),
+        });
+        let aces_graph =
+            compile_reference_render_graph(aces_builder.finish()).expect("ACES grade graph");
+        let aces_plan = lower_effect_graph_to_gpu_plan(&aces_graph).expect("ACES GPU point plan");
+        let aces_expected =
+            apply_compiled_effect_graph_rgba_f32(&aces_frame.rgba_f32().data, 2, 2, &aces_graph, 0)
+                .expect("ACES CPU reference");
+        let aces_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&aces_frame),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&aces_plan),
+            frame_seed: 0,
+        };
+        let aces_actual = readback_test_composite_in_space(
+            &context,
+            &[aces_layer],
+            2,
+            2,
+            WorkingColorSpace::AcesCg,
+        );
+        assert_test_pixels_accurate(&aces_expected, &aces_actual);
+
         fn assert_test_pixels_accurate(expected: &[[f32; 4]], actual: &[[f32; 4]]) {
             let report = compare_linear_rgba(
                 expected,
@@ -2499,6 +4013,117 @@ mod tests {
                 report.within_budget,
                 "GPU point-effect accuracy budget exceeded: {report:#?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_lut_grade_chain_keeps_resident_source_native_and_reuses_lut_upload() {
+        use mondrian_effects::{
+            compile_reference_render_graph, lower_effect_graph_to_gpu_plan,
+            EffectGraphBuilderState, EffectRenderOp, Lut3D, PreparedLut3D,
+        };
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping resident GPU LUT test: no GPU adapter available");
+            return;
+        };
+        let mut builder = EffectGraphBuilderState::new();
+        builder.append_unary(EffectRenderOp::ColorAdjust {
+            exposure: 0.2,
+            contrast: 1.05,
+            saturation: 0.95,
+            working_color_space: WorkingColorSpace::LinearRec709,
+        });
+        builder.append_unary(EffectRenderOp::Lut3D {
+            lut: std::sync::Arc::new(PreparedLut3D::new(
+                Lut3D::identity(3).expect("identity LUT"),
+            )),
+            intensity: 0.8,
+        });
+        let graph = compile_reference_render_graph(builder.finish()).expect("valid graph");
+        let plan = lower_effect_graph_to_gpu_plan(&graph).expect("GPU LUT grade plan");
+        let descriptor = ColorFrameDescriptor {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709.into(),
+            domain: ColorFrameDomain::Working,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: crate::ColorFrameAlpha::StraightCoverage,
+        };
+        let input = GpuColorFrameHandle::new(
+            crate::GpuColorFrameId::from_raw(1_200),
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "resident-lut-grade-input",
+        )
+        .expect("input handle");
+        let input_resource = GpuColorFrameUploader::allocate(
+            &context.device,
+            &GpuColorFrameAllocationPlan::for_handle(input.clone()),
+        );
+        let input_pixels = [[0.18_f32, 0.35, 0.72, 1.0]; 16];
+        context.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &input_resource.resource().texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&input_pixels),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(64),
+                rows_per_image: Some(4),
+            },
+            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+        );
+        let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
+        let mut ids = GpuColorFrameIdAllocator::new(1_201).expect("frame IDs");
+        let mut table = GpuColorFrameResourceTable::new();
+        table.insert(input_resource).expect("resident source");
+        let layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::GpuFrame(&input),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: Some(&plan),
+            frame_seed: 0,
+        };
+
+        for pass_index in 0..2 {
+            let mut encoder =
+                context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("resident-gpu-lut-grade"),
+                });
+            let record = compositor
+                .record(
+                    &context.device,
+                    &context.queue,
+                    &mut encoder,
+                    &mut ids,
+                    &mut table,
+                    None,
+                    GpuCompositeRequest {
+                        width: 4,
+                        height: 4,
+                        working_color_space: WorkingColorSpace::LinearRec709,
+                        layers: &[layer],
+                    },
+                )
+                .expect("resident GPU LUT composite");
+            assert_eq!(record.diagnostics.gpu_native_composites, 1);
+            assert_eq!(record.diagnostics.gpu_with_upload_composites, 0);
+            context.queue.submit(std::iter::once(encoder.finish()));
+            compositor.clear_frame_resources();
+            let diagnostics = compositor.creative_lut_diagnostics();
+            assert_eq!(diagnostics.texture_uploads, 1);
+            if pass_index == 0 {
+                assert_eq!(diagnostics.cache_misses, 1);
+                assert_eq!(diagnostics.cache_hits, 0);
+            } else {
+                assert_eq!(diagnostics.cache_hits, 1);
+            }
         }
     }
 
@@ -2630,6 +4255,80 @@ mod tests {
                         actual[channel]
                     );
                 }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn gpu_compositor_preserves_positive_sixteen_bit_alpha_and_opacity() {
+        use mondrian_effects::blend_rgba_f32_pixel;
+
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping low-coverage GPU parity test: no GPU adapter available");
+            return;
+        };
+        let edge = 1.0 / 65_535.0;
+        let low_coverage = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![[1.25, -0.25, 0.5, edge]; 16],
+        });
+        let low_coverage_layer = GpuCompositeLayer {
+            source: GpuCompositeLayerSource::CpuFrame(&low_coverage),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        };
+        let low_coverage_actual = readback_test_composite(&context, &[low_coverage_layer]);
+        for pixel in low_coverage_actual {
+            assert_eq!(pixel, [1.25, -0.25, 0.5, edge]);
+        }
+
+        let base_pixel = [0.1, 0.3, 0.7, 1.0];
+        let source_pixel = [1.5, -0.5, 0.125, 1.0];
+        let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![base_pixel; 16],
+        });
+        let source = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![source_pixel; 16],
+        });
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&base),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&source),
+                opacity: edge,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+        ];
+        let expected = blend_rgba_f32_pixel(base_pixel, source_pixel, edge, BlendMode::Normal);
+        let low_opacity_actual = readback_test_composite(&context, &layers);
+        for (pixel_index, pixel) in low_opacity_actual.iter().enumerate() {
+            for channel in 0..4 {
+                assert!(
+                    (pixel[channel] - expected[channel]).abs() <= 2.0e-7,
+                    "pixel {pixel_index}, channel {channel}: expected {}, got {}",
+                    expected[channel],
+                    pixel[channel]
+                );
             }
         }
     }
@@ -3206,6 +4905,16 @@ mod tests {
         context: &crate::GpuContext,
         layers: &[GpuCompositeLayer<'_>],
     ) -> Vec<[f32; 4]> {
+        readback_test_composite_in_space(context, layers, 4, 4, WorkingColorSpace::LinearRec709)
+    }
+
+    fn readback_test_composite_in_space(
+        context: &crate::GpuContext,
+        layers: &[GpuCompositeLayer<'_>],
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+    ) -> Vec<[f32; 4]> {
         let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
         let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
@@ -3220,17 +4929,12 @@ mod tests {
                 &mut ids,
                 &mut table,
                 None,
-                GpuCompositeRequest {
-                    width: 4,
-                    height: 4,
-                    working_color_space: WorkingColorSpace::LinearRec709,
-                    layers,
-                },
+                GpuCompositeRequest { width, height, working_color_space, layers },
             )
             .expect("record GPU effect composite");
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian-test-gpu-point-effect-readback"),
-            size: 256 * 4,
+            size: 256 * u64::from(height),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -3247,17 +4951,17 @@ mod tests {
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(256),
-                    rows_per_image: Some(4),
+                    rows_per_image: Some(height),
                 },
             },
-            wgpu::Extent3d { width: 4, height: 4, depth_or_array_layers: 1 },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
         context.queue.submit(std::iter::once(encoder.finish()));
         let mapped = map_test_readback(&context.device, &readback);
-        let mut actual = Vec::with_capacity(16);
-        for row in mapped.chunks_exact(256).take(4) {
+        let mut actual = Vec::with_capacity((width * height) as usize);
+        for row in mapped.chunks_exact(256).take(height as usize) {
             actual.extend(
-                bytemuck::cast_slice::<u8, f32>(&row[..64])
+                bytemuck::cast_slice::<u8, f32>(&row[..width as usize * 16])
                     .chunks_exact(4)
                     .map(|pixel| [pixel[0], pixel[1], pixel[2], pixel[3]]),
             );

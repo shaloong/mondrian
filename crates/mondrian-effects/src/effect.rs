@@ -11,9 +11,11 @@ use crate::{
     EffectExecutionContract, EffectExecutionContractViolation, EffectGraphTopology,
     EffectResourceLifetime, EffectRoiPropagation,
 };
+#[cfg(test)]
+use mondrian_core::NormalizedCurvePoint;
 use mondrian_core::{
     automation::{
-        AnimatablePropertyUiMetadata, ParameterCacheImpact, ParameterEnumOption,
+        AnimatablePropertyUiMetadata, NormalizedCurve, ParameterCacheImpact, ParameterEnumOption,
         ParameterInvalidValuePolicy, ParameterNumericContract, ParameterNumericRange,
         ParameterResourceReference, ParameterUnit, PropertyBag, PropertyDescriptor, PropertyValue,
     },
@@ -435,6 +437,12 @@ pub struct PreparedLut3D {
     semantic_fingerprint: [u8; 32],
 }
 
+impl PartialEq for PreparedLut3D {
+    fn eq(&self, other: &Self) -> bool {
+        self.semantic_fingerprint == other.semantic_fingerprint
+    }
+}
+
 impl PreparedLut3D {
     /// Prepare one parsed LUT for shared frame execution.
     pub fn new(lut: Lut3D) -> Self {
@@ -526,6 +534,38 @@ pub enum EffectRenderOp {
         saturation: f32,
         working_color_space: WorkingColorSpace,
     },
+    /// Working-space-aware Bradford white-balance adaptation.
+    WhiteBalance {
+        grade: crate::WhiteBalanceGrade,
+    },
+    /// Lift/Gamma/Gain/Offset primary correction.
+    Primaries {
+        grade: crate::PrimariesGrade,
+    },
+    /// ASC CDL v1.2 no-clamp SOP/Saturation correction.
+    AscCdl {
+        grade: crate::AscCdlGrade,
+    },
+    /// ACES 1.3 Reference Gamut Compression in the Sequence working space.
+    GamutCompression {
+        grade: crate::GamutCompressionGrade,
+    },
+    /// Scene-linear clipped-channel chroma reconstruction.
+    HighlightRecovery {
+        grade: crate::HighlightRecoveryGrade,
+    },
+    /// Compiled RGB/YRGB and secondary color curves.
+    ColorCurves {
+        curves: Arc<crate::PreparedColorCurves>,
+    },
+    /// Scene-linear working RGB to refined AlphaMask qualification.
+    Qualifier {
+        qualifier: Arc<crate::PreparedQualifier>,
+    },
+    /// AlphaMask to opaque black/white working-RGB observation transform.
+    MattePreview {
+        invert: bool,
+    },
     GaussianBlur {
         radius: f32,
     },
@@ -603,6 +643,31 @@ impl std::fmt::Debug for EffectRenderOp {
                 .field("saturation", saturation)
                 .field("working_color_space", working_color_space)
                 .finish(),
+            Self::WhiteBalance { grade } => {
+                formatter.debug_struct("WhiteBalance").field("grade", grade).finish()
+            }
+            Self::Primaries { grade } => {
+                formatter.debug_struct("Primaries").field("grade", grade).finish()
+            }
+            Self::AscCdl { grade } => {
+                formatter.debug_struct("AscCdl").field("grade", grade).finish()
+            }
+            Self::GamutCompression { grade } => {
+                formatter.debug_struct("GamutCompression").field("grade", grade).finish()
+            }
+            Self::HighlightRecovery { grade } => {
+                formatter.debug_struct("HighlightRecovery").field("grade", grade).finish()
+            }
+            Self::ColorCurves { curves } => {
+                formatter.debug_struct("ColorCurves").field("curves", curves).finish()
+            }
+            Self::Qualifier { qualifier } => formatter
+                .debug_struct("Qualifier")
+                .field("semantic_fingerprint", qualifier.semantic_fingerprint())
+                .finish(),
+            Self::MattePreview { invert } => {
+                formatter.debug_struct("MattePreview").field("invert", invert).finish()
+            }
             Self::GaussianBlur { radius } => {
                 formatter.debug_struct("GaussianBlur").field("radius", radius).finish()
             }
@@ -771,6 +836,62 @@ impl EffectRenderOp {
                 saturation.to_bits().hash(state);
                 working_color_space.hash(state);
             }
+            EffectRenderOp::WhiteBalance { grade } => {
+                10u8.hash(state);
+                for value in grade.matrix().into_iter().flatten() {
+                    value.to_bits().hash(state);
+                }
+            }
+            EffectRenderOp::Primaries { grade } => {
+                11u8.hash(state);
+                for value in grade
+                    .offset()
+                    .into_iter()
+                    .chain(grade.lift_delta())
+                    .chain(grade.inverse_gamma())
+                    .chain(grade.gain())
+                {
+                    value.to_bits().hash(state);
+                }
+            }
+            EffectRenderOp::AscCdl { grade } => {
+                12u8.hash(state);
+                for value in grade
+                    .slope()
+                    .into_iter()
+                    .chain(grade.offset())
+                    .chain(grade.power())
+                    .chain([grade.saturation()])
+                {
+                    value.to_bits().hash(state);
+                }
+            }
+            EffectRenderOp::GamutCompression { grade } => {
+                16u8.hash(state);
+                grade.amount().to_bits().hash(state);
+                grade.working_color_space().hash(state);
+            }
+            EffectRenderOp::HighlightRecovery { grade } => {
+                17u8.hash(state);
+                grade.threshold().to_bits().hash(state);
+                grade.rolloff().to_bits().hash(state);
+                grade.strength().to_bits().hash(state);
+                for value in grade.luminance_coefficients() {
+                    value.to_bits().hash(state);
+                }
+            }
+            EffectRenderOp::ColorCurves { curves } => {
+                13u8.hash(state);
+                curves.semantic_fingerprint().hash(state);
+            }
+            EffectRenderOp::Qualifier { qualifier } => {
+                14u8.hash(state);
+                qualifier.semantic_fingerprint().hash(state);
+            }
+            EffectRenderOp::MattePreview { invert } => {
+                15u8.hash(state);
+                invert.hash(state);
+            }
             EffectRenderOp::GaussianBlur { radius } => {
                 1u8.hash(state);
                 radius.to_bits().hash(state);
@@ -844,6 +965,16 @@ impl EffectRenderOp {
     pub fn estimated_cost(&self) -> u32 {
         match self {
             EffectRenderOp::ColorAdjust { .. } => 1,
+            EffectRenderOp::WhiteBalance { .. }
+            | EffectRenderOp::Primaries { .. }
+            | EffectRenderOp::AscCdl { .. }
+            | EffectRenderOp::GamutCompression { .. }
+            | EffectRenderOp::HighlightRecovery { .. } => 1,
+            EffectRenderOp::ColorCurves { .. } => 3,
+            EffectRenderOp::Qualifier { qualifier } => {
+                4 + qualifier.denoise_radius() + qualifier.input_halo()
+            }
+            EffectRenderOp::MattePreview { .. } => 1,
             EffectRenderOp::Vignette { .. } => 1,
             EffectRenderOp::Grain { .. } => 2,
             EffectRenderOp::Crop { .. } => 1,
@@ -1229,13 +1360,17 @@ impl EffectDefinition {
     }
 }
 
-fn builtin_effect_types() -> [EffectType; 14] {
+fn builtin_effect_types() -> [EffectType; 18] {
     [
         EffectType::BasicCorrection,
         EffectType::WhiteBalance,
         EffectType::Lut3D,
         EffectType::ColorWheel,
+        EffectType::AscCdl,
         EffectType::Curves,
+        EffectType::GamutCompression,
+        EffectType::HighlightRecovery,
+        EffectType::Qualifier,
         EffectType::HueSaturationLightness,
         EffectType::Crop,
         EffectType::GaussianBlur,
@@ -1572,8 +1707,19 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
             define_builtin_property(
                 &mut properties,
                 &effect_type,
+                "offset",
+                "Primaries",
+                "Offset",
+                PropertyValue::Vec3(glam::Vec3::ZERO),
+                Some(-2.0),
+                Some(2.0),
+                Some(0.001),
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
                 "lift",
-                "色轮",
+                "Primaries",
                 "Lift",
                 PropertyValue::Vec3(glam::Vec3::ONE),
                 Some(0.0),
@@ -1584,37 +1730,215 @@ fn default_properties_for(effect_type: EffectType) -> PropertyBag {
                 &mut properties,
                 &effect_type,
                 "gamma",
-                "色轮",
+                "Primaries",
                 "Gamma",
                 PropertyValue::Vec3(glam::Vec3::ONE),
-                Some(0.0),
-                Some(2.0),
+                Some(0.01),
+                Some(4.0),
                 Some(0.01),
             );
             define_builtin_property(
                 &mut properties,
                 &effect_type,
                 "gain",
-                "色轮",
+                "Primaries",
                 "Gain",
                 PropertyValue::Vec3(glam::Vec3::ONE),
                 Some(0.0),
-                Some(2.0),
+                Some(4.0),
+                Some(0.01),
+            );
+        }
+        EffectType::AscCdl => {
+            for (parameter, label, default, min, max) in [
+                ("slope", "Slope", glam::Vec3::ONE, 0.0, 4.0),
+                ("offset", "Offset", glam::Vec3::ZERO, -2.0, 2.0),
+                ("power", "Power", glam::Vec3::ONE, 0.01, 4.0),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "ASC CDL",
+                    label,
+                    PropertyValue::Vec3(default),
+                    Some(min),
+                    Some(max),
+                    Some(0.001),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "saturation",
+                "ASC CDL",
+                "Saturation",
+                PropertyValue::Float(1.0),
+                Some(0.0),
+                Some(4.0),
                 Some(0.01),
             );
         }
         EffectType::Curves => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "曲线",
+                "Master 模式",
+                "rgb",
+                vec![
+                    ParameterEnumOption::new("rgb", "mondrian.effect.curves.mode.rgb"),
+                    ParameterEnumOption::new("yrgb", "mondrian.effect.curves.mode.yrgb"),
+                ],
+            );
+            for (parameter, label, neutral_delta) in [
+                ("master", "Master", false),
+                ("red", "Red", false),
+                ("green", "Green", false),
+                ("blue", "Blue", false),
+                ("hue_vs_hue", "Hue vs Hue", true),
+                ("hue_vs_saturation", "Hue vs Saturation", true),
+                ("hue_vs_luma", "Hue vs Luma", true),
+                ("luma_vs_saturation", "Luma vs Saturation", true),
+                ("saturation_vs_saturation", "Saturation vs Saturation", true),
+                ("saturation_vs_luma", "Saturation vs Luma", true),
+            ] {
+                define_builtin_curve_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "曲线",
+                    label,
+                    if neutral_delta {
+                        NormalizedCurve::flat(0.5).expect("valid neutral curve")
+                    } else {
+                        NormalizedCurve::identity()
+                    },
+                );
+            }
+        }
+        EffectType::GamutCompression => {
             define_builtin_property(
                 &mut properties,
                 &effect_type,
-                "master",
-                "曲线",
-                "主曲线强度",
+                "amount",
+                "色域压缩",
+                "强度",
                 PropertyValue::Float(1.0),
                 Some(0.0),
-                Some(2.0),
+                Some(1.0),
                 Some(0.01),
             );
+        }
+        EffectType::HighlightRecovery => {
+            for (parameter, label, default, minimum, maximum, step) in [
+                ("threshold", "起始阈值", 1.0, 0.0, 16.0, 0.01),
+                ("rolloff", "过渡宽度", 1.0, 0.01, 16.0, 0.01),
+                ("strength", "恢复强度", 1.0, 0.0, 1.0, 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "高光恢复",
+                    label,
+                    PropertyValue::Float(default),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+        }
+        EffectType::Qualifier => {
+            define_builtin_enum_property(
+                &mut properties,
+                &effect_type,
+                "mode",
+                "Qualifier",
+                "选择模式",
+                "hsl",
+                vec![
+                    ParameterEnumOption::new("hsl", "mondrian.effect.qualifier.mode.hsl"),
+                    ParameterEnumOption::new(
+                        "three_dimensional",
+                        "mondrian.effect.qualifier.mode.three_dimensional",
+                    ),
+                ],
+            );
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "samples",
+                "Qualifier · 3D",
+                "采样颜色",
+                PropertyValue::QualifierSamples(
+                    mondrian_core::automation::QualifierSampleSet::green_screen(),
+                ),
+                None,
+                None,
+                None,
+            );
+            for (parameter, label, default, minimum, maximum, step) in [
+                ("hue_center", "色相中心", 120.0, 0.0, 360.0, 1.0),
+                ("hue_width", "色相宽度", 80.0, 0.0, 360.0, 1.0),
+                ("hue_softness", "色相柔化", 20.0, 0.0, 180.0, 1.0),
+                ("saturation_low", "饱和度低", 0.2, 0.0, 1.0, 0.01),
+                ("saturation_high", "饱和度高", 1.0, 0.0, 1.0, 0.01),
+                ("saturation_softness", "饱和度柔化", 0.1, 0.0, 1.0, 0.01),
+                ("luminance_low", "亮度低", 0.0, 0.0, 1.0, 0.01),
+                ("luminance_high", "亮度高", 1.0, 0.0, 1.0, 0.01),
+                ("luminance_softness", "亮度柔化", 0.1, 0.0, 1.0, 0.01),
+                ("three_d_tolerance", "3D 容差", 0.12, 0.0, 2.0, 0.01),
+                ("three_d_softness", "3D 柔化", 0.08, 0.0, 2.0, 0.01),
+                (
+                    "blur_radius",
+                    "Matte 羽化",
+                    0.0,
+                    0.0,
+                    crate::MAX_QUALIFIER_BLUR_RADIUS as f64,
+                    0.1,
+                ),
+                ("clean_black", "Clean Black", 0.0, 0.0, 0.49, 0.01),
+                ("clean_white", "Clean White", 0.0, 0.0, 0.49, 0.01),
+            ] {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "Qualifier",
+                    label,
+                    PropertyValue::Float(default as f32),
+                    Some(minimum),
+                    Some(maximum),
+                    Some(step),
+                );
+            }
+            define_builtin_property(
+                &mut properties,
+                &effect_type,
+                "denoise_radius",
+                "Qualifier · Matte",
+                "Denoise 半径",
+                PropertyValue::Int(0),
+                Some(0.0),
+                Some(crate::MAX_QUALIFIER_DENOISE_RADIUS as f64),
+                Some(1.0),
+            );
+            for (parameter, label) in [("invert", "反转 Matte"), ("matte_preview", "Matte 预览")]
+            {
+                define_builtin_property(
+                    &mut properties,
+                    &effect_type,
+                    parameter,
+                    "Qualifier · Matte",
+                    label,
+                    PropertyValue::Bool(false),
+                    None,
+                    None,
+                    None,
+                );
+            }
         }
         EffectType::HueSaturationLightness => {
             define_builtin_property(
@@ -1862,6 +2186,9 @@ fn define_builtin_property(
     if matches!(effect_type, EffectType::Lut3D) && parameter == "path" {
         descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Resource);
     }
+    if matches!(effect_type, EffectType::Qualifier) && parameter == "matte_preview" {
+        descriptor = descriptor.with_cache_impact(ParameterCacheImpact::Topology);
+    }
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_string()),
         supports_spatial: false,
@@ -1885,6 +2212,26 @@ fn define_builtin_enum_property(
             .with_parameter_id(builtin_parameter_id(effect_type, parameter))
             .with_enum_options(options)
             .with_animatable(false);
+    descriptor.ui_metadata = AnimatablePropertyUiMetadata {
+        group_name: Some(group.to_owned()),
+        supports_spatial: false,
+        display_order: Some(properties.iter().count() as u32),
+    };
+    properties.define(descriptor);
+}
+
+fn define_builtin_curve_property(
+    properties: &mut PropertyBag,
+    effect_type: &EffectType,
+    parameter: &str,
+    group: &str,
+    name: &str,
+    default_curve: NormalizedCurve,
+) {
+    let path = effect_type.property_path(parameter);
+    let mut descriptor = PropertyDescriptor::new(path, name, PropertyValue::Curve(default_curve))
+        .with_parameter_id(builtin_parameter_id(effect_type, parameter))
+        .with_animatable(false);
     descriptor.ui_metadata = AnimatablePropertyUiMetadata {
         group_name: Some(group.to_owned()),
         supports_spatial: false,
@@ -1956,6 +2303,10 @@ fn builtin_parameter_unit(effect_type: &EffectType, parameter: &str) -> Paramete
     match (effect_type, parameter) {
         (EffectType::BasicCorrection, "exposure") => ParameterUnit::Stops,
         (EffectType::HueSaturationLightness, "hue") => ParameterUnit::Degrees,
+        (EffectType::Qualifier, "hue_center" | "hue_width" | "hue_softness") => {
+            ParameterUnit::Degrees
+        }
+        (EffectType::Qualifier, "blur_radius" | "denoise_radius") => ParameterUnit::Pixels,
         (EffectType::Crop, "left" | "top" | "right" | "bottom") => ParameterUnit::Percent,
         (EffectType::GaussianBlur, "radius") => ParameterUnit::Pixels,
         _ => ParameterUnit::Unitless,
@@ -1976,8 +2327,12 @@ fn builtin_effect_category(effect_type: &EffectType) -> Vec<String> {
         EffectType::BasicCorrection
         | EffectType::WhiteBalance
         | EffectType::ColorWheel
+        | EffectType::AscCdl
         | EffectType::Curves
+        | EffectType::GamutCompression
+        | EffectType::HighlightRecovery
         | EffectType::HueSaturationLightness => vec!["颜色".to_string()],
+        EffectType::Qualifier => vec!["抠像".to_string(), "Qualifier".to_string()],
         EffectType::Lut3D => vec!["颜色".to_string(), "LUT".to_string()],
         EffectType::Crop => vec!["变换".to_string()],
         EffectType::GaussianBlur | EffectType::Sharpen => vec!["模糊与锐化".to_string()],
@@ -2002,7 +2357,11 @@ fn builtin_effect_definition(effect_type: EffectType) -> EffectDefinition {
     if let Some(graph_preparer) = builtin_graph_preparer_for(&effect_type) {
         definition.with_prepared_graph_builder(graph_preparer)
     } else if let Some(graph_builder) = builtin_graph_builder_for(&effect_type) {
-        definition.with_graph_builder(graph_builder)
+        if matches!(effect_type, EffectType::Qualifier) {
+            definition.with_branching_graph_builder(graph_builder)
+        } else {
+            definition.with_graph_builder(graph_builder)
+        }
     } else {
         definition
     }
@@ -2024,18 +2383,41 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
         topology: EffectGraphTopology::LinearChain,
     };
     match effect_type {
-        EffectType::BasicCorrection | EffectType::Vignette | EffectType::Crop => {
-            EffectExecutionContract {
-                execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
-                ..cpu_linear
-            }
-        }
+        EffectType::BasicCorrection
+        | EffectType::WhiteBalance
+        | EffectType::ColorWheel
+        | EffectType::AscCdl
+        | EffectType::Curves
+        | EffectType::GamutCompression
+        | EffectType::HighlightRecovery
+        | EffectType::Qualifier
+        | EffectType::Vignette
+        | EffectType::Crop => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
+            roi_propagation: if matches!(effect_type, EffectType::Qualifier) {
+                EffectRoiPropagation::Expand {
+                    horizontal_pixels: crate::MAX_QUALIFIER_DENOISE_RADIUS
+                        + (crate::MAX_QUALIFIER_BLUR_RADIUS * 3.0) as u32,
+                    vertical_pixels: crate::MAX_QUALIFIER_DENOISE_RADIUS
+                        + (crate::MAX_QUALIFIER_BLUR_RADIUS * 3.0) as u32,
+                }
+            } else {
+                cpu_linear.roi_propagation
+            },
+            topology: if matches!(effect_type, EffectType::Qualifier) {
+                EffectGraphTopology::GeneralDag
+            } else {
+                cpu_linear.topology
+            },
+            ..cpu_linear
+        },
         EffectType::Grain => EffectExecutionContract {
             execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             determinism: EffectDeterminism::FrameSeeded,
             ..cpu_linear
         },
         EffectType::Lut3D => EffectExecutionContract {
+            execution_modes: EffectExecutionModes::CPU_F32.union(EffectExecutionModes::GPU_F32),
             resource_lifetime: EffectResourceLifetime::PreparedProgram,
             ..cpu_linear
         },
@@ -2053,10 +2435,7 @@ fn builtin_effect_execution_contract(effect_type: &EffectType) -> EffectExecutio
             roi_propagation: EffectRoiPropagation::FullFrame,
             ..cpu_linear
         },
-        EffectType::WhiteBalance
-        | EffectType::ColorWheel
-        | EffectType::Curves
-        | EffectType::HueSaturationLightness
+        EffectType::HueSaturationLightness
         | EffectType::ChromaKey
         | EffectType::LumaKey
         | EffectType::Plugin(_) => EffectExecutionContract {
@@ -2160,6 +2539,338 @@ fn builtin_graph_builder_for(effect_type: &EffectType) -> Option<EffectGraphBuil
                 Ok(())
             }))
         }
+        EffectType::WhiteBalance => {
+            let temperature_id = builtin_parameter_id(effect_type, "temperature");
+            let tint_id = builtin_parameter_id(effect_type, "tint");
+            Some(Arc::new(move |effect, context, graph| {
+                let temperature = effect.evaluate_f32_parameter(&temperature_id, context.time, 0.0);
+                let tint = effect.evaluate_f32_parameter(&tint_id, context.time, 0.0);
+                let grade =
+                    crate::WhiteBalanceGrade::new(temperature, tint, context.working_color_space)
+                        .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::WhiteBalance { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::ColorWheel => {
+            let offset_id = builtin_parameter_id(effect_type, "offset");
+            let lift_id = builtin_parameter_id(effect_type, "lift");
+            let gamma_id = builtin_parameter_id(effect_type, "gamma");
+            let gain_id = builtin_parameter_id(effect_type, "gain");
+            Some(Arc::new(move |effect, context, graph| {
+                let offset = effect
+                    .evaluate_vec3_parameter(&offset_id, context.time, glam::Vec3::ZERO)
+                    .to_array();
+                let lift = effect
+                    .evaluate_vec3_parameter(&lift_id, context.time, glam::Vec3::ONE)
+                    .to_array();
+                let gamma = effect
+                    .evaluate_vec3_parameter(&gamma_id, context.time, glam::Vec3::ONE)
+                    .to_array();
+                let gain = effect
+                    .evaluate_vec3_parameter(&gain_id, context.time, glam::Vec3::ONE)
+                    .to_array();
+                let grade =
+                    crate::PrimariesGrade::new(offset, lift, gamma, gain).map_err(|error| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: error.to_string(),
+                        }
+                    })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::Primaries { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::AscCdl => {
+            let slope_id = builtin_parameter_id(effect_type, "slope");
+            let offset_id = builtin_parameter_id(effect_type, "offset");
+            let power_id = builtin_parameter_id(effect_type, "power");
+            let saturation_id = builtin_parameter_id(effect_type, "saturation");
+            Some(Arc::new(move |effect, context, graph| {
+                let slope = effect
+                    .evaluate_vec3_parameter(&slope_id, context.time, glam::Vec3::ONE)
+                    .to_array();
+                let offset = effect
+                    .evaluate_vec3_parameter(&offset_id, context.time, glam::Vec3::ZERO)
+                    .to_array();
+                let power = effect
+                    .evaluate_vec3_parameter(&power_id, context.time, glam::Vec3::ONE)
+                    .to_array();
+                let saturation = effect.evaluate_f32_parameter(&saturation_id, context.time, 1.0);
+                let grade =
+                    crate::AscCdlGrade::new(slope, offset, power, saturation).map_err(|error| {
+                        EffectGraphBuildError::InvalidAuthorState {
+                            effect_key: effect.effect_type.key(),
+                            effect_id: effect.id,
+                            reason: error.to_string(),
+                        }
+                    })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::AscCdl { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::Curves => {
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let ids = [
+                "master",
+                "red",
+                "green",
+                "blue",
+                "hue_vs_hue",
+                "hue_vs_saturation",
+                "hue_vs_luma",
+                "luma_vs_saturation",
+                "saturation_vs_saturation",
+                "saturation_vs_luma",
+            ]
+            .map(|parameter| builtin_parameter_id(effect_type, parameter));
+            Some(Arc::new(move |effect, context, graph| {
+                let identity = NormalizedCurve::identity();
+                let neutral = NormalizedCurve::flat(0.5).map_err(|error| {
+                    EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    }
+                })?;
+                let values = std::array::from_fn::<_, 10, _>(|index| {
+                    effect.evaluate_curve_parameter(&ids[index], context.time).unwrap_or_else(
+                        || {
+                            if index < 4 {
+                                identity.clone()
+                            } else {
+                                neutral.clone()
+                            }
+                        },
+                    )
+                });
+                let mode = match effect.evaluate_enum_parameter(&mode_id, context.time).as_deref() {
+                    Some("yrgb") => crate::ColorCurvesMode::YRgb,
+                    _ => crate::ColorCurvesMode::Rgb,
+                };
+                let curves = Arc::new(crate::PreparedColorCurves::new(
+                    crate::ColorCurvesAuthoring {
+                        mode,
+                        master: &values[0],
+                        red: &values[1],
+                        green: &values[2],
+                        blue: &values[3],
+                        hue_vs_hue: &values[4],
+                        hue_vs_saturation: &values[5],
+                        hue_vs_luma: &values[6],
+                        luma_vs_saturation: &values[7],
+                        saturation_vs_saturation: &values[8],
+                        saturation_vs_luma: &values[9],
+                    },
+                    context.working_color_space,
+                ));
+                if !curves.is_identity() {
+                    graph.append_unary(EffectRenderOp::ColorCurves { curves });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::GamutCompression => {
+            let amount_id = builtin_parameter_id(effect_type, "amount");
+            Some(Arc::new(move |effect, context, graph| {
+                let amount = effect.evaluate_f32_parameter(&amount_id, context.time, 1.0);
+                let grade = crate::GamutCompressionGrade::new(amount, context.working_color_space)
+                    .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                        effect_key: effect.effect_type.key(),
+                        effect_id: effect.id,
+                        reason: error.to_string(),
+                    })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::GamutCompression { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::HighlightRecovery => {
+            let threshold_id = builtin_parameter_id(effect_type, "threshold");
+            let rolloff_id = builtin_parameter_id(effect_type, "rolloff");
+            let strength_id = builtin_parameter_id(effect_type, "strength");
+            Some(Arc::new(move |effect, context, graph| {
+                let threshold = effect.evaluate_f32_parameter(&threshold_id, context.time, 1.0);
+                let rolloff = effect.evaluate_f32_parameter(&rolloff_id, context.time, 1.0);
+                let strength = effect.evaluate_f32_parameter(&strength_id, context.time, 1.0);
+                let grade = crate::HighlightRecoveryGrade::new(
+                    threshold,
+                    rolloff,
+                    strength,
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                if !grade.is_identity() {
+                    graph.append_unary(EffectRenderOp::HighlightRecovery { grade });
+                }
+                Ok(())
+            }))
+        }
+        EffectType::Qualifier => {
+            let mode_id = builtin_parameter_id(effect_type, "mode");
+            let samples_id = builtin_parameter_id(effect_type, "samples");
+            let hue_center_id = builtin_parameter_id(effect_type, "hue_center");
+            let hue_width_id = builtin_parameter_id(effect_type, "hue_width");
+            let hue_softness_id = builtin_parameter_id(effect_type, "hue_softness");
+            let saturation_low_id = builtin_parameter_id(effect_type, "saturation_low");
+            let saturation_high_id = builtin_parameter_id(effect_type, "saturation_high");
+            let saturation_softness_id = builtin_parameter_id(effect_type, "saturation_softness");
+            let luminance_low_id = builtin_parameter_id(effect_type, "luminance_low");
+            let luminance_high_id = builtin_parameter_id(effect_type, "luminance_high");
+            let luminance_softness_id = builtin_parameter_id(effect_type, "luminance_softness");
+            let tolerance_id = builtin_parameter_id(effect_type, "three_d_tolerance");
+            let three_d_softness_id = builtin_parameter_id(effect_type, "three_d_softness");
+            let denoise_radius_id = builtin_parameter_id(effect_type, "denoise_radius");
+            let blur_radius_id = builtin_parameter_id(effect_type, "blur_radius");
+            let clean_black_id = builtin_parameter_id(effect_type, "clean_black");
+            let clean_white_id = builtin_parameter_id(effect_type, "clean_white");
+            let invert_id = builtin_parameter_id(effect_type, "invert");
+            let matte_preview_id = builtin_parameter_id(effect_type, "matte_preview");
+            Some(Arc::new(move |effect, context, graph| {
+                let samples = effect
+                    .evaluate_qualifier_samples_parameter(&samples_id, context.time)
+                    .unwrap_or_else(mondrian_core::automation::QualifierSampleSet::green_screen);
+                let mode = match effect.evaluate_enum_parameter(&mode_id, context.time).as_deref() {
+                    Some("three_dimensional") => crate::QualifierMode::ThreeDimensional,
+                    _ => crate::QualifierMode::Hsl,
+                };
+                let denoise_radius =
+                    match effect.evaluate_parameter(&denoise_radius_id, context.time) {
+                        Some(PropertyValue::Int(value)) => {
+                            value.clamp(0, i64::from(crate::MAX_QUALIFIER_DENOISE_RADIUS)) as u32
+                        }
+                        _ => 0,
+                    };
+                let prepared = crate::PreparedQualifier::new(
+                    crate::QualifierAuthoring {
+                        mode,
+                        hue_center_degrees: effect.evaluate_f32_parameter(
+                            &hue_center_id,
+                            context.time,
+                            120.0,
+                        ),
+                        hue_width_degrees: effect.evaluate_f32_parameter(
+                            &hue_width_id,
+                            context.time,
+                            80.0,
+                        ),
+                        hue_softness_degrees: effect.evaluate_f32_parameter(
+                            &hue_softness_id,
+                            context.time,
+                            20.0,
+                        ),
+                        saturation_low: effect.evaluate_f32_parameter(
+                            &saturation_low_id,
+                            context.time,
+                            0.2,
+                        ),
+                        saturation_high: effect.evaluate_f32_parameter(
+                            &saturation_high_id,
+                            context.time,
+                            1.0,
+                        ),
+                        saturation_softness: effect.evaluate_f32_parameter(
+                            &saturation_softness_id,
+                            context.time,
+                            0.1,
+                        ),
+                        luminance_low: effect.evaluate_f32_parameter(
+                            &luminance_low_id,
+                            context.time,
+                            0.0,
+                        ),
+                        luminance_high: effect.evaluate_f32_parameter(
+                            &luminance_high_id,
+                            context.time,
+                            1.0,
+                        ),
+                        luminance_softness: effect.evaluate_f32_parameter(
+                            &luminance_softness_id,
+                            context.time,
+                            0.1,
+                        ),
+                        samples: &samples,
+                        three_d_tolerance: effect.evaluate_f32_parameter(
+                            &tolerance_id,
+                            context.time,
+                            0.12,
+                        ),
+                        three_d_softness: effect.evaluate_f32_parameter(
+                            &three_d_softness_id,
+                            context.time,
+                            0.08,
+                        ),
+                        denoise_radius,
+                        blur_radius: effect.evaluate_f32_parameter(
+                            &blur_radius_id,
+                            context.time,
+                            0.0,
+                        ),
+                        clean_black: effect.evaluate_f32_parameter(
+                            &clean_black_id,
+                            context.time,
+                            0.0,
+                        ),
+                        clean_white: effect.evaluate_f32_parameter(
+                            &clean_white_id,
+                            context.time,
+                            0.0,
+                        ),
+                    },
+                    context.working_color_space,
+                )
+                .map_err(|error| EffectGraphBuildError::InvalidAuthorState {
+                    effect_key: effect.effect_type.key(),
+                    effect_id: effect.id,
+                    reason: error.to_string(),
+                })?;
+                let invert = matches!(
+                    effect.evaluate_parameter(&invert_id, context.time),
+                    Some(PropertyValue::Bool(true))
+                );
+                let matte_preview = matches!(
+                    effect.evaluate_parameter(&matte_preview_id, context.time),
+                    Some(PropertyValue::Bool(true))
+                );
+                let source = graph.current_output();
+                let matte = graph.append_unary_in_domain(
+                    EffectRenderOp::Qualifier { qualifier: Arc::new(prepared) },
+                    EffectColorDomainContract {
+                        input: EffectColorDomain::SceneLinearRgb,
+                        output: EffectColorDomain::AlphaMask,
+                    },
+                );
+                let output = if matte_preview {
+                    graph.append_unary_in_domain(
+                        EffectRenderOp::MattePreview { invert },
+                        EffectColorDomainContract {
+                            input: EffectColorDomain::AlphaMask,
+                            output: EffectColorDomain::SceneLinearRgb,
+                        },
+                    )
+                } else {
+                    graph.add_mask(source, matte, invert, crate::MaskOp::Add)
+                };
+                graph.set_current_output(output);
+                Ok(())
+            }))
+        }
         EffectType::Crop => {
             let left_id = builtin_parameter_id(effect_type, "left");
             let top_id = builtin_parameter_id(effect_type, "top");
@@ -2237,8 +2948,12 @@ fn builtin_display_name(effect_type: &EffectType) -> &'static str {
         EffectType::BasicCorrection => "基础调色",
         EffectType::WhiteBalance => "白平衡",
         EffectType::Lut3D => "LUT",
-        EffectType::ColorWheel => "色轮",
+        EffectType::ColorWheel => "Primaries",
+        EffectType::AscCdl => "ASC CDL",
         EffectType::Curves => "曲线",
+        EffectType::GamutCompression => "色域压缩",
+        EffectType::HighlightRecovery => "高光恢复",
+        EffectType::Qualifier => "HSL / 3D Qualifier",
         EffectType::HueSaturationLightness => "HSL",
         EffectType::Crop => "裁切",
         EffectType::GaussianBlur => "模糊",
@@ -2270,7 +2985,10 @@ mod tests {
     use super::*;
     use crate::graph::EffectGraphNodeKind;
     use mondrian_core::{
-        automation::{Keyframe, PropertyHost, PropertyMutation, PropertyValue},
+        automation::{
+            Keyframe, PropertyHost, PropertyMutation, PropertyValue, QualifierSample,
+            QualifierSampleOperation, QualifierSampleSet,
+        },
         TimelineTime, WorkingColorSpace,
     };
 
@@ -2444,7 +3162,14 @@ mod tests {
     fn effect_library_exposes_only_builtins_with_executable_graphs() {
         let expected = [
             EffectType::BasicCorrection,
+            EffectType::WhiteBalance,
             EffectType::Lut3D,
+            EffectType::ColorWheel,
+            EffectType::AscCdl,
+            EffectType::Curves,
+            EffectType::GamutCompression,
+            EffectType::HighlightRecovery,
+            EffectType::Qualifier,
             EffectType::Crop,
             EffectType::GaussianBlur,
             EffectType::Sharpen,
@@ -2463,9 +3188,6 @@ mod tests {
 
         assert_eq!(actual, expected);
         for modeled_only in [
-            EffectType::WhiteBalance,
-            EffectType::ColorWheel,
-            EffectType::Curves,
             EffectType::HueSaturationLightness,
             EffectType::ChromaKey,
             EffectType::LumaKey,
@@ -2473,6 +3195,415 @@ mod tests {
             let definition = effect_definition(&modeled_only).expect("built-in definition");
             assert!(!definition.supports_visual_evaluation());
         }
+    }
+
+    #[test]
+    fn color_curves_serialize_rebuild_and_lower_with_stable_structured_parameters() {
+        let mut effect = instantiate_effect_node(EffectType::Curves).expect("Curves definition");
+        assert_eq!(effect.properties.iter().count(), 11);
+        assert!(effect
+            .properties
+            .iter()
+            .map(|(_, property)| property)
+            .filter(|property| matches!(property.static_value(), PropertyValue::Curve(_)))
+            .all(|property| !property.descriptor.schema.is_animatable));
+
+        let mode_path = EffectType::Curves.property_path("mode");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: mode_path,
+                value: PropertyValue::Enum("yrgb".to_owned()),
+            })
+            .expect("set YRGB mode");
+        let master = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.02),
+            NormalizedCurvePoint::new(0.4, 0.31),
+            NormalizedCurvePoint::new(1.0, 0.96),
+        ])
+        .expect("master curve");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Curves.property_path("master"),
+                value: PropertyValue::Curve(master.clone()),
+            })
+            .expect("set master curve");
+        let hue_vs_saturation = NormalizedCurve::new(vec![
+            NormalizedCurvePoint::new(0.0, 0.5),
+            NormalizedCurvePoint::new(0.5, 0.58),
+            NormalizedCurvePoint::new(1.0, 0.5),
+        ])
+        .expect("secondary curve");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: EffectType::Curves.property_path("hue_vs_saturation"),
+                value: PropertyValue::Curve(hue_vs_saturation.clone()),
+            })
+            .expect("set secondary curve");
+
+        let original_addresses = effect
+            .properties
+            .iter()
+            .map(|(_, property)| property)
+            .map(|property| {
+                (
+                    property.track_id,
+                    property.descriptor.parameter_id().clone(),
+                    property.static_value().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let graph = build_effect_render_graph(&[effect.clone()], tt(0), TEST_WORKING_SPACE)
+            .expect("Curves graph");
+        let curves = graph
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect {
+                    op: EffectRenderOp::ColorCurves { curves },
+                    ..
+                }
+                | EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::ColorCurves { curves },
+                    ..
+                } => Some(curves),
+                _ => None,
+            })
+            .expect("compiled ColorCurves op");
+        assert_eq!(curves.mode(), crate::ColorCurvesMode::YRgb);
+        assert!(!curves.secondary_identity());
+
+        let encoded = serde_json::to_vec(&effect).expect("serialize Curves effect");
+        let decoded: EffectNode = serde_json::from_slice(&encoded).expect("deserialize Curves");
+        let decoded_addresses = decoded
+            .properties
+            .iter()
+            .map(|(_, property)| property)
+            .map(|property| {
+                (
+                    property.track_id,
+                    property.descriptor.parameter_id().clone(),
+                    property.static_value().clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(decoded_addresses, original_addresses);
+
+        let rebuilt = build_effect_render_graph(&[decoded], tt(0), TEST_WORKING_SPACE)
+            .expect("rebuilt Curves graph");
+        let compiled = crate::compile_reference_render_graph(rebuilt).expect("compiled graph");
+        let gpu_plan = crate::lower_effect_graph_to_gpu_plan(&compiled).expect("Curves GPU plan");
+        assert!(matches!(
+            gpu_plan.operations(),
+            [crate::EffectGpuPointOp::ColorCurves { curves }]
+                if curves.mode() == crate::ColorCurvesMode::YRgb
+                    && !curves.secondary_identity()
+        ));
+        let rebuilt_curves = match &gpu_plan.operations()[0] {
+            crate::EffectGpuPointOp::ColorCurves { curves } => curves,
+            _ => unreachable!("asserted ColorCurves operation"),
+        };
+        assert_eq!(
+            rebuilt_curves.semantic_fingerprint(),
+            curves.semantic_fingerprint()
+        );
+        assert!(decoded_addresses
+            .iter()
+            .any(|(_, _, value)| value == &PropertyValue::Curve(master.clone())));
+        assert!(decoded_addresses
+            .iter()
+            .any(|(_, _, value)| value == &PropertyValue::Curve(hue_vs_saturation.clone())));
+    }
+
+    #[test]
+    fn qualifier_is_authorable_domain_typed_topology_sensitive_and_cpu_executable() {
+        let mut effect = instantiate_effect_node(EffectType::Qualifier)
+            .expect("registered Qualifier definition");
+        let samples_id = EffectType::Qualifier.parameter_id("samples").expect("samples ID");
+        let preview_id = EffectType::Qualifier.parameter_id("matte_preview").expect("preview ID");
+        let samples_path = EffectType::Qualifier.property_path("samples");
+        let preview_path = EffectType::Qualifier.property_path("matte_preview");
+        let samples = QualifierSampleSet::new(vec![
+            QualifierSample::new([0.0, 1.0, 0.0], QualifierSampleOperation::Include),
+            QualifierSample::new([1.0, 0.0, 0.0], QualifierSampleOperation::Exclude),
+        ])
+        .expect("valid Include/Exclude samples");
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: samples_path.clone(),
+                value: PropertyValue::QualifierSamples(samples.clone()),
+            })
+            .expect("author Qualifier samples");
+        let sample_property = effect.properties.property(&samples_path).expect("samples property");
+        let sample_track_id = sample_property.track_id;
+        assert_eq!(sample_property.descriptor.parameter_id(), &samples_id);
+        assert!(!sample_property.descriptor.schema.is_animatable);
+        assert_eq!(
+            sample_property.descriptor.schema.cache_impact,
+            ParameterCacheImpact::Value
+        );
+        let preview_property = effect.properties.property(&preview_path).expect("preview property");
+        assert_eq!(preview_property.descriptor.parameter_id(), &preview_id);
+        assert_eq!(
+            preview_property.descriptor.schema.cache_impact,
+            ParameterCacheImpact::Topology
+        );
+
+        let normal =
+            build_effect_render_graph(&[effect.clone()], TimelineTime::ZERO, TEST_WORKING_SPACE)
+                .expect("normal Qualifier graph");
+        let qualifier = normal
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::Qualifier { qualifier },
+                    domain_contract,
+                    ..
+                } => Some((*qualifier.semantic_fingerprint(), *domain_contract, node.id)),
+                _ => None,
+            })
+            .expect("Qualifier domain node");
+        assert_ne!(qualifier.0, [0; 32]);
+        assert_eq!(
+            qualifier.1,
+            EffectColorDomainContract {
+                input: EffectColorDomain::SceneLinearRgb,
+                output: EffectColorDomain::AlphaMask,
+            }
+        );
+        assert!(matches!(
+            normal.output.and_then(|output| normal.nodes.get(output.0 as usize)),
+            Some(crate::graph::EffectGraphNode {
+                kind: EffectGraphNodeKind::Mask { mask, .. },
+                ..
+            }) if *mask == qualifier.2
+        ));
+        let normal_compiled =
+            crate::compile_reference_render_graph(normal).expect("compiled normal Qualifier graph");
+        assert_eq!(
+            normal_compiled.domain_plan().node_output_domains[&qualifier.2],
+            EffectColorDomain::AlphaMask
+        );
+        assert!(normal_compiled.domain_plan().blockers.is_empty());
+
+        effect
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: preview_path,
+                value: PropertyValue::Bool(true),
+            })
+            .expect("enable Matte preview");
+        let preview =
+            build_effect_render_graph(&[effect.clone()], TimelineTime::ZERO, TEST_WORKING_SPACE)
+                .expect("Matte preview graph");
+        assert!(matches!(
+            preview.output.and_then(|output| preview.nodes.get(output.0 as usize)),
+            Some(crate::graph::EffectGraphNode {
+                kind: EffectGraphNodeKind::DomainEffect {
+                    op: EffectRenderOp::MattePreview { .. },
+                    domain_contract: EffectColorDomainContract {
+                        input: EffectColorDomain::AlphaMask,
+                        output: EffectColorDomain::SceneLinearRgb,
+                    },
+                    ..
+                },
+                ..
+            })
+        ));
+        let preview_compiled =
+            crate::compile_reference_render_graph(preview).expect("compiled Matte preview graph");
+        assert_ne!(
+            normal_compiled.semantic_fingerprint(),
+            preview_compiled.semantic_fingerprint(),
+            "Matte preview is a topology-changing observation route"
+        );
+        assert!(preview_compiled.domain_plan().blockers.is_empty());
+
+        let input = [
+            [0.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+            [-0.25, 4.0, 0.15, 0.5],
+        ];
+        let normal_output =
+            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &normal_compiled, 0)
+                .expect("CPU Mask output");
+        assert!(normal_output[0][3] > normal_output[1][3]);
+        assert!(normal_output.iter().flatten().all(|channel| channel.is_finite()));
+        let preview_output =
+            crate::apply_compiled_effect_graph_rgba_f32(&input, 3, 1, &preview_compiled, 0)
+                .expect("CPU Matte preview");
+        assert!(preview_output
+            .iter()
+            .all(|pixel| { pixel[0] == pixel[1] && pixel[1] == pixel[2] && pixel[3] == 1.0 }));
+
+        let encoded = serde_json::to_vec(&effect).expect("serialize Qualifier effect");
+        let decoded: EffectNode = serde_json::from_slice(&encoded).expect("deserialize Qualifier");
+        let decoded_property = decoded.properties.property(&samples_path).expect("decoded samples");
+        assert_eq!(decoded.id, effect.id);
+        assert_eq!(decoded_property.track_id, sample_track_id);
+        assert_eq!(decoded_property.descriptor.parameter_id(), &samples_id);
+        assert_eq!(
+            decoded_property.static_value(),
+            &PropertyValue::QualifierSamples(samples)
+        );
+        decoded.validate_author_state().expect("valid decoded Qualifier state");
+        let rebuilt_graph =
+            build_effect_render_graph(&[decoded], TimelineTime::ZERO, TEST_WORKING_SPACE)
+                .expect("rebuilt Qualifier graph");
+        let rebuilt = crate::compile_reference_render_graph(rebuilt_graph)
+            .expect("compiled rebuilt Qualifier graph");
+        assert_eq!(
+            rebuilt.semantic_fingerprint(),
+            preview_compiled.semantic_fingerprint()
+        );
+    }
+
+    #[test]
+    fn primary_grade_effects_animate_serialize_and_rebuild_identically() {
+        let mut white_balance =
+            instantiate_effect_node(EffectType::WhiteBalance).expect("White Balance definition");
+        let temperature_path = EffectType::WhiteBalance.property_path("temperature");
+        white_balance
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: temperature_path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.0)),
+            })
+            .expect("White Balance start");
+        white_balance
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: temperature_path,
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(1.0)),
+            })
+            .expect("White Balance end");
+
+        let mut primaries =
+            instantiate_effect_node(EffectType::ColorWheel).expect("Primaries definition");
+        let offset_path = EffectType::ColorWheel.property_path("offset");
+        primaries
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: offset_path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Vec3(glam::Vec3::ZERO)),
+            })
+            .expect("Primaries start");
+        primaries
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: offset_path,
+                keyframe: Keyframe::linear(
+                    tt(10),
+                    PropertyValue::Vec3(glam::Vec3::new(0.2, -0.1, 0.4)),
+                ),
+            })
+            .expect("Primaries end");
+
+        let mut cdl = instantiate_effect_node(EffectType::AscCdl).expect("ASC CDL definition");
+        let saturation_path = EffectType::AscCdl.property_path("saturation");
+        cdl.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: saturation_path.clone(),
+            keyframe: Keyframe::linear(tt(0), PropertyValue::Float(1.0)),
+        })
+        .expect("CDL start");
+        cdl.apply_property_mutation(PropertyMutation::SetKeyframe {
+            path: saturation_path,
+            keyframe: Keyframe::linear(tt(10), PropertyValue::Float(0.5)),
+        })
+        .expect("CDL end");
+
+        let effects = vec![white_balance, primaries, cdl];
+        let graph = build_effect_render_graph(&effects, tt(5), TEST_WORKING_SPACE)
+            .expect("animated primary grade graph");
+        let operations = graph
+            .nodes
+            .iter()
+            .filter_map(|node| match &node.kind {
+                EffectGraphNodeKind::UnaryEffect { op, .. }
+                | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(matches!(operations[0], EffectRenderOp::WhiteBalance { .. }));
+        let EffectRenderOp::Primaries { grade } = operations[1] else {
+            panic!("expected animated Primaries operation");
+        };
+        assert_eq!(grade.offset(), [0.1, -0.05, 0.2]);
+        let EffectRenderOp::AscCdl { grade } = operations[2] else {
+            panic!("expected animated ASC CDL operation");
+        };
+        assert!((grade.saturation() - 0.75).abs() <= 1.0e-6);
+
+        let encoded = serde_json::to_vec(&effects).expect("serialize primary effects");
+        let decoded: Vec<EffectNode> =
+            serde_json::from_slice(&encoded).expect("deserialize primary effects");
+        let rebuilt = build_effect_render_graph(&decoded, tt(5), TEST_WORKING_SPACE)
+            .expect("rebuild serialized primary grade graph");
+        assert_eq!(
+            EffectRenderPlan { ops: operations.into_iter().cloned().collect() }.signature_hash(),
+            EffectRenderPlan {
+                ops: rebuilt
+                    .nodes
+                    .iter()
+                    .filter_map(|node| match &node.kind {
+                        EffectGraphNodeKind::UnaryEffect { op, .. }
+                        | EffectGraphNodeKind::DomainEffect { op, .. } => Some(op.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            }
+            .signature_hash()
+        );
+    }
+
+    #[test]
+    fn gamut_and_highlight_effects_animate_serialize_and_execute_float32() {
+        let mut gamut =
+            instantiate_effect_node(EffectType::GamutCompression).expect("gamut definition");
+        let amount_path = EffectType::GamutCompression.property_path("amount");
+        gamut
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: amount_path.clone(),
+                keyframe: Keyframe::linear(tt(0), PropertyValue::Float(0.0)),
+            })
+            .expect("gamut start");
+        gamut
+            .apply_property_mutation(PropertyMutation::SetKeyframe {
+                path: amount_path,
+                keyframe: Keyframe::linear(tt(10), PropertyValue::Float(1.0)),
+            })
+            .expect("gamut end");
+
+        let mut highlight =
+            instantiate_effect_node(EffectType::HighlightRecovery).expect("highlight definition");
+        let strength_path = EffectType::HighlightRecovery.property_path("strength");
+        highlight
+            .apply_property_mutation(PropertyMutation::SetStaticValue {
+                path: strength_path,
+                value: PropertyValue::Float(0.75),
+            })
+            .expect("highlight strength");
+
+        let effects = vec![gamut, highlight];
+        let graph = build_effect_render_graph(&effects, tt(5), WorkingColorSpace::LinearRec2020)
+            .expect("gamut/highlight graph");
+        let compiled = crate::compile_reference_render_graph(graph).expect("compiled graph");
+        let input = [[3.0, -0.4, 0.2, 0.35], [0.5, 0.25, 0.1, 0.8]];
+        let output = crate::apply_compiled_effect_graph_rgba_f32(&input, 2, 1, &compiled, 0)
+            .expect("float32 execution");
+        assert_eq!(output[0][3], input[0][3]);
+        assert_eq!(output[1][3], input[1][3]);
+        assert_ne!(output[0][..3], input[0][..3]);
+        assert_eq!(output[1], input[1], "below-threshold pixel stays exact");
+        assert!(output.iter().flatten().all(|value| value.is_finite()));
+
+        let encoded = serde_json::to_vec(&effects).expect("serialize effects");
+        let decoded: Vec<EffectNode> =
+            serde_json::from_slice(&encoded).expect("deserialize effects");
+        let rebuilt = crate::compile_reference_render_graph(
+            build_effect_render_graph(&decoded, tt(5), WorkingColorSpace::LinearRec2020)
+                .expect("rebuilt graph"),
+        )
+        .expect("compiled rebuilt graph");
+        assert_eq!(
+            compiled.semantic_fingerprint(),
+            rebuilt.semantic_fingerprint()
+        );
     }
 
     #[test]
@@ -2549,7 +3680,7 @@ mod tests {
 
     #[test]
     fn enabled_modeled_only_effect_fails_instead_of_rendering_identity() {
-        let effect = EffectNode::with_defaults(EffectType::ColorWheel);
+        let effect = EffectNode::with_defaults(EffectType::HueSaturationLightness);
 
         let error = build_effect_render_graph(&[effect], tt(0), TEST_WORKING_SPACE)
             .expect_err("modeled-only effect must not render as identity");
@@ -2557,7 +3688,7 @@ mod tests {
         assert!(matches!(
             error,
             EffectGraphBuildError::EvaluationUnsupported { effect_key, .. }
-                if effect_key == "builtin.color_wheel"
+                if effect_key == "builtin.hue_saturation_lightness"
         ));
     }
 

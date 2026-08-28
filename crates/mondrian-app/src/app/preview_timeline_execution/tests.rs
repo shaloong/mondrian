@@ -36,6 +36,7 @@ fn color_context(sequence: &Sequence) -> ProgramColorContext {
     sequence
         .settings
         .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+        .expect("valid test context")
 }
 
 fn temporal_blend_effect(offset: TimelineTime) -> mondrian_effects::EffectNode {

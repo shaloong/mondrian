@@ -655,6 +655,7 @@ impl AppState {
         self.manual_project_file_destination = None;
         self.manual_project_file_applied_request = None;
         self.autosave_in_flight_request = None;
+        self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();
@@ -1325,6 +1326,7 @@ impl AppState {
         self.manual_project_file_destination = Some(replacement_destination.clone());
         self.manual_project_file_applied_request = Some((replacement_destination, request_id));
         self.autosave_in_flight_request = None;
+        self.visual_tracking.cancel_all();
         self.proxy_generation.bind_project(Some(project_id));
         self.media_import.bind_project(Some(project_id));
         self.media_import_batches.clear();

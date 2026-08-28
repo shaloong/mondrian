@@ -854,6 +854,21 @@ impl ProductAction {
                         namespace, name, payload,
                     )?)),
                 ))),
+                VISUAL_MASK_START_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::StartTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_MASK_CANCEL_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::CancelTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
+                VISUAL_MASK_RECOMPUTE_TRACKING => Ok(Some(Self::VisualMask(
+                    VisualMaskProductAction::RecomputeTracking(decode_payload(
+                        namespace, name, payload,
+                    )?),
+                ))),
                 _ => Ok(None),
             },
             _ => Ok(None),
@@ -1238,6 +1253,21 @@ impl ProductAction {
             Self::VisualMask(VisualMaskProductAction::SetParameterValue(payload)) => (
                 VISUAL_MASK_NAMESPACE,
                 VISUAL_MASK_SET_PARAMETER_VALUE,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::StartTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_START_TRACKING,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::CancelTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_CANCEL_TRACKING,
+                serde_json::json!(payload),
+            ),
+            Self::VisualMask(VisualMaskProductAction::RecomputeTracking(payload)) => (
+                VISUAL_MASK_NAMESPACE,
+                VISUAL_MASK_RECOMPUTE_TRACKING,
                 serde_json::json!(payload),
             ),
         };
@@ -3172,6 +3202,15 @@ mod tests {
             ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
                 VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GaussianBlur },
             )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload { clip_id, effect_type: EffectType::GamutCompression },
+            )),
+            ProductAction::VisualEffect(VisualEffectProductAction::AddToClip(
+                VisualEffectAddToClipPayload {
+                    clip_id,
+                    effect_type: EffectType::HighlightRecovery,
+                },
+            )),
             ProductAction::VisualEffect(VisualEffectProductAction::Select(
                 VisualEffectTargetPayload { clip_id, effect_id },
             )),
@@ -3260,6 +3299,21 @@ mod tests {
                     value: PropertyValue::Float(0.75),
                 },
             ))),
+            ProductAction::VisualMask(VisualMaskProductAction::StartTracking(
+                VisualMaskStartTrackingPayload {
+                    clip_id,
+                    mask_id,
+                    model: mondrian_core::mask_data::MaskTrackingModel::PlanarHomography,
+                    direction: mondrian_core::mask_data::MaskTrackingDirection::Both,
+                    settings: mondrian_core::mask_data::MaskTrackingSettings::default(),
+                },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::CancelTracking(
+                VisualMaskTargetPayload { clip_id, mask_id },
+            )),
+            ProductAction::VisualMask(VisualMaskProductAction::RecomputeTracking(
+                VisualMaskTargetPayload { clip_id, mask_id },
+            )),
         ];
 
         for expected in actions {
