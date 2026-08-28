@@ -75,6 +75,7 @@ define_id!(GradeGraphNodeId, "调色图节点 ID");
 define_id!(GradeDefinitionId, "共享调色定义 ID");
 define_id!(GradeVersionId, "调色版本 ID");
 define_id!(GradeGroupId, "调色组 ID");
+define_id!(GalleryStillId, "调色 Gallery Still ID");
 
 /// Monotonic authoring revision of one stable Sequence identity.
 ///

@@ -8,7 +8,8 @@
 use anyhow::Context;
 use mondrian_core::{
     AssetId, AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError,
-    AuthoringSet, ProjectColorEnvironment, ProjectId, ProjectMeta, ProjectSettings, SequenceId,
+    AuthoringSet, ProjectColorEnvironment, ProjectGallery, ProjectId, ProjectMeta, ProjectSettings,
+    SequenceId, MAX_GALLERY_STILL_DECODED_BYTES, MAX_GALLERY_STILL_DIMENSION,
 };
 use mondrian_storage::{
     FilePublicationFailure as StoragePublicationFailure, FilePublicationMode, OwnedPublicationFile,
@@ -650,6 +651,9 @@ pub struct ProjectDocument {
     pub sequences: SequenceCollection,
     /// Assets currently forced into proxy playback mode.
     pub proxy_mode_assets: AuthoringSet<AssetId>,
+    /// Portable, authored color-reference stills shared across Sequences.
+    #[serde(default)]
+    pub gallery: ProjectGallery,
 }
 
 impl AuthoringFootprint for ProjectDocument {
@@ -667,13 +671,15 @@ impl AuthoringFootprint for ProjectDocument {
             new_sequence_defaults,
             sequences,
             proxy_mode_assets,
+            gallery,
         } = self;
         collector.collect(meta)?;
         collector.collect(settings)?;
         collector.collect(color_environment)?;
         collector.collect(new_sequence_defaults)?;
         collector.collect(sequences)?;
-        collector.collect(proxy_mode_assets)
+        collector.collect(proxy_mode_assets)?;
+        collector.collect(gallery)
     }
 }
 
@@ -883,6 +889,7 @@ impl ProjectDocument {
             new_sequence_defaults,
             sequences,
             proxy_mode_assets: AuthoringSet::new(),
+            gallery: ProjectGallery::default(),
         }
     }
 
@@ -942,6 +949,65 @@ impl ProjectDocument {
         self.new_sequence_defaults
             .validate_with_color_environment(&self.color_environment)
             .context("new Sequence defaults are invalid")?;
+        self.gallery.validate().context("Project Gallery is invalid")?;
+        for still in &self.gallery.stills {
+            let mut reader = image::ImageReader::with_format(
+                std::io::Cursor::new(&still.raster.png),
+                image::ImageFormat::Png,
+            );
+            let mut limits = image::Limits::default();
+            limits.max_image_width = Some(MAX_GALLERY_STILL_DIMENSION);
+            limits.max_image_height = Some(MAX_GALLERY_STILL_DIMENSION);
+            limits.max_alloc = Some(MAX_GALLERY_STILL_DECODED_BYTES);
+            reader.limits(limits);
+            let decoded = reader
+                .decode()
+                .with_context(|| format!("Gallery still {} contains an invalid PNG", still.id))?;
+            if decoded.width() != still.raster.width || decoded.height() != still.raster.height {
+                anyhow::bail!(
+                    "Gallery still {} PNG extent {}x{} does not match declared extent {}x{}",
+                    still.id,
+                    decoded.width(),
+                    decoded.height(),
+                    still.raster.width,
+                    still.raster.height
+                );
+            }
+            if decoded.color() != image::ColorType::Rgba8 {
+                anyhow::bail!(
+                    "Gallery still {} PNG must contain canonical RGBA8 pixels, found {:?}",
+                    still.id,
+                    decoded.color()
+                );
+            }
+            let sequence = self
+                .sequences
+                .sequences
+                .iter()
+                .find(|sequence| sequence.id == still.source_sequence_id)
+                .with_context(|| {
+                    format!(
+                        "Gallery still {} references missing Sequence {}",
+                        still.id, still.source_sequence_id
+                    )
+                })?;
+            for binding in &still.active_grade_versions {
+                let definition =
+                    sequence.grade_definition(binding.definition_id).with_context(|| {
+                        format!(
+                            "Gallery still {} references missing Grade Definition {}",
+                            still.id, binding.definition_id
+                        )
+                    })?;
+                if !definition.versions.iter().any(|version| version.id == binding.version_id) {
+                    anyhow::bail!(
+                        "Gallery still {} references missing Grade Version {}",
+                        still.id,
+                        binding.version_id
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

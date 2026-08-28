@@ -1692,6 +1692,7 @@ fn structured_authoring_state_eq(left: &ProjectDocument, right: &ProjectDocument
         color_environment: left_color_environment,
         new_sequence_defaults: left_new_sequence_defaults,
         sequences: left_sequences,
+        gallery: left_gallery,
         proxy_mode_assets: left_proxy_mode_assets,
     } = left;
     let ProjectDocument {
@@ -1703,6 +1704,7 @@ fn structured_authoring_state_eq(left: &ProjectDocument, right: &ProjectDocument
         color_environment: right_color_environment,
         new_sequence_defaults: right_new_sequence_defaults,
         sequences: right_sequences,
+        gallery: right_gallery,
         proxy_mode_assets: right_proxy_mode_assets,
     } = right;
     left_schema_version == right_schema_version
@@ -1712,6 +1714,7 @@ fn structured_authoring_state_eq(left: &ProjectDocument, right: &ProjectDocument
         && left_settings == right_settings
         && left_color_environment == right_color_environment
         && left_new_sequence_defaults == right_new_sequence_defaults
+        && left_gallery == right_gallery
         && left_proxy_mode_assets == right_proxy_mode_assets
         && left_sequences.default_sequence_id == right_sequences.default_sequence_id
         && left_sequences.active_sequence_id == right_sequences.active_sequence_id

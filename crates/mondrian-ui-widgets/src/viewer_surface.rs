@@ -217,6 +217,22 @@ pub enum ViewerFrameContent {
     ExternalTexture(ViewerExternalTextureFrame),
 }
 
+/// Domain-light Viewer split/wipe layout for one frozen reference image.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ViewerComparisonLayout {
+    WipeVertical { position: f32 },
+    WipeHorizontal { position: f32 },
+    SplitVertical,
+    SplitHorizontal,
+}
+
+/// Frozen raster and layout painted over the current Viewer frame.
+#[derive(Debug, Clone)]
+pub struct ViewerComparisonReference {
+    pub frame: ViewerFrameImage,
+    pub layout: ViewerComparisonLayout,
+}
+
 impl ViewerFrameContent {
     /// Source frame dimensions.
     pub fn dimensions(&self) -> (u32, u32) {
@@ -316,6 +332,7 @@ pub struct ViewerSurface {
     playing: bool,
     enabled: bool,
     frame_content: Option<ViewerFrameContent>,
+    comparison_reference: Option<ViewerComparisonReference>,
     canvas_background: ViewerCanvasBackground,
     empty_message: Option<String>,
     hovered_control: Option<ViewerControl>,
@@ -361,6 +378,7 @@ impl ViewerSurface {
             playing: false,
             enabled: true,
             frame_content: None,
+            comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             empty_message: None,
             hovered_control: None,
@@ -474,6 +492,12 @@ impl ViewerSurface {
     /// Set the rendered preview content shown inside the fitted canvas.
     pub fn with_frame_content(mut self, frame_content: ViewerFrameContent) -> Self {
         self.frame_content = Some(frame_content);
+        self
+    }
+
+    /// Paint one frozen reference over the current frame using a wipe/split layout.
+    pub fn with_comparison_reference(mut self, reference: ViewerComparisonReference) -> Self {
+        self.comparison_reference = Some(reference);
         self
     }
 
@@ -1061,6 +1085,55 @@ impl Widget for ViewerSurface {
                             Color::WHITE,
                         ),
                     },
+                }
+            }
+            if self.frame_content.is_some()
+                && let Some(reference) = &self.comparison_reference
+            {
+                let (position, vertical) = match reference.layout {
+                    ViewerComparisonLayout::WipeVertical { position } => {
+                        (position.clamp(0.0, 1.0), true)
+                    }
+                    ViewerComparisonLayout::WipeHorizontal { position } => {
+                        (position.clamp(0.0, 1.0), false)
+                    }
+                    ViewerComparisonLayout::SplitVertical => (0.5, true),
+                    ViewerComparisonLayout::SplitHorizontal => (0.5, false),
+                };
+                let reference_clip = if vertical {
+                    Rect::new(canvas.x, canvas.y, canvas.width * position, canvas.height)
+                } else {
+                    Rect::new(canvas.x, canvas.y, canvas.width, canvas.height * position)
+                };
+                if reference_clip.width > 0.0 && reference_clip.height > 0.0 {
+                    ctx.push_clip(reference_clip);
+                    ctx.encoder.draw_raster_image(
+                        &reference.frame.key,
+                        canvas,
+                        reference.frame.width,
+                        reference.frame.height,
+                        reference.frame.color_space,
+                        Arc::clone(&reference.frame.rgba),
+                        Color::WHITE,
+                    );
+                    ctx.pop_clip();
+                }
+                if position > 0.0 && position < 1.0 {
+                    if vertical {
+                        let x = canvas.x + canvas.width * position;
+                        ctx.encoder.draw_rect(
+                            Rect::new(x - 0.5, canvas.y, 1.0, canvas.height),
+                            Color::WHITE,
+                            0.0,
+                        );
+                    } else {
+                        let y = canvas.y + canvas.height * position;
+                        ctx.encoder.draw_rect(
+                            Rect::new(canvas.x, y - 0.5, canvas.width, 1.0),
+                            Color::WHITE,
+                            0.0,
+                        );
+                    }
                 }
             }
         }
@@ -2712,6 +2785,50 @@ mod tests {
             "sequence canvas should be painted as a straight-edged rectangle"
         );
         assert_eq!(encoder.clip_pops, encoder.clips.len());
+    }
+
+    #[test]
+    fn gallery_split_paints_frozen_raster_over_gpu_current_with_exact_clip() {
+        let current = ViewerExternalTextureFrame::new("viewer.current", 1920, 1080)
+            .expect("current GPU frame");
+        let reference = ViewerFrameImage::new(
+            "gallery.reference",
+            1920,
+            1080,
+            mondrian_ui_core::RasterImageColorSpace::Srgb,
+            vec![128; 1920 * 1080 * 4],
+        )
+        .expect("reference raster");
+        let mut viewer = ViewerSurface::new("Compare", 1920, 1080)
+            .with_frame_content(ViewerFrameContent::ExternalTexture(current))
+            .with_comparison_reference(ViewerComparisonReference {
+                frame: reference,
+                layout: ViewerComparisonLayout::SplitVertical,
+            });
+        let bounds = Rect::new(0.0, 0.0, 500.0, 320.0);
+        viewer.layout(bounds);
+        let canvas = viewer.canvas_rect();
+        let expected_reference_clip =
+            Rect::new(canvas.x, canvas.y, canvas.width * 0.5, canvas.height);
+        let theme = ThemePreset::Dark.build();
+        let mut encoder = RecordingEncoder::default();
+        viewer.paint(&mut PaintContext {
+            encoder: &mut encoder,
+            theme: &theme,
+            clip_rect: bounds,
+        });
+
+        assert_eq!(encoder.external_textures.len(), 1);
+        assert_eq!(
+            encoder.raster_images,
+            vec![("gallery.reference".to_owned(), canvas, 1920, 1080)]
+        );
+        assert!(encoder.clips.contains(&expected_reference_clip));
+        assert!(encoder.rects.iter().any(|rect| {
+            (rect.x - (canvas.x + canvas.width * 0.5 - 0.5)).abs() < f32::EPSILON
+                && rect.width == 1.0
+                && rect.height == canvas.height
+        }));
     }
 
     #[test]

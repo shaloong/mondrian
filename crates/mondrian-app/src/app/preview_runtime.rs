@@ -367,6 +367,8 @@ pub struct PreviewProductionRuntime<O: Clone> {
     unavailability_evidence: RefCell<PreviewUnavailabilityEvidence>,
     display_snapshot: RefCell<Option<DisplayOutputSnapshot>>,
     display_snapshot_identity: Cell<Option<DisplayOutputIdentity>>,
+    /// Latest exact CPU Viewer output prepared for a user-triggered Gallery capture.
+    last_gallery_capture: RefCell<Option<crate::app::product_action::GalleryCaptureStillPayload>>,
     hardware_decode_admission: Cell<PreviewHardwareDecodeAdmissionState>,
     decode_cpu_budget: PreviewDecodeCpuBudget,
     decode_worker_count: usize,
@@ -744,6 +746,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
             display_snapshot: RefCell::new(None),
             display_snapshot_identity: Cell::new(None),
+            last_gallery_capture: RefCell::new(None),
             hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
             decode_cpu_budget,
             decode_worker_count,
@@ -760,6 +763,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// Runtime's typed result pumps remain the sole completion authority.
     pub(crate) fn work_watch(&self) -> PreviewWorkWatch {
         self.work_watch.clone()
+    }
+
+    /// Clone the latest exact CPU Viewer output as a named Gallery capture payload.
+    ///
+    /// GPU-only presentation intentionally returns `None` until its explicit
+    /// readback path publishes equivalent working-linear evidence.
+    pub fn gallery_capture_payload(
+        &self,
+        name: impl Into<String>,
+    ) -> Option<crate::app::product_action::GalleryCaptureStillPayload> {
+        self.last_gallery_capture.borrow().clone().map(|mut payload| {
+            payload.name = name.into();
+            payload
+        })
     }
 
     #[cfg(test)]

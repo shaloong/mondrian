@@ -23,6 +23,7 @@ Project state. See [Timeline Render Cache](timeline-render-cache.md).
 - `color_environment: ProjectColorEnvironment`
 - `new_sequence_defaults: SequenceSettings`
 - `sequences: SequenceCollection`
+- `gallery: ProjectGallery`
 - `proxy_mode_assets: AuthoringSet<AssetId>` (persisted with the exact
   canonical `BTreeSet<AssetId>` JSON representation)
 
@@ -117,6 +118,23 @@ Effect, and automation identities once; active-Version switching does not copy
 the graph. Archive validation rejects missing references, duplicate identities,
 invalid topology, empty names, and configured size/fan-in/version-limit
 violations.
+
+The Project Gallery is deliberate authored reference media rather than a
+rebuildable cache. Each of at most 512 stills stores a non-empty name, strong
+source Sequence and active Grade Version bindings, exact source time, a
+presentation-contract fingerprint, bounded working-linear statistics, and one
+canonical RGBA8 sRGB PNG of at most 64 MiB compressed and 256 MiB decoded. JSON carries the PNG as base64 so the
+existing canonical three-entry `.mdp` layout stays portable and requires no
+parallel archive-entry namespace.
+
+Project validation closes every Sequence/Grade Version reference, decodes each
+PNG under strict 16K-per-axis and 256 MiB allocation limits, requires canonical
+RGBA8 pixels, and requires its real dimensions to match the declared non-zero extent.
+Corrupt, truncated, oversized, or misdeclared stills fail project admission.
+The frozen binding records which Grade Versions produced the reference; it
+does not follow later active-Version changes. Shot Match evidence embeds the
+reference statistics it consumed, so removing an otherwise unreferenced still
+does not make an already-authored Grade Version invalid.
 
 Prepared Grade resources, compiled schedules, stage bindings, cache signatures,
 GPU resources, and retained-byte estimates are runtime evidence and are never

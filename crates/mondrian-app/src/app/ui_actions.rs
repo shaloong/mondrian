@@ -35,12 +35,13 @@ pub use super::product_action::{
     ClipCurveEditPayload, ClipEditNumericCurvePayload, ClipHoldFramePayload,
     ClipNormalizedCurvePointPayload, ClipParameterValueWrite, ClipSetEnabledPayload,
     ClipSetRatePayload, ClipSetSolidColorPayload, ClipWriteParameterValuesPayload, ExportDraftEdit,
-    ProjectCreateWithSettingsPayload, ProjectRecoverFromAutosavePayload,
-    ProjectUpdateColorEnvironmentPayload, ProjectUpdateNewSequenceDefaultsPayload,
-    SequenceTargetPayload, SequenceUpdateSettingsPayload, TimelineClipSelectionModePayload,
-    TimelineDropAssetPayload, TimelineInOutPointKind, TimelineInsertAssetPayload,
-    TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload, TimelineSeekPayload,
-    TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
+    GalleryApplyShotMatchPayload, GalleryCaptureStillPayload, GalleryRenameStillPayload,
+    GallerySetComparisonPayload, GalleryStillTargetPayload, ProjectCreateWithSettingsPayload,
+    ProjectRecoverFromAutosavePayload, ProjectUpdateColorEnvironmentPayload,
+    ProjectUpdateNewSequenceDefaultsPayload, SequenceTargetPayload, SequenceUpdateSettingsPayload,
+    TimelineClipSelectionModePayload, TimelineDropAssetPayload, TimelineInOutPointKind,
+    TimelineInsertAssetPayload, TimelineMoveClipPayload, TimelinePrecomposeSelectionPayload,
+    TimelineSeekPayload, TimelineSeekSource, TimelineSelectClipPayload, TimelineSelectionEdit,
     TimelineSetInOutPointPayload, TimelineTrimClipsPayload, TimelineTrimPayloadEdge, TrackAddKind,
     TrackAddPayload, TrackAuthorControl, TrackEditPolicyControl, TrackMovePayload,
     TrackSetAuthorControlPayload, TrackSetEditPolicyPayload,
@@ -79,10 +80,10 @@ pub use super::product_action::{
     VISUAL_MASK_START_TRACKING, VISUAL_MASK_WRITE_SHAPE,
 };
 use super::product_action::{
-    AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction, ProductAction,
-    ProjectProductAction, SequenceProductAction, TimelineProductAction, TrackProductAction,
-    VideoTransitionProductAction, ViewerProductAction, VisualEffectProductAction,
-    VisualMaskProductAction,
+    AssetProductAction, AudioProductAction, ClipProductAction, ExportProductAction,
+    GalleryProductAction, ProductAction, ProjectProductAction, SequenceProductAction,
+    TimelineProductAction, TrackProductAction, VideoTransitionProductAction, ViewerProductAction,
+    VisualEffectProductAction, VisualMaskProductAction,
 };
 
 /// Shell-local action name for cycling viewer canvas zoom.
@@ -196,6 +197,8 @@ pub const APP_SHELL_WINDOW_MINIMIZE: &str = "window_minimize";
 pub const APP_SHELL_WINDOW_TOGGLE_MAXIMIZE: &str = "window_toggle_maximize";
 /// App-shell request to begin native window dragging from custom chrome.
 pub const APP_SHELL_WINDOW_DRAG: &str = "window_drag";
+/// App-shell request to capture the exact current Viewer result into the Gallery.
+pub const APP_SHELL_GALLERY_CAPTURE_CURRENT: &str = "gallery_capture_current";
 /// App-shell request to relocate one dock panel tab in the workspace layout.
 pub const APP_SHELL_RELOCATE_PANEL: &str = "relocate_panel";
 
@@ -1128,6 +1131,33 @@ pub fn viewer_set_preview_resolution_scale_action(
         .into_external_action()
 }
 
+/// Persist one exact CPU Viewer result as a portable Project Gallery still.
+pub fn gallery_capture_still_action(payload: GalleryCaptureStillPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::CaptureStill(Box::new(payload)))
+        .into_external_action()
+}
+
+/// Rename one Project Gallery still.
+pub fn gallery_rename_still_action(payload: GalleryRenameStillPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::RenameStill(payload)).into_external_action()
+}
+
+/// Remove one Project Gallery still.
+pub fn gallery_remove_still_action(payload: GalleryStillTargetPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::RemoveStill(payload)).into_external_action()
+}
+
+/// Select or clear one Viewer wipe/split comparison.
+pub fn gallery_set_comparison_action(payload: GallerySetComparisonPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::SetComparison(payload)).into_external_action()
+}
+
+/// Author one deterministic Shot Match Grade Version.
+pub fn gallery_apply_shot_match_action(payload: GalleryApplyShotMatchPayload) -> Action {
+    ProductAction::Gallery(GalleryProductAction::ApplyShotMatch(Box::new(payload)))
+        .into_external_action()
+}
+
 /// Build a shell-local viewer request for cycling canvas zoom.
 pub fn viewer_cycle_zoom_action() -> Action {
     custom_viewer_action(VIEWER_CYCLE_ZOOM, ())
@@ -1485,6 +1515,11 @@ pub fn app_shell_window_toggle_maximize_action() -> Action {
 /// Build an app-shell request for beginning native window drag from custom chrome.
 pub fn app_shell_window_drag_action() -> Action {
     custom_app_shell_action(APP_SHELL_WINDOW_DRAG)
+}
+
+/// Build a shell request for one exact current-frame Gallery capture.
+pub fn app_shell_gallery_capture_current_action() -> Action {
+    custom_app_shell_action(APP_SHELL_GALLERY_CAPTURE_CURRENT)
 }
 
 /// Build an app-shell request for relocating one dock panel tab.

@@ -42,11 +42,11 @@ use crate::app::ui_actions::{
     PreferencesShortcutReboundPayload, PreferencesThemePayload, PreferencesViewerBackgroundPayload,
     PreferencesWaveformDisplayPayload, APP_SHELL_ASSET_BROWSER_OPEN_FOLDER,
     APP_SHELL_CANCEL_NEW_PROJECT_DIALOG, APP_SHELL_CLOSE_MODAL,
-    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG, APP_SHELL_NAMESPACE,
-    APP_SHELL_NEW_PROJECT_DIALOG, APP_SHELL_NEW_PROJECT_DRAFT_CHANGED,
-    APP_SHELL_OPEN_PROJECT_DIALOG, APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL,
-    APP_SHELL_PENDING_CLOSE_DISCARD, APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE,
-    APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
+    APP_SHELL_CONFIRM_NEW_PROJECT_DIALOG, APP_SHELL_CONFIRM_RECOVERY_DIALOG,
+    APP_SHELL_GALLERY_CAPTURE_CURRENT, APP_SHELL_NAMESPACE, APP_SHELL_NEW_PROJECT_DIALOG,
+    APP_SHELL_NEW_PROJECT_DRAFT_CHANGED, APP_SHELL_OPEN_PROJECT_DIALOG,
+    APP_SHELL_OPEN_RECENT_PROJECT, APP_SHELL_PENDING_CLOSE_CANCEL, APP_SHELL_PENDING_CLOSE_DISCARD,
+    APP_SHELL_PENDING_CLOSE_SAVE_CONTINUE, APP_SHELL_PREFERENCES_AUDIO_OUTPUT_DEVICE_CHANGED,
     APP_SHELL_PREFERENCES_DISPLAY_MANAGEMENT_CHANGED,
     APP_SHELL_PREFERENCES_REFRESH_AUDIO_OUTPUT_DEVICES, APP_SHELL_PREFERENCES_SHORTCUT_DISABLED,
     APP_SHELL_PREFERENCES_SHORTCUT_REBOUND, APP_SHELL_PREFERENCES_SHORTCUT_RESET,
@@ -160,6 +160,8 @@ pub struct AppUiHost {
     /// Guarded close/quit intent whose Project persistence barrier is still
     /// progressing outside the UI thread.
     quiescing_close_action: Option<PendingCloseAction>,
+    /// One command waiting for an exact CPU Viewer result before authoring a still.
+    pending_gallery_capture_name: RefCell<Option<String>>,
 }
 
 fn window_preview_state_retains_external_gpu(state: &ViewerPreviewState) -> bool {
@@ -265,6 +267,7 @@ impl AppUiHost {
             preview_dirty: Cell::new(false),
             pending_close_action: None,
             quiescing_close_action: None,
+            pending_gallery_capture_name: RefCell::new(None),
         }
     }
 
@@ -785,6 +788,7 @@ impl AppUiHost {
                 self.window_preview_state.replace(ViewerPreviewState::Unavailable(reason));
             }
         }
+        self.complete_pending_gallery_capture();
     }
 
     /// Resolve one Broker-owned heterogeneous Viewer candidate after wgpu
@@ -1281,6 +1285,10 @@ impl AppUiHost {
                 needs_layout = true;
                 continue;
             }
+            if self.take_gallery_capture_current(&action) {
+                needs_layout = true;
+                continue;
+            }
             if !self.is_action_enabled(&action) {
                 tracing::debug!(?action, "disabled custom UI action ignored");
                 continue;
@@ -1373,6 +1381,74 @@ impl AppUiHost {
 
     fn is_action_enabled(&self, action: &Action) -> bool {
         app_state_action_enabled(action, &self.app_state.borrow())
+    }
+
+    fn take_gallery_capture_current(&self, action: &Action) -> bool {
+        let Action::Custom { namespace, name, .. } = action else {
+            return false;
+        };
+        if namespace != APP_SHELL_NAMESPACE || name != APP_SHELL_GALLERY_CAPTURE_CURRENT {
+            return false;
+        }
+        if !self.app_state.borrow().has_open_project() {
+            self.app_state.borrow_mut().set_status_hint("当前没有可捕获的项目 Viewer", true);
+            return true;
+        }
+        let name = format!(
+            "Still {}",
+            self.app_state
+                .borrow()
+                .project_gallery()
+                .map_or(1, |gallery| gallery.stills.len() + 1)
+        );
+        if let Some(payload) = self.preview_service.gallery_capture_payload(name.clone()) {
+            let action = crate::app::ui_actions::gallery_capture_still_action(payload);
+            let result = self.app_state.borrow_mut().dispatch_action(action);
+            match result {
+                Ok(()) => {
+                    self.app_state.borrow_mut().set_status_hint("Gallery Still 已捕获", false);
+                    self.preview_service.clear_viewer_cpu_fallback();
+                }
+                Err(error) => self
+                    .app_state
+                    .borrow_mut()
+                    .set_status_hint(format!("Gallery Still 捕获失败：{error}"), true),
+            }
+            self.mark_dirty();
+        } else {
+            self.pending_gallery_capture_name.borrow_mut().replace(name);
+            self.preview_service.request_viewer_cpu_fallback(
+                "Gallery Still requires exact working-linear evidence",
+            );
+            self.app_state
+                .borrow_mut()
+                .set_status_hint("正在准备精确 Gallery Still…", false);
+            self.mark_dirty();
+        }
+        true
+    }
+
+    fn complete_pending_gallery_capture(&self) {
+        let Some(name) = self.pending_gallery_capture_name.borrow().clone() else {
+            return;
+        };
+        let Some(payload) = self.preview_service.gallery_capture_payload(name) else {
+            return;
+        };
+        self.pending_gallery_capture_name.borrow_mut().take();
+        let action = crate::app::ui_actions::gallery_capture_still_action(payload);
+        let result = self.app_state.borrow_mut().dispatch_action(action);
+        match result {
+            Ok(()) => {
+                self.app_state.borrow_mut().set_status_hint("Gallery Still 已捕获", false);
+                self.preview_service.clear_viewer_cpu_fallback();
+            }
+            Err(error) => self
+                .app_state
+                .borrow_mut()
+                .set_status_hint(format!("Gallery Still 捕获失败：{error}"), true),
+        }
+        self.mark_dirty();
     }
 
     pub fn sync_workspace_layout_from_root(&mut self) {

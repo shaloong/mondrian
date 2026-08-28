@@ -28,6 +28,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             self.clear_all_preview_residency();
         }
         self.future_media_window.borrow_mut().clear();
+        self.last_gallery_capture.borrow_mut().take();
         self.visual_program_authoring_session.set(current);
     }
 

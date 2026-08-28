@@ -6,6 +6,7 @@
 //! boundary. Window and Headless Adapters only project the returned state.
 
 use super::*;
+use sha2::Digest;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     pub(crate) fn presentation(
@@ -264,6 +265,21 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                             );
                         }
                     };
+                    let presentation_fingerprint =
+                        sha2::Sha256::digest(format!("{}", output_key).as_bytes()).into();
+                    match crate::app::gallery_authoring::gallery_capture_payload_from_preview(
+                        "Still",
+                        presentation_fingerprint,
+                        &output,
+                    ) {
+                        Ok(payload) => {
+                            self.last_gallery_capture.borrow_mut().replace(payload);
+                        }
+                        Err(error) => tracing::warn!(
+                            %error,
+                            "latest CPU Viewer output could not become a Gallery capture"
+                        ),
+                    }
                     render_stage_durations.accumulate_cpu_execution(output.execution_durations);
                     self.record_cpu_execution_evidence(&output);
                     self.record_composite(output.composite_diagnostics);

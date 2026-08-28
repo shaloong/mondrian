@@ -8,7 +8,7 @@ use crate::effect_data::EffectNode;
 use crate::{
     AuthoringFootprint, AuthoringFootprintCollector, AuthoringFootprintError, AuthoringList,
     BlendMode, EffectId, GradeDefinitionId, GradeGraphNodeId, GradeVersionId, MondrianError,
-    Result,
+    Result, ShotMatchEvidence,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -251,6 +251,20 @@ pub struct GradeVersion {
     pub id: GradeVersionId,
     pub name: String,
     pub graph: GradeGraph,
+    /// Auditable origin of this version's initial graph.
+    #[serde(default)]
+    pub origin: GradeVersionOrigin,
+}
+
+/// Provenance of one authored Grade Version.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GradeVersionOrigin {
+    /// Manually created or edited author version.
+    #[default]
+    Manual,
+    /// Deterministic Shot Match result with complete input/output evidence.
+    ShotMatch { evidence: ShotMatchEvidence },
 }
 
 impl GradeVersion {
@@ -259,6 +273,19 @@ impl GradeVersion {
             id: GradeVersionId::new(),
             name: name.into(),
             graph,
+            origin: GradeVersionOrigin::Manual,
+        }
+    }
+}
+
+impl AuthoringFootprint for GradeVersionOrigin {
+    fn collect_authoring_footprint(
+        &self,
+        collector: &mut AuthoringFootprintCollector,
+    ) -> std::result::Result<(), AuthoringFootprintError> {
+        match self {
+            Self::Manual => Ok(()),
+            Self::ShotMatch { evidence } => collector.collect(evidence),
         }
     }
 }
@@ -269,7 +296,8 @@ impl AuthoringFootprint for GradeVersion {
         collector: &mut AuthoringFootprintCollector,
     ) -> std::result::Result<(), AuthoringFootprintError> {
         collector.collect(&self.name)?;
-        collector.collect(&self.graph)
+        collector.collect(&self.graph)?;
+        collector.collect(&self.origin)
     }
 }
 
@@ -330,6 +358,9 @@ impl GradeDefinition {
                 )));
             }
             version.graph.validate_author_state()?;
+            if let GradeVersionOrigin::ShotMatch { evidence } = &version.origin {
+                evidence.validate()?;
+            }
         }
         if !ids.contains(&self.active_version) {
             return Err(grade_graph_error(format!(

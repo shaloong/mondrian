@@ -30,6 +30,7 @@ pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
+pub mod shot_match;
 pub mod source_frame_preparation;
 pub mod timeline_composite;
 mod timeline_effect_routes;
@@ -280,6 +281,9 @@ pub use prepared_visual_range_closure::{
 pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
     GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
+};
+pub use shot_match::{
+    analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,
 };
 pub use source_frame_preparation::{
     prepare_decoded_cpu_source_frame, DecodedCpuSourceFrame, PreparedSourceFrame,

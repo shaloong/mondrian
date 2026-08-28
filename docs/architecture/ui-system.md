@@ -99,6 +99,25 @@ The Inspector therefore does not apply its generic Clip-editable flag to all
 Grade controls. It owns no execution schedule, hierarchy ordering, graph
 validation, Version copy, or Effect preparation.
 
+Gallery author actions use the separate `ui.gallery` namespace. Capture, remove,
+and rename are Project transactions and therefore restore through the same
+bounded Project Undo/Redo history; selecting a reference or changing its
+Wipe/Split position is transient App session state and creates no author
+generation. A frozen still retains the Grade Version bindings that produced it,
+so activating another Version and comparing against that still is a version
+comparison without a second graph authority.
+
+The Window host accepts “Capture Gallery Still” only with an open Project. If
+the exact current Preview result already retains its CPU Float32 evidence, the
+capture is committed immediately. A GPU-only current Viewer instead requests
+the normal exact CPU fallback asynchronously and commits after presentation
+publishes that result; the UI thread never reads back or composites a full GPU
+frame. The Viewer decodes the selected PNG once and clips it over either the
+CPU raster or external GPU texture with one divider. This transient paint does
+not alter the Timeline render, Program Output, Scopes input, cache identity, or
+stored divider position. Direct evidence-bearing GPU capture/readback is not a
+current capability claim.
+
 Basic Title Inspector rows use the same definition-backed property projection
 and `ClipProductAction` parameter-write Interface as Transform/Opacity; the panel does not own a parallel
 title draft or reconstruct property ranges/options. Text is multiline, the

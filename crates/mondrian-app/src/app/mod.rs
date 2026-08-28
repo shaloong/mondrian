@@ -107,6 +107,7 @@ mod clip_retime;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
+mod gallery_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub mod golden_project_acceptance;
 mod grade_authoring;
@@ -377,6 +378,8 @@ pub struct AppState {
     /// Machine-local Viewer policy. It is runtime state, never Project or
     /// Sequence author data.
     viewer_display_management: DisplayManagementPolicy,
+    /// Viewer-only frozen-still comparison; never Project author data.
+    gallery_comparison: Option<gallery_authoring::GalleryComparisonState>,
 
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
@@ -468,6 +471,7 @@ impl AppState {
             autosave_last_requested_at: Instant::now(),
             autosave_in_flight_request: None,
             viewer_display_management: DisplayManagementPolicy::default(),
+            gallery_comparison: None,
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,
@@ -540,6 +544,11 @@ impl AppState {
     /// Canonical active Sequence. Execution and UI callers receive no mutable clone.
     pub fn active_sequence(&self) -> Option<&Sequence> {
         self.authoring.as_ref().and_then(AuthoringSession::active_sequence)
+    }
+
+    /// Canonical Project Gallery, if a Project is open.
+    pub fn project_gallery(&self) -> Option<&mondrian_core::ProjectGallery> {
+        self.authoring.as_ref().map(|session| &session.document().gallery)
     }
 
     /// Direct fixture access for tests that need to construct otherwise

@@ -124,6 +124,24 @@ relabelled as a creative Grade scope. Preview and Export consume the same
 compiled graph and explicit working/output contexts, so a hierarchy edit cannot
 select different color science by consumer.
 
+Gallery capture keeps the display reference and analysis authority separate.
+The portable still raster is one frozen sRGB PNG for Viewer comparison, while
+Shot Match statistics are computed from the straight-alpha Float32
+working-linear frame before Program Output or monitor adaptation. The renderer
+examines at most 262,144 regularly strided non-transparent finite samples and
+records per-channel 5th, 50th, and 95th percentiles. Sorting is therefore
+deterministic and bounded even for high-resolution sources; no display RGB8
+histogram or machine ICC state can enter the solver.
+
+The v1 solver maps reference/target percentile spans to ColorWheel Gain and
+aligns their medians with Offset, clamping both to the registered author
+bounds. App authoring appends that operation to a freshly identity-forked Grade
+Graph in a new Grade Version and persists the complete input statistics,
+algorithm version, still identity, and authored result. This is reproducible
+statistical matching, not a semantic scene-understanding or perceptual match
+claim. Existing Shot Match evidence intentionally remains self-contained when
+its Gallery still is later removed.
+
 The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
 adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
 semantics, but they must preserve node order and the exact endpoint identities.

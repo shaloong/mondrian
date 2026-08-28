@@ -139,6 +139,18 @@ is one explicit full-composite element evaluated after all Track compositing,
 never a synthetic Clip.
 _Avoid_: UI-defined ordering, Timeline Grade per Clip, copied Shared Grade state, output/display transform treated as creative grade
 
+**Project Gallery Still**:
+A portable Project-owned frozen comparison reference containing one bounded sRGB PNG, source Sequence/time, active Grade Version bindings, the capture presentation fingerprint, and bounded working-linear distribution statistics. The raster is authored reference media inside canonical `project.json`, not a machine-local Preview cache; archive admission decodes it and proves the declared extent. Deleting the still does not invalidate Shot Match evidence already embedded in a Grade Version.
+_Avoid_: Viewer-current pixels as persistent authority, unvalidated PNG blobs, cache paths in `.mdp`, live Grade references presented as a frozen version
+
+**Shot Match**:
+The deterministic renderer analysis and App authoring workflow that samples a bounded straight-alpha working-linear frame, derives per-channel 5/50/95 percentiles, solves a clamped Gain/Offset recipe, and commits a fresh Grade Version with complete evidence and fresh graph identities. It is an auditable statistical match, not an AI, semantic, or perceptual-equivalence claim.
+_Avoid_: Matching encoded Viewer pixels, mutating the active Version in place, shared cross-Version node identities, nondeterministic full-frame analysis
+
+**Gallery Comparison Session**:
+The transient App/Viewer state selecting one frozen Gallery still plus None, Wipe, or Split layout. The reference PNG is decoded once for painting over either a CPU raster or current external GPU texture; capture requests an exact CPU Viewer result when no evidence-bearing CPU output exists. Comparison never mutates Timeline pixels, Scopes inputs, Program Output, or Project state beyond explicit Gallery author actions.
+_Avoid_: Persisted divider position, UI-thread full-frame compositing, GPU surface availability treated as working-linear capture evidence, comparison altering render/cache identity
+
 **Custom OCIO Dynamic Properties**:
 The canonical, persisted Project-engine overrides for OCIO Exposure, Contrast, Gamma, Grading Primary, Grading Tone, Grading RGB Curve, and all eight Grading Hue Curve families. Values are strictly typed and validated against the selected executable route. Static config/processor/shader/LUT identity excludes only the changing payload; CPU applies it on the processor owner thread and GPU updates the resident uniform buffer without rebuilding static backend objects. Result/cache identities still include the complete evaluated values.
 _Avoid_: Free-form vendor properties, duplicate property kinds, dynamic values folded into config reload identity, stale resident uniforms, route-missing properties silently ignored

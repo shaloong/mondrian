@@ -15,7 +15,11 @@ requests a save but never serializes a live document or SQLite connection.
 
 Rebuildable proxies, thumbnails, waveforms, decoded frames, prepared render
 plans, plugin runtime state, UI navigation, and device handles never enter the
-archive.
+archive. Project Gallery stills are the explicit exception for pixels: they are
+user-authored portable references, stored as bounded base64 PNG payloads inside
+canonical `project.json`, not incidental Viewer/cache residency. Archive read
+decodes them under a 256 MiB per-still allocation cap and validates canonical
+RGBA8 structure and declared dimensions before admitting the Project.
 
 The archive format, Project document schema, and SQLite schema are independent
 version axes. The current values are archive v1, document v25, and library v5.

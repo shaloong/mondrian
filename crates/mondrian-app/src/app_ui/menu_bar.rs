@@ -72,7 +72,14 @@ pub fn default_menu_items() -> Vec<(&'static str, Vec<MenuItem>)> {
             ],
         ),
         // ── View ────────────────────────────────────────────────────────
-        ("视图", vec![command_menu_item("view.toggle_fullscreen")]),
+        (
+            "视图",
+            vec![
+                command_menu_item("viewer.capture_gallery_still"),
+                MenuItem::separator(),
+                command_menu_item("view.toggle_fullscreen"),
+            ],
+        ),
         // ── Graphics ────────────────────────────────────────────────────
         (
             "图形",

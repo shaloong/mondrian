@@ -18,8 +18,9 @@ use mondrian_core::types::{
     KeyframeId, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    Color, GradeDefinitionId, GradeGraph, GradeVersionId, ProjectColorEnvironment, ProjectSettings,
-    TimeScale, TimelineTime, TimelineTimeRange,
+    Color, GalleryColorStatistics, GalleryStillId, GalleryStillRaster, GradeDefinitionId,
+    GradeGraph, GradeVersionId, ProjectColorEnvironment, ProjectSettings, TimeScale, TimelineTime,
+    TimelineTimeRange,
 };
 use mondrian_editor_state::Action;
 use mondrian_export::preset::{BuiltinExportPreset, ExportPreset, TimelineExportRange};
@@ -178,6 +179,14 @@ pub const GRADE_ACTIVATE_VERSION: &str = "activate_version";
 pub const GRADE_REPLACE_ACTIVE_GRAPH: &str = "replace_active_graph";
 pub const GRADE_ADD_EFFECT: &str = "add_effect";
 
+/// External custom-action namespace for the Project color Gallery.
+pub const GALLERY_NAMESPACE: &str = "ui.gallery";
+pub const GALLERY_CAPTURE_STILL: &str = "capture_still";
+pub const GALLERY_RENAME_STILL: &str = "rename_still";
+pub const GALLERY_REMOVE_STILL: &str = "remove_still";
+pub const GALLERY_SET_COMPARISON: &str = "set_comparison";
+pub const GALLERY_APPLY_SHOT_MATCH: &str = "apply_shot_match";
+
 /// External custom-action namespace for Sequence audio authoring operations.
 pub const AUDIO_NAMESPACE: &str = "ui.audio";
 
@@ -256,6 +265,8 @@ pub enum ProductAction {
     VisualEffect(VisualEffectProductAction),
     /// An operation owned by Sequence grading hierarchy authoring.
     Grade(GradeProductAction),
+    /// An operation owned by the Project Gallery and Viewer comparison session.
+    Gallery(GalleryProductAction),
     /// An operation owned by Clip-local visual Mask authoring or selection.
     VisualMask(VisualMaskProductAction),
 }
@@ -365,6 +376,16 @@ pub enum GradeProductAction {
     ActivateVersion(GradeActivateVersionPayload),
     ReplaceActiveGraph(Box<GradeReplaceActiveGraphPayload>),
     AddEffect(GradeAddEffectPayload),
+}
+
+/// Closed Project Gallery and Shot Match operations.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GalleryProductAction {
+    CaptureStill(Box<GalleryCaptureStillPayload>),
+    RenameStill(GalleryRenameStillPayload),
+    RemoveStill(GalleryStillTargetPayload),
+    SetComparison(GallerySetComparisonPayload),
+    ApplyShotMatch(Box<GalleryApplyShotMatchPayload>),
 }
 
 /// Closed authoring operations owned by one Timeline Clip.
@@ -525,6 +546,7 @@ fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
         EXPORT_NAMESPACE => Some("export_action"),
         VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
         GRADE_NAMESPACE => Some("grade_action"),
+        GALLERY_NAMESPACE => Some("gallery_action"),
         VISUAL_MASK_NAMESPACE => Some("visual_mask_action"),
         _ => None,
     }
@@ -872,6 +894,28 @@ impl ProductAction {
                 GRADE_ADD_EFFECT => Ok(Some(Self::Grade(GradeProductAction::AddEffect(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                _ => Ok(None),
+            },
+            GALLERY_NAMESPACE => match name.as_str() {
+                GALLERY_CAPTURE_STILL => {
+                    Ok(Some(Self::Gallery(GalleryProductAction::CaptureStill(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
+                GALLERY_RENAME_STILL => Ok(Some(Self::Gallery(GalleryProductAction::RenameStill(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GALLERY_REMOVE_STILL => Ok(Some(Self::Gallery(GalleryProductAction::RemoveStill(
+                    decode_payload(namespace, name, payload)?,
+                )))),
+                GALLERY_SET_COMPARISON => Ok(Some(Self::Gallery(
+                    GalleryProductAction::SetComparison(decode_payload(namespace, name, payload)?),
+                ))),
+                GALLERY_APPLY_SHOT_MATCH => {
+                    Ok(Some(Self::Gallery(GalleryProductAction::ApplyShotMatch(
+                        Box::new(decode_payload(namespace, name, payload)?),
+                    ))))
+                }
                 _ => Ok(None),
             },
             VISUAL_MASK_NAMESPACE => match name.as_str() {
@@ -1293,6 +1337,31 @@ impl ProductAction {
             Self::Grade(GradeProductAction::AddEffect(payload)) => (
                 GRADE_NAMESPACE,
                 GRADE_ADD_EFFECT,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::CaptureStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_CAPTURE_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::RenameStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_RENAME_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::RemoveStill(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_REMOVE_STILL,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::SetComparison(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_SET_COMPARISON,
+                serde_json::json!(payload),
+            ),
+            Self::Gallery(GalleryProductAction::ApplyShotMatch(payload)) => (
+                GALLERY_NAMESPACE,
+                GALLERY_APPLY_SHOT_MATCH,
                 serde_json::json!(payload),
             ),
             Self::VisualMask(VisualMaskProductAction::AddToClip(payload)) => (
@@ -2011,6 +2080,75 @@ pub struct GradeAddEffectPayload {
     pub effect_type: EffectType,
 }
 
+/// Frozen Viewer raster and working-linear statistics for a new still.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryCaptureStillPayload {
+    pub name: String,
+    pub presentation_fingerprint: [u8; 32],
+    pub raster: GalleryStillRaster,
+    pub statistics: GalleryColorStatistics,
+}
+
+/// Stable Gallery still target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryStillTargetPayload {
+    pub still_id: GalleryStillId,
+}
+
+/// Rename one frozen still without changing its identity or capture evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryRenameStillPayload {
+    pub still_id: GalleryStillId,
+    pub name: String,
+}
+
+/// Viewer-only Gallery comparison layout.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GalleryComparisonLayout {
+    /// Reference occupies the left part of the Viewer.
+    WipeVertical { position: f32 },
+    /// Reference occupies the upper part of the Viewer.
+    WipeHorizontal { position: f32 },
+    /// Fixed side-by-side split at the Viewer center.
+    SplitVertical,
+    /// Fixed top/bottom split at the Viewer center.
+    SplitHorizontal,
+}
+
+impl GalleryComparisonLayout {
+    pub fn validate(self) -> bool {
+        match self {
+            Self::WipeVertical { position } | Self::WipeHorizontal { position } => {
+                position.is_finite() && (0.0..=1.0).contains(&position)
+            }
+            Self::SplitVertical | Self::SplitHorizontal => true,
+        }
+    }
+}
+
+/// Select or clear one Viewer Gallery comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GallerySetComparisonPayload {
+    pub still_id: Option<GalleryStillId>,
+    pub layout: GalleryComparisonLayout,
+}
+
+/// Create one deterministic Shot Match Grade Version from current target stats.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GalleryApplyShotMatchPayload {
+    pub still_id: GalleryStillId,
+    pub definition_id: GradeDefinitionId,
+    pub target_statistics: GalleryColorStatistics,
+    pub version_name: String,
+    pub activate: bool,
+}
+
 /// Explicit author policy when real endpoint handles cannot satisfy a visual
 /// Transition range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2197,6 +2335,7 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
             ProductAction::Grade(action) => self.allows_grade(action),
+            ProductAction::Gallery(action) => self.allows_gallery(action),
             ProductAction::VisualMask(action) => self.allows_visual_mask(action),
         }
     }
@@ -2644,6 +2783,44 @@ impl<'a> ProductActionAvailability<'a> {
                         && mondrian_effects::effect_definition(&payload.effect_type)
                             .is_some_and(|effect| effect.supports_visual_evaluation())
                 }),
+        }
+    }
+
+    fn allows_gallery(&self, action: &GalleryProductAction) -> bool {
+        let Some(session) = self.state.authoring.as_ref() else {
+            return false;
+        };
+        let document = session.document();
+        let still = |still_id| document.gallery.stills.iter().find(|still| still.id == still_id);
+        match action {
+            GalleryProductAction::CaptureStill(payload) => {
+                document.gallery.stills.len() < mondrian_core::MAX_GALLERY_STILLS
+                    && self.state.active_sequence().is_some()
+                    && !payload.name.trim().is_empty()
+                    && payload.raster.validate().is_ok()
+                    && payload.statistics.validate().is_ok()
+            }
+            GalleryProductAction::RenameStill(payload) => {
+                still(payload.still_id).is_some_and(|still| {
+                    !payload.name.trim().is_empty() && still.name != payload.name.trim()
+                })
+            }
+            GalleryProductAction::RemoveStill(payload) => still(payload.still_id).is_some(),
+            GalleryProductAction::SetComparison(payload) => {
+                payload.layout.validate()
+                    && payload.still_id.is_none_or(|still_id| still(still_id).is_some())
+            }
+            GalleryProductAction::ApplyShotMatch(payload) => {
+                still(payload.still_id).is_some()
+                    && !payload.version_name.trim().is_empty()
+                    && payload.target_statistics.validate().is_ok()
+                    && self.state.active_sequence().is_some_and(|sequence| {
+                        sequence.grade_definition(payload.definition_id).is_some_and(|definition| {
+                            definition.versions.len() < mondrian_core::MAX_GRADE_VERSIONS
+                                && definition.active().is_some()
+                        })
+                    })
+            }
         }
     }
 

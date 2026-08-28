@@ -649,6 +649,7 @@ impl AppState {
         // directory out from under a live Session.
         library_generation.commit();
         self.authoring = Some(session);
+        self.gallery_comparison = None;
         self.audio_monitoring.reset();
         self.synchronize_audio_idle_warmup_binding();
         self.project_runtime_lease = Some(runtime_lease);
@@ -1319,6 +1320,7 @@ impl AppState {
         self.retain_current_project_library_generation();
         self.clear_timeline_targeting();
         self.authoring = Some(session);
+        self.gallery_comparison = None;
         self.audio_monitoring.reset();
         self.synchronize_audio_idle_warmup_binding();
         self.project_runtime_lease = Some(runtime_lease);

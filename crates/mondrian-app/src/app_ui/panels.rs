@@ -65,8 +65,8 @@ use mondrian_timeline::{
     AudioComponentMutation, EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
 };
 use mondrian_ui_core::types::SplitDirection;
-use mondrian_ui_core::DragPayload;
 use mondrian_ui_core::Widget;
+use mondrian_ui_core::{DragPayload, RasterImageColorSpace};
 use mondrian_ui_theme::current_theme;
 use mondrian_ui_widgets::dock_splitter::DockSplitter;
 use mondrian_ui_widgets::dock_tab_bar::TabInfo;
@@ -83,9 +83,10 @@ use mondrian_ui_widgets::{
     TimelineSeekSource as WidgetTimelineSeekSource, TimelineToolbarIconSlot, TimelineTrack,
     TimelineTrackControl, TimelineTrackControlIconSlot, TimelineTrackMove, TimelineTrackRef,
     TimelineTransition, TimelineTransitionRef, TimelineTransitionResize, TimelineTrimEdge,
-    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground, ViewerControl,
-    ViewerFrameContent, ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
-    ViewerStatusTone, ViewerSurface, WaveformDisplay,
+    TimelineView, VideoScopesSurface, VideoScopesTextureSet, ViewerCanvasBackground,
+    ViewerComparisonLayout, ViewerComparisonReference, ViewerControl, ViewerFrameContent,
+    ViewerPowerWindow, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerStatusTone,
+    ViewerSurface, WaveformDisplay,
 };
 
 use crate::app::exporting::{builtin_export_presets, export_preset_extension};
@@ -716,6 +717,8 @@ pub struct ViewerPanelModel {
     pub preview_waiting: bool,
     pub enabled: bool,
     pub frame_content: Option<ViewerFrameContent>,
+    /// Frozen Project Gallery reference painted over the current frame.
+    pub comparison_reference: Option<ViewerComparisonReference>,
     pub canvas_background: ViewerCanvasBackground,
     /// Whether the exact current presentation is a texture-free transparent canvas.
     pub transparent_canvas: bool,
@@ -868,6 +871,30 @@ impl ViewerPanelModel {
             | ViewerPreviewState::StaleTransparent
             | ViewerPreviewState::Loading => None,
         });
+        let comparison_reference = state.gallery_comparison().and_then(|comparison| {
+            let layout = match comparison.layout {
+                crate::app::product_action::GalleryComparisonLayout::WipeVertical { position } => {
+                    ViewerComparisonLayout::WipeVertical { position }
+                }
+                crate::app::product_action::GalleryComparisonLayout::WipeHorizontal {
+                    position,
+                } => ViewerComparisonLayout::WipeHorizontal { position },
+                crate::app::product_action::GalleryComparisonLayout::SplitVertical => {
+                    ViewerComparisonLayout::SplitVertical
+                }
+                crate::app::product_action::GalleryComparisonLayout::SplitHorizontal => {
+                    ViewerComparisonLayout::SplitHorizontal
+                }
+            };
+            RasterImage::new(
+                format!("gallery.still:{}", comparison.still_id),
+                comparison.width,
+                comparison.height,
+                RasterImageColorSpace::Srgb,
+                std::sync::Arc::clone(&comparison.rgba),
+            )
+            .map(|frame| ViewerComparisonReference { frame, layout })
+        });
         let transparent_canvas = matches!(
             preview_state,
             Some(ViewerPreviewState::Transparent | ViewerPreviewState::StaleTransparent)
@@ -922,6 +949,7 @@ impl ViewerPanelModel {
             preview_waiting,
             enabled: true,
             frame_content,
+            comparison_reference,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas,
             empty_message: if let Some(rejection) =
@@ -966,6 +994,7 @@ impl ViewerPanelModel {
             preview_waiting: false,
             enabled: false,
             frame_content: None,
+            comparison_reference: None,
             canvas_background: ViewerCanvasBackground::default(),
             transparent_canvas: false,
             empty_message: Some("未载入序列".into()),
@@ -2833,6 +2862,10 @@ fn viewer_panel(model: &ViewerPanelModel) -> ViewerSurface {
     };
     let surface = match model.frame_content.clone() {
         Some(frame_content) => surface.with_frame_content(frame_content),
+        None => surface,
+    };
+    let surface = match model.comparison_reference.clone() {
+        Some(reference) => surface.with_comparison_reference(reference),
         None => surface,
     };
     if let Some(window) = model.power_window.clone() {

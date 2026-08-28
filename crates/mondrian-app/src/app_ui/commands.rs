@@ -11,9 +11,10 @@ use mondrian_ui_core::shortcut::ShortcutBinding;
 use mondrian_ui_core::types::{KeyCode, Modifiers};
 
 use crate::app::ui_actions::{
-    app_shell_about_action, app_shell_import_media_dialog_action,
-    app_shell_new_project_dialog_action, app_shell_open_project_dialog_action,
-    app_shell_preferences_action, app_shell_project_settings_action, app_shell_quit_action,
+    app_shell_about_action, app_shell_gallery_capture_current_action,
+    app_shell_import_media_dialog_action, app_shell_new_project_dialog_action,
+    app_shell_open_project_dialog_action, app_shell_preferences_action,
+    app_shell_project_settings_action, app_shell_quit_action,
     app_shell_save_project_as_dialog_action, timeline_create_basic_title_action,
 };
 
@@ -223,6 +224,14 @@ pub fn default_commands() -> Vec<AppUiCommandDescriptor> {
             AppUiCommandCategory::View,
             Some(ShortcutBinding::new(KeyCode::F11, Modifiers::none())),
             action_toggle_fullscreen,
+        ),
+        command(
+            "viewer.capture_gallery_still",
+            "捕获 Gallery Still",
+            "捕获 Gallery Still",
+            AppUiCommandCategory::View,
+            None,
+            action_capture_gallery_still,
         ),
         command(
             "timeline.split_at_playhead",
@@ -513,6 +522,9 @@ fn action_preferences() -> Action {
 }
 fn action_toggle_fullscreen() -> Action {
     Action::ToggleFullscreen
+}
+fn action_capture_gallery_still() -> Action {
+    app_shell_gallery_capture_current_action()
 }
 fn action_split_at_playhead() -> Action {
     Action::SplitClipAtPlayhead

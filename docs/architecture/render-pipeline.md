@@ -1003,6 +1003,16 @@ Bare RGBA8 buffers are valid only at source import, debug/golden snapshot, UI
 presentation readback, and CPU encoder boundaries. They are not a renderer-stage
 exchange format.
 
+Shot Match analysis is a renderer-owned read-only operation over that exact
+straight-alpha Float32 working frame. It ignores transparent and non-finite
+pixels, selects at most 262,144 samples with a deterministic regular stride,
+and derives per-channel 5/50/95 percentiles. The bounded sample vectors are
+sorted once (`O(n log n)` under the fixed cap); analysis allocates no
+resolution-sized duplicate frame and performs no OCIO, Program Output, monitor,
+or encoded-raster round trip. The renderer also owns the versioned affine
+Gain/Offset solver, while Core persists only its statistics/evidence contract
+and App owns the author transaction that creates a new Grade Version.
+
 Program and nested-sequence working canvases use transparent black as their
 initial value and retain straight coverage alpha through CPU and GPU
 compositing. Viewer background/checkerboard treatment is presentation-only and

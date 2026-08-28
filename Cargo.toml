@@ -160,6 +160,7 @@ ocio-rs          = { git = "https://github.com/shaloong/ocio-rs.git", rev = "933
 
 # ---- 图像 ----
 image            = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64           = "0.22"
 zip              = "0.6"
 zstd             = "0.11"
 

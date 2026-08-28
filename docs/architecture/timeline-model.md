@@ -304,7 +304,7 @@ Sequence commands retain typed before/after `AuthoringSnapshot<Sequence>`
 endpoints; structural Project commands retain typed
 `AuthoringSnapshot<ProjectRestorePoint>` endpoints. A Project restore point
 contains Project identity and Project-owned authored fields, canonical Sequence
-order/default and the structural active fallback, plus exact body-or-absence
+order/default, the structurally shared Project Gallery, and the structural active fallback, plus exact body-or-absence
 state only for affected Sequence identities. It deliberately excludes
 `document_revision` and `ProjectMeta.updated_at`; JSON serialization is neither
 the endpoint representation nor the restoration path.

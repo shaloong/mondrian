@@ -93,8 +93,9 @@ pub use timeline_view::{
 pub use vector_icon::{VectorIcon, VectorIconError};
 pub use video_scopes_surface::{VideoScopesSurface, VideoScopesTextureSet};
 pub use viewer_surface::{
-    ViewerCanvasBackground, ViewerControl, ViewerControlAction, ViewerExternalTextureFrame,
-    ViewerExternalTexturePresentation, ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow,
-    ViewerPowerWindowAction, ViewerPowerWindowBezierPoint, ViewerPowerWindowShape,
-    ViewerPresentationGeometry, ViewerStatusTone, ViewerSurface,
+    ViewerCanvasBackground, ViewerComparisonLayout, ViewerComparisonReference, ViewerControl,
+    ViewerControlAction, ViewerExternalTextureFrame, ViewerExternalTexturePresentation,
+    ViewerFrameContent, ViewerFrameImage, ViewerPowerWindow, ViewerPowerWindowAction,
+    ViewerPowerWindowBezierPoint, ViewerPowerWindowShape, ViewerPresentationGeometry,
+    ViewerStatusTone, ViewerSurface,
 };
