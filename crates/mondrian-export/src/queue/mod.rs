@@ -33,10 +33,10 @@ use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef
 use mondrian_core::types::ColorEngine;
 use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
-    AudioChannelLayout, AudioSamplePosition, AudioSampleRate, AudioSampleRounding,
-    AudioSourceComponentId, ExecutionCancellationToken, FrameRounding, Resolution,
-    ResolvedPictureGeometry, SequenceId, TimelineTime, TimelineTimeRange, WorkingColorSpace,
-    WorkingRgbaF32Frame,
+    legalize_encoded_rgba_f32, AudioChannelLayout, AudioSamplePosition, AudioSampleRate,
+    AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
+    Resolution, ResolvedPictureGeometry, SequenceId, SignalComplianceContract, SignalLegalizer,
+    TimelineTime, TimelineTimeRange, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
@@ -355,6 +355,7 @@ impl ExportGpuExecutionRuntime {
         frame: &CpuColorFrame,
         boundary: &RenderOutputColorBoundary,
         frame_contract: ExportFrameContract,
+        legalizer: SignalLegalizer,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputExecutionError> {
         #[cfg(test)]
@@ -370,6 +371,7 @@ impl ExportGpuExecutionRuntime {
                     frame,
                     boundary,
                     frame_contract,
+                    legalizer,
                     self.active_output_grant,
                     cancellation,
                 );
@@ -549,6 +551,7 @@ fn execute_export_gpu_output_boundary_with_backend(
     frame: &CpuColorFrame,
     boundary: &RenderOutputColorBoundary,
     frame_contract: ExportFrameContract,
+    legalizer: SignalLegalizer,
     active_grant: RenderGpuOutputExecutionResourceGrant,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputExecutionError> {
@@ -560,12 +563,19 @@ fn execute_export_gpu_output_boundary_with_backend(
             label: Some("mondrian-export-gpu-output-boundary"),
         });
 
+    let boundary_texture_format = if legalizer.is_active()
+        && matches!(frame_contract, ExportFrameContract::EncodedRgba8Unorm)
+    {
+        GpuColorFrameTextureFormat::Rgba16Float
+    } else {
+        frame_contract.gpu_boundary_texture_format()
+    };
     let record = backend
         .runtime
         .record_wgpu_output_boundary_owned_backend_with_grant(
             boundary,
             frame,
-            frame_contract.gpu_boundary_texture_format(),
+            boundary_texture_format,
             RenderColorTransformGpuOptions {
                 output_residency: ColorFrameResidency::Cpu,
                 ..RenderColorTransformGpuOptions::default()
@@ -593,7 +603,7 @@ fn execute_export_gpu_output_boundary_with_backend(
     let readback_buffer = record.readback_buffer.ok_or(ExportGpuOutputExecutionError::Fallback(
         ExportGpuOutputFallbackReason::MissingReadbackBuffer,
     ))?;
-    let readback_plan = match frame_contract.gpu_boundary_texture_format() {
+    let readback_plan = match boundary_texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
@@ -617,7 +627,7 @@ fn execute_export_gpu_output_boundary_with_backend(
         cancellation,
         deadline,
     )?;
-    let pipe_bytes = match frame_contract.gpu_boundary_texture_format() {
+    let pipe_bytes = match boundary_texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
             let actual = readback_plan
                 .unpack_mapped_rgba8(&mapped)
@@ -625,15 +635,37 @@ fn execute_export_gpu_output_boundary_with_backend(
             frame_contract.pack_rgba8(actual.rgba())?
         }
         GpuColorFrameTextureFormat::Rgba16Float => {
-            let f32_data = readback_plan
+            let mut f32_data = readback_plan
                 .unpack_mapped_rgba16float(&mapped)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            if legalizer.is_active() {
+                let compliance =
+                    SignalComplianceContract::normalized_rgb(boundary.output_color_space)
+                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+                legalize_encoded_rgba_f32(
+                    bytemuck::cast_slice_mut(&mut f32_data),
+                    compliance,
+                    legalizer,
+                )
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            }
             frame_contract.pack_rgba_f32(&f32_data)?
         }
         GpuColorFrameTextureFormat::Rgba32Float => {
-            let f32_data = readback_plan
+            let mut f32_data = readback_plan
                 .unpack_mapped_rgba32float(&mapped)
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            if legalizer.is_active() {
+                let compliance =
+                    SignalComplianceContract::normalized_rgb(boundary.output_color_space)
+                        .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
+                legalize_encoded_rgba_f32(
+                    bytemuck::cast_slice_mut(&mut f32_data),
+                    compliance,
+                    legalizer,
+                )
+                .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
+            }
             frame_contract.pack_rgba_f32(&f32_data)?
         }
     };
@@ -3497,6 +3529,22 @@ struct ExportRenderInitialDiagnostics {
     audio_analysis: Option<AudioLoudnessReport>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ExportDeliveryPixelContract {
+    frame: ExportFrameContract,
+    legalizer: SignalLegalizer,
+}
+
+impl ExportDeliveryPixelContract {
+    const fn new(frame: ExportFrameContract, legalizer: SignalLegalizer) -> Self {
+        Self { frame, legalizer }
+    }
+
+    const fn unmodified(frame: ExportFrameContract) -> Self {
+        Self::new(frame, SignalLegalizer::Off)
+    }
+}
+
 fn render_timeline_frames_with_sink(
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
@@ -3544,7 +3592,7 @@ fn render_timeline_frames_with_sink(
             height,
             alpha_mode,
             root_color_context.clone(),
-            frame_contract,
+            ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
             &mut canvas,
             Some(&mut frame_color_counts),
             Some(&mut frame_stage_diagnostics),
@@ -3655,7 +3703,7 @@ fn render_timeline_frame_into(
         height,
         alpha_mode,
         color_context,
-        frame_contract,
+        ExportDeliveryPixelContract::unmodified(frame_contract),
         canvas,
         input_color_counts,
         stage_diagnostics,
@@ -3672,7 +3720,7 @@ fn render_timeline_frame_into_with_session(
     height: u32,
     alpha_mode: ExportAlphaMode,
     color_context: ProgramColorContext,
-    frame_contract: ExportFrameContract,
+    delivery_pixels: ExportDeliveryPixelContract,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -3687,7 +3735,7 @@ fn render_timeline_frame_into_with_session(
         height,
         alpha_mode,
         color_context,
-        frame_contract,
+        delivery_pixels,
         canvas,
         input_color_counts,
         stage_diagnostics,
@@ -3706,7 +3754,7 @@ fn render_timeline_frame_into_with_session_cancellable(
     height: u32,
     alpha_mode: ExportAlphaMode,
     color_context: ProgramColorContext,
-    frame_contract: ExportFrameContract,
+    delivery_pixels: ExportDeliveryPixelContract,
     canvas: &mut Vec<u8>,
     input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
@@ -3715,7 +3763,7 @@ fn render_timeline_frame_into_with_session_cancellable(
     visual_session: &mut ExportVisualRenderSession,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<(), String> {
-    let required_len = frame_contract.canvas_len(width, height);
+    let required_len = delivery_pixels.frame.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
     }
@@ -3724,7 +3772,7 @@ fn render_timeline_frame_into_with_session_cancellable(
         media: &timeline.media,
         color_environment: &timeline.color_environment,
         alpha_mode,
-        frame_contract,
+        delivery_pixels,
         input_color_counts,
         stage_diagnostics,
         composite_diagnostics,
@@ -4037,7 +4085,7 @@ struct ExportFrameRenderContext<'a> {
     media: &'a HashMap<AssetId, crate::preset::ExportMediaDependency>,
     color_environment: &'a mondrian_core::ProjectColorEnvironment,
     alpha_mode: ExportAlphaMode,
-    frame_contract: ExportFrameContract,
+    delivery_pixels: ExportDeliveryPixelContract,
     input_color_counts: Option<&'a mut InputColorResolutionSourceCounts>,
     stage_diagnostics: Option<&'a mut RenderColorStageDiagnostics>,
     composite_diagnostics: Option<&'a mut TimelineCompositeDiagnostics>,
@@ -4457,7 +4505,7 @@ fn render_prepared_visual_node_into(
     let Resolution { width, height } = resolution;
     let media_dependencies = context.media;
 
-    let frame_contract = context.frame_contract;
+    let frame_contract = context.delivery_pixels.frame;
     if let SequenceRenderTarget::Deliverable(canvas) = &mut target {
         let required_len = frame_contract.canvas_len(width, height);
         if canvas.len() != required_len {
@@ -4912,6 +4960,7 @@ fn render_prepared_visual_node_into(
         &rendered.frame,
         &boundary,
         frame_contract,
+        context.delivery_pixels.legalizer,
         context.cancellation,
     ) {
         Ok(attempt) => Some(attempt),
@@ -4945,7 +4994,9 @@ fn render_prepared_visual_node_into(
             attempt.pipe_bytes
         }
         None => {
-            if frame_contract.requires_float_output_boundary() {
+            if frame_contract.requires_float_output_boundary()
+                || context.delivery_pixels.legalizer.is_active()
+            {
                 match cpu_output_boundary_float(
                     &rendered.frame,
                     &boundary,
@@ -4955,8 +5006,22 @@ fn render_prepared_visual_node_into(
                         if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
                             diagnostics.accumulate(float_result.stage_diagnostics);
                         }
-                        let flat: &[f32] =
-                            bytemuck::cast_slice(&float_result.frame.rgba_f32().data);
+                        let mut encoded = float_result.frame.into_rgba_f32();
+                        if context.delivery_pixels.legalizer.is_active() {
+                            let compliance = SignalComplianceContract::normalized_rgb(
+                                boundary.output_color_space,
+                            )
+                            .map_err(|error| {
+                                format!("export legalizer contract failed: {error}")
+                            })?;
+                            legalize_encoded_rgba_f32(
+                                &mut encoded.data,
+                                compliance,
+                                context.delivery_pixels.legalizer,
+                            )
+                            .map_err(|error| format!("export legalizer failed: {error}"))?;
+                        }
+                        let flat: &[f32] = bytemuck::cast_slice(&encoded.data);
                         frame_contract
                             .pack_rgba_f32(flat)
                             .map_err(|error| format!("export CPU float output cannot enter the declared FFmpeg pipe: {error}"))?
@@ -7490,6 +7555,7 @@ mod tests {
                 tone_map: true,
                 output_transform: mondrian_core::OutputTransformIntent::mondrian_standard(),
             },
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -9216,7 +9282,9 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::FlattenBlack,
-            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                ExportFrameContract::EncodedRgba8Unorm,
+            ),
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -9290,7 +9358,9 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                ExportFrameContract::EncodedRgba8Unorm,
+            ),
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -9360,7 +9430,9 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                ExportFrameContract::EncodedRgba8Unorm,
+            ),
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: Some(&mut composite_diagnostics),
@@ -9442,7 +9514,9 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                ExportFrameContract::EncodedRgba8Unorm,
+            ),
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -9501,7 +9575,9 @@ mod tests {
             media: &timeline.media,
             color_environment: &timeline.color_environment,
             alpha_mode: ExportAlphaMode::Preserve,
-            frame_contract: ExportFrameContract::EncodedRgba8Unorm,
+            delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                ExportFrameContract::EncodedRgba8Unorm,
+            ),
             input_color_counts: None,
             stage_diagnostics: None,
             composite_diagnostics: None,
@@ -11073,7 +11149,7 @@ mod tests {
             16,
             ExportAlphaMode::FlattenBlack,
             color_context,
-            ExportFrameContract::EncodedRgba8Unorm,
+            ExportDeliveryPixelContract::unmodified(ExportFrameContract::EncodedRgba8Unorm),
             &mut canvas,
             None,
             None,

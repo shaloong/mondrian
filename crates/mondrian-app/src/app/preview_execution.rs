@@ -215,6 +215,31 @@ impl PreviewOutputKey {
         )
     }
 
+    /// Derive the final Viewer presentation identity for active signal warnings.
+    ///
+    /// Disabled monitoring preserves the existing identity, while the tap and
+    /// complete warning settings distinguish every presentation-only raster.
+    pub(crate) fn with_signal_monitoring(
+        &self,
+        tap: mondrian_core::ProgramScopesTap,
+        settings: mondrian_core::SignalMonitoringSettings,
+    ) -> Self {
+        if !settings.is_active() {
+            return self.clone();
+        }
+        let mut builder =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.signal-monitoring.v1");
+        self.plan_identity.hash(&mut builder);
+        tap.hash(&mut builder);
+        settings.hash(&mut builder);
+        Self::new(
+            self.sequence_id,
+            self.width,
+            self.height,
+            builder.finish_identity(),
+        )
+    }
+
     /// Bind a semantic plan identity to one concrete non-reusable execution.
     pub(crate) fn with_execution_nonce(&self, candidate_id: u64) -> Self {
         let mut builder =
@@ -1118,6 +1143,33 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_signal_monitoring_is_part_of_final_presentation_identity_only() {
+        let base = PreviewOutputKey::new(
+            SequenceId::new(),
+            1920,
+            1080,
+            PreviewSemanticIdentity::from_test_fingerprint([7; 32]),
+        );
+        assert_eq!(
+            base.with_signal_monitoring(
+                mondrian_core::ProgramScopesTap::MonitorOutput,
+                mondrian_core::SignalMonitoringSettings::default(),
+            ),
+            base
+        );
+        let active =
+            mondrian_core::SignalMonitoringSettings { false_color: true, ..Default::default() };
+        assert_ne!(
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::ProgramOutput, active),
+            base
+        );
+        assert_ne!(
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::ProgramOutput, active),
+            base.with_signal_monitoring(mondrian_core::ProgramScopesTap::MonitorOutput, active)
+        );
+    }
 
     #[test]
     fn generation_output_and_candidate_lifecycle_stay_atomic() {

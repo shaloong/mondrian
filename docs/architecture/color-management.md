@@ -448,6 +448,23 @@ reference contract exists. No edge can select another engine, and forcing the
 parent working space never replaces the child's media-input interpretation
 policy.
 
+Signal compliance has one Core-owned contract over normalized display-encoded
+RGB. Viewer false color, zebra, and gamut alarm are machine-local,
+non-destructive consumers of that contract: they classify either retained
+Program Output or pre-ICC Monitor Output while coloring only the
+monitor-adapted presentation. They preserve Alpha and use the fixed priority
+gamut alarm over zebra over false color. These controls never enter Project,
+Sequence, grade, or render-cache identity.
+
+Export legalization is a separate destructive delivery decision. The
+materialized `ExportPreset` freezes `SignalLegalizer::Off` or `ClampRgb`; an
+active policy requires a standardized display signal, executes only on the root
+deliverable after the output transform and before the one integer/YUV
+quantization, and preserves Alpha. Nested/working frames are never legalized.
+`VideoRange::Legal` instead selects the encoder's code-value mapping and does
+not clip RGB excursions. Active legalization disables Smart Render because a
+packet remux cannot prove the requested pixel modification.
+
 `DisplayToneMapPolicy` controls the final working-to-Program-Output boundary.
 Its `Automatic` mode follows the effective workflow; the per-sequence
 `color.input.auto_tone_map_media` preference is copied onto each media render

@@ -13,6 +13,7 @@ use crate::preset::{
 };
 use mondrian_core::{
     AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
+    SignalComplianceContract, SignalLegalizer,
 };
 use mondrian_timeline::sequence::{
     DeliveryBitDepth, SequenceSettings, StaticHdrMetadataPolicy, VideoRange,
@@ -132,6 +133,8 @@ pub struct ResolvedExportDeliveryContract {
     pub pixel_format: &'static str,
     /// Exact creative color target, independent from signal representation.
     pub color_target: ResolvedExportColorTarget,
+    /// Exact delivery legalization frozen with the admitted export.
+    pub legalizer: SignalLegalizer,
 }
 
 /// Resolve and validate one preset against complete Sequence output intent.
@@ -220,6 +223,20 @@ pub fn resolve_export_delivery(
         validate_dimensions(resolution, chroma_sampling)?;
     }
     let color_target = resolve_export_color_target(preset, settings, color_environment)?;
+    if preset.legalizer.is_active() {
+        if matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
+            return Err(ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleColorOutput,
+                "audio-only export cannot apply a video-signal legalizer",
+            ));
+        }
+        SignalComplianceContract::normalized_rgb(color_target.color_space).map_err(|error| {
+            ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleColorOutput,
+                format!("delivery legalizer requires a standardized display signal: {error}"),
+            )
+        })?;
+    }
     validate_color_output(
         preset,
         settings,
@@ -247,6 +264,7 @@ pub fn resolve_export_delivery(
         chroma_sampling,
         pixel_format,
         color_target,
+        legalizer: preset.legalizer,
     })
 }
 
@@ -891,6 +909,7 @@ mod tests {
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: crate::preset::ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         };
 
         let contract =
@@ -900,6 +919,32 @@ mod tests {
         assert_eq!(contract.video_range, VideoRange::Full);
         assert_eq!(contract.frame_rate, settings.frame_rate);
         assert_eq!(contract.frame_sampling, ExportFrameSampling::FrameHold);
+    }
+
+    #[test]
+    fn delivery_freezes_explicit_legalizer_and_rejects_audio_only_use() {
+        let settings = SequenceSettings::default();
+        let environment = ProjectColorEnvironment::default();
+        let mut video = ExportPreset::h264_aac_sdr_1080p();
+        video.legalizer = SignalLegalizer::ClampRgb;
+        let resolved = resolve_export_delivery(&video, &settings, &environment)
+            .expect("display delivery legalizer");
+        assert_eq!(resolved.legalizer, SignalLegalizer::ClampRgb);
+
+        let mut audio = ExportPreset::audio_stems_pcm24();
+        audio.legalizer = SignalLegalizer::ClampRgb;
+        let error = resolve_export_delivery(&audio, &settings, &environment)
+            .expect_err("audio-only output has no video signal to legalize");
+        assert_eq!(error.code, ExportDeliveryIssueCode::IncompatibleColorOutput);
+    }
+
+    #[test]
+    fn legacy_preset_without_legalizer_defaults_to_off() {
+        let mut value =
+            serde_json::to_value(ExportPreset::h264_aac_sdr_1080p()).expect("serialize preset");
+        value.as_object_mut().expect("preset object").remove("legalizer");
+        let decoded: ExportPreset = serde_json::from_value(value).expect("legacy preset");
+        assert_eq!(decoded.legalizer, SignalLegalizer::Off);
     }
 
     #[test]

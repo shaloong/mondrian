@@ -3,7 +3,7 @@
 use mondrian_core::timeline_data::AssetMediaInterpretation;
 use mondrian_core::types::{AssetId, ColorSpace};
 use mondrian_core::{
-    AudioSourceComponentId, FramePosition, FrameRounding, Rational, TimelineTime,
+    AudioSourceComponentId, FramePosition, FrameRounding, Rational, SignalLegalizer, TimelineTime,
     TimelineTimeError, TimelineTimeRange,
 };
 use mondrian_media::{
@@ -358,6 +358,9 @@ pub struct ExportPreset {
     /// Explicit creative color target, independent from encoded signal layout.
     #[serde(default)]
     pub color_target: ExportColorTarget,
+    /// Explicit delivery legalization after the output transform and before quantization.
+    #[serde(default)]
+    pub legalizer: SignalLegalizer,
 }
 
 impl ExportPreset {
@@ -435,6 +438,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -461,6 +465,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -486,6 +491,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -511,6 +517,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Rec709),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -534,6 +541,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::Preserve,
             color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -552,6 +560,7 @@ impl ExportPreset {
             ),
             alpha_mode: ExportAlphaMode::Preserve,
             color_target: ExportColorTarget::RenderingView(ColorSpace::Srgb),
+            legalizer: SignalLegalizer::Off,
         }
     }
 
@@ -566,6 +575,7 @@ impl ExportPreset {
             video_signal: ExportVideoSignal::default(),
             alpha_mode: ExportAlphaMode::FlattenBlack,
             color_target: ExportColorTarget::FollowSequence,
+            legalizer: SignalLegalizer::Off,
         }
     }
 }

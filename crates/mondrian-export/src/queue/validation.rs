@@ -67,7 +67,9 @@ pub fn export_visual_frame_validation(
         media: &timeline.media,
         color_environment: &timeline.color_environment,
         alpha_mode: ExportAlphaMode::Preserve,
-        frame_contract: export_frame_contract(timeline.sequence.settings.delivery.bit_depth),
+        delivery_pixels: ExportDeliveryPixelContract::unmodified(export_frame_contract(
+            timeline.sequence.settings.delivery.bit_depth,
+        )),
         input_color_counts: None,
         stage_diagnostics: None,
         composite_diagnostics: None,

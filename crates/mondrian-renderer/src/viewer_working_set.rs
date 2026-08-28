@@ -85,6 +85,8 @@ pub enum ViewerGpuActiveWorkingSetStage {
     ProgramScopes,
     /// Preview-only Program Output to local-monitor adaptation.
     MonitorAdaptation,
+    /// Fused false-color/zebra/gamut warning output.
+    SignalMonitoring,
     /// Display-calibration output and 3D LUT.
     DisplayCalibration,
     /// Outputs detached into live presentation leases from earlier candidates.
@@ -125,6 +127,8 @@ pub struct ViewerGpuActiveWorkingSetEstimate {
     pub program_scopes: ViewerGpuActiveTextureDemand,
     /// Preview-only monitor-adaptation texture.
     pub monitor_adaptation: ViewerGpuActiveTextureDemand,
+    /// Optional fused monitoring output texture.
+    pub signal_monitoring: ViewerGpuActiveTextureDemand,
     /// Display-calibration output and 3D LUT.
     pub display_calibration: ViewerGpuActiveTextureDemand,
     /// Exact final texture that becomes the move-only presentation lease.
@@ -461,6 +465,19 @@ pub fn estimate_viewer_gpu_active_working_set(
             request.output_height,
             8,
             ViewerGpuActiveWorkingSetStage::MonitorAdaptation,
+        )?;
+    }
+    if request.signal_monitoring.is_some() {
+        let format = if request.monitor_adaptation.requires_pass() {
+            GpuColorFrameTextureFormat::Rgba16Float
+        } else {
+            program_output_texture_format(request)
+        };
+        estimate.signal_monitoring = ViewerGpuActiveTextureDemand::checked_texture(
+            request.output_width,
+            request.output_height,
+            u64::from(format.bytes_per_pixel()),
+            ViewerGpuActiveWorkingSetStage::SignalMonitoring,
         )?;
     }
     estimate.display_calibration = estimate_display_calibration(request)?;
@@ -889,7 +906,7 @@ fn estimate_display_calibration(
 fn program_output_texture_format(
     request: &ViewerGpuExecutionRequest<'_>,
 ) -> GpuColorFrameTextureFormat {
-    if request.monitor_adaptation.requires_pass() {
+    if request.monitor_adaptation.requires_pass() || request.signal_monitoring.is_some() {
         GpuColorFrameTextureFormat::Rgba16Float
     } else {
         match request.output_precision {
@@ -904,19 +921,22 @@ fn program_output_texture_format(
 fn estimate_presentation_output(
     request: &ViewerGpuExecutionRequest<'_>,
 ) -> Result<ViewerGpuActiveTextureDemand, ViewerGpuActiveWorkingSetEstimateError> {
-    let texture_format =
-        if request.display_calibration.is_some() || request.monitor_adaptation.requires_pass() {
-            // The calibrated output and the monitor-adaptation output both
-            // become RGBA16F presentation leases.
-            GpuColorFrameTextureFormat::Rgba16Float
-        } else {
-            match request.output_precision {
-                crate::ViewerGpuOutputPrecision::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
-                crate::ViewerGpuOutputPrecision::EncodedFloat16 => {
-                    GpuColorFrameTextureFormat::Rgba16Float
-                }
+    let texture_format = if request.display_calibration.is_some()
+        || request.monitor_adaptation.requires_pass()
+        || request.signal_monitoring.is_some()
+    {
+        // The calibrated output and the monitor-adaptation output both
+        // become RGBA16F presentation leases. Signal monitoring likewise
+        // preserves encoded excursions until its classification pass.
+        GpuColorFrameTextureFormat::Rgba16Float
+    } else {
+        match request.output_precision {
+            crate::ViewerGpuOutputPrecision::Encoded8 => GpuColorFrameTextureFormat::Rgba8Unorm,
+            crate::ViewerGpuOutputPrecision::EncodedFloat16 => {
+                GpuColorFrameTextureFormat::Rgba16Float
             }
-        };
+        }
+    };
     ViewerGpuActiveTextureDemand::checked_texture(
         request.output_width,
         request.output_height,
@@ -938,6 +958,7 @@ fn total_estimate(
         estimate.program_output,
         estimate.program_scopes,
         estimate.monitor_adaptation,
+        estimate.signal_monitoring,
         estimate.display_calibration,
         estimate.detached_presentations,
         estimate.presentation_continuity_reserve,
@@ -1041,8 +1062,8 @@ fn native_surface_texture_bytes(
 mod tests {
     use super::*;
     use crate::{
-        CpuColorFrame, RenderMonitorAdaptation, RenderOutputColorBoundary, TimelineSolidColorLayer,
-        ViewerGpuOutputPrecision,
+        CpuColorFrame, GpuSignalMonitorRequest, RenderMonitorAdaptation, RenderOutputColorBoundary,
+        TimelineSolidColorLayer, ViewerGpuOutputPrecision,
     };
     use mondrian_core::display_calibration::{DisplayCalibrationLut3d, IccProfileFingerprint};
     use mondrian_core::{
@@ -1099,6 +1120,7 @@ mod tests {
             output_precision: ViewerGpuOutputPrecision::Encoded8,
             display_calibration: None,
             program_scopes: None,
+            signal_monitoring: None,
         })
     }
 
@@ -1319,6 +1341,7 @@ mod tests {
                     output_precision,
                     display_calibration,
                     program_scopes: None,
+                    signal_monitoring: None,
                 })
                 .expect("Viewer working-set estimate")
             };
@@ -1326,6 +1349,36 @@ mod tests {
         let encoded = estimate_for(&identity_monitor, ViewerGpuOutputPrecision::Encoded8, None);
         assert_eq!(encoded.presentation_output, encoded.program_output);
         assert_eq!(encoded.presentation_output.bytes, 4 * 4 * 4);
+
+        let signal_monitoring = GpuSignalMonitorRequest::new(
+            mondrian_core::SignalComplianceContract::normalized_rgb(ColorSpace::Rec709)
+                .expect("signal contract"),
+            mondrian_core::SignalMonitoringSettings { gamut_alarm: true, ..Default::default() },
+            mondrian_core::ProgramScopesTap::ProgramOutput,
+        )
+        .expect("active signal monitoring");
+        let monitored = estimate_viewer_gpu_active_working_set(&ViewerGpuExecutionRequest {
+            sequence_id: SequenceId::new(),
+            timeline_frame: 0,
+            width: 4,
+            height: 4,
+            working_color_space: WorkingColorSpace::LinearRec709,
+            layers: &[],
+            heterogeneous_inputs: Vec::new(),
+            program_output_boundary: &boundary,
+            monitor_adaptation: &identity_monitor,
+            source_rect: ViewerSourceRect::FULL,
+            output_width: 4,
+            output_height: 4,
+            output_precision: ViewerGpuOutputPrecision::Encoded8,
+            display_calibration: None,
+            program_scopes: None,
+            signal_monitoring: Some(signal_monitoring),
+        })
+        .expect("monitored Viewer working-set estimate");
+        assert_eq!(monitored.program_output.bytes, 4 * 4 * 8);
+        assert_eq!(monitored.signal_monitoring.bytes, 4 * 4 * 8);
+        assert_eq!(monitored.presentation_output, monitored.signal_monitoring);
 
         let adapted = estimate_for(&adapted_monitor, ViewerGpuOutputPrecision::Encoded8, None);
         assert_eq!(adapted.presentation_output, adapted.monitor_adaptation);

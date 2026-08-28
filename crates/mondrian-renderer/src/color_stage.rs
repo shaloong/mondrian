@@ -4420,6 +4420,93 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_session(
     adaptation: &crate::RenderMonitorAdaptation,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderProgramMonitorPresentationRgba8, RenderColorTransformError> {
+    let float = execute_cpu_program_monitor_presentation_float_with_session(
+        frame,
+        program_boundary,
+        adaptation,
+        session,
+    )?;
+    Ok(float.into_rgba8())
+}
+
+/// Execute CPU Viewer presentation with the same fused signal warnings as GPU Preview.
+pub fn execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_with_session(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+    tap: mondrian_core::ProgramScopesTap,
+    settings: mondrian_core::SignalMonitoringSettings,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderProgramMonitorPresentationRgba8, CpuSignalMonitoringError> {
+    let mut float = execute_cpu_program_monitor_presentation_float_with_session(
+        frame,
+        program_boundary,
+        adaptation,
+        session,
+    )?;
+    let signal_color_space = match tap {
+        mondrian_core::ProgramScopesTap::ProgramOutput => program_boundary.output_color_space,
+        mondrian_core::ProgramScopesTap::MonitorOutput => adaptation.monitor_color_space(),
+    };
+    let contract = mondrian_core::SignalComplianceContract::normalized_rgb(signal_color_space)?;
+    let width = float.monitor_frame.descriptor().width;
+    match tap {
+        mondrian_core::ProgramScopesTap::ProgramOutput => {
+            mondrian_core::apply_signal_monitoring_rgba_f32(
+                &float.program_frame.rgba_f32().data,
+                &mut float.monitor_frame.rgba_f32_mut().data,
+                width,
+                contract,
+                settings,
+            )?;
+        }
+        mondrian_core::ProgramScopesTap::MonitorOutput => {
+            let signal = float.monitor_frame.rgba_f32().data.clone();
+            mondrian_core::apply_signal_monitoring_rgba_f32(
+                &signal,
+                &mut float.monitor_frame.rgba_f32_mut().data,
+                width,
+                contract,
+                settings,
+            )?;
+        }
+    }
+    Ok(float.into_rgba8())
+}
+
+struct RenderProgramMonitorPresentationFloat {
+    program_color_diagnostics: crate::RenderColorTransformDiagnostics,
+    program_output_descriptor: ColorFrameDescriptor,
+    monitor_color_diagnostics: Option<crate::RenderColorTransformDiagnostics>,
+    stage_diagnostics: RenderColorStageDiagnostics,
+    program_frame: crate::CpuEncodedFloatColorFrame,
+    monitor_frame: crate::CpuEncodedFloatColorFrame,
+}
+
+impl RenderProgramMonitorPresentationFloat {
+    fn into_rgba8(self) -> RenderProgramMonitorPresentationRgba8 {
+        let rgba = quantize_encoded_float_frame_rgba8(&self.monitor_frame);
+        let descriptor = self.monitor_frame.descriptor();
+        RenderProgramMonitorPresentationRgba8 {
+            program_color_diagnostics: self.program_color_diagnostics,
+            program_output_descriptor: self.program_output_descriptor,
+            monitor_color_diagnostics: self.monitor_color_diagnostics,
+            stage_diagnostics: self.stage_diagnostics,
+            rgba,
+            output_descriptor: ColorFrameDescriptor {
+                encoding: ColorFrameEncoding::EncodedRgba8,
+                ..descriptor
+            },
+        }
+    }
+}
+
+fn execute_cpu_program_monitor_presentation_float_with_session(
+    frame: &CpuColorFrame,
+    program_boundary: &RenderOutputColorBoundary,
+    adaptation: &crate::RenderMonitorAdaptation,
+    session: &mut crate::RenderCpuColorExecutionSession,
+) -> Result<RenderProgramMonitorPresentationFloat, RenderColorTransformError> {
     validate_program_monitor_boundary(frame, program_boundary, adaptation)?;
 
     let RenderOutputColorBoundaryFloat {
@@ -4428,6 +4515,7 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_session(
         mut stage_diagnostics,
         output_descriptor: program_output_descriptor,
     } = execute_cpu_output_boundary_float_with_session(frame, program_boundary, session)?;
+    let program_frame_for_monitoring = program_frame.clone();
     let (monitor_frame, monitor_color_diagnostics) = if adaptation.requires_pass() {
         let result = crate::CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
             program_frame,
@@ -4444,20 +4532,25 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_session(
     } else {
         (program_frame, None)
     };
-    let rgba = quantize_encoded_float_frame_rgba8(&monitor_frame);
-    let descriptor = monitor_frame.descriptor();
-    let output_descriptor = ColorFrameDescriptor {
-        encoding: ColorFrameEncoding::EncodedRgba8,
-        ..descriptor
-    };
-    Ok(RenderProgramMonitorPresentationRgba8 {
+    Ok(RenderProgramMonitorPresentationFloat {
         program_color_diagnostics,
         program_output_descriptor,
         monitor_color_diagnostics,
         stage_diagnostics,
-        rgba,
-        output_descriptor,
+        program_frame: program_frame_for_monitoring,
+        monitor_frame,
     })
+}
+
+/// CPU Viewer warning failure without collapsing color and signal diagnostics.
+#[derive(Debug, thiserror::Error)]
+pub enum CpuSignalMonitoringError {
+    /// Program/Monitor color execution failed.
+    #[error(transparent)]
+    Color(#[from] RenderColorTransformError),
+    /// Shared signal classification rejected the request or raster.
+    #[error(transparent)]
+    Compliance(#[from] mondrian_core::SignalComplianceError),
 }
 
 fn validate_program_monitor_boundary(
@@ -8426,6 +8519,48 @@ mod tests {
         );
         assert_eq!(presentation.stage_diagnostics, result.stage_diagnostics);
         assert_eq!(presentation.output_descriptor, result.output_descriptor);
+    }
+
+    #[test]
+    fn cpu_signal_monitoring_matches_viewer_presentation_contract_and_preserves_alpha() {
+        ensure_mondrian_default_ocio_loaded().expect("default OCIO config");
+        let frame = cpu_working_frame();
+        let boundary = RenderOutputColorBoundary::display(
+            ColorSpace::Rec709,
+            false,
+            ColorEngine::mondrian_standard(),
+        );
+        let adaptation = crate::RenderMonitorAdaptation::new(
+            ColorSpace::Rec709,
+            ColorSpace::Srgb,
+            ColorEngine::mondrian_standard(),
+        )
+        .expect("SDR monitor adaptation");
+        let baseline =
+            execute_cpu_program_monitor_presentation_rgba8(&frame, &boundary, &adaptation)
+                .expect("baseline presentation");
+        let mut session = crate::RenderCpuColorExecutionSession::new(0);
+        let monitored =
+            execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_with_session(
+                &frame,
+                &boundary,
+                &adaptation,
+                mondrian_core::ProgramScopesTap::ProgramOutput,
+                mondrian_core::SignalMonitoringSettings { false_color: true, ..Default::default() },
+                &mut session,
+            )
+            .expect("false-color presentation");
+
+        assert_ne!(monitored.rgba, baseline.rgba);
+        assert_eq!(
+            monitored.rgba.iter().skip(3).step_by(4).collect::<Vec<_>>(),
+            baseline.rgba.iter().skip(3).step_by(4).collect::<Vec<_>>()
+        );
+        assert_eq!(monitored.output_descriptor, baseline.output_descriptor);
+        assert_eq!(
+            monitored.program_output_descriptor,
+            baseline.program_output_descriptor
+        );
     }
 
     #[test]

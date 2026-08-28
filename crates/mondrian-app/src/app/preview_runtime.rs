@@ -36,10 +36,13 @@ use crate::app::preview_access_mode::{
     MEDIA_PREVIEW_PREFETCH_DECODE_BUDGET_US,
 };
 #[cfg(test)]
-use crate::app::preview_cpu_execution::composite_resolved_preview_working;
 use crate::app::preview_cpu_execution::{
-    composite_resolved_preview, output_boundary_from_color_context, present_preview_working,
-    PreviewCompositeOutput, PreviewCpuExecutionDurations, PreviewWorkingCompositeOutput,
+    composite_resolved_preview, composite_resolved_preview_working,
+};
+use crate::app::preview_cpu_execution::{
+    composite_resolved_preview_with_signal_monitoring, output_boundary_from_color_context,
+    present_preview_working_with_signal_monitoring, PreviewCompositeOutput,
+    PreviewCpuExecutionDurations, PreviewWorkingCompositeOutput,
 };
 use crate::app::preview_cpu_fallback_task::{
     PreviewCpuFallbackRequest, PreviewCpuFallbackResult, PreviewCpuFallbackSubmission,
@@ -343,6 +346,10 @@ pub struct PreviewProductionRuntime<O: Clone> {
     cpu_fallback_task: Option<PreviewCpuFallbackTask>,
     cpu_fallback_start_failure: Option<String>,
     viewer_cpu_fallback_active: Cell<bool>,
+    viewer_signal_monitoring: Cell<(
+        mondrian_core::ProgramScopesTap,
+        mondrian_core::SignalMonitoringSettings,
+    )>,
     cpu_fallback_in_flight:
         RefCell<Option<(u64, mondrian_playback::PlaybackEpoch, PreviewOutputKey)>>,
     cpu_fallback_failure: RefCell<Option<(PreviewOutputKey, String)>>,
@@ -418,6 +425,22 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         }
     }
 
+    pub(crate) fn set_viewer_signal_monitoring(
+        &self,
+        tap: mondrian_core::ProgramScopesTap,
+        settings: mondrian_core::SignalMonitoringSettings,
+    ) -> bool {
+        let next = (tap, settings);
+        if self.viewer_signal_monitoring.get() == next {
+            return false;
+        }
+        self.viewer_signal_monitoring.set(next);
+        self.invalidate_preview_generation();
+        self.execution.borrow_mut().clear_output();
+        self.work_notifier.retry_became_actionable();
+        true
+    }
+
     fn schedule_cpu_fallback(
         &self,
         generation: u64,
@@ -475,6 +498,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             cached_working: resolved
                 .render_cache_identity
                 .and_then(|identity| self.timeline_render_cache.borrow().ready_frame(identity)),
+            monitoring_tap: self.viewer_signal_monitoring.get().0,
+            monitoring_settings: self.viewer_signal_monitoring.get().1,
         };
         match task.submit(request) {
             PreviewCpuFallbackSubmission::Scheduled => {
@@ -721,6 +746,10 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             cpu_fallback_task,
             cpu_fallback_start_failure,
             viewer_cpu_fallback_active: Cell::new(false),
+            viewer_signal_monitoring: Cell::new((
+                mondrian_core::ProgramScopesTap::default(),
+                mondrian_core::SignalMonitoringSettings::default(),
+            )),
             cpu_fallback_in_flight: RefCell::new(None),
             cpu_fallback_failure: RefCell::new(None),
             timeline_render_cache: RefCell::new(timeline_render_cache),
@@ -1132,7 +1161,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 // The GPU output identity overlays the monitor adaptation on
                 // the evaluation's plan identity; the shared evaluation stays
                 // display-independent.
-                let cache_key = evaluation.output_key.with_monitor_adaptation(&monitor_adaptation);
+                let (monitoring_tap, monitoring_settings) = self.viewer_signal_monitoring.get();
+                let cache_key = evaluation
+                    .output_key
+                    .with_monitor_adaptation(&monitor_adaptation)
+                    .with_signal_monitoring(monitoring_tap, monitoring_settings);
                 let cache_reusable =
                     matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable);
                 if transport.is_lookahead_preparation()
@@ -1176,7 +1209,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 ResolvedPlanView {
                     elements: Arc::clone(&evaluation.elements),
                     cache_key,
-                    cpu_cache_key: evaluation.output_key.clone(),
+                    cpu_cache_key: evaluation
+                        .output_key
+                        .with_signal_monitoring(monitoring_tap, monitoring_settings),
                     cache_reusable,
                     color_context: evaluation.color_context.clone(),
                     render_cache_identity: evaluation.render_cache_identity,

@@ -66,14 +66,14 @@ use crate::app_ui::runtime::{
 use crate::app_ui::shortcuts::{register_shortcuts, AppUiShortcutOverride};
 use crate::app_ui::startup::{STARTUP_WINDOW_HEIGHT, STARTUP_WINDOW_WIDTH};
 use mondrian_core::types::ColorSpace;
-use mondrian_core::{ProgramScopeScale, ProgramScopesTap, WaveformMode};
+use mondrian_core::{ProgramScopeScale, ProgramScopesTap, SignalComplianceContract, WaveformMode};
 use mondrian_editor_state::state::PanelKind;
 use mondrian_platform::SystemPlatformService;
 #[cfg(test)]
 use mondrian_renderer::RenderOutputColorBoundary;
 use mondrian_renderer::{
     native_video_texture_device_features, ocio_lut_filtering_device_features,
-    request_adapter_with_native_video_preference, GpuProgramScopesRequest,
+    request_adapter_with_native_video_preference, GpuProgramScopesRequest, GpuSignalMonitorRequest,
     RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
     RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
@@ -4453,6 +4453,20 @@ fn prepare_viewer_gpu_preview(
                 );
                 None
             }),
+            signal_monitoring: viewer_signal_monitor_request(
+                frame.program_output_boundary.output_color_space,
+                frame.monitor_adaptation.monitor_color_space(),
+                scopes_settings,
+            )
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    sequence_id = %frame.sequence_id,
+                    frame = frame.frame,
+                    %error,
+                    "Viewer signal-monitoring controls rejected the selected signal"
+                );
+                None
+            }),
         },
     ) {
         Ok(record) => record,
@@ -5015,6 +5029,26 @@ fn viewer_program_scopes_request(
             )
         })
         .transpose()
+}
+
+fn viewer_signal_monitor_request(
+    program_output_color_space: ColorSpace,
+    monitor_output_color_space: ColorSpace,
+    settings: VideoScopesSettings,
+) -> Result<Option<GpuSignalMonitorRequest>, mondrian_renderer::GpuSignalMonitorError> {
+    if !settings.monitoring.is_active() {
+        return Ok(None);
+    }
+    let signal_color_space = match settings.tap {
+        ProgramScopesTap::ProgramOutput => program_output_color_space,
+        ProgramScopesTap::MonitorOutput => monitor_output_color_space,
+    };
+    GpuSignalMonitorRequest::new(
+        SignalComplianceContract::normalized_rgb(signal_color_space)?,
+        settings.monitoring,
+        settings.tap,
+    )
+    .map(Some)
 }
 
 fn synchronize_viewer_spatial_presentation(
@@ -6203,6 +6237,33 @@ mod tests {
         assert_eq!(monitor.waveform_mode(), WaveformMode::RgbParade);
         assert_eq!(monitor.scale(), ProgramScopeScale::Nits1000);
         assert_eq!(monitor.tap(), ProgramScopesTap::MonitorOutput);
+    }
+
+    #[test]
+    fn viewer_monitoring_is_independent_from_scope_panel_visibility() {
+        assert!(viewer_signal_monitor_request(
+            ColorSpace::Rec709,
+            ColorSpace::DisplayP3,
+            VideoScopesSettings::default(),
+        )
+        .expect("inactive settings")
+        .is_none());
+        let settings = VideoScopesSettings {
+            tap: ProgramScopesTap::MonitorOutput,
+            monitoring: mondrian_core::SignalMonitoringSettings {
+                false_color: true,
+                zebra: true,
+                gamut_alarm: true,
+                ..Default::default()
+            },
+            ..VideoScopesSettings::default()
+        };
+        let request =
+            viewer_signal_monitor_request(ColorSpace::Rec709, ColorSpace::DisplayP3, settings)
+                .expect("supported monitoring signal")
+                .expect("active request");
+        assert_eq!(request.tap, ProgramScopesTap::MonitorOutput);
+        assert_eq!(request.compliance.signal_color_space, ColorSpace::DisplayP3);
     }
 
     #[test]

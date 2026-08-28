@@ -217,6 +217,10 @@ impl AppUiHost {
         waveform_service.set_library(app_state.asset_library_handle());
         let preview_service = WindowPreviewAdapter::new();
         preview_service.synchronize_transport_intent(app_state.preview_transport_intent());
+        preview_service.set_viewer_signal_monitoring(
+            preferences.video_scopes.tap,
+            preferences.video_scopes.monitoring,
+        );
         apply_execution_resource_policy(
             &app_state,
             &asset_thumbnails,
@@ -1635,6 +1639,10 @@ impl AppUiHost {
                     }
                     PreferencesUpdate::VideoScopes(payload) => {
                         self.preferences.video_scopes = payload.settings;
+                        self.preview_service.set_viewer_signal_monitoring(
+                            payload.settings.tap,
+                            payload.settings.monitoring,
+                        );
                     }
                     PreferencesUpdate::AudioOutputDevice(payload) => {
                         self.preferences.audio_output_device = payload.selection.clone();
@@ -3994,6 +4002,12 @@ mod tests {
             layout: mondrian_ui_widgets::VideoScopesLayout::Vectorscope,
             show_skin_tone_line: false,
             show_color_targets: true,
+            monitoring: mondrian_core::SignalMonitoringSettings {
+                false_color: true,
+                zebra: true,
+                gamut_alarm: true,
+                ..Default::default()
+            },
         };
         let pending = PendingUiActions::default();
         pending.push(crate::app::ui_actions::app_shell_scopes_settings_changed_action(settings));

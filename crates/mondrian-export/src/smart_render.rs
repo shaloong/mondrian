@@ -44,6 +44,7 @@ pub(crate) enum SmartRenderBlocker {
     PictureGeometryMismatch,
     SignalMismatch,
     ColorTransformRequired,
+    LegalizerRequiresRender,
     HdrMetadataRequiresRender,
 }
 
@@ -57,6 +58,9 @@ pub(crate) fn qualify_smart_render(
 ) -> Result<SmartRenderPlan, SmartRenderBlocker> {
     if config.smart_render != ExportSmartRenderPolicy::Automatic {
         return Err(SmartRenderBlocker::PolicyDisabled);
+    }
+    if delivery.legalizer.is_active() {
+        return Err(SmartRenderBlocker::LegalizerRequiresRender);
     }
     let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact else {
         return Err(SmartRenderBlocker::UnsupportedArtifact);

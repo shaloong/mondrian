@@ -1019,6 +1019,12 @@ machine-local `AppUiPreferences`, never `.mdp` author state. Skin line, targets,
 axis labels, and pane layout are presentation-only. Changing only those fields
 repaints the widget without invalidating GPU analysis; waveform mode, scale, or
 tap changes reissue exactly one current Viewer scope result.
+The same preference payload owns False Color, Zebra, and Gamut Alarm controls.
+Zebra cycles bounded 90–100%, 70–80%, and 80–90% presets. These warning fields
+do not alter the Scopes aggregation identity, do not require the Scopes panel
+to remain visible, and invalidate only the current Viewer presentation. The
+Window propagates restored and edited settings to both GPU execution and the
+bounded CPU fallback.
 The window registers GPU-generated waveform, histogram, and vectorscope
 textures with stable UI keys using the linear external-texture contract, and
 unregisters all three when Scopes is hidden or Viewer presentation is reset.
@@ -1232,6 +1238,11 @@ snapshot, so no parallel UI-only field bag can disagree with enqueue. A
 container edit rewrites the output suffix only when that suffix still matched
 the previous container; an explicitly custom suffix is preserved. Admission
 freezes the edited preset into the job.
+The same materialized preset exposes an explicit delivery Legalizer checkbox.
+It is independent from Full/Legal range: enabled means clamp final
+display-encoded RGB before quantization; disabled preserves excursions. The UI
+only edits the complete preset snapshot, while queue admission remains the
+authority for target compatibility.
 
 The Audio Stems PCM24 built-in uses the synthetic `.wavstems` suffix only to
 make the destination's directory nature unambiguous in the draft. Queue

@@ -31,6 +31,7 @@ pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
 pub mod shot_match;
+pub mod signal_monitor;
 pub mod source_frame_preparation;
 pub mod timeline_composite;
 mod timeline_effect_routes;
@@ -96,9 +97,11 @@ pub use color_stage::{
     execute_cpu_program_monitor_boundary_rgba8,
     execute_cpu_program_monitor_boundary_rgba8_with_session,
     execute_cpu_program_monitor_presentation_rgba8,
-    execute_cpu_program_monitor_presentation_rgba8_with_session, execute_cpu_source_input_stage,
-    execute_cpu_source_input_stage_with_session, execute_cpu_working_transform,
-    execute_cpu_working_transform_with_session, CpuRenderColorStageExecutor, RenderColorStage,
+    execute_cpu_program_monitor_presentation_rgba8_with_session,
+    execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_with_session,
+    execute_cpu_source_input_stage, execute_cpu_source_input_stage_with_session,
+    execute_cpu_working_transform, execute_cpu_working_transform_with_session,
+    CpuRenderColorStageExecutor, CpuSignalMonitoringError, RenderColorStage,
     RenderColorStageDiagnostics, RenderColorStageExecution, RenderColorStageGpuBlockerBreakdown,
     RenderColorStageMode, RenderColorStagePlan, RenderColorStagePlanner,
     RenderGpuColorPassExecutionError, RenderGpuColorPassResolvedResources,
@@ -284,6 +287,10 @@ pub use program_scopes_gpu::{
 };
 pub use shot_match::{
     analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,
+};
+pub use signal_monitor::{
+    GpuSignalMonitorError, GpuSignalMonitorRequest, GpuSignalMonitorRuntime,
+    GpuSignalMonitorRuntimeDiagnostics,
 };
 pub use source_frame_preparation::{
     prepare_decoded_cpu_source_frame, DecodedCpuSourceFrame, PreparedSourceFrame,

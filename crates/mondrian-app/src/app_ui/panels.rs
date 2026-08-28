@@ -27,8 +27,8 @@ use mondrian_core::types::{
 };
 use mondrian_core::{
     AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, SampleAspectRatio,
-    TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime, TimelineTimeRange,
-    WorkingColorSpace,
+    SignalLegalizer, TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
+    TimelineTimeRange, WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -5149,6 +5149,24 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_alpha_mode_items(&model.preset),
     )
     .with_max_visible_items(2);
+    let legalizer_preset = model.preset.clone();
+    let legalizer_checkbox = Checkbox::new(
+        "限制到合法 RGB 信号范围",
+        model.preset.legalizer == SignalLegalizer::ClampRgb,
+    )
+    .enabled(!matches!(
+        model.preset.artifact,
+        mondrian_export::preset::ExportArtifactEncoding::AudioStems { .. }
+    ))
+    .on_change(move |enabled| {
+        let mut updated = legalizer_preset.clone();
+        updated.legalizer = if enabled {
+            SignalLegalizer::ClampRgb
+        } else {
+            SignalLegalizer::Off
+        };
+        export_preset_update_action(updated)
+    });
     let audio_codec_dropdown = Dropdown::new(
         media
             .map(|media| export_audio_codec_label(&media.audio))
@@ -5287,7 +5305,8 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_row(PropertyRow::new(
             "目标空间",
             Box::new(color_target_space_dropdown),
-        ));
+        ))
+        .with_row(PropertyRow::new("Legalizer", Box::new(legalizer_checkbox)));
 
     let mut encoding_section = PropertySection::new("编码参数");
     if let Some((rate_control, max_crf)) =

@@ -10,7 +10,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
 const TIMESTAMP_READBACK_BYTES: u64 = 2 * wgpu::QUERY_SIZE as u64;
-const VIEWER_STAGE_TIMESTAMP_COUNT: u32 = 7;
+const VIEWER_STAGE_TIMESTAMP_COUNT: u32 = 8;
 const VIEWER_STAGE_TIMESTAMP_READBACK_BYTES: u64 =
     VIEWER_STAGE_TIMESTAMP_COUNT as u64 * wgpu::QUERY_SIZE as u64;
 
@@ -211,6 +211,8 @@ pub enum GpuTimestampStageMarker {
     AfterMonitorAdaptation,
     /// Optional Program/Monitor scopes commands have been recorded.
     AfterProgramScopes,
+    /// Optional fused false-color/zebra/gamut commands have been recorded.
+    AfterSignalMonitoring,
 }
 
 impl GpuTimestampStageMarker {
@@ -221,6 +223,7 @@ impl GpuTimestampStageMarker {
             Self::AfterProgramOutputBoundary => 3,
             Self::AfterMonitorAdaptation => 4,
             Self::AfterProgramScopes => 5,
+            Self::AfterSignalMonitoring => 6,
         }
     }
 }
@@ -238,6 +241,8 @@ pub struct GpuTimestampStageDurations {
     pub program_scopes_us: u64,
     /// Preview-only monitor adaptation after Program Output.
     pub monitor_adaptation_us: u64,
+    /// Fused signal-monitoring pass after analysis and before calibration.
+    pub signal_monitoring_us: u64,
     /// Optional display calibration after monitor adaptation.
     pub display_calibration_us: u64,
 }
@@ -349,9 +354,10 @@ impl GpuTimestampStageTimer {
             program_output_boundary_us: segment(2, 3)?,
             monitor_adaptation_us: segment(3, 4)?,
             program_scopes_us: segment(4, 5)?,
-            display_calibration_us: segment(5, 6)?,
+            signal_monitoring_us: segment(5, 6)?,
+            display_calibration_us: segment(6, 7)?,
         };
-        Ok((segment(0, 6)?, stages))
+        Ok((segment(0, 7)?, stages))
     }
 }
 
@@ -692,6 +698,7 @@ mod tests {
             GpuTimestampStageMarker::AfterProgramOutputBoundary,
             GpuTimestampStageMarker::AfterMonitorAdaptation,
             GpuTimestampStageMarker::AfterProgramScopes,
+            GpuTimestampStageMarker::AfterSignalMonitoring,
         ] {
             ring.mark_stage(&mut encoder, token, marker).expect("ordered stage marker");
         }

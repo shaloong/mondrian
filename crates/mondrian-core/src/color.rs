@@ -753,6 +753,11 @@ impl ProgramSignalColorimetry {
         self.chroma(rgb[0], rgb[2], y)
     }
 
+    /// Compute non-constant-luminance encoded luma for one RGB signal sample.
+    pub fn encoded_luma(self, rgb: [f32; 3]) -> f32 {
+        self.luma(rgb[0], rgb[1], rgb[2])
+    }
+
     fn luma(self, r: f32, g: f32, b: f32) -> f32 {
         let kg = 1.0 - self.kr - self.kb;
         self.kr * r + kg * g + self.kb * b

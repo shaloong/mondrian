@@ -18,7 +18,8 @@ use mondrian_renderer::{
 use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_cpu_execution::{
-    composite_resolved_preview, present_preview_working, PreviewCpuExecutionDurations,
+    composite_resolved_preview_with_signal_monitoring,
+    present_preview_working_with_signal_monitoring, PreviewCpuExecutionDurations,
     PreviewWorkingCompositeOutput,
 };
 use super::preview_execution::PreviewOutputKey;
@@ -41,6 +42,8 @@ pub(crate) struct PreviewCpuFallbackRequest {
     pub(crate) color_context: ProgramColorContext,
     pub(crate) render_cache_identity: Option<TimelineRenderCacheIdentity>,
     pub(crate) cached_working: Option<CpuColorFrame>,
+    pub(crate) monitoring_tap: mondrian_core::ProgramScopesTap,
+    pub(crate) monitoring_settings: mondrian_core::SignalMonitoringSettings,
 }
 
 pub(crate) struct PreviewCpuFallbackReady {
@@ -188,7 +191,7 @@ fn execute_cpu_fallback(
     let contract = preview_raster_presentation_contract(&request.color_context)
         .map_err(|error| error.to_string())?;
     let execution = match &request.cached_working {
-        Some(frame) => present_preview_working(
+        Some(frame) => present_preview_working_with_signal_monitoring(
             PreviewWorkingCompositeOutput {
                 frame: frame.clone(),
                 composite_diagnostics: TimelineCompositeDiagnostics::default(),
@@ -197,13 +200,17 @@ fn execute_cpu_fallback(
                 execution_durations: PreviewCpuExecutionDurations::default(),
             },
             &request.color_context,
+            request.monitoring_tap,
+            request.monitoring_settings,
             scratch,
         ),
-        None => composite_resolved_preview(
+        None => composite_resolved_preview_with_signal_monitoring(
             request.width,
             request.height,
             &request.elements,
             &request.color_context,
+            request.monitoring_tap,
+            request.monitoring_settings,
             scratch,
         ),
     }

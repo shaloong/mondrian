@@ -567,6 +567,9 @@ impl ViewerGpuExecutionStageMarker for HeadlessGpuStageMarker<'_> {
             ViewerGpuExecutionGpuStage::ProgramScopes => {
                 GpuTimestampStageMarker::AfterProgramScopes
             }
+            ViewerGpuExecutionGpuStage::SignalMonitoring => {
+                GpuTimestampStageMarker::AfterSignalMonitoring
+            }
             ViewerGpuExecutionGpuStage::MonitorAdaptation => {
                 GpuTimestampStageMarker::AfterMonitorAdaptation
             }
@@ -956,6 +959,7 @@ impl HeadlessViewerGpuAdapter {
             ),
             display_calibration: None,
             program_scopes: None,
+            signal_monitoring: None,
         };
         let record_result =
             if let (Some(ring), Some(token)) = (&mut self.timestamp_ring, timestamp_token) {

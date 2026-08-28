@@ -251,6 +251,13 @@ mod tests {
                 layout: mondrian_ui_widgets::VideoScopesLayout::Grid,
                 show_skin_tone_line: false,
                 show_color_targets: true,
+                monitoring: mondrian_core::SignalMonitoringSettings {
+                    false_color: true,
+                    zebra: true,
+                    gamut_alarm: true,
+                    zebra_lower_per_mille: 850,
+                    zebra_upper_per_mille: 980,
+                },
             },
             audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::Specific {
                 device_id: mondrian_media::RealtimeAudioOutputDeviceId::new(

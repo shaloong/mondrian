@@ -1,7 +1,8 @@
 //! GPU-backed Program Output video scopes surface.
 
 use mondrian_core::{
-    Color, ColorSpace, ProgramScopeScale, ProgramScopesTap, ProgramSignalColorimetry, WaveformMode,
+    Color, ColorSpace, ProgramScopeScale, ProgramScopesTap, ProgramSignalColorimetry,
+    SignalMonitoringSettings, WaveformMode,
 };
 use mondrian_editor_state::Action;
 use mondrian_ui_core::types::{LayoutConstraint, MouseButton, Point, Rect, Size, WidgetId};
@@ -10,7 +11,7 @@ use mondrian_ui_core::{EventResult, UiEvent, Widget};
 use serde::{Deserialize, Serialize};
 
 const TOOLBAR_HEIGHT: f32 = 28.0;
-const CONTROL_COUNT: usize = 6;
+const CONTROL_COUNT: usize = 9;
 
 /// Independent scope-pane layout selected by the operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -50,6 +51,9 @@ pub struct VideoScopesSettings {
     pub layout: VideoScopesLayout,
     pub show_skin_tone_line: bool,
     pub show_color_targets: bool,
+    /// Viewer-picture warnings configured beside the signal-analysis controls.
+    #[serde(default)]
+    pub monitoring: SignalMonitoringSettings,
 }
 
 impl Default for VideoScopesSettings {
@@ -61,6 +65,7 @@ impl Default for VideoScopesSettings {
             layout: VideoScopesLayout::Overview,
             show_skin_tone_line: true,
             show_color_targets: true,
+            monitoring: SignalMonitoringSettings::default(),
         }
     }
 }
@@ -86,6 +91,9 @@ enum ScopeControl {
     Tap,
     Skin,
     Targets,
+    FalseColor,
+    Zebra,
+    Gamut,
     Layout,
 }
 
@@ -203,6 +211,9 @@ impl VideoScopesSurface {
                 ScopeControl::Tap,
                 ScopeControl::Skin,
                 ScopeControl::Targets,
+                ScopeControl::FalseColor,
+                ScopeControl::Zebra,
+                ScopeControl::Gamut,
                 ScopeControl::Layout,
             ][index],
         )
@@ -226,6 +237,34 @@ impl VideoScopesSurface {
             }
             ScopeControl::Skin => settings.show_skin_tone_line = !settings.show_skin_tone_line,
             ScopeControl::Targets => settings.show_color_targets = !settings.show_color_targets,
+            ScopeControl::FalseColor => {
+                settings.monitoring.false_color = !settings.monitoring.false_color;
+            }
+            ScopeControl::Zebra => {
+                if !settings.monitoring.zebra {
+                    settings.monitoring.zebra = true;
+                    settings.monitoring.zebra_lower_per_mille = 900;
+                    settings.monitoring.zebra_upper_per_mille = 1_000;
+                } else {
+                    match (
+                        settings.monitoring.zebra_lower_per_mille,
+                        settings.monitoring.zebra_upper_per_mille,
+                    ) {
+                        (900, 1_000) => {
+                            settings.monitoring.zebra_lower_per_mille = 700;
+                            settings.monitoring.zebra_upper_per_mille = 800;
+                        }
+                        (700, 800) => {
+                            settings.monitoring.zebra_lower_per_mille = 800;
+                            settings.monitoring.zebra_upper_per_mille = 900;
+                        }
+                        _ => settings.monitoring.zebra = false,
+                    }
+                }
+            }
+            ScopeControl::Gamut => {
+                settings.monitoring.gamut_alarm = !settings.monitoring.gamut_alarm;
+            }
             ScopeControl::Layout => settings.layout = settings.layout.next(),
         }
         settings
@@ -321,6 +360,34 @@ impl VideoScopesSurface {
                     "Targets ✓"
                 } else {
                     "Targets"
+                }
+            }
+            ScopeControl::FalseColor => {
+                if self.settings.monitoring.false_color {
+                    "False ✓"
+                } else {
+                    "False"
+                }
+            }
+            ScopeControl::Zebra => {
+                if !self.settings.monitoring.zebra {
+                    "Zebra"
+                } else {
+                    match (
+                        self.settings.monitoring.zebra_lower_per_mille,
+                        self.settings.monitoring.zebra_upper_per_mille,
+                    ) {
+                        (700, 800) => "Z 70–80",
+                        (800, 900) => "Z 80–90",
+                        _ => "Z 90–100",
+                    }
+                }
+            }
+            ScopeControl::Gamut => {
+                if self.settings.monitoring.gamut_alarm {
+                    "Gamut ✓"
+                } else {
+                    "Gamut"
                 }
             }
             ScopeControl::Layout => match self.settings.layout {
@@ -642,7 +709,7 @@ mod tests {
         let dispatched = RefCell::new(Vec::new());
         let dispatch = |action| dispatched.borrow_mut().push(action);
         let mut ctx = make_event_ctx(&mut focus, &mut shortcut, &mut tooltip, &dispatch);
-        let scale_control = Point::new(150.0, TOOLBAR_HEIGHT * 0.5);
+        let scale_control = Point::new(100.0, TOOLBAR_HEIGHT * 0.5);
 
         assert_eq!(
             surface.event(
@@ -672,5 +739,35 @@ mod tests {
         assert_eq!(settings.waveform_mode, WaveformMode::Luma);
         assert_eq!(settings.tap, ProgramScopesTap::ProgramOutput);
         assert_eq!(dispatched.borrow().as_slice(), &[Action::Play]);
+    }
+
+    #[test]
+    fn monitoring_controls_are_machine_local_and_zebra_cycles_bounded_presets() {
+        let surface = VideoScopesSurface::new();
+        let false_color = surface.changed_settings(ScopeControl::FalseColor);
+        assert!(false_color.monitoring.false_color);
+        assert_eq!(
+            false_color.analysis_identity(),
+            VideoScopesSettings::default().analysis_identity()
+        );
+
+        let zebra_90 = surface.changed_settings(ScopeControl::Zebra);
+        assert!(zebra_90.monitoring.zebra);
+        assert_eq!(zebra_90.monitoring.zebra_lower_per_mille, 900);
+        let surface = VideoScopesSurface::new().with_settings(zebra_90, ColorSpace::Rec709);
+        let zebra_70 = surface.changed_settings(ScopeControl::Zebra);
+        assert_eq!(zebra_70.monitoring.zebra_lower_per_mille, 700);
+        assert_eq!(zebra_70.monitoring.zebra_upper_per_mille, 800);
+        let surface = VideoScopesSurface::new().with_settings(zebra_70, ColorSpace::Rec709);
+        let zebra_80 = surface.changed_settings(ScopeControl::Zebra);
+        assert_eq!(zebra_80.monitoring.zebra_lower_per_mille, 800);
+        assert_eq!(zebra_80.monitoring.zebra_upper_per_mille, 900);
+        let surface = VideoScopesSurface::new().with_settings(zebra_80, ColorSpace::Rec709);
+        let zebra_off = surface.changed_settings(ScopeControl::Zebra);
+        assert!(!zebra_off.monitoring.zebra);
+        let surface = VideoScopesSurface::new().with_settings(zebra_off, ColorSpace::Rec709);
+        let zebra_restart = surface.changed_settings(ScopeControl::Zebra);
+        assert_eq!(zebra_restart.monitoring.zebra_lower_per_mille, 900);
+        assert_eq!(zebra_restart.monitoring.zebra_upper_per_mille, 1_000);
     }
 }

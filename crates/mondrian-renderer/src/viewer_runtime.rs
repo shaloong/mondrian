@@ -18,7 +18,8 @@ use crate::{
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
     GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
-    GpuProgramScopesRuntimeDiagnostics, GpuViewerSpatialRuntimeDiagnostics,
+    GpuProgramScopesRuntimeDiagnostics, GpuSignalMonitorError, GpuSignalMonitorRequest,
+    GpuSignalMonitorRuntime, GpuViewerSpatialRuntimeDiagnostics,
     HeterogeneousGpuCompletedContinuation, HeterogeneousGpuContinuationError,
     HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
     HeterogeneousGpuSubmittedContinuation, NativeVideoImportCandidateTimingReceipt,
@@ -78,6 +79,8 @@ pub struct ViewerGpuExecutionRequest<'a> {
     pub display_calibration: Option<Arc<DisplayCalibrationLut3d>>,
     /// Optional demand-driven analysis of Program Output before monitor adaptation.
     pub program_scopes: Option<GpuProgramScopesRequest>,
+    /// Optional fused false-color, zebra, and gamut warning pass.
+    pub signal_monitoring: Option<GpuSignalMonitorRequest>,
 }
 
 /// Precision contract between a presentation Adapter and Viewer GPU execution.
@@ -127,6 +130,8 @@ pub enum ViewerGpuExecutionGpuStage {
     MonitorAdaptation,
     /// Optional Program/Monitor scopes commands are complete.
     ProgramScopes,
+    /// Optional fused signal-monitoring commands are complete.
+    SignalMonitoring,
 }
 
 /// Adapter hook for writing GPU markers without coupling execution to a profiler.
@@ -158,6 +163,7 @@ pub struct ViewerGpuExecutionRuntime {
     spatial: GpuViewerSpatialRuntime,
     display_calibration: GpuDisplayCalibrationRuntime,
     program_scopes: GpuProgramScopesRuntime,
+    signal_monitor: GpuSignalMonitorRuntime,
     working_compositor: GpuFrameCompositor,
 }
 
@@ -223,6 +229,9 @@ impl ViewerGpuExecutionRuntime {
                 &resource_pool,
             ))?,
             program_scopes: GpuProgramScopesRuntime::default(),
+            signal_monitor: GpuSignalMonitorRuntime::with_resource_pool(Arc::clone(
+                &resource_pool,
+            ))?,
             working_compositor: GpuFrameCompositor::new(device)?,
         })
     }
@@ -399,6 +408,7 @@ impl ViewerGpuExecutionRuntime {
         self.color_output.clear_frame_resources();
         self.spatial.clear_frame_resources();
         self.display_calibration.clear_frame_resources();
+        self.signal_monitor.clear_frame_resources();
     }
 
     /// Record one current Viewer frame through the shared GPU execution path.
@@ -467,6 +477,11 @@ impl ViewerGpuExecutionRuntime {
             request.program_output_boundary,
             request.monitor_adaptation,
             request.program_scopes,
+        )?;
+        validate_signal_monitor_contract(
+            request.program_output_boundary,
+            request.monitor_adaptation,
+            request.signal_monitoring,
         )?;
         if !self.prepare_cpu_yuv_uploads(request.layers)? {
             return Err(ViewerGpuExecutionError::Backpressure(
@@ -605,11 +620,12 @@ impl ViewerGpuExecutionRuntime {
             ViewerGpuExecutionGpuStage::Spatial,
         )?;
         let program_output_boundary_started = Instant::now();
-        let program_output_texture_format = if request.monitor_adaptation.requires_pass() {
-            GpuColorFrameTextureFormat::Rgba16Float
-        } else {
-            request.output_precision.texture_format()
-        };
+        let program_output_texture_format =
+            if request.monitor_adaptation.requires_pass() || request.signal_monitoring.is_some() {
+                GpuColorFrameTextureFormat::Rgba16Float
+            } else {
+                request.output_precision.texture_format()
+            };
         let program_output_record = self
             .color_output
             .record_wgpu_output_boundary_gpu_frame_owned_backend(
@@ -700,12 +716,59 @@ impl ViewerGpuExecutionRuntime {
             encoder,
             ViewerGpuExecutionGpuStage::ProgramScopes,
         )?;
-        let calibration_started = Instant::now();
-        let (output, output_owner) = if let Some(calibration) = request.display_calibration {
-            let output_resource =
+        let signal_monitoring_started = Instant::now();
+        let (output, output_owner) = if let Some(monitoring) = request.signal_monitoring {
+            let signal = match monitoring.tap {
+                ProgramScopesTap::ProgramOutput => &program_output,
+                ProgramScopesTap::MonitorOutput => &output,
+            };
+            let signal_resource = self.color_output.frame_table().get(signal).map_err(|error| {
+                ViewerGpuExecutionError::ProgramOutputMissing(format!("{error:?}"))
+            })?;
+            let presentation_resource =
                 self.color_output.frame_table().get(&output).map_err(|error| {
                     ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
                 })?;
+            let monitored = self
+                .signal_monitor
+                .record(
+                    device,
+                    queue,
+                    encoder,
+                    signal_resource,
+                    presentation_resource,
+                    monitoring,
+                )
+                .map_err(|error| ViewerGpuExecutionError::SignalMonitoring(Box::new(error)))?;
+            (monitored, ViewerGpuExecutionOutputOwner::SignalMonitor)
+        } else {
+            (output, ViewerGpuExecutionOutputOwner::ColorOutput)
+        };
+        let signal_monitoring_us = elapsed_us(signal_monitoring_started);
+        mark_gpu_stage(
+            &mut stage_marker,
+            encoder,
+            ViewerGpuExecutionGpuStage::SignalMonitoring,
+        )?;
+        let calibration_started = Instant::now();
+        let (output, output_owner) = if let Some(calibration) = request.display_calibration {
+            let output_resource = match output_owner {
+                ViewerGpuExecutionOutputOwner::ColorOutput => {
+                    self.color_output.frame_table().get(&output).map_err(|error| {
+                        ViewerGpuExecutionError::DisplayOutputMissing(format!("{error:?}"))
+                    })?
+                }
+                ViewerGpuExecutionOutputOwner::SignalMonitor => {
+                    self.signal_monitor.output(&output).ok_or_else(|| {
+                        ViewerGpuExecutionError::DisplayOutputMissing(
+                            "signal-monitoring output is missing".to_owned(),
+                        )
+                    })?
+                }
+                ViewerGpuExecutionOutputOwner::DisplayCalibration => {
+                    unreachable!("display calibration cannot own output before its own stage")
+                }
+            };
             let calibrated = self
                 .display_calibration
                 .record(
@@ -722,7 +785,7 @@ impl ViewerGpuExecutionRuntime {
                 ViewerGpuExecutionOutputOwner::DisplayCalibration,
             )
         } else {
-            (output, ViewerGpuExecutionOutputOwner::ColorOutput)
+            (output, output_owner)
         };
         let display_calibration_us = elapsed_us(calibration_started);
         let heterogeneous_continuations = std::mem::take(&mut prepared.heterogeneous_continuations);
@@ -744,6 +807,7 @@ impl ViewerGpuExecutionRuntime {
                 program_output_boundary_us,
                 program_scopes_us,
                 monitor_adaptation_us,
+                signal_monitoring_us,
                 display_calibration_us,
             },
             native_video_import_timing_receipt: None,
@@ -781,6 +845,12 @@ impl ViewerGpuExecutionRuntime {
                     },
                 )?
             }
+            ViewerGpuExecutionOutputOwner::SignalMonitor => self
+                .signal_monitor
+                .take_output(&record.output)
+                .ok_or(ViewerGpuPresentationOutputTakeError::SignalMonitorMissing {
+                    id: record.output.id(),
+                })?,
         };
         Ok(ViewerGpuPresentationOutputLease::new(
             resource,
@@ -815,6 +885,15 @@ impl ViewerGpuExecutionRuntime {
                         "calibrated output disappeared before presentation".to_owned(),
                     )
                 }),
+            Some(ViewerGpuExecutionOutputOwner::SignalMonitor) => self
+                .signal_monitor
+                .output(&record.output)
+                .map(|resource| resource.resource().texture_view.clone())
+                .ok_or_else(|| {
+                    ViewerGpuExecutionError::DisplayOutputMissing(
+                        "signal-monitoring output disappeared before presentation".to_owned(),
+                    )
+                }),
             None => Err(ViewerGpuExecutionError::DisplayOutputMissing(
                 "presentation output ownership was already transferred".to_owned(),
             )),
@@ -841,6 +920,7 @@ impl ViewerGpuExecutionRuntime {
         self.working_compositor.clear_frame_resources();
         self.spatial.clear();
         self.display_calibration.clear();
+        self.signal_monitor.clear();
         self.program_scopes.clear();
         self.color_output.clear_frame_resources();
         self.cpu_yuv_upload.clear();
@@ -889,6 +969,31 @@ fn validate_program_scopes_contract(
             tap: request.tap(),
             expected_signal: expected,
             scopes_signal: request.signal_color_space(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_signal_monitor_contract(
+    boundary: &RenderOutputColorBoundary,
+    adaptation: &RenderMonitorAdaptation,
+    request: Option<GpuSignalMonitorRequest>,
+) -> Result<(), ViewerGpuExecutionError> {
+    let Some(request) = request else {
+        return Ok(());
+    };
+    let request = request
+        .validate()
+        .map_err(|error| ViewerGpuExecutionError::SignalMonitoring(Box::new(error)))?;
+    let expected = match request.tap {
+        ProgramScopesTap::ProgramOutput => boundary.output_color_space,
+        ProgramScopesTap::MonitorOutput => adaptation.monitor_color_space(),
+    };
+    if expected != request.compliance.signal_color_space {
+        return Err(ViewerGpuExecutionError::SignalMonitoringBoundaryMismatch {
+            tap: request.tap,
+            expected_signal: expected,
+            monitoring_signal: request.compliance.signal_color_space,
         });
     }
     Ok(())
@@ -1073,6 +1178,8 @@ pub struct ViewerGpuExecutionCpuStageTimings {
     pub program_scopes_us: u64,
     /// Preview-only monitor-adaptation command preparation.
     pub monitor_adaptation_us: u64,
+    /// Optional fused false-color/zebra/gamut-alarm command preparation.
+    pub signal_monitoring_us: u64,
     /// Optional display-calibration command preparation.
     pub display_calibration_us: u64,
 }
@@ -1084,6 +1191,7 @@ fn elapsed_us(started: Instant) -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ViewerGpuExecutionOutputOwner {
     ColorOutput,
+    SignalMonitor,
     DisplayCalibration,
 }
 
@@ -1105,6 +1213,9 @@ pub enum ViewerGpuPresentationOutputTakeError {
         /// Renderer resource identity expected from display calibration.
         id: GpuColorFrameId,
     },
+    /// The signal-monitoring owner no longer held the exact output.
+    #[error("Viewer signal-monitoring output {id:?} is missing")]
+    SignalMonitorMissing { id: GpuColorFrameId },
 }
 
 /// Stage-specific failures from the shared Viewer GPU execution Interface.
@@ -1152,6 +1263,15 @@ pub enum ViewerGpuExecutionError {
         expected_signal: mondrian_core::types::ColorSpace,
         scopes_signal: mondrian_core::types::ColorSpace,
     },
+    /// Monitoring signal identity did not match its selected Viewer tap.
+    #[error(
+        "Viewer monitoring tap {tap:?} expects {expected_signal:?}, not {monitoring_signal:?}"
+    )]
+    SignalMonitoringBoundaryMismatch {
+        tap: ProgramScopesTap,
+        expected_signal: mondrian_core::types::ColorSpace,
+        monitoring_signal: mondrian_core::types::ColorSpace,
+    },
     #[error("Viewer GPU working composite graph failed: {0:?}")]
     WorkingComposite(Box<RenderGpuCompositeGraphRecordError>),
     /// A typed two-input Transition could not be materialized exactly.
@@ -1171,6 +1291,9 @@ pub enum ViewerGpuExecutionError {
     ProgramOutputBoundary(Box<RenderGpuOutputBoundaryRuntimeRecordError>),
     #[error("Viewer GPU Program Output scopes failed: {0}")]
     ProgramScopes(#[source] Box<GpuProgramScopesError>),
+    /// False-color/zebra/gamut monitoring failed without changing Program Output.
+    #[error("Viewer GPU signal monitoring failed: {0}")]
+    SignalMonitoring(#[source] Box<GpuSignalMonitorError>),
     #[error("Viewer GPU monitor adaptation failed: {0:?}")]
     MonitorAdaptation(Box<RenderGpuColorTransformRuntimeRecordError>),
     #[error("Viewer GPU Program Output is missing: {0}")]
@@ -2261,6 +2384,7 @@ mod tests {
                 output_precision,
                 display_calibration,
                 program_scopes: None,
+                signal_monitoring: None,
             },
         )?;
         context.queue.submit(std::iter::once(encoder.finish()));
@@ -2525,6 +2649,7 @@ mod tests {
                         output_precision: ViewerGpuOutputPrecision::Encoded8,
                         display_calibration: None,
                         program_scopes: None,
+                        signal_monitoring: None,
                     },
                 )
                 .expect("Viewer GPU frame");
@@ -2851,6 +2976,7 @@ mod tests {
                         )
                         .expect("scope request"),
                     ),
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer GPU monitor adaptation frame");
@@ -2910,6 +3036,7 @@ mod tests {
                         )
                         .expect("monitor scope request"),
                     ),
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer GPU Monitor Output scopes frame");
@@ -3021,6 +3148,7 @@ mod tests {
                         output_precision: ViewerGpuOutputPrecision::Encoded8,
                         display_calibration: None,
                         program_scopes: None,
+                        signal_monitoring: None,
                     },
                 )
                 .expect("Viewer GPU effect-domain frame");
@@ -3119,6 +3247,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer CPU working effect-domain frame");
@@ -3210,6 +3339,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer zero-opacity media frame");
@@ -3299,6 +3429,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer GPU solid effect-domain frame");
@@ -3374,6 +3505,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::EncodedFloat16,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer affine scene-linear solid frame");
@@ -3460,6 +3592,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer typed Cross Dissolve frame");
@@ -3616,6 +3749,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("record Viewer heterogeneous tracer");
@@ -3757,6 +3891,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer composite-to-output frame");
@@ -3888,6 +4023,7 @@ mod tests {
                     output_precision: ViewerGpuOutputPrecision::Encoded8,
                     display_calibration: None,
                     program_scopes: None,
+                    signal_monitoring: None,
                 },
             )
             .expect("Viewer GPU external-domain adjustment frame");

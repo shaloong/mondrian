@@ -1188,9 +1188,12 @@ export color health contract.
 
 ## Viewer Resource Reuse
 
-Viewer spatial prefilter, separable Lanczos, working composite, OCIO output, and
-optional ICC display-calibration output textures share one device-scoped,
-exact-contract, byte-bounded resource pool.
+Viewer spatial prefilter, separable Lanczos, working composite, OCIO output,
+fused signal-monitoring output, and optional ICC display-calibration output
+textures share one device-scoped, exact-contract, byte-bounded resource pool.
+Signal monitoring adds at most one active output texture, retains its pipeline
+and uniform buffer, updates the uniform payload through `Queue::write_buffer`,
+and performs no pass or texture allocation when every warning is disabled.
 Renderer caches must use a security-supported `lru` dependency. Dependency
 upgrades must preserve VRAM budgets, eviction order, and exact cache-key
 semantics; renderer tests and `cargo deny` jointly guard that contract.

@@ -2274,6 +2274,12 @@ expectations. Nested Sequences remain working-domain render inputs and cannot
 select a different deliverable precision. Invalid 4:2:0/4:2:2 dimensions or
 profile/signal combinations fail at admission; the renderer must not crop,
 round, or ask FFmpeg to choose a substitute profile.
+An explicit root-delivery Legalizer forces an encoded-float output boundary,
+clamps normalized encoded RGB before exactly one target-format quantization,
+and preserves Alpha. The policy is frozen beside the other delivery facts and
+never enters nested execution. Legal/full `VideoRange` remains the later codec
+code-range projection, not a substitute for legalization. Smart Render rejects
+an active Legalizer and selects the complete render path.
 `expected_export_video_signal` is the single shared projection from that
 admitted delivery plus Sequence output color intent to encoded pixel format,
 range, CICP primaries/transfer/matrix, and static-HDR metadata expectation.
@@ -2388,6 +2394,10 @@ User scrub/play
         → exact atomic aggregation from the selected Program/Monitor tap
         → encoded IRE or transfer-decoded absolute nits bins
         → GPU-only histogram/waveform/vectorscope display textures
+    → optional GpuSignalMonitorRuntime::record()
+        → classify the selected Program/Monitor tap
+        → color the monitor-adapted presentation in one fused pass
+        → preserve Alpha; gamut alarm > zebra > false color
     → optional GPU ICC monitor calibration
     → queue.submit()
       → transfer the move-only presentation output lease
@@ -2443,7 +2453,8 @@ diagnostic projections may be logged, but never authorize frame, LUT, or
 display-dependent resource reuse.
 
 Viewer GPU hardware timestamps and CPU command-recording attribution expose
-Program Output, Monitor Adaptation, and Program Scopes as separate stages.
+Program Output, Monitor Adaptation, Program Scopes, and Signal Monitoring as
+separate stages.
 Identical monitor identities still emit the ordered zero-duration marker so
 profiling remains structurally comparable without adding a render pass.
 
@@ -2466,6 +2477,9 @@ quantizes only after both transforms. Callers that need Program Output pixels
 for scopes use the retained-output API instead. The fallback therefore cannot
 replace the program View with the atlas identity or insert an intermediate
 RGBA8 round-trip.
+When signal monitoring is active, the CPU path uses the same Core classifier,
+selected Program/Monitor tap, priority, and Alpha policy as the fused GPU pass,
+then performs the same single final RGBA8 quantization.
 The Program Output transform makes exactly one owned typed output from the
 borrowed composite and exposes its contiguous `[f32; 4]` storage directly to
 OCIO. The presentation-only Interface then consumes and reuses that uniquely

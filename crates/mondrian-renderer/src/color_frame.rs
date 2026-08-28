@@ -2781,6 +2781,10 @@ impl CpuEncodedFloatColorFrame {
         self.frame.as_ref()
     }
 
+    pub(crate) fn rgba_f32_mut(&mut self) -> &mut EncodedRgbaF32Frame {
+        Arc::make_mut(&mut self.frame)
+    }
+
     /// Clone the shared immutable encoded floating-point frame backing this wrapper.
     pub fn rgba_f32_shared(&self) -> Arc<EncodedRgbaF32Frame> {
         Arc::clone(&self.frame)

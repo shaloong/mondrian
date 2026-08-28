@@ -120,7 +120,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         };
         let preview_state = match resolved {
             FrameResolutionOutcome::Ready(evaluation) => {
-                let output_key =
+                let base_output_key =
                     if matches!(evaluation.reuse_policy, EvaluationReusePolicy::Reusable) {
                         evaluation.output_key.clone()
                     } else {
@@ -131,6 +131,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                         let execution_nonce = self.execution.borrow_mut().issue_candidate_id();
                         evaluation.output_key.with_execution_nonce(execution_nonce)
                     };
+                let (monitoring_tap, monitoring_settings) = self.viewer_signal_monitoring.get();
+                let output_key =
+                    base_output_key.with_signal_monitoring(monitoring_tap, monitoring_settings);
                 self.execution.borrow_mut().set_presentation_quality(
                     resolved_preview_presentation_quality(&evaluation.elements),
                 );
@@ -150,7 +153,12 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                     )
                                     .ok()
                                     .map(|adaptation| {
-                                        output_key.with_monitor_adaptation(&adaptation)
+                                        base_output_key
+                                            .with_monitor_adaptation(&adaptation)
+                                            .with_signal_monitoring(
+                                                monitoring_tap,
+                                                monitoring_settings,
+                                            )
                                     })
                                 },
                             )
@@ -231,7 +239,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                     });
                     let render_cache_hit = cached_working.is_some();
                     let execution = match cached_working {
-                        Some(frame) => present_preview_working(
+                        Some(frame) => present_preview_working_with_signal_monitoring(
                             PreviewWorkingCompositeOutput {
                                 frame,
                                 composite_diagnostics: TimelineCompositeDiagnostics::default(),
@@ -241,13 +249,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                                 execution_durations: PreviewCpuExecutionDurations::default(),
                             },
                             &evaluation.color_context,
+                            monitoring_tap,
+                            monitoring_settings,
                             &mut self.scratch.borrow_mut(),
                         ),
-                        None => composite_resolved_preview(
+                        None => composite_resolved_preview_with_signal_monitoring(
                             width,
                             height,
                             &evaluation.elements,
                             &evaluation.color_context,
+                            monitoring_tap,
+                            monitoring_settings,
                             &mut self.scratch.borrow_mut(),
                         ),
                     };
