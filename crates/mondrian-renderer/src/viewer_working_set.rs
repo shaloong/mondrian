@@ -498,6 +498,7 @@ fn estimate_source(
     match source {
         ViewerGpuSourceLayer::Media {
             frame,
+            is_data_texture,
             gpu_source,
             native_source,
             cpu_yuv_source,
@@ -507,6 +508,17 @@ fn estimate_source(
             ..
         } => {
             let mut effect_extent = None::<(u32, u32, u64)>;
+            if *is_data_texture
+                && (frame.is_none()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                    || heterogeneous_input.is_some())
+            {
+                return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                    reason: "DataTexture media must provide exactly one typed CPU numeric payload",
+                });
+            }
             if let Some(address) = heterogeneous_input {
                 if frame.is_some()
                     || gpu_source.is_some()
@@ -702,12 +714,21 @@ fn estimate_source(
                 });
             };
             if effect_plan.processing_domain() != EffectColorDomain::SceneLinearRgb {
+                let effect_textures = if *is_data_texture {
+                    // The typed numeric source must first cross the explicit
+                    // compositor bypass; conservatively retain both working
+                    // accumulator textures before the ordinary three-texture
+                    // external-domain round trip.
+                    5
+                } else {
+                    3
+                };
                 estimate.effects.checked_add(
                     ViewerGpuActiveTextureDemand::checked_repeated_texture(
                         effect_width,
                         effect_height,
                         16,
-                        3,
+                        effect_textures,
                         ViewerGpuActiveWorkingSetStage::Effects,
                     )?,
                     ViewerGpuActiveWorkingSetStage::Effects,
@@ -1185,6 +1206,7 @@ mod tests {
         let layers = [
             ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
+                is_data_texture: false,
                 gpu_source: None,
                 native_source: None,
                 cpu_yuv_source: None,
@@ -1197,6 +1219,7 @@ mod tests {
             })),
             ViewerGpuExecutionLayer::Source(Box::new(ViewerGpuSourceLayer::Media {
                 frame: Some(frame()),
+                is_data_texture: false,
                 gpu_source: None,
                 native_source: None,
                 cpu_yuv_source: None,

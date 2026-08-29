@@ -12,7 +12,10 @@ use mondrian_core::{
     ExecutionTerminalDisposition, ExecutionTerminalEvidence, JobId,
 };
 use mondrian_media::AudioSourceCacheConfig;
-use mondrian_renderer::{RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant};
+use mondrian_renderer::{
+    GpuVisualFrameExecutionResourceGrant, RenderGpuOutputExecutionResourceGrant,
+    TimelineCpuWorkingSetGrant,
+};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
@@ -75,6 +78,11 @@ pub struct ExportExecutionResourcePolicy {
     pub gpu_output_idle_per_contract: usize,
     /// Aggregate approximate idle GPU output texture bytes.
     pub gpu_output_idle_bytes: u64,
+    /// Hard active texture grant for the complete GPU visual closure.
+    ///
+    /// Existing nested outputs and every new upload/Effect/Transition/composite
+    /// texture are admitted together before each node records.
+    pub gpu_visual_active: GpuVisualFrameExecutionResourceGrant,
     /// Hard active texture/readback grant for one final GPU output boundary.
     ///
     /// Unlike idle retention, this grant is frozen for the accepted Export
@@ -113,6 +121,10 @@ impl Default for ExportExecutionResourcePolicy {
             cpu_color_processor_capacity: 32,
             gpu_output_idle_per_contract: 1,
             gpu_output_idle_bytes: 96 * 1024 * 1024,
+            gpu_visual_active: GpuVisualFrameExecutionResourceGrant::new(
+                2 * 1024 * 1024 * 1024,
+                128,
+            ),
             gpu_output_active: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
             title_cache_entries: 16,
             title_cache_bytes: 64 * 1024 * 1024,

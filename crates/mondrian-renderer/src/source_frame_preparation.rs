@@ -189,6 +189,20 @@ impl PreparedSourceFrame {
         matches!(self, Self::DataTexture { .. })
     }
 
+    /// Clone the normalized numeric payload for the compositor-owned typed
+    /// DataTexture upload seam.
+    ///
+    /// The returned frame carries a working-space storage descriptor only so
+    /// the existing float frame container can own its pixels. Consumers must
+    /// preserve the accompanying DataTexture route identity and must not pass
+    /// it through a color transform.
+    pub fn data_texture_frame(&self) -> Option<CpuColorFrame> {
+        match self {
+            Self::DataTexture { frame, .. } => Some(frame.clone()),
+            Self::ColorManaged { .. } => None,
+        }
+    }
+
     /// Working domain produced by this prepared route.
     pub fn working_color_space(&self) -> WorkingColorSpace {
         match self {
@@ -199,8 +213,9 @@ impl PreparedSourceFrame {
 
     /// Clone the GPU-capable color-managed source and transform.
     ///
-    /// Data textures deliberately return `None` until the GPU compositor owns
-    /// a typed non-color import route; callers must use the exact CPU bypass.
+    /// Data textures deliberately return `None`: their GPU route is the
+    /// compositor-owned typed numeric upload exposed by
+    /// [`Self::data_texture_frame`], never a color input transform.
     pub fn color_managed_gpu_input(
         &self,
     ) -> Option<(Arc<CpuSourceColorFrame>, RenderInputTransform)> {

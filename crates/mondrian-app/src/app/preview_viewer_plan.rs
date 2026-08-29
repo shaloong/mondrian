@@ -506,6 +506,7 @@ pub(crate) fn gpu_layer_for_cached_working(
     Ok(ViewerGpuExecutionLayer::Source(Box::new(
         ViewerGpuSourceLayer::Media {
             frame: Some(frame),
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -691,6 +692,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         if let Ok(effect_plan) = self.scratch.get_or_lower_effect_gpu_plan(effect_graph) {
             return Ok(ViewerGpuSourceLayer::Media {
                 frame: frame.working_payload(),
+                is_data_texture: frame.is_data_texture(),
                 gpu_source: frame.gpu_source(),
                 native_source: frame.native_source(),
                 cpu_yuv_source: frame.cpu_yuv_source(),
@@ -729,6 +731,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         });
         Ok(ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -772,6 +775,7 @@ impl<'a> HeterogeneousPreviewLayerBuilder<'a> {
         });
         Ok(ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -903,6 +907,7 @@ fn gpu_media_source(
         .map_err(|_| GpuCompositingBlockerReason::EffectRequiresCpu)?;
     Ok(ViewerGpuSourceLayer::Media {
         frame: frame.working_payload(),
+        is_data_texture: frame.is_data_texture(),
         gpu_source: frame.gpu_source(),
         native_source: frame.native_source(),
         cpu_yuv_source: frame.cpu_yuv_source(),
@@ -1047,6 +1052,7 @@ fn is_preview_gpu_transform_supported(transform: [f32; 6]) -> bool {
 #[cfg(test)]
 mod heterogeneous_tests {
     use super::*;
+    use crate::app::preview_media_frame::MediaPreviewGpuSourceFrame;
     use mondrian_core::automation::{PropertyHost, PropertyMutation, PropertyValue};
     use mondrian_core::{TimelineTime, WorkingRgbaF32Frame};
     use mondrian_effects::{
@@ -1137,6 +1143,25 @@ mod heterogeneous_tests {
                 color_space: WORKING_SPACE,
                 data: vec![[0.2, 0.4, 0.6, 1.0]; (WIDTH * HEIGHT) as usize],
             }),
+            mondrian_core::Resolution { width: WIDTH, height: HEIGHT },
+            identity.finish_identity(),
+            FramePresentationQuality::Ready,
+            PreviewDecodeExecutionSummary::default(),
+        )
+    }
+
+    fn data_texture_frame(identity_salt: u64) -> MediaPreviewFrame {
+        let mut identity =
+            PreviewSemanticIdentityBuilder::new(b"mondrian.preview.data-texture-plan-test.v1");
+        identity_salt.hash(&mut identity);
+        let numeric = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: WIDTH,
+            height: HEIGHT,
+            color_space: WORKING_SPACE,
+            data: vec![[-0.25, 0.5, 1.75, 0.8]; (WIDTH * HEIGHT) as usize],
+        });
+        MediaPreviewFrame::from_source(
+            MediaPreviewGpuSourceFrame::new_data_texture(numeric, WORKING_SPACE),
             mondrian_core::Resolution { width: WIDTH, height: HEIGHT },
             identity.finish_identity(),
             FramePresentationQuality::Ready,
@@ -1250,6 +1275,39 @@ mod heterogeneous_tests {
             source.as_ref(),
             ViewerGpuSourceLayer::Media { blend_mode: BlendMode::Screen, .. }
         ));
+    }
+
+    #[test]
+    fn data_texture_lowers_to_typed_cpu_numeric_upload_without_a_color_source() {
+        let graph = identity_compiled_effect_graph().expect("identity graph");
+        let resolved = [ResolvedPreviewElement::Media {
+            frame: data_texture_frame(9),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_graph: graph,
+            prepared_heterogeneous_route: None,
+            frame_seed: 9,
+        }];
+
+        let layers = gpu_composite_layers_for_resolved(&resolved, WORKING_SPACE)
+            .expect("DataTexture Viewer plan");
+        let [ViewerGpuExecutionLayer::Source(source)] = &layers[..] else {
+            panic!("expected one DataTexture source layer");
+        };
+        let ViewerGpuSourceLayer::Media {
+            frame: Some(frame),
+            is_data_texture: true,
+            gpu_source: None,
+            native_source: None,
+            cpu_yuv_source: None,
+            heterogeneous_input: None,
+            ..
+        } = source.as_ref()
+        else {
+            panic!("DataTexture must use the typed CPU numeric upload seam");
+        };
+        assert_eq!(frame.rgba_f32().data[0], [-0.25, 0.5, 1.75, 0.8]);
     }
 
     #[test]

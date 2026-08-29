@@ -25,6 +25,11 @@ pub enum ColorFrameDomain {
     Effect,
     /// Non-color scalar alpha/mask values stored in the alpha channel.
     AlphaMask,
+    /// Non-color RGBA numeric channels before their explicit compositor bypass.
+    ///
+    /// This domain is intentionally distinct from `Working`: the samples have
+    /// no color identity and must never be admitted to an OCIO processor.
+    DataTexture,
     /// Presentation pixels after a display/view transform.
     Display,
     /// Delivery pixels after export/output transforms.
@@ -165,9 +170,15 @@ impl ColorFrameDescriptor {
     pub const fn has_coherent_space_domain(self) -> bool {
         matches!(
             (self.color_space, self.domain),
-            (ColorFrameSpace::NonColorData, ColorFrameDomain::AlphaMask)
+            (
+                ColorFrameSpace::NonColorData,
+                ColorFrameDomain::AlphaMask | ColorFrameDomain::DataTexture
+            )
         ) || (!matches!(self.color_space, ColorFrameSpace::NonColorData)
-            && !matches!(self.domain, ColorFrameDomain::AlphaMask))
+            && !matches!(
+                self.domain,
+                ColorFrameDomain::AlphaMask | ColorFrameDomain::DataTexture
+            ))
     }
 }
 
@@ -532,6 +543,23 @@ impl<R> GpuColorFrameResourceTable<R> {
     /// Return the number of entries in the table.
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Return checked logical texture bytes for every active table entry.
+    ///
+    /// Driver allocation padding is backend-specific and excluded. `None` is
+    /// a fail-closed overflow signal for owner admission; it must never be
+    /// interpreted as zero residency.
+    pub fn logical_texture_bytes(&self) -> Option<u64> {
+        self.entries.values().try_fold(0_u64, |total, entry| {
+            let descriptor = entry.handle.descriptor();
+            u64::from(descriptor.width)
+                .checked_mul(u64::from(descriptor.height))
+                .and_then(|pixels| {
+                    pixels.checked_mul(u64::from(entry.handle.texture_format().bytes_per_pixel()))
+                })
+                .and_then(|bytes| total.checked_add(bytes))
+        })
     }
 
     /// Return whether the table has no entries.
@@ -1205,6 +1233,7 @@ enum GpuColorFrameUploadPayload {
     Float32(Arc<Vec<f32>>),
     EncodedRgba32(Arc<EncodedRgbaF32Frame>),
     WorkingRgba32(Arc<WorkingRgbaF32Frame>),
+    DataTextureRgba32(Arc<WorkingRgbaF32Frame>),
     AlphaMaskRgba32(Arc<Vec<[f32; 4]>>),
 }
 
@@ -1215,6 +1244,7 @@ impl GpuColorFrameUploadPayload {
             Self::Float32(samples) => bytemuck::cast_slice(samples.as_slice()),
             Self::EncodedRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::WorkingRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
+            Self::DataTextureRgba32(frame) => bytemuck::cast_slice(frame.data.as_slice()),
             Self::AlphaMaskRgba32(samples) => bytemuck::cast_slice(samples.as_slice()),
         }
     }
@@ -1240,6 +1270,43 @@ impl GpuColorFrameUploadPlan {
         Self::new(
             handle,
             GpuColorFrameUploadPayload::WorkingRgba32(frame.rgba_f32_shared()),
+        )
+    }
+
+    /// Build a typed non-color upload plan for normalized RGBA numeric data.
+    ///
+    /// The CPU storage happens to use [`CpuColorFrame`] for its validated
+    /// Float32 extent and straight-alpha payload. The GPU handle deliberately
+    /// carries `NonColorData + DataTexture`, so the upload cannot be passed to
+    /// a color transform or mistaken for an already color-managed working
+    /// frame. Only the compositor's explicit numeric-bypass source may consume
+    /// it and write a working-domain result.
+    pub fn from_cpu_data_texture(
+        id: GpuColorFrameId,
+        frame: &CpuColorFrame,
+        label: impl Into<String>,
+    ) -> Result<Self, GpuColorFrameUploadError> {
+        let source = frame.descriptor();
+        let descriptor = ColorFrameDescriptor {
+            width: source.width,
+            height: source.height,
+            color_space: ColorFrameSpace::NonColorData,
+            domain: ColorFrameDomain::DataTexture,
+            encoding: ColorFrameEncoding::LinearFloat,
+            residency: ColorFrameResidency::Gpu,
+            alpha: source.alpha,
+        };
+        validate_cpu_pixel_count(descriptor, frame.rgba_f32().data.len())?;
+        let handle = GpuColorFrameHandle::new(
+            id,
+            descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            label,
+        )
+        .map_err(GpuColorFrameUploadError::Handle)?;
+        Self::new(
+            handle,
+            GpuColorFrameUploadPayload::DataTextureRgba32(frame.rgba_f32_shared()),
         )
     }
 

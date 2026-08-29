@@ -5,11 +5,13 @@ Module. The Module consumes Media's immutable RGBA frame contract, validates
 payload extent and encoded-versus-linear-versus-DataTexture identity, and
 normalizes Alpha. It atomically constructs either a color-managed source bound
 to one `RenderInputTransform`, or a DataTexture working frame that preserves
-normalized numeric channels and executes zero OCIO/color stages. Preview may
-retain that prepared value for GPU admission or lazy CPU fallback, while Export
-executes its CPU source-to-working method directly. This shared seam prevents
-consumer Adapters from deriving color semantics from scalar type or bit depth,
-and structurally prevents payload/intent domain mismatches after preparation.
+normalized numeric channels and executes zero OCIO/color stages. Preview and
+Export retain that prepared value for either exact CPU execution or the
+compositor-owned typed GPU DataTexture upload; the latter materializes
+`NonColorData + DataTexture` and can enter a working accumulator only through
+the explicit numeric-composite bypass. This shared seam prevents consumer
+Adapters from deriving color semantics from scalar type or bit depth, and
+structurally prevents payload/intent domain mismatches after preparation.
 
 Pointwise gamut/highlight grades stay in the same prepared Effect graph used by
 Preview and Export. CPU normalized-RGBA8 and Float32 dispatch call the same
@@ -199,6 +201,35 @@ Preview and Export are the two real Adapters, while decode, title rasterization,
 compositing, Pending/Unavailable semantics, Viewer presentation, delivery
 encoding, and publication stay in those owning Modules.
 
+For an Export deliverable, the Adapter first proves the entire prepared frame
+closure can lower to homogeneous GPU Effect plans and carries neither temporal
+batches nor heterogeneous payloads. Only then does the renderer-owned
+`GpuVisualFrameExecutor` start. It records source Effects, Cross Dissolve,
+adjustments, Grade elements, and the final working composite into the same
+`RenderGpuOutputBoundaryRuntime` frame table. Nested child results remain typed
+`GpuColorFrameHandle` values; a child/parent working-space mismatch becomes one
+explicit stock-OCIO GPU intermediate transform. The root handle enters Program
+Output/legalization/packing directly and performs exactly one readback at the
+encoder-pipe boundary. There is no nested or graph-internal readback.
+
+GPU selection is whole-closure and pre-start. An unsupported graph, temporal
+closure, heterogeneous route, unavailable device, or active-resource rejection
+selects the complete CPU route before GPU pixels start. Once the GPU Adapter
+records the first node, device/composite/color/output failure is terminal for
+that attempt; it cannot silently replay the frame on CPU. CPU decode/upload is
+still the explicit input residency boundary pending decoder-surface residency,
+and the encoder pipe remains the explicit output readback boundary pending a
+GPU-surface encoder contract.
+
+Before every visual node records, the Module checks the existing frame-table
+residency left by child nodes together with conservative new upload,
+source-domain, Transition, adjustment, and working-composite textures. Both
+logical bytes and texture count must fit the attempt-frozen
+`GpuVisualFrameExecutionResourceGrant`. The returned record exposes the exact
+admitted estimate; Export retains high-water diagnostics. Idle texture pooling
+is not active-allocation authority, and memory pressure cannot shrink this
+grant under a running attempt.
+
 This replaces both consumer-private recursive walkers. Temporal-vs-current
 nested selection is still decided earlier by the Frame Closure: a placement
 with a finite temporal batch binds only its exact temporal child requests and
@@ -208,8 +239,9 @@ Structural corruption (missing node/output, wrong binding parent, multiple
 parents, cycle, unreachable node, or absent root output) fails before a parent
 Adapter can consume incomplete pixels. The iterative schedule also removes a
 consumer call stack proportional to nesting depth and creates the explicit
-execution Seam needed by later GPU-nested and pass-fusion work without
-prematurely implementing those COL-024/COL-026 policies.
+execution Seam consumed by GPU-nested execution while leaving pass fusion,
+ROI/tile/damage scheduling, and tighter physical lifetime reuse to their own
+renderer policy.
 
 Before lowering each distinct Sequence, the closure resolves exactly one
 `PreparedVisualProgramBinding` from the consumer-owned cache or frozen Export

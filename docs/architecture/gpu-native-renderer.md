@@ -67,6 +67,24 @@ out; a heterogeneous sub-grant does not replace the enclosing Viewer grant;
 and returning an intermediate to the idle pool does not authorize the next
 frame.
 
+Offline deliverables use the sibling `GpuVisualFrameExecutor` Module. It accepts
+only resolved working sources, typed DataTextures, already-resident nested
+working handles, procedural solids, adjustments, and Cross Dissolve. The
+Export Adapter owns decode and closure traversal but cannot reinterpret those
+pixel domains. A whole-closure preflight selects GPU before any GPU pixel work;
+nested results remain in the shared frame table, cross-working conversion uses
+the same OCIO GPU runtime, and the root passes directly into the output boundary
+for one encoder-pipe readback. Temporal and heterogeneous closures currently
+select CPU before start.
+
+`GpuVisualFrameExecutionResourceGrant` is independent from idle pooling and the
+final output/readback grant. Before each node records, the executor adds exact
+current frame-table bytes/count to conservative new upload, external-domain,
+Transition, and composite demand. Arithmetic overflow or either exceeded limit
+fails before allocating that node. Export freezes the grant per attempt and
+reports its active high-water bytes/textures; it may not reduce precision or
+fall back after GPU execution has begun.
+
 Software-decoded compact YUV follows that same ownership rule. Its encoded-RGB
 intermediate is acquired from the shared exact-contract pool and returned when
 the submitted candidate's frame resource table clears on the next record; it

@@ -1353,6 +1353,7 @@ struct PreparedComposite<'a> {
     nodes: Vec<PreparedCompositeNode<'a>>,
     residency: ViewerGpuExecutionResidency,
     input_stage_diagnostics: RenderColorStageDiagnostics,
+    pre_compositing_diagnostics: GpuCompositingDiagnostics,
     fallback_reasons: Vec<String>,
 }
 
@@ -1369,6 +1370,7 @@ struct PreparedCompositeLayer<'a> {
 #[derive(Clone, Copy)]
 enum PreparedCompositeLayerSource<'a> {
     CpuFrame(&'a CpuColorFrame),
+    CpuDataTexture(&'a CpuColorFrame),
     GpuFrame(usize),
     SolidColor(Color),
     Adjustment,
@@ -1401,6 +1403,7 @@ fn prepare_composite<'a>(
         nodes: Vec::with_capacity(request.layers.len()),
         residency: ViewerGpuExecutionResidency::default(),
         input_stage_diagnostics: RenderColorStageDiagnostics::default(),
+        pre_compositing_diagnostics: GpuCompositingDiagnostics::default(),
         fallback_reasons: Vec::new(),
     };
 
@@ -1563,6 +1566,7 @@ fn prepare_source_layer<'a>(
     match source_layer {
         crate::ViewerGpuSourceLayer::Media {
             frame,
+            is_data_texture,
             gpu_source,
             native_source,
             cpu_yuv_source,
@@ -1574,6 +1578,18 @@ fn prepare_source_layer<'a>(
             frame_seed,
         } => {
             prepared.residency.media_layers = prepared.residency.media_layers.saturating_add(1);
+            if *is_data_texture
+                && (frame.is_none()
+                    || gpu_source.is_some()
+                    || native_source.is_some()
+                    || cpu_yuv_source.is_some()
+                    || heterogeneous_input.is_some())
+            {
+                return Err(ViewerGpuExecutionError::InputPreparation(
+                    "DataTexture media must provide exactly one typed CPU numeric payload"
+                        .to_owned(),
+                ));
+            }
             if let Some(address) = heterogeneous_input {
                 if frame.is_some()
                     || gpu_source.is_some()
@@ -1717,7 +1733,11 @@ fn prepare_source_layer<'a>(
                                             request.sequence_id, request.timeline_frame
                                         )
                                     });
-                                    PreparedCompositeLayerSource::CpuFrame(frame)
+                                    if *is_data_texture {
+                                        PreparedCompositeLayerSource::CpuDataTexture(frame)
+                                    } else {
+                                        PreparedCompositeLayerSource::CpuFrame(frame)
+                                    }
                                 } else {
                                     return Err(ViewerGpuExecutionError::InputPreparation(
                                         format!(
@@ -1747,50 +1767,86 @@ fn prepare_source_layer<'a>(
                         };
                         prepared.residency.cpu_upload_layers =
                             prepared.residency.cpu_upload_layers.saturating_add(1);
-                        PreparedCompositeLayerSource::CpuFrame(frame)
+                        if *is_data_texture {
+                            PreparedCompositeLayerSource::CpuDataTexture(frame)
+                        } else {
+                            PreparedCompositeLayerSource::CpuFrame(frame)
+                        }
                     }
                 }
             };
-            let (source, effect_plan) =
-                if effect_plan.processing_domain() == EffectColorDomain::SceneLinearRgb {
-                    (source, Some(effect_plan.as_ref()))
-                } else {
-                    let input = match source {
-                        PreparedCompositeLayerSource::GpuFrame(index) => {
-                            prepared.gpu_input_handles[index].clone()
-                        }
-                        PreparedCompositeLayerSource::CpuFrame(frame) => {
-                            let upload = runtime
-                                .upload_wgpu_working_frame(device, queue, frame)
-                                .map_err(|error| {
-                                    ViewerGpuExecutionError::EffectDomain(format!(
-                                        "CPU working source upload failed: {error:?}"
-                                    ))
-                                })?;
-                            prepared.input_stage_diagnostics.accumulate(upload.stage_diagnostics);
-                            upload.output
-                        }
-                        PreparedCompositeLayerSource::SolidColor(_)
-                        | PreparedCompositeLayerSource::Adjustment => {
-                            return Err(ViewerGpuExecutionError::EffectDomain(
-                                "media effect received a non-media prepared source".to_owned(),
-                            ));
-                        }
-                    };
-                    let index = record_external_domain_effect(
-                        prepared,
-                        runtime,
-                        compositor,
-                        effect_plan,
-                        input,
-                        request.program_output_boundary.engine.clone(),
-                        *frame_seed,
-                        device,
-                        queue,
-                        encoder,
-                    )?;
-                    (PreparedCompositeLayerSource::GpuFrame(index), None)
+            let (source, effect_plan) = if effect_plan.processing_domain()
+                == EffectColorDomain::SceneLinearRgb
+            {
+                (source, Some(effect_plan.as_ref()))
+            } else {
+                let input = match source {
+                    PreparedCompositeLayerSource::GpuFrame(index) => {
+                        prepared.gpu_input_handles[index].clone()
+                    }
+                    PreparedCompositeLayerSource::CpuFrame(frame) => {
+                        let upload = runtime
+                            .upload_wgpu_working_frame(device, queue, frame)
+                            .map_err(|error| {
+                                ViewerGpuExecutionError::EffectDomain(format!(
+                                    "CPU working source upload failed: {error:?}"
+                                ))
+                            })?;
+                        prepared.input_stage_diagnostics.accumulate(upload.stage_diagnostics);
+                        upload.output
+                    }
+                    PreparedCompositeLayerSource::CpuDataTexture(frame) => {
+                        let layer = GpuCompositeLayer {
+                            source: GpuCompositeLayerSource::CpuDataTexture(frame),
+                            opacity: 1.0,
+                            blend_mode: BlendMode::Normal,
+                            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                            effect_plan: None,
+                            frame_seed: *frame_seed,
+                        };
+                        let descriptor = frame.descriptor();
+                        let materialized = runtime
+                            .record_wgpu_working_composite(
+                                compositor,
+                                device,
+                                queue,
+                                encoder,
+                                GpuCompositeRequest {
+                                    width: descriptor.width,
+                                    height: descriptor.height,
+                                    working_color_space: request.working_color_space,
+                                    layers: std::slice::from_ref(&layer),
+                                },
+                            )
+                            .map_err(|error| {
+                                ViewerGpuExecutionError::EffectDomain(format!(
+                                    "DataTexture numeric bypass failed: {error:?}"
+                                ))
+                            })?;
+                        prepared.pre_compositing_diagnostics.accumulate(materialized.diagnostics);
+                        materialized.output
+                    }
+                    PreparedCompositeLayerSource::SolidColor(_)
+                    | PreparedCompositeLayerSource::Adjustment => {
+                        return Err(ViewerGpuExecutionError::EffectDomain(
+                            "media effect received a non-media prepared source".to_owned(),
+                        ));
+                    }
                 };
+                let index = record_external_domain_effect(
+                    prepared,
+                    runtime,
+                    compositor,
+                    effect_plan,
+                    input,
+                    request.program_output_boundary.engine.clone(),
+                    *frame_seed,
+                    device,
+                    queue,
+                    encoder,
+                )?;
+                (PreparedCompositeLayerSource::GpuFrame(index), None)
+            };
             Ok(PreparedCompositeLayer {
                 source,
                 opacity: *opacity,
@@ -1905,7 +1961,7 @@ fn execute_prepared_composite_nodes<'a>(
 ) -> Result<(Vec<PreparedCompositeLayer<'a>>, GpuCompositingDiagnostics), ViewerGpuExecutionError> {
     let nodes = std::mem::take(&mut prepared.nodes);
     let mut layers = Vec::with_capacity(nodes.len());
-    let mut diagnostics = GpuCompositingDiagnostics::default();
+    let mut diagnostics = std::mem::take(&mut prepared.pre_compositing_diagnostics);
 
     for node in nodes {
         match node {
@@ -2166,6 +2222,9 @@ fn composite_layer<'a>(
         source: match layer.source {
             PreparedCompositeLayerSource::CpuFrame(frame) => {
                 GpuCompositeLayerSource::CpuFrame(frame)
+            }
+            PreparedCompositeLayerSource::CpuDataTexture(frame) => {
+                GpuCompositeLayerSource::CpuDataTexture(frame)
             }
             PreparedCompositeLayerSource::GpuFrame(index) => {
                 GpuCompositeLayerSource::GpuFrame(&gpu_input_handles[index])
@@ -3101,6 +3160,7 @@ mod tests {
             let layer =
                 ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
                     frame: None,
+                    is_data_texture: false,
                     gpu_source: Some(ViewerGpuMediaSource {
                         source: Arc::clone(&source),
                         input_transform: RenderInputTransform::to_working_gpu(
@@ -3198,6 +3258,7 @@ mod tests {
         });
         let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -3290,6 +3351,7 @@ mod tests {
         });
         let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: Some(frame),
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -3695,6 +3757,7 @@ mod tests {
         );
         let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: None,
             native_source: None,
             cpu_yuv_source: None,
@@ -3821,6 +3884,7 @@ mod tests {
         );
         let layer = ViewerGpuExecutionLayer::Source(Box::new(crate::ViewerGpuSourceLayer::Media {
             frame: None,
+            is_data_texture: false,
             gpu_source: Some(ViewerGpuMediaSource {
                 source: Arc::clone(&source),
                 input_transform: gpu_input_transform,

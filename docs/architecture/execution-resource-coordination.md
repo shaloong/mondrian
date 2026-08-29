@@ -402,11 +402,18 @@ collection of live knobs. It grants the attempt-local Prepared Visual Program
 cache including its LUT Preparation Cache, Effect pixel/topology/GPU-plan
 residency and temporal/ROI working limit, heterogeneous route-contract ledger,
 CPU color-processor Session, GPU output idle-texture pool, and Basic Title
-cache. The route ledger is correctness/admission state, not GPU-plan cache
+cache. The policy separately freezes `gpu_visual_active` for the complete
+GPU-resident visual closure and `gpu_output_active` for the final output plus
+readback. The route ledger is correctness/admission state, not GPU-plan cache
 residency: its entry and conservative logical-byte grants remain stable across
 Nominal and Elevated pressure, while retained GPU-plan entries/bytes may
 shrink. The below-minimum/8/16/32 GiB profiles grant 8/16/32/64 immutable route
-contracts at 128 conservative logical bytes each. The same profiles grant
+contracts at 128 conservative logical bytes each. Their GPU visual grants are
+384 MiB/768 MiB/2 GiB/4 GiB across 48/64/96/160 active textures. Every node
+includes already-retained nested outputs plus conservative upload,
+Effect-domain, Transition, and working-composite demand; rejection happens
+before that node records and becomes terminal only if an earlier GPU node has
+already started. The same profiles grant
 384 MiB/512 MiB/1 GiB/2 GiB and four resources to one final GPU output
 boundary. That pressure-stable grant covers the exact working input texture,
 encoded output texture, and padded readback buffer; the separate idle pool may

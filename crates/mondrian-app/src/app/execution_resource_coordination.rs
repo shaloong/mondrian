@@ -26,9 +26,10 @@ use mondrian_platform::{
 use mondrian_playback::MAX_BOUNDED_VIDEO_PREROLL_FRAMES;
 use mondrian_playback::{PreviewFrameStoreConfig, PreviewResolutionScale};
 use mondrian_renderer::{
-    HeterogeneousCpuPrefixBatchGrant, HeterogeneousGpuResourceGrant,
-    PreparedVisualProgramCacheConfig, RenderGpuOutputExecutionResourceGrant,
-    TimelineCpuWorkingSetGrant, ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
+    GpuVisualFrameExecutionResourceGrant, HeterogeneousCpuPrefixBatchGrant,
+    HeterogeneousGpuResourceGrant, PreparedVisualProgramCacheConfig,
+    RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant,
+    ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
 };
 use parking_lot::Mutex;
 
@@ -42,7 +43,7 @@ use super::AppState;
 const MIB: usize = 1024 * 1024;
 
 /// Schema revision of the immutable execution-resource decision.
-pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 14;
+pub(crate) const EXECUTION_RESOURCE_DECISION_VERSION: u32 = 15;
 const PROCESS_PRESSURE_OBSERVATION_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_PRESSURE_RESULT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PREVIEW_HETEROGENEOUS_MAX_BATCH_ITEMS: usize = 5;
@@ -1668,6 +1669,20 @@ fn export_gpu_output_active_grant(
     RenderGpuOutputExecutionResourceGrant::new(max_active_bytes, 4)
 }
 
+fn export_gpu_visual_active_grant(
+    class: MachineResourceClass,
+) -> GpuVisualFrameExecutionResourceGrant {
+    let (max_active_bytes, max_active_textures) = match class {
+        MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
+        MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
+            (768 * MIB as u64, 64)
+        }
+        MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
+        MachineResourceClass::Professional => (4 * 1024 * MIB as u64, 160),
+    };
+    GpuVisualFrameExecutionResourceGrant::new(max_active_bytes, max_active_textures)
+}
+
 fn export_resource_policy(
     class: MachineResourceClass,
     cache_divisor: usize,
@@ -1799,6 +1814,7 @@ fn export_resource_policy(
         cpu_color_processor_capacity: (cpu_color_processor_capacity / cache_divisor).max(1),
         gpu_output_idle_per_contract: gpu_output_idle_per_contract / cache_divisor,
         gpu_output_idle_bytes: (gpu_output_idle_bytes / cache_divisor) as u64,
+        gpu_visual_active: export_gpu_visual_active_grant(class),
         gpu_output_active: export_gpu_output_active_grant(class),
         title_cache_entries: (title_cache_entries / cache_divisor).max(1),
         title_cache_bytes: (title_cache_bytes / cache_divisor).max(1),
@@ -2142,6 +2158,10 @@ mod tests {
             nominal.preview.viewer_gpu.grant.max_active_textures()
         );
         assert_eq!(
+            elevated.export.resource_policy.gpu_visual_active,
+            nominal.export.resource_policy.gpu_visual_active
+        );
+        assert_eq!(
             elevated.export.resource_policy.gpu_output_active,
             nominal.export.resource_policy.gpu_output_active
         );
@@ -2321,6 +2341,26 @@ mod tests {
                 minimum.preview.viewer_gpu.grant.max_active_textures(),
                 standard.preview.viewer_gpu.grant.max_active_textures(),
                 professional.preview.viewer_gpu.grant.max_active_textures(),
+            ),
+            (64, 96, 160)
+        );
+        assert_eq!(
+            minimum.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            768 * MIB as u64
+        );
+        assert_eq!(
+            standard.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            2 * 1024 * MIB as u64
+        );
+        assert_eq!(
+            professional.export.resource_policy.gpu_visual_active.max_active_bytes(),
+            4 * 1024 * MIB as u64
+        );
+        assert_eq!(
+            (
+                minimum.export.resource_policy.gpu_visual_active.max_active_textures(),
+                standard.export.resource_policy.gpu_visual_active.max_active_textures(),
+                professional.export.resource_policy.gpu_visual_active.max_active_textures(),
             ),
             (64, 96, 160)
         );

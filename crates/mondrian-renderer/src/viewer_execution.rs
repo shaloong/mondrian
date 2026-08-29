@@ -58,6 +58,9 @@ pub enum ViewerGpuSourceLayer {
     Media {
         /// CPU working frame used if GPU input preparation cannot execute.
         frame: Option<CpuColorFrame>,
+        /// Whether `frame` is a normalized non-color DataTexture payload that
+        /// must enter the compositor through the typed numeric bypass.
+        is_data_texture: bool,
         /// Encoded CPU source for a GPU input color transform.
         gpu_source: Option<ViewerGpuMediaSource>,
         /// Native decoder surface for low-copy renderer import.

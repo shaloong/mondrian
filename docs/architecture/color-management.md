@@ -146,6 +146,13 @@ The compiled domain plan is backend-neutral. CPU and GPU backends may fuse
 adjacent matrix, 1D, and 3D OCIO operations when OCIO proves the same processor
 semantics, but they must preserve node order and the exact endpoint identities.
 Non-color data and alpha/mask payloads are typed, non-convertible domains.
+RGB DataTexture decode normalizes numeric channels once, then GPU upload binds
+the exact `NonColorData + DataTexture + Rgba32Float` descriptor. No input OCIO
+processor is created or counted. The compositor's explicit numeric bypass is
+the only operation allowed to produce a working-domain accumulator from that
+texture; native YUV, proxies, and ordinary color-input transforms cannot
+masquerade as this route. Preview and Export lower the same
+`PreparedSourceFrame` evidence into this typed upload path.
 The CPU timeline backend executes legal transitions directly through the
 selected engine's OCIO CPU processors without copying between pixel containers.
 Those processors are retained only by the explicit

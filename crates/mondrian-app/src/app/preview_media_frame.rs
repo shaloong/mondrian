@@ -232,9 +232,8 @@ impl MediaPreviewFrame {
     pub(crate) fn working_payload(&self) -> Option<CpuColorFrame> {
         match &self.payload {
             MediaPreviewPayload::Working(frame) => Some(frame.clone()),
-            MediaPreviewPayload::Source(_)
-            | MediaPreviewPayload::CpuYuv(_)
-            | MediaPreviewPayload::Native(_) => None,
+            MediaPreviewPayload::Source(source) => source.prepared_source.data_texture_frame(),
+            MediaPreviewPayload::CpuYuv(_) | MediaPreviewPayload::Native(_) => None,
         }
     }
 
@@ -247,6 +246,15 @@ impl MediaPreviewFrame {
             MediaPreviewPayload::CpuYuv(source) => Some(source.input_transform.working_color_space),
             MediaPreviewPayload::Native(source) => Some(source.input_transform.working_color_space),
         }
+    }
+
+    /// Whether the CPU working payload represents an explicit non-color
+    /// DataTexture bypass rather than color-managed working pixels.
+    pub(crate) fn is_data_texture(&self) -> bool {
+        matches!(
+            &self.payload,
+            MediaPreviewPayload::Source(source) if source.prepared_source.is_data_texture()
+        )
     }
 
     #[cfg(test)]
@@ -492,6 +500,23 @@ impl MediaPreviewGpuSourceFrame {
     ) -> Self {
         Self {
             prepared_source: PreparedSourceFrame::from_typed_source(source, input_transform),
+            decoder_residency: DecodedFrameResidency::CpuRgba,
+            decoder_handle_kind: None,
+            decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,
+            decoded_video_sampling: DecodedVideoSampling::default(),
+            #[cfg(any(test, feature = "validation"))]
+            temporal_selection: None,
+            working_cache: Arc::new(OnceLock::new()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_data_texture(
+        frame: CpuColorFrame,
+        working_color_space: mondrian_core::WorkingColorSpace,
+    ) -> Self {
+        Self {
+            prepared_source: PreparedSourceFrame::DataTexture { frame, working_color_space },
             decoder_residency: DecodedFrameResidency::CpuRgba,
             decoder_handle_kind: None,
             decoded_surface_format: DecodedVideoSurfaceFormat::Unknown,

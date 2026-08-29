@@ -29,9 +29,9 @@ use mondrian_audio::{
     AudioRenderContract, AudioRenderRequest, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
-#[cfg(test)]
-use mondrian_core::types::ColorEngine;
-use mondrian_core::types::{AssetId, ColorSpace, FramePosition, Rational};
+use mondrian_core::types::{
+    AssetId, ColorEngine, ColorSpace, FramePosition, OcioColorSpaceIdentity, Rational,
+};
 use mondrian_core::{
     legalize_encoded_rgba_f32, AudioChannelLayout, AudioSamplePosition, AudioSampleRate,
     AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
@@ -58,8 +58,11 @@ use mondrian_renderer::{
     execute_cpu_working_transform_with_session, execute_prepared_visual_closure,
     prepare_decoded_cpu_source_frame, prepare_visual_frame_closure,
     project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterizer,
-    ColorFrameResidency, CpuColorFrame, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
-    GpuColorFrameWgpuResourcePool, GpuColorFrameWgpuResourcePoolOptions, GpuContext,
+    ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    GpuColorFrameWgpuResourcePoolOptions, GpuContext, GpuVisualFrameElement,
+    GpuVisualFrameExecutionResourceGrant, GpuVisualFrameExecutor, GpuVisualFrameRecord,
+    GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer, GpuVisualTransitionInput,
     HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
     HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
     HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime, PreparedSourceFrame,
@@ -70,9 +73,9 @@ use mondrian_renderer::{
     PreparedVisualProgram, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderOutputColorBoundary,
-    SourceFramePreparationIntent, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
-    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderIntermediateColorTransform,
+    RenderOutputColorBoundary, SourceFramePreparationIntent, TimelineAdjustmentLayer,
+    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
@@ -156,6 +159,9 @@ thread_local! {
     static FORCE_FLOAT_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Test-only flag that forces export GPU output scheduling to fail before runtime access.
     static FORCE_GPU_BOUNDARY_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// GPU visual execution is opt-in per test so the parallel unit suite does
+    /// not compile the large compositor shader on dozens of D3D devices at once.
+    static ENABLE_GPU_VISUAL_EXECUTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Guard that sets and clears `FORCE_FLOAT_BOUNDARY_FAILURE` for the duration
@@ -196,9 +202,28 @@ impl Drop for GpuBoundaryFailureGuard {
     }
 }
 
+#[cfg(test)]
+struct GpuVisualExecutionGuard;
+
+#[cfg(test)]
+impl GpuVisualExecutionGuard {
+    fn activate() -> Self {
+        ENABLE_GPU_VISUAL_EXECUTION.with(|cell| cell.set(true));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for GpuVisualExecutionGuard {
+    fn drop(&mut self) {
+        ENABLE_GPU_VISUAL_EXECUTION.with(|cell| cell.set(false));
+    }
+}
+
 struct ExportGpuOutputBackend {
     context: Arc<GpuContext>,
     runtime: RenderGpuOutputBoundaryRuntime,
+    visual: Option<GpuVisualFrameExecutor>,
     heterogeneous_runtime: HeterogeneousGpuContinuationRuntime,
 }
 
@@ -262,6 +287,7 @@ struct ExportGpuExecutionRuntime {
     attempt_generation: u64,
     next_device_generation: u64,
     resource_pool_options: GpuColorFrameWgpuResourcePoolOptions,
+    visual_active_grant: GpuVisualFrameExecutionResourceGrant,
     active_output_grant: RenderGpuOutputExecutionResourceGrant,
     state: ExportGpuExecutionRuntimeState,
 }
@@ -275,6 +301,10 @@ impl Default for ExportGpuExecutionRuntime {
                 max_per_contract: 1,
                 max_retained_bytes: 96 * 1024 * 1024,
             },
+            visual_active_grant: GpuVisualFrameExecutionResourceGrant::new(
+                2 * 1024 * 1024 * 1024,
+                128,
+            ),
             active_output_grant: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
             state: ExportGpuExecutionRuntimeState::Cold,
         }
@@ -287,11 +317,14 @@ impl ExportGpuExecutionRuntime {
             max_per_contract: policy.gpu_output_idle_per_contract,
             max_retained_bytes: policy.gpu_output_idle_bytes,
         };
+        let visual_active_grant = policy.gpu_visual_active;
         self.active_output_grant = policy.gpu_output_active;
-        if self.resource_pool_options == options {
+        if self.resource_pool_options == options && self.visual_active_grant == visual_active_grant
+        {
             return;
         }
         self.resource_pool_options = options;
+        self.visual_active_grant = visual_active_grant;
         self.state = ExportGpuExecutionRuntimeState::Cold;
     }
 
@@ -352,6 +385,125 @@ impl ExportGpuExecutionRuntime {
         }
     }
 
+    fn begin_visual_frame(&mut self) -> Result<(), ExportGpuOutputFallbackReason> {
+        #[cfg(test)]
+        if !ENABLE_GPU_VISUAL_EXECUTION.with(|cell| cell.get()) {
+            return Err(ExportGpuOutputFallbackReason::ContextUnavailable);
+        }
+        self.ensure_ready()?;
+        if let ExportGpuExecutionRuntimeState::Ready { backend, .. } = &mut self.state {
+            if backend.visual.is_none() {
+                backend.visual = Some(
+                    GpuVisualFrameExecutor::with_resource_grant(
+                        &backend.context.device,
+                        self.visual_active_grant,
+                    )
+                    .map_err(|_| ExportGpuOutputFallbackReason::ContextUnavailable)?,
+                );
+            }
+            if let Some(visual) = backend.visual.as_ref() {
+                visual.clear_frame_resources();
+            }
+            backend.runtime.clear_frame_resources();
+            return Ok(());
+        }
+        Err(ExportGpuOutputFallbackReason::ContextUnavailable)
+    }
+
+    fn record_visual_node(
+        &mut self,
+        request: GpuVisualFrameRequest<'_>,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<GpuVisualFrameRecord, String> {
+        if cancellation.is_canceled() {
+            return Err("export GPU visual execution canceled".to_owned());
+        }
+        self.ensure_ready()
+            .map_err(|reason| format!("export GPU visual backend is unavailable: {reason:?}"))?;
+        let backend = match &mut self.state {
+            ExportGpuExecutionRuntimeState::Ready { backend, .. } => backend,
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {
+                return Err("export GPU visual backend is unavailable".to_owned());
+            }
+        };
+        let mut encoder =
+            backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mondrian-export-gpu-visual-node"),
+            });
+        let visual = backend.visual.as_ref().ok_or_else(|| {
+            "export GPU visual executor was not prepared before recording".to_owned()
+        })?;
+        let record = visual
+            .record(
+                &mut backend.runtime,
+                &backend.context.device,
+                &backend.context.queue,
+                &mut encoder,
+                request,
+            )
+            .map_err(|error| format!("export GPU visual node failed: {error}"))?;
+        backend.context.queue.submit(std::iter::once(encoder.finish()));
+        if cancellation.is_canceled() {
+            return Err("export GPU visual execution canceled".to_owned());
+        }
+        Ok(record)
+    }
+
+    fn convert_gpu_working_frame(
+        &mut self,
+        frame: &GpuColorFrameHandle,
+        target: WorkingColorSpace,
+        engine: ColorEngine,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<(GpuColorFrameHandle, RenderColorStageDiagnostics), String> {
+        if frame.descriptor().color_space.working() == Some(target) {
+            return Ok((frame.clone(), RenderColorStageDiagnostics::default()));
+        }
+        if cancellation.is_canceled() {
+            return Err("export nested GPU working transform canceled".to_owned());
+        }
+        self.ensure_ready().map_err(|reason| {
+            format!("export nested GPU working transform backend unavailable: {reason:?}")
+        })?;
+        let backend = match &mut self.state {
+            ExportGpuExecutionRuntimeState::Ready { backend, .. } => backend,
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {
+                return Err("export nested GPU working transform backend unavailable".to_owned());
+            }
+        };
+        let mut encoder =
+            backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("mondrian-export-gpu-nested-working-transform"),
+            });
+        let record = backend
+            .runtime
+            .record_wgpu_intermediate_color_transform_owned_backend(
+                &RenderIntermediateColorTransform {
+                    output_identity: OcioColorSpaceIdentity::Working(target),
+                    output_domain: ColorFrameDomain::Working,
+                    output_encoding: ColorFrameEncoding::LinearFloat,
+                    engine,
+                },
+                frame,
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "export-nested-parent-working",
+                RenderColorTransformGpuOptions::default(),
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &backend.context.device,
+                    queue: &backend.context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                },
+            )
+            .map_err(|error| format!("nested GPU working-space transform failed: {error:?}"))?;
+        let output = record.materialized.output.clone();
+        let diagnostics = record.stage_diagnostics;
+        backend.context.queue.submit(std::iter::once(encoder.finish()));
+        Ok((output, diagnostics))
+    }
+
     fn execute(
         &mut self,
         frame: &CpuColorFrame,
@@ -370,7 +522,7 @@ impl ExportGpuExecutionRuntime {
                 let _device_generation = *device_generation;
                 let result = execute_export_gpu_output_boundary_with_backend(
                     backend,
-                    frame,
+                    ExportGpuBoundaryInput::Cpu(frame),
                     boundary,
                     frame_contract,
                     legalizer,
@@ -386,6 +538,40 @@ impl ExportGpuExecutionRuntime {
                     backend.runtime.clear_frame_resources();
                 }
                 result
+            }
+            ExportGpuExecutionRuntimeState::Cold
+            | ExportGpuExecutionRuntimeState::Backoff { .. } => {
+                Err(ExportGpuOutputFallbackReason::ContextUnavailable.into())
+            }
+        };
+        if result.as_ref().is_err_and(export_gpu_error_requires_backend_backoff) {
+            self.state = ExportGpuExecutionRuntimeState::Backoff {
+                attempt_generation: self.attempt_generation,
+            };
+        }
+        result
+    }
+
+    fn execute_gpu_frame(
+        &mut self,
+        frame: &GpuColorFrameHandle,
+        boundary: &RenderOutputColorBoundary,
+        frame_contract: ExportFrameContract,
+        legalizer: SignalLegalizer,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<ExportGpuOutputAttemptOutcome, ExportGpuOutputExecutionError> {
+        self.ensure_ready().map_err(ExportGpuOutputExecutionError::from)?;
+        let result = match &mut self.state {
+            ExportGpuExecutionRuntimeState::Ready { backend, .. } => {
+                execute_export_gpu_output_boundary_with_backend(
+                    backend,
+                    ExportGpuBoundaryInput::Gpu(frame),
+                    boundary,
+                    frame_contract,
+                    legalizer,
+                    self.active_output_grant,
+                    cancellation,
+                )
             }
             ExportGpuExecutionRuntimeState::Cold
             | ExportGpuExecutionRuntimeState::Backoff { .. } => {
@@ -456,6 +642,7 @@ fn build_export_gpu_output_runtime(
     )
     .map_err(|err| format!("create heterogeneous GPU continuation runtime failed: {err}"))?;
     Ok(Box::new(ExportGpuOutputBackend {
+        visual: None,
         context,
         runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool)
             .map_err(|err| format!("create GPU output runtime failed: {err}"))?,
@@ -548,9 +735,15 @@ fn export_gpu_readback_poll_timeout(
     Ok(poll_timeout)
 }
 
+#[derive(Clone, Copy)]
+enum ExportGpuBoundaryInput<'a> {
+    Cpu(&'a CpuColorFrame),
+    Gpu(&'a GpuColorFrameHandle),
+}
+
 fn execute_export_gpu_output_boundary_with_backend(
     backend: &mut ExportGpuOutputBackend,
-    frame: &CpuColorFrame,
+    frame: ExportGpuBoundaryInput<'_>,
     boundary: &RenderOutputColorBoundary,
     frame_contract: ExportFrameContract,
     legalizer: SignalLegalizer,
@@ -572,34 +765,52 @@ fn execute_export_gpu_output_boundary_with_backend(
     } else {
         frame_contract.gpu_boundary_texture_format()
     };
-    let record = backend
-        .runtime
-        .record_wgpu_output_boundary_owned_backend_with_grant(
-            boundary,
-            frame,
-            boundary_texture_format,
-            RenderColorTransformGpuOptions {
-                output_residency: ColorFrameResidency::Cpu,
-                ..RenderColorTransformGpuOptions::default()
-            },
-            active_grant,
-            RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                device: &backend.context.device,
-                queue: &backend.context.queue,
-                encoder: &mut encoder,
-                load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-            },
-        )
-        .map_err(|error| match error {
-            RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet(_) => {
-                ExportGpuOutputExecutionError::Fallback(
-                    ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
-                )
-            }
-            _ => ExportGpuOutputExecutionError::Fallback(
-                ExportGpuOutputFallbackReason::RecordBoundaryFailed,
-            ),
-        })?;
+    let gpu_options = RenderColorTransformGpuOptions {
+        output_residency: ColorFrameResidency::Cpu,
+        ..RenderColorTransformGpuOptions::default()
+    };
+    let record = match frame {
+        ExportGpuBoundaryInput::Cpu(frame) => {
+            backend.runtime.record_wgpu_output_boundary_owned_backend_with_grant(
+                boundary,
+                frame,
+                boundary_texture_format,
+                gpu_options,
+                active_grant,
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &backend.context.device,
+                    queue: &backend.context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+        }
+        ExportGpuBoundaryInput::Gpu(frame) => {
+            backend.runtime.record_wgpu_output_boundary_gpu_frame_owned_backend_with_grant(
+                boundary,
+                frame,
+                boundary_texture_format,
+                gpu_options,
+                active_grant,
+                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
+                    device: &backend.context.device,
+                    queue: &backend.context.queue,
+                    encoder: &mut encoder,
+                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                },
+            )
+        }
+    }
+    .map_err(|error| match error {
+        RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet(_) => {
+            ExportGpuOutputExecutionError::Fallback(
+                ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
+            )
+        }
+        _ => ExportGpuOutputExecutionError::Fallback(
+            ExportGpuOutputFallbackReason::RecordBoundaryFailed,
+        ),
+    })?;
 
     let submission_index = backend.context.queue.submit(std::iter::once(encoder.finish()));
     let readback_buffer = record.readback_buffer.ok_or(ExportGpuOutputExecutionError::Fallback(
@@ -673,6 +884,9 @@ fn execute_export_gpu_output_boundary_with_backend(
     };
     if cancellation.is_canceled() {
         return Err(ExportGpuOutputExecutionError::Canceled);
+    }
+    if let Some(visual) = backend.visual.as_ref() {
+        visual.clear_frame_resources();
     }
     backend.runtime.clear_frame_resources();
 
@@ -770,6 +984,18 @@ impl ExportHeterogeneousCompletionEvidence {
 /// UI-independent visual execution evidence for one Export attempt.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ExportJobVisualDiagnostics {
+    /// Prepared visual nodes completed as GPU-resident working frames.
+    pub gpu_visual_nodes_completed: u64,
+    /// Non-root Sequence outputs handed to their parent without CPU readback.
+    pub gpu_visual_nested_outputs: u64,
+    /// Typed non-color DataTexture uploads consumed by the GPU numeric bypass.
+    pub gpu_visual_data_texture_uploads: u64,
+    /// Final GPU visual outputs read back exactly at the encoder-pipe boundary.
+    pub gpu_visual_output_readbacks: u64,
+    /// High-water logical active texture bytes admitted by the GPU Visual Module.
+    pub gpu_visual_peak_active_bytes: u64,
+    /// High-water active texture count admitted by the GPU Visual Module.
+    pub gpu_visual_peak_active_textures: u64,
     /// Distinct conservative heterogeneous route contracts frozen by preflight.
     pub heterogeneous_route_contracts: u64,
     /// Frames whose heterogeneous attempt crossed into CPU-prefix execution.
@@ -2336,6 +2562,7 @@ impl TimelineAudioInput {
 #[derive(Debug, Clone)]
 struct DecodedVideoLayer {
     frame: CpuColorFrame,
+    is_data_texture: bool,
     source_resolution: Resolution,
     picture_geometry: ResolvedPictureGeometry,
     source_fingerprint: MediaFileFingerprint,
@@ -4347,7 +4574,14 @@ type PreparedExportVisualClosure =
 
 enum PreparedExportVisualOutput {
     Root,
-    Nested(CpuColorFrame),
+    NestedCpu(CpuColorFrame),
+    NestedGpu(GpuColorFrameHandle),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportPreparedVisualMode {
+    Cpu,
+    Gpu,
 }
 
 type ExportNodeInputs<'a> = PreparedVisualExecutionNodeInputs<
@@ -4359,6 +4593,7 @@ type ExportNodeInputs<'a> = PreparedVisualExecutionNodeInputs<
 struct ExportPreparedVisualAdapter<'context, 'resources, 'target> {
     context: &'context mut ExportFrameRenderContext<'resources>,
     root_target: Option<SequenceRenderTarget<'target>>,
+    mode: ExportPreparedVisualMode,
 }
 
 impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
@@ -4376,7 +4611,14 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
                 .root_target
                 .take()
                 .ok_or_else(|| "prepared export root target was already consumed".to_owned())?;
-            render_prepared_visual_node_into(self.context, &inputs, target)?;
+            match self.mode {
+                ExportPreparedVisualMode::Cpu => {
+                    render_prepared_visual_node_into(self.context, &inputs, target)?;
+                }
+                ExportPreparedVisualMode::Gpu => {
+                    render_prepared_visual_node_gpu_into(self.context, &inputs, target)?;
+                }
+            }
             return Ok(PreparedExportVisualOutput::Root);
         }
 
@@ -4386,6 +4628,22 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
                 inputs.node().id().index()
             )
         })?;
+        if self.mode == ExportPreparedVisualMode::Gpu {
+            let output = render_prepared_visual_node_gpu(self.context, &inputs, false)?;
+            let parent_working = inbound.parent_working_color_space();
+            let (output, stage_diagnostics) =
+                self.context.visual_session.gpu_output.convert_gpu_working_frame(
+                    &output,
+                    parent_working,
+                    inputs.node().color_context().engine().clone(),
+                    self.context.cancellation,
+                )?;
+            if let Some(diagnostics) = self.context.stage_diagnostics.as_deref_mut() {
+                diagnostics.accumulate(stage_diagnostics);
+            }
+            return Ok(PreparedExportVisualOutput::NestedGpu(output));
+        }
+
         let mut output = None;
         render_prepared_visual_node_into(
             self.context,
@@ -4412,7 +4670,7 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
             }
             frame = converted.result.frame;
         }
-        Ok(PreparedExportVisualOutput::Nested(frame))
+        Ok(PreparedExportVisualOutput::NestedCpu(frame))
     }
 }
 
@@ -4422,13 +4680,39 @@ fn prepared_export_nested_output<'a>(
     sample: PreparedVisualNestedSample,
 ) -> Result<&'a CpuColorFrame, String> {
     match inputs.nested_output(placement, sample) {
-        Some(PreparedExportVisualOutput::Nested(frame)) => Ok(frame),
+        Some(PreparedExportVisualOutput::NestedCpu(frame)) => Ok(frame),
+        Some(PreparedExportVisualOutput::NestedGpu(_)) => Err(format!(
+            "prepared export child for Clip {} returned a GPU output to the CPU Adapter",
+            placement.clip_id
+        )),
         Some(PreparedExportVisualOutput::Root) => Err(format!(
             "prepared export child for Clip {} returned the root output",
             placement.clip_id
         )),
         None => Err(format!(
             "prepared export child output is unavailable for Clip {} ({sample:?})",
+            placement.clip_id
+        )),
+    }
+}
+
+fn prepared_export_nested_gpu_output(
+    inputs: &ExportNodeInputs<'_>,
+    placement: TimelineClipExecutionRef,
+    sample: PreparedVisualNestedSample,
+) -> Result<GpuColorFrameHandle, String> {
+    match inputs.nested_output(placement, sample) {
+        Some(PreparedExportVisualOutput::NestedGpu(frame)) => Ok(frame.clone()),
+        Some(PreparedExportVisualOutput::NestedCpu(_)) => Err(format!(
+            "prepared export child for Clip {} returned a CPU output to the GPU Adapter",
+            placement.clip_id
+        )),
+        Some(PreparedExportVisualOutput::Root) => Err(format!(
+            "prepared export child for Clip {} returned the root output",
+            placement.clip_id
+        )),
+        None => Err(format!(
+            "prepared export child GPU output is unavailable for Clip {} ({sample:?})",
             placement.clip_id
         )),
     }
@@ -4576,10 +4860,21 @@ fn render_sequence_frame_into(
         .map_err(|error| {
             format!("export visual closure exceeds its CPU working-set grant: {error}")
         })?;
-    let mut adapter = ExportPreparedVisualAdapter { context, root_target: Some(target) };
+    let use_gpu = matches!(&target, SequenceRenderTarget::Deliverable(_))
+        && prepared_export_visual_closure_supports_gpu(
+            &closure,
+            &mut context.visual_session.composite_scratch,
+        )
+        && context.visual_session.gpu_output.begin_visual_frame().is_ok();
+    let mode = if use_gpu {
+        ExportPreparedVisualMode::Gpu
+    } else {
+        ExportPreparedVisualMode::Cpu
+    };
+    let mut adapter = ExportPreparedVisualAdapter { context, root_target: Some(target), mode };
     match execute_prepared_visual_closure(&closure, &mut adapter) {
         Ok(PreparedExportVisualOutput::Root) => Ok(()),
-        Ok(PreparedExportVisualOutput::Nested(_)) => {
+        Ok(PreparedExportVisualOutput::NestedCpu(_) | PreparedExportVisualOutput::NestedGpu(_)) => {
             Err("prepared export execution returned a nested frame for the root".to_owned())
         }
         Err(PreparedVisualExecutionError::Structure(error)) => Err(format!(
@@ -4587,6 +4882,583 @@ fn render_sequence_frame_into(
         )),
         Err(PreparedVisualExecutionError::Adapter(error)) => Err(error),
     }
+}
+
+fn prepared_export_visual_closure_supports_gpu(
+    closure: &PreparedExportVisualClosure,
+    scratch: &mut TimelineCompositeScratch,
+) -> bool {
+    closure.nodes().iter().all(|node| {
+        node.evaluation().payload().is_empty()
+            && node.evaluation().temporal_batches().is_empty()
+            && node
+                .evaluation()
+                .plan()
+                .elements
+                .iter()
+                .all(|element| prepared_export_element_supports_gpu(element, scratch))
+    })
+}
+
+fn prepared_export_element_supports_gpu(
+    element: &TimelineRenderPlanElement,
+    scratch: &mut TimelineCompositeScratch,
+) -> bool {
+    let graph_supported = |graph: &Arc<mondrian_effects::CompiledEffectGraph>,
+                           scratch: &mut TimelineCompositeScratch| {
+        scratch.get_or_lower_effect_gpu_plan(graph).is_ok()
+    };
+    match element {
+        TimelineRenderPlanElement::Media(media) => graph_supported(&media.effect_graph, scratch),
+        TimelineRenderPlanElement::BasicTitle(title) => {
+            graph_supported(&title.effect_graph, scratch)
+        }
+        TimelineRenderPlanElement::NestedSequence(nested) => {
+            graph_supported(&nested.effect_graph, scratch)
+        }
+        TimelineRenderPlanElement::SolidColor(solid) => {
+            graph_supported(&solid.effect_graph, scratch)
+        }
+        TimelineRenderPlanElement::Adjustment(adjustment) => {
+            graph_supported(&adjustment.effect_graph, scratch)
+        }
+        TimelineRenderPlanElement::TimelineGrade(grade) => {
+            graph_supported(&grade.effect_graph, scratch)
+        }
+        TimelineRenderPlanElement::CrossDissolve(transition) => {
+            prepared_export_transition_input_supports_gpu(&transition.left, scratch)
+                && prepared_export_transition_input_supports_gpu(&transition.right, scratch)
+        }
+    }
+}
+
+fn prepared_export_transition_input_supports_gpu(
+    input: &TimelineTransitionInputPlan,
+    scratch: &mut TimelineCompositeScratch,
+) -> bool {
+    match input {
+        TimelineTransitionInputPlan::Transparent => true,
+        TimelineTransitionInputPlan::Media(media) => {
+            scratch.get_or_lower_effect_gpu_plan(&media.effect_graph).is_ok()
+        }
+        TimelineTransitionInputPlan::BasicTitle(title) => {
+            scratch.get_or_lower_effect_gpu_plan(&title.effect_graph).is_ok()
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            scratch.get_or_lower_effect_gpu_plan(&nested.effect_graph).is_ok()
+        }
+        TimelineTransitionInputPlan::SolidColor(solid) => {
+            scratch.get_or_lower_effect_gpu_plan(&solid.effect_graph).is_ok()
+        }
+    }
+}
+
+fn render_prepared_visual_node_gpu_into(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    target: SequenceRenderTarget<'_>,
+) -> Result<(), String> {
+    let flatten_black = matches!(&target, SequenceRenderTarget::Deliverable(_))
+        && context.alpha_mode == ExportAlphaMode::FlattenBlack;
+    let output = render_prepared_visual_node_gpu(context, inputs, flatten_black)?;
+    let SequenceRenderTarget::Deliverable(canvas) = target else {
+        return Err("GPU visual root requires a deliverable target".to_owned());
+    };
+    finish_export_gpu_visual_output(context, inputs.node().color_context(), output, canvas)
+}
+
+fn render_prepared_visual_node_gpu(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    flatten_black: bool,
+) -> Result<GpuColorFrameHandle, String> {
+    if context.cancellation.is_canceled() {
+        return Err("export GPU visual execution canceled".to_owned());
+    }
+    let node = inputs.node();
+    let materialization = node.materialization_contract();
+    let author_resolution = materialization.author_resolution();
+    let resolution = node.execution_resolution();
+    let Resolution { width, height } = resolution;
+    let color_context = node.color_context().clone();
+    let render_plan = node.evaluation().plan();
+    if !node.evaluation().payload().is_empty() || !node.evaluation().temporal_batches().is_empty() {
+        return Err(
+            "heterogeneous or temporal work escaped Export GPU visual preflight".to_owned(),
+        );
+    }
+
+    let mut decode_cache = HashMap::<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>::with_capacity(
+        render_plan.len().saturating_mul(2),
+    );
+    let mut decoded_media =
+        std::iter::repeat_with(|| None).take(render_plan.len()).collect::<Vec<_>>();
+    let mut title_media = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<ResolvedExportTitle>>>();
+    let mut nested_media = std::iter::repeat_with(|| None)
+        .take(render_plan.len())
+        .collect::<Vec<Option<GpuColorFrameHandle>>>();
+
+    for (index, element) in render_plan.elements.iter().enumerate() {
+        match element {
+            TimelineRenderPlanElement::Media(media) => {
+                decoded_media[index] = Some(decode_export_media_plan(
+                    context.media,
+                    media,
+                    width,
+                    height,
+                    &color_context,
+                    &mut decode_cache,
+                    context.input_color_counts.as_deref_mut(),
+                    context.stage_diagnostics.as_deref_mut(),
+                    context.visual_session,
+                    context.cancellation,
+                )?);
+            }
+            TimelineRenderPlanElement::BasicTitle(title) => {
+                title_media[index] = Some(render_export_basic_title_plan(
+                    context.visual_session,
+                    materialization,
+                    title,
+                    width,
+                    height,
+                    color_context.working_color_space(),
+                )?);
+            }
+            TimelineRenderPlanElement::NestedSequence(nested) => {
+                nested_media[index] = Some(prepared_export_nested_gpu_output(
+                    inputs,
+                    nested.placement,
+                    PreparedVisualNestedSample::Current,
+                )?);
+            }
+            TimelineRenderPlanElement::Adjustment(_)
+            | TimelineRenderPlanElement::TimelineGrade(_)
+            | TimelineRenderPlanElement::SolidColor(_)
+            | TimelineRenderPlanElement::CrossDissolve(_) => {}
+        }
+    }
+
+    let mut gpu_elements =
+        Vec::with_capacity(render_plan.len().saturating_add(usize::from(flatten_black)));
+    if flatten_black {
+        gpu_elements.push(GpuVisualFrameElement::Source(Box::new(
+            GpuVisualSourceLayer {
+                source: GpuVisualFrameSource::Solid(mondrian_core::Color::BLACK),
+                opacity: 1.0,
+                blend_mode: mondrian_core::BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &identity_compiled_effect_graph().ok_or_else(|| {
+                        "renderer could not prepare the identity Effect graph".to_owned()
+                    })?,
+                )?,
+                frame_seed: 0,
+            },
+        )));
+    }
+
+    for (index, element) in render_plan.elements.iter().enumerate() {
+        let gpu_element = match element {
+            TimelineRenderPlanElement::Media(media) => {
+                let decoded = decoded_media[index].as_ref().ok_or_else(|| {
+                    "GPU media plan was not resolved before compositing".to_owned()
+                })?;
+                let transform = project_export_picture_affine(
+                    media.transform,
+                    decoded.picture_geometry.source_to_display_affine(),
+                    decoded.source_resolution,
+                    decoded_frame_resolution(&decoded.frame),
+                    author_resolution,
+                    resolution,
+                    "GPU media",
+                )?;
+                GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+                    source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                    opacity: media.opacity,
+                    blend_mode: media.blend_mode,
+                    transform,
+                    effect_plan: lower_export_gpu_effect_plan(
+                        context.visual_session,
+                        &media.effect_graph,
+                    )?,
+                    frame_seed: media.frame_seed,
+                }))
+            }
+            TimelineRenderPlanElement::BasicTitle(title) => {
+                let resolved = title_media[index].as_ref().ok_or_else(|| {
+                    "GPU Basic Title plan was not resolved before compositing".to_owned()
+                })?;
+                GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+                    source: export_gpu_cpu_source(&resolved.frame, false),
+                    opacity: title.opacity,
+                    blend_mode: title.blend_mode,
+                    transform: resolved.transform,
+                    effect_plan: lower_export_gpu_effect_plan(
+                        context.visual_session,
+                        &title.effect_graph,
+                    )?,
+                    frame_seed: title.frame_seed,
+                }))
+            }
+            TimelineRenderPlanElement::NestedSequence(nested) => {
+                let frame = nested_media[index].as_ref().ok_or_else(|| {
+                    "GPU nested Sequence plan was not resolved before compositing".to_owned()
+                })?;
+                let child_id = export_nested_child(
+                    inputs.closure(),
+                    node.id(),
+                    nested.placement,
+                    PreparedVisualNestedSample::Current,
+                )?;
+                let source_resolution =
+                    export_visual_node(inputs.closure(), child_id)?.author_resolution();
+                let descriptor = frame.descriptor();
+                let transform = project_export_affine(
+                    nested.transform,
+                    source_resolution,
+                    Resolution { width: descriptor.width, height: descriptor.height },
+                    author_resolution,
+                    resolution,
+                    "GPU nested Sequence",
+                )?;
+                GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+                    source: GpuVisualFrameSource::GpuWorking(frame.clone()),
+                    opacity: nested.opacity,
+                    blend_mode: nested.blend_mode,
+                    transform,
+                    effect_plan: lower_export_gpu_effect_plan(
+                        context.visual_session,
+                        &nested.effect_graph,
+                    )?,
+                    frame_seed: nested.frame_seed,
+                }))
+            }
+            TimelineRenderPlanElement::SolidColor(solid) => {
+                let transform = project_export_affine(
+                    solid.transform,
+                    author_resolution,
+                    resolution,
+                    author_resolution,
+                    resolution,
+                    "GPU solid color",
+                )?;
+                GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+                    source: GpuVisualFrameSource::Solid(solid.color),
+                    opacity: solid.opacity,
+                    blend_mode: solid.blend_mode,
+                    transform,
+                    effect_plan: lower_export_gpu_effect_plan(
+                        context.visual_session,
+                        &solid.effect_graph,
+                    )?,
+                    frame_seed: solid.frame_seed,
+                }))
+            }
+            TimelineRenderPlanElement::Adjustment(adjustment) => {
+                GpuVisualFrameElement::Adjustment {
+                    effect_plan: lower_export_gpu_effect_plan(
+                        context.visual_session,
+                        &adjustment.effect_graph,
+                    )?,
+                    opacity: adjustment.opacity,
+                    blend_mode: adjustment.blend_mode,
+                    frame_seed: adjustment.frame_seed,
+                }
+            }
+            TimelineRenderPlanElement::TimelineGrade(grade) => GpuVisualFrameElement::Adjustment {
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &grade.effect_graph,
+                )?,
+                opacity: 1.0,
+                blend_mode: mondrian_core::BlendMode::Normal,
+                frame_seed: grade.frame_seed,
+            },
+            TimelineRenderPlanElement::CrossDissolve(transition) => {
+                GpuVisualFrameElement::CrossDissolve {
+                    left: lower_export_gpu_transition_input(
+                        context,
+                        inputs,
+                        materialization,
+                        resolution,
+                        &color_context,
+                        &transition.left,
+                        &mut decode_cache,
+                    )?,
+                    right: lower_export_gpu_transition_input(
+                        context,
+                        inputs,
+                        materialization,
+                        resolution,
+                        &color_context,
+                        &transition.right,
+                        &mut decode_cache,
+                    )?,
+                    progress: transition.progress,
+                }
+            }
+        };
+        gpu_elements.push(gpu_element);
+    }
+
+    let record = context.visual_session.gpu_output.record_visual_node(
+        GpuVisualFrameRequest {
+            width,
+            height,
+            working_color_space: color_context.working_color_space(),
+            color_engine: color_context.engine().clone(),
+            elements: &gpu_elements,
+        },
+        context.cancellation,
+    )?;
+    context.visual_session.visual_diagnostics.gpu_visual_nodes_completed = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_nodes_completed
+        .saturating_add(1);
+    if !inputs.is_root() {
+        context.visual_session.visual_diagnostics.gpu_visual_nested_outputs = context
+            .visual_session
+            .visual_diagnostics
+            .gpu_visual_nested_outputs
+            .saturating_add(1);
+    }
+    context.visual_session.visual_diagnostics.gpu_visual_data_texture_uploads = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_data_texture_uploads
+        .saturating_add(record.compositing_diagnostics.data_texture_uploads);
+    let active = record.active_working_set.total();
+    context.visual_session.visual_diagnostics.gpu_visual_peak_active_bytes = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_peak_active_bytes
+        .max(active.bytes);
+    context.visual_session.visual_diagnostics.gpu_visual_peak_active_textures = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_peak_active_textures
+        .max(active.textures);
+    if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
+        diagnostics.accumulate(record.color_stage_diagnostics);
+    }
+    if let Some(diagnostics) = context.composite_diagnostics.as_deref_mut() {
+        diagnostics.accumulate(TimelineCompositeDiagnostics {
+            elements: render_plan.len() as u64,
+            float_linear_composites: 1,
+            effect_gpu_executed: gpu_elements.len() as u64,
+            ..TimelineCompositeDiagnostics::default()
+        });
+    }
+    Ok(record.output)
+}
+
+fn export_gpu_cpu_source(frame: &CpuColorFrame, is_data_texture: bool) -> GpuVisualFrameSource {
+    if is_data_texture {
+        GpuVisualFrameSource::DataTexture(Arc::new(frame.clone()))
+    } else {
+        GpuVisualFrameSource::Working(Arc::new(frame.clone()))
+    }
+}
+
+fn lower_export_gpu_effect_plan(
+    visual_session: &mut ExportVisualRenderSession,
+    graph: &Arc<mondrian_effects::CompiledEffectGraph>,
+) -> Result<Arc<mondrian_effects::CompiledEffectGpuPlan>, String> {
+    visual_session
+        .composite_scratch
+        .get_or_lower_effect_gpu_plan(graph)
+        .map_err(|blocker| format!("Effect graph escaped Export GPU preflight: {blocker:?}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_export_gpu_transition_input(
+    context: &mut ExportFrameRenderContext<'_>,
+    inputs: &ExportNodeInputs<'_>,
+    materialization: PreparedVisualMaterializationContract,
+    resolution: Resolution,
+    color_context: &ProgramColorContext,
+    plan: &TimelineTransitionInputPlan,
+    decode_cache: &mut HashMap<ExportDecodeCacheKey, Arc<DecodedVideoLayer>>,
+) -> Result<GpuVisualTransitionInput, String> {
+    let author_resolution = materialization.author_resolution();
+    let Resolution { width, height } = resolution;
+    Ok(match plan {
+        TimelineTransitionInputPlan::Transparent => GpuVisualTransitionInput::Transparent,
+        TimelineTransitionInputPlan::Media(media) => {
+            let decoded = decode_export_media_plan(
+                context.media,
+                media,
+                width,
+                height,
+                color_context,
+                decode_cache,
+                context.input_color_counts.as_deref_mut(),
+                context.stage_diagnostics.as_deref_mut(),
+                context.visual_session,
+                context.cancellation,
+            )?;
+            let transform = project_export_picture_affine(
+                media.transform,
+                decoded.picture_geometry.source_to_display_affine(),
+                decoded.source_resolution,
+                decoded_frame_resolution(&decoded.frame),
+                author_resolution,
+                resolution,
+                "GPU Transition media",
+            )?;
+            GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
+                source: export_gpu_cpu_source(&decoded.frame, decoded.is_data_texture),
+                opacity: media.opacity,
+                blend_mode: media.blend_mode,
+                transform,
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &media.effect_graph,
+                )?,
+                frame_seed: media.frame_seed,
+            }))
+        }
+        TimelineTransitionInputPlan::BasicTitle(title) => {
+            let resolved = render_export_basic_title_plan(
+                context.visual_session,
+                materialization,
+                title,
+                width,
+                height,
+                color_context.working_color_space(),
+            )?;
+            GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
+                source: export_gpu_cpu_source(&resolved.frame, false),
+                opacity: title.opacity,
+                blend_mode: title.blend_mode,
+                transform: resolved.transform,
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &title.effect_graph,
+                )?,
+                frame_seed: title.frame_seed,
+            }))
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            let frame = prepared_export_nested_gpu_output(
+                inputs,
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+            )?;
+            let child_id = export_nested_child(
+                inputs.closure(),
+                inputs.node().id(),
+                nested.placement,
+                PreparedVisualNestedSample::Current,
+            )?;
+            let source_resolution =
+                export_visual_node(inputs.closure(), child_id)?.author_resolution();
+            let descriptor = frame.descriptor();
+            let transform = project_export_affine(
+                nested.transform,
+                source_resolution,
+                Resolution { width: descriptor.width, height: descriptor.height },
+                author_resolution,
+                resolution,
+                "GPU Transition nested Sequence",
+            )?;
+            GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
+                source: GpuVisualFrameSource::GpuWorking(frame),
+                opacity: nested.opacity,
+                blend_mode: nested.blend_mode,
+                transform,
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &nested.effect_graph,
+                )?,
+                frame_seed: nested.frame_seed,
+            }))
+        }
+        TimelineTransitionInputPlan::SolidColor(solid) => {
+            let transform = project_export_affine(
+                solid.transform,
+                author_resolution,
+                resolution,
+                author_resolution,
+                resolution,
+                "GPU Transition solid color",
+            )?;
+            GpuVisualTransitionInput::Source(Box::new(GpuVisualSourceLayer {
+                source: GpuVisualFrameSource::Solid(solid.color),
+                opacity: solid.opacity,
+                blend_mode: solid.blend_mode,
+                transform,
+                effect_plan: lower_export_gpu_effect_plan(
+                    context.visual_session,
+                    &solid.effect_graph,
+                )?,
+                frame_seed: solid.frame_seed,
+            }))
+        }
+    })
+}
+
+fn finish_export_gpu_visual_output(
+    context: &mut ExportFrameRenderContext<'_>,
+    color_context: &ProgramColorContext,
+    output: GpuColorFrameHandle,
+    canvas: &mut Vec<u8>,
+) -> Result<(), String> {
+    let boundary = export_output_boundary_from_context(color_context)?;
+    if color_context.output_tone_map()
+        && boundary.display_view.is_none()
+        && let Some(diagnostics) = context.export_diagnostics.as_deref_mut()
+    {
+        diagnostics.record_output_transform_issue(
+            ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
+        );
+    }
+    let attempt = context
+        .visual_session
+        .gpu_output
+        .execute_gpu_frame(
+            &output,
+            &boundary,
+            context.delivery_pixels.frame,
+            context.delivery_pixels.legalizer,
+            context.cancellation,
+        )
+        .map_err(|error| match error {
+            ExportGpuOutputExecutionError::Canceled => {
+                "export GPU visual output readback canceled".to_owned()
+            }
+            ExportGpuOutputExecutionError::DeviceTimedOut => {
+                "export GPU visual output readback timed out".to_owned()
+            }
+            ExportGpuOutputExecutionError::Fallback(reason) => {
+                format!("export GPU visual output failed closed: {reason:?}")
+            }
+            ExportGpuOutputExecutionError::Packing(error) => {
+                format!("export GPU visual output cannot enter the declared FFmpeg pipe: {error}")
+            }
+        })?;
+    context.visual_session.visual_diagnostics.gpu_visual_output_readbacks = context
+        .visual_session
+        .visual_diagnostics
+        .gpu_visual_output_readbacks
+        .saturating_add(1);
+    if let Some(diagnostics) = context.stage_diagnostics.as_deref_mut() {
+        diagnostics.accumulate(attempt.stage_diagnostics);
+    }
+    if let Some(diagnostics) = context.export_diagnostics.as_deref_mut() {
+        diagnostics.record_export_output_boundary(
+            1,
+            0,
+            ExportGpuOutputFallbackBreakdown::default(),
+        );
+    }
+    canvas.clear();
+    canvas.extend_from_slice(&attempt.pipe_bytes);
+    Ok(())
 }
 
 fn render_prepared_visual_node_into(
@@ -6231,11 +7103,13 @@ fn decode_video_layer_scaled(
                 ));
             }
         };
+    let is_data_texture = source.is_data_texture();
     let execution = source
         .execute_cpu_with_session(color_session)
         .map_err(|err| format!("asset={asset_id} color transform failed: {err}"))?;
     Ok(Arc::new(DecodedVideoLayer {
         frame: execution.frame,
+        is_data_texture,
         source_resolution,
         picture_geometry,
         source_fingerprint: dependency.source_fingerprint,
@@ -6415,6 +7289,7 @@ mod tests {
             attempt_generation: 7,
             next_device_generation: 3,
             resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
+            visual_active_grant: GpuVisualFrameExecutionResourceGrant::default(),
             active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
             state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
         };
@@ -6505,10 +7380,12 @@ mod tests {
 
     #[test]
     fn export_gpu_active_grant_reconfigures_without_reclassifying_backend_state() {
+        let visual_active_grant = ExportExecutionResourcePolicy::default().gpu_visual_active;
         let mut runtime = ExportGpuExecutionRuntime {
             attempt_generation: 7,
             next_device_generation: 3,
             resource_pool_options: GpuColorFrameWgpuResourcePoolOptions::default(),
+            visual_active_grant,
             active_output_grant: RenderGpuOutputExecutionResourceGrant::default(),
             state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
         };
@@ -6525,6 +7402,30 @@ mod tests {
         assert!(matches!(
             runtime.state,
             ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 }
+        ));
+    }
+
+    #[test]
+    fn export_gpu_visual_grant_change_rebuilds_the_backend_before_next_frame() {
+        let policy = ExportExecutionResourcePolicy::default();
+        let mut runtime = ExportGpuExecutionRuntime {
+            attempt_generation: 7,
+            next_device_generation: 3,
+            resource_pool_options: GpuColorFrameWgpuResourcePoolOptions {
+                max_per_contract: policy.gpu_output_idle_per_contract,
+                max_retained_bytes: policy.gpu_output_idle_bytes,
+            },
+            visual_active_grant: GpuVisualFrameExecutionResourceGrant::new(1, 1),
+            active_output_grant: policy.gpu_output_active,
+            state: ExportGpuExecutionRuntimeState::Backoff { attempt_generation: 7 },
+        };
+
+        runtime.configure(policy);
+
+        assert_eq!(runtime.visual_active_grant, policy.gpu_visual_active);
+        assert!(matches!(
+            runtime.state,
+            ExportGpuExecutionRuntimeState::Cold
         ));
     }
 
@@ -7943,6 +8844,7 @@ mod tests {
         )
         .expect("decode and prepare RGB data texture");
 
+        assert!(decoded.is_data_texture);
         assert_eq!(
             decoded.stage_diagnostics,
             RenderColorStageDiagnostics::default()
@@ -9586,6 +10488,96 @@ mod tests {
 
         let frame = output.expect("nested working output");
         assert!(frame.rgba_f32().data.iter().any(|pixel| pixel[3] > 0.0));
+    }
+
+    #[test]
+    #[ignore = "real GPU Export nested residency qualification; run independently"]
+    fn export_gpu_visual_path_keeps_nested_output_resident_until_final_readback() {
+        let _gpu_visual = GpuVisualExecutionGuard::activate();
+        let mut child = Sequence::new("GPU nested child");
+        child.settings.resolution = Resolution { width: 4, height: 2 };
+        let child_time_base = child.time_base();
+        child.video_tracks[0]
+            .add_clip(
+                Clip::new_solid_color(
+                    AssetId::new(),
+                    mondrian_core::Color::from_rgba8(64, 128, 255, 255),
+                    tt(0, child_time_base),
+                    tt(1, child_time_base),
+                )
+                .expect("GPU nested solid"),
+            )
+            .expect("place GPU nested solid");
+
+        let mut root = Sequence::new("GPU nested root");
+        root.settings.resolution = Resolution { width: 4, height: 2 };
+        let root_time_base = root.time_base();
+        root.video_tracks[0]
+            .add_clip(
+                Clip::new_nested_sequence(
+                    child.id,
+                    tt(0, root_time_base),
+                    tt(1, root_time_base),
+                    None,
+                )
+                .expect("GPU nested Sequence"),
+            )
+            .expect("place GPU nested Sequence");
+        let color_environment = mondrian_core::ProjectColorEnvironment::default();
+        let color_context = root
+            .settings
+            .root_program_color_context(&color_environment)
+            .expect("GPU nested color context");
+        let mut timeline = TimelineExportSnapshot {
+            sequence: root,
+            sequences: vec![child],
+            media: HashMap::new(),
+            color_environment,
+            prepared_execution: None,
+            range: TimelineExportRange::SequenceInOut,
+        };
+        let mut visual_session = captured_visual_session_for_test(&mut timeline);
+        if visual_session.gpu_output.begin_visual_frame().is_err() {
+            eprintln!("skipping Export GPU nested test: no GPU adapter available");
+            return;
+        }
+        let cancellation = ExecutionCancellationToken::new();
+        let mut canvas = Vec::new();
+        {
+            let mut render_context = ExportFrameRenderContext {
+                media: &timeline.media,
+                color_environment: &timeline.color_environment,
+                alpha_mode: ExportAlphaMode::Preserve,
+                delivery_pixels: ExportDeliveryPixelContract::unmodified(
+                    ExportFrameContract::EncodedRgba8Unorm,
+                ),
+                input_color_counts: None,
+                stage_diagnostics: None,
+                composite_diagnostics: None,
+                export_diagnostics: None,
+                visual_session: &mut visual_session,
+                cancellation: &cancellation,
+            };
+            render_sequence_frame_into(
+                &timeline,
+                &mut render_context,
+                &timeline.sequence,
+                0,
+                Resolution { width: 4, height: 2 },
+                color_context,
+                SequenceRenderTarget::Deliverable(&mut canvas),
+            )
+            .expect("Export GPU nested render");
+        }
+
+        let diagnostics = visual_session.visual_diagnostics();
+        assert_eq!(diagnostics.gpu_visual_nodes_completed, 2);
+        assert_eq!(diagnostics.gpu_visual_nested_outputs, 1);
+        assert_eq!(diagnostics.gpu_visual_output_readbacks, 1);
+        assert!(diagnostics.gpu_visual_peak_active_bytes > 0);
+        assert!(diagnostics.gpu_visual_peak_active_textures >= 3);
+        assert_eq!(canvas.len(), 4 * 2 * 4);
+        assert!(canvas.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub mod display_calibration;
 pub mod gpu_compositor;
 pub mod gpu_output_working_set;
 pub mod gpu_qualification;
+pub mod gpu_visual_frame;
 mod heterogeneous_cpu;
 pub mod heterogeneous_gpu;
 pub mod native_video;
@@ -174,6 +175,14 @@ pub use gpu_qualification::{
     GpuColorQualificationError, GpuColorQualificationExecutionPolicy,
     GpuColorQualificationPolicyError, GPU_COLOR_QUALIFICATION_POLICY_ENV,
     SEALED_GPU_COLOR_QUALIFICATION_POLICY,
+};
+pub use gpu_visual_frame::{
+    estimate_gpu_visual_frame_active_working_set, GpuVisualFrameActiveTextureDemand,
+    GpuVisualFrameActiveWorkingSetAdmissionError, GpuVisualFrameActiveWorkingSetEstimate,
+    GpuVisualFrameActiveWorkingSetEstimateError, GpuVisualFrameActiveWorkingSetStage,
+    GpuVisualFrameElement, GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant,
+    GpuVisualFrameExecutor, GpuVisualFrameRecord, GpuVisualFrameRequest, GpuVisualFrameSource,
+    GpuVisualSourceLayer, GpuVisualTransitionInput,
 };
 pub use heterogeneous_gpu::{
     record_heterogeneous_gpu_continuation, HeterogeneousGpuBatchId,

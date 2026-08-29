@@ -1030,6 +1030,8 @@ pub struct GpuCompositingDiagnostics {
     pub gpu_native_composites: u64,
     /// Number of compositing operations that uploaded CPU layers for GPU compositing.
     pub gpu_with_upload_composites: u64,
+    /// Typed non-color DataTexture uploads consumed by the numeric bypass.
+    pub data_texture_uploads: u64,
     /// Dedicated two-input working-linear Cross Dissolve passes.
     pub gpu_cross_dissolve_passes: u64,
     /// Number of compositing operations that fell back to CPU compositing.
@@ -1051,6 +1053,8 @@ impl GpuCompositingDiagnostics {
             self.gpu_native_composites.saturating_add(other.gpu_native_composites);
         self.gpu_with_upload_composites =
             self.gpu_with_upload_composites.saturating_add(other.gpu_with_upload_composites);
+        self.data_texture_uploads =
+            self.data_texture_uploads.saturating_add(other.data_texture_uploads);
         self.gpu_cross_dissolve_passes =
             self.gpu_cross_dissolve_passes.saturating_add(other.gpu_cross_dissolve_passes);
         self.cpu_fallback_composites =
@@ -1100,6 +1104,9 @@ pub fn evaluate_gpu_compositing_capability(
 pub enum GpuCompositeLayerSource<'a> {
     /// CPU working-space frame that will be uploaded to an Rgba32Float texture.
     CpuFrame(&'a CpuColorFrame),
+    /// CPU RGBA numeric data uploaded as `NonColorData + DataTexture` and
+    /// admitted to working compositing only through the explicit bypass.
+    CpuDataTexture(&'a CpuColorFrame),
     /// GPU-resident working-space frame that will be sampled directly.
     GpuFrame(&'a GpuColorFrameHandle),
     /// Solid working-space color drawn directly by shader uniform.
@@ -1676,6 +1683,7 @@ impl GpuFrameCompositor {
 
         let mut transient_uploads = Vec::new();
         let mut uploaded_cpu_layers = false;
+        let mut data_texture_uploads = 0_u64;
         let mut src_is_a = true;
         for (index, layer) in request.layers.iter().enumerate() {
             if layer_has_zero_contribution(layer) {
@@ -1704,6 +1712,30 @@ impl GpuFrameCompositor {
                             transient_uploads
                                 .last()
                                 .expect("uploaded layer just pushed")
+                                .resource(),
+                        ),
+                        0,
+                        [0.0, 0.0, 0.0, 0.0],
+                        [descriptor.width as f32, descriptor.height as f32],
+                    )
+                }
+                GpuCompositeLayerSource::CpuDataTexture(frame) => {
+                    uploaded_cpu_layers = true;
+                    data_texture_uploads = data_texture_uploads.saturating_add(1);
+                    let descriptor = frame.descriptor();
+                    let upload = GpuColorFrameUploadPlan::from_cpu_data_texture(
+                        ids.allocate()?,
+                        frame,
+                        format!("gpu-composite-data-texture-{index}"),
+                    )
+                    .map_err(GpuCompositeError::Upload)?;
+                    let uploaded = GpuColorFrameUploader::upload(device, queue, &upload);
+                    transient_uploads.push(uploaded);
+                    (
+                        GpuCompositeTextureBinding::Resource(
+                            transient_uploads
+                                .last()
+                                .expect("uploaded data texture just pushed")
                                 .resource(),
                         ),
                         0,
@@ -1786,6 +1818,7 @@ impl GpuFrameCompositor {
         } else {
             diagnostics.gpu_native_composites = 1;
         }
+        diagnostics.data_texture_uploads = data_texture_uploads;
         Ok(GpuCompositeRecord { output, diagnostics })
     }
 
@@ -3232,9 +3265,12 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         request.layers.iter().filter(|layer| !layer_has_zero_contribution(layer));
     let capability = evaluate_gpu_compositing_capability(
         contributing_layers.clone().any(|layer| !gpu_transform_supported(layer)),
-        contributing_layers
-            .clone()
-            .all(|layer| !matches!(layer.source, GpuCompositeLayerSource::CpuFrame(_))),
+        contributing_layers.clone().all(|layer| {
+            !matches!(
+                layer.source,
+                GpuCompositeLayerSource::CpuFrame(_) | GpuCompositeLayerSource::CpuDataTexture(_)
+            )
+        }),
     );
     if let GpuCompositingCapability::CpuFallback { reason } = capability {
         return Err(GpuCompositeError::Blocked { reason });
@@ -3257,19 +3293,31 @@ fn validate_request(request: &GpuCompositeRequest<'_>) -> Result<(), GpuComposit
         if let Some(actual) = layer_source_descriptor(layer.source) {
             let expected_residency = match layer.source {
                 GpuCompositeLayerSource::CpuFrame(_) => ColorFrameResidency::Cpu,
+                GpuCompositeLayerSource::CpuDataTexture(_) => ColorFrameResidency::Gpu,
                 GpuCompositeLayerSource::GpuFrame(_) => ColorFrameResidency::Gpu,
                 GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => {
                     unreachable!("procedural layers have no descriptor")
                 }
             };
-            let expected = ColorFrameDescriptor {
-                width: actual.width,
-                height: actual.height,
-                color_space: request.working_color_space.into(),
-                domain: ColorFrameDomain::Working,
-                encoding: ColorFrameEncoding::LinearFloat,
-                residency: expected_residency,
-                alpha: actual.alpha,
+            let expected = match layer.source {
+                GpuCompositeLayerSource::CpuDataTexture(_) => ColorFrameDescriptor {
+                    width: actual.width,
+                    height: actual.height,
+                    color_space: crate::ColorFrameSpace::NonColorData,
+                    domain: ColorFrameDomain::DataTexture,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: expected_residency,
+                    alpha: actual.alpha,
+                },
+                _ => ColorFrameDescriptor {
+                    width: actual.width,
+                    height: actual.height,
+                    color_space: request.working_color_space.into(),
+                    domain: ColorFrameDomain::Working,
+                    encoding: ColorFrameEncoding::LinearFloat,
+                    residency: expected_residency,
+                    alpha: actual.alpha,
+                },
             };
             require_straight_compatible_alpha(actual.alpha)?;
             if actual != expected {
@@ -3297,6 +3345,7 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
 
     match layer.source {
         GpuCompositeLayerSource::CpuFrame(_)
+        | GpuCompositeLayerSource::CpuDataTexture(_)
         | GpuCompositeLayerSource::GpuFrame(_)
         | GpuCompositeLayerSource::SolidColor(_) => affine_has_zero_area(layer.transform),
         GpuCompositeLayerSource::Adjustment => false,
@@ -3311,6 +3360,7 @@ fn affine_has_zero_area(transform: [f32; 6]) -> bool {
 fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
     match layer.source {
         GpuCompositeLayerSource::CpuFrame(_)
+        | GpuCompositeLayerSource::CpuDataTexture(_)
         | GpuCompositeLayerSource::GpuFrame(_)
         | GpuCompositeLayerSource::SolidColor(_) => invert_affine(layer.transform).is_some(),
         GpuCompositeLayerSource::Adjustment => is_identity_transform(layer.transform),
@@ -3320,6 +3370,18 @@ fn gpu_transform_supported(layer: &GpuCompositeLayer<'_>) -> bool {
 fn layer_source_descriptor(source: GpuCompositeLayerSource<'_>) -> Option<ColorFrameDescriptor> {
     match source {
         GpuCompositeLayerSource::CpuFrame(frame) => Some(frame.descriptor()),
+        GpuCompositeLayerSource::CpuDataTexture(frame) => {
+            let descriptor = frame.descriptor();
+            Some(ColorFrameDescriptor {
+                width: descriptor.width,
+                height: descriptor.height,
+                color_space: crate::ColorFrameSpace::NonColorData,
+                domain: ColorFrameDomain::DataTexture,
+                encoding: ColorFrameEncoding::LinearFloat,
+                residency: ColorFrameResidency::Gpu,
+                alpha: descriptor.alpha,
+            })
+        }
         GpuCompositeLayerSource::GpuFrame(handle) => Some(handle.descriptor()),
         GpuCompositeLayerSource::SolidColor(_) | GpuCompositeLayerSource::Adjustment => None,
     }

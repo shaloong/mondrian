@@ -80,10 +80,11 @@ pub fn export_visual_frame_validation(
     let mut adapter = ExportPreparedVisualAdapter {
         context: &mut context,
         root_target: Some(SequenceRenderTarget::Working(&mut working_frame)),
+        mode: ExportPreparedVisualMode::Cpu,
     };
     match execute_prepared_visual_closure(&closure, &mut adapter) {
         Ok(PreparedExportVisualOutput::Root) => {}
-        Ok(PreparedExportVisualOutput::Nested(_)) => {
+        Ok(PreparedExportVisualOutput::NestedCpu(_) | PreparedExportVisualOutput::NestedGpu(_)) => {
             return Err(
                 "prepared Export validation returned a nested frame for the root".to_owned(),
             );
