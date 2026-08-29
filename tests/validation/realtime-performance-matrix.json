@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "id": "commercial-realtime-performance-matrix-v1",
+  "machine_profile": "windows-alpha-reference-v2",
+  "build_profile": "release",
+  "execution_policy": "sealed-required",
+  "requires_clean_unchanged_source": true,
+  "minimum_machine": {
+    "memory_class": "professional-large-project",
+    "dedicated_gpu_required": true,
+    "minimum_reported_dedicated_gpu_bytes": 2147483648,
+    "timestamp_queries_required": true
+  },
+  "required_dimensions": [
+    "real-4k60-main10-dual-layer-decode-publish",
+    "4k60-hdr-multilayer-multieffect-scopes",
+    "8k30-hdr-multilayer-multieffect-scopes",
+    "30-minute-video-playback",
+    "30-minute-audio-recovery",
+    "120-minute-authoring"
+  ],
+  "gates": [
+    {
+      "id": "playback-reference",
+      "kind": "nested-supervisor",
+      "script": "scripts/validation/invoke-playback-reference-gates.ps1",
+      "process_timeout_seconds": 7200,
+      "required_dimensions": [
+        "30-minute-video-playback",
+        "30-minute-audio-recovery"
+      ],
+      "expected_status": "passed-baseline"
+    },
+    {
+      "id": "real-4k60-dual-layer",
+      "kind": "cargo-test",
+      "package": "mondrian-app",
+      "cargo_test": "preview_media_realtime_4k60_dual_video_gate",
+      "fixture_id": "generated-performance-4k60-hevc-main10-rec709-v1",
+      "media_environment": "MONDRIAN_REALTIME_4K60_MEDIA_PATH",
+      "report_environment": "MONDRIAN_PERF_OUTPUT",
+      "build_timeout_seconds": 2700,
+      "process_timeout_seconds": 1200,
+      "required_dimensions": [
+        "real-4k60-main10-dual-layer-decode-publish"
+      ],
+      "environment": {
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_FRAMES": "600",
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_P95_US": "16667",
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_QUEUE_WAIT_P95_US": "4000",
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_VISIBLE_PERCENT": "99",
+        "MONDRIAN_PREVIEW_EXTERNAL_PLAYBACK_READY_BASIS_POINTS": "9950",
+        "MONDRIAN_PREVIEW_EXTERNAL_SEEK_PROBES": "8"
+      },
+      "expected_scenario": "preview_media_external_dual_video_playback",
+      "expected_frames": 600,
+      "expected_width": 3840,
+      "expected_height": 2160,
+      "expected_frame_rate": "60/1",
+      "expected_bit_depth": 10,
+      "expected_layers": 2
+    },
+    {
+      "id": "renderer-visual",
+      "kind": "cargo-test",
+      "package": "mondrian-renderer",
+      "cargo_test": "--test realtime_visual_gpu_perf",
+      "test_filter": "realtime_visual_gpu_matrix_gate",
+      "report_environment": "MONDRIAN_REALTIME_VISUAL_PERF_OUTPUT",
+      "build_timeout_seconds": 2700,
+      "process_timeout_seconds": 1200,
+      "required_dimensions": [
+        "4k60-hdr-multilayer-multieffect-scopes",
+        "8k30-hdr-multilayer-multieffect-scopes"
+      ],
+      "expected_report_schema": 1,
+      "expected_profile": "realtime_visual_gpu_matrix_v1",
+      "expected_scenarios": [
+        "uhd4k60_hdr_multilayer_effects_scopes",
+        "eight_k30_hdr_multilayer_effects_scopes"
+      ]
+    },
+    {
+      "id": "long-authoring",
+      "kind": "cargo-test",
+      "package": "mondrian-app",
+      "cargo_test": "large_project_authoring_perf_matrix",
+      "report_environment": "MONDRIAN_PERF_OUTPUT",
+      "build_timeout_seconds": 2700,
+      "process_timeout_seconds": 3600,
+      "required_dimensions": [
+        "120-minute-authoring"
+      ],
+      "environment": {
+        "MONDRIAN_AUTHORING_PERF_ENFORCE": "1"
+      },
+      "expected_report_schema": 10,
+      "expected_protocol_schema": 1,
+      "expected_scale_reports": 6,
+      "expected_completion_reports": 1,
+      "required_duration_minutes": 120
+    }
+  ],
+  "acceptance": {
+    "required_gate_ids": [
+      "playback-reference",
+      "real-4k60-dual-layer",
+      "renderer-visual",
+      "long-authoring"
+    ],
+    "missing_hardware_or_fixture_status": "unqualified",
+    "executed_gate_failure_status": "failed",
+    "success_status": "passed-baseline",
+    "skip_forbidden": true,
+    "machine_report_required": true,
+    "fixture_attestation_required": true,
+    "raw_report_hashes_required": true,
+    "source_revision_binding_required": true,
+    "source_unchanged_required": true,
+    "serial_execution_required": true
+  }
+}

@@ -698,3 +698,50 @@ untrusted samples remain visible through failure evidence instead of
 contaminating the stage distributions.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.
+
+## Commercial realtime performance matrix
+
+`tests/validation/realtime-performance-matrix.json` is the sealed COL-031
+contract. It is intentionally separate from the developer smoke suite and the
+Stress Project contract. Its exact coverage is:
+
+- the existing 30-minute real-video and real-audio/recovery reference gates;
+- a generated, attested 3840×2160 60 fps HEVC Main10 fixture driving 600
+  observations through the real dual-layer decode/publication path;
+- Renderer-owned 4K60 and 8K30 HDR/multilayer/multieffect/scopes GPU workloads;
+- the existing active-heavy and project-heavy 5/30/120-minute authoring
+  matrix, with timing enforcement enabled.
+
+Validate the closed contract without building or touching hardware:
+
+```powershell
+scripts/validation/invoke-realtime-performance-matrix.ps1 -ValidateOnly
+```
+
+Generate or validate the dedicated 4K60 fixture independently:
+
+```powershell
+scripts/validation/generate-realtime-performance-media.ps1
+```
+
+Run a complete reference-machine qualification only from a clean committed
+tree:
+
+```powershell
+scripts/validation/invoke-realtime-performance-matrix.ps1 `
+  -MachineId <operator-assigned-id> `
+  -RegenerateGeneratedFixtures
+```
+
+The supervisor holds a named mutex and runs every build/test sequentially, so
+App and Renderer release targets never compete for compiler, linker, GPU, or
+fixture ownership. It hashes the matrix, corpus, machine reports, fixtures,
+attestations, logs, and raw JSONL reports and binds both ends of the run to one
+Git revision. `passed-baseline` requires every exact gate and dimension on a
+qualified machine with an unchanged clean tree. Missing machine capability or
+an attested fixture is `unqualified`; an attempted gate that fails is
+`failed`. Neither condition is a successful skip.
+
+The current development machine must not be described as qualified merely
+because the contract and test targets compile. Physical execution evidence is
+produced only by the supervisor on a machine satisfying the sealed profile.

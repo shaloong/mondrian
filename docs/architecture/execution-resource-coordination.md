@@ -629,3 +629,18 @@ guidance only: `cancel` remains the sole authority and returns the exact
 returns the exact removal count from the same lock. “Terminal” includes
 Completed, Failed, and Cancelled evidence; the product must not label this as
 completed-only cleanup or report success when no evidence was removed.
+# Professional realtime Viewer grant
+
+The App maps the `Professional` machine class to
+`ViewerGpuExecutionResourceGrant::professional_realtime()`, the same
+Renderer-owned grant used by sealed 4K/8K qualification. The pool remains
+demand-driven: selecting the class allocates nothing. Speculative pressure
+reduces duplicate retention to one resource per exact contract, while
+aggressive pressure releases all idle textures. Neither pressure state lowers
+the 4 GiB active byte ceiling, 160-texture ceiling, working precision, or
+frame semantics.
+
+Lower machine classes retain their smaller product grants and are not implied
+to satisfy the 8K qualification profile. Machine classification from system
+RAM also does not prove GPU capacity; the coordinated matrix records and
+checks the reference-machine GPU inventory and the real Renderer workload.

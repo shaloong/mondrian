@@ -408,6 +408,15 @@ impl ViewerGpuExecutionRuntime {
         self.program_scopes.diagnostics()
     }
 
+    /// Return point-in-time evidence for device-scoped Viewer texture reuse.
+    ///
+    /// Qualification takes a snapshot after warmup and after the measured
+    /// interval. The difference proves whether the production runtime stayed
+    /// allocation-free without exposing resource-table ownership.
+    pub fn resource_pool_diagnostics(&self) -> crate::GpuColorFrameWgpuResourcePoolDiagnostics {
+        self.resource_pool.diagnostics()
+    }
+
     /// Release resources scoped to the current candidate, retaining pipelines.
     pub fn clear_frame_resources(&mut self) {
         self.cpu_yuv_upload.begin_frame();

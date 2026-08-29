@@ -34,6 +34,7 @@ pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
+pub mod realtime_performance;
 pub mod shot_match;
 pub mod signal_monitor;
 pub mod source_frame_preparation;
@@ -312,6 +313,17 @@ pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,
     GpuProgramScopesRequest, GpuProgramScopesRuntime, GpuProgramScopesRuntimeDiagnostics,
 };
+pub use realtime_performance::{
+    evaluate_realtime_visual_performance, RealtimePerformanceExecutionPolicy,
+    RealtimePerformancePolicyError, RealtimeVisualAdapterIdentity, RealtimeVisualCheckRelation,
+    RealtimeVisualFrameEvidence, RealtimeVisualPerformanceCheck,
+    RealtimeVisualPerformanceObservation, RealtimeVisualPerformanceReport,
+    RealtimeVisualPerformanceVerdict, RealtimeVisualQuantiles, RealtimeVisualScenarioId,
+    RealtimeVisualStageQuantiles, RealtimeVisualWarmPathEvidence, RealtimeVisualWorkload,
+    REALTIME_PERFORMANCE_EXECUTION_POLICY_ENV, REALTIME_VISUAL_PERFORMANCE_PROFILE,
+    REALTIME_VISUAL_PERFORMANCE_REPORT_SCHEMA_VERSION,
+    SEALED_REALTIME_PERFORMANCE_EXECUTION_POLICY,
+};
 pub use shot_match::{
     analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,
 };
@@ -375,6 +387,10 @@ pub use viewer_working_set::{
     ViewerGpuActiveWorkingSetAdmissionError, ViewerGpuActiveWorkingSetDiagnostics,
     ViewerGpuActiveWorkingSetEstimate, ViewerGpuActiveWorkingSetEstimateError,
     ViewerGpuActiveWorkingSetStage, ViewerGpuExecutionResourceGrant,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT,
+    PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES,
 };
 #[cfg(feature = "validation")]
 pub use visual_execution_validation::{

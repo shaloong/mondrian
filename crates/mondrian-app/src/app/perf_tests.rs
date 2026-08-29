@@ -3777,6 +3777,18 @@ fn preview_media_external_dual_video_playback_smoke() -> anyhow::Result<()> {
 }
 
 #[test]
+#[ignore = "sealed realtime 4K60 Main10 dual-layer playback gate; requires generated media and GPU"]
+fn preview_media_realtime_4k60_dual_video_gate() -> anyhow::Result<()> {
+    let _guard = perf_lock().lock().expect("perf lock poisoned");
+    let video_path = std::env::var_os("MONDRIAN_REALTIME_4K60_MEDIA_PATH")
+        .map(std::path::PathBuf::from)
+        .context(
+            "MONDRIAN_REALTIME_4K60_MEDIA_PATH is required; the sealed realtime gate never skips",
+        )?;
+    run_external_continuous_playback_gate(video_path, false, 2)
+}
+
+#[test]
 #[ignore = "development preview media resolution-scale decode stability smoke; run manually"]
 fn preview_media_resolution_scale_decode_stability_smoke() -> anyhow::Result<()> {
     let _guard = perf_lock().lock().expect("perf lock poisoned");

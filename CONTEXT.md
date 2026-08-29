@@ -356,6 +356,10 @@ _Avoid_: Adapter index as exact device proof, separately-created decoder graphic
 
 **Viewer GPU Output Health**:
 The UI-independent policy that maps one typed presentation-attempt outcome plus renderer stage facts into the canonical Waiting, Blocked, Failed, Rejected, Degraded, or Ready status and cumulative counts. Window telemetry, Headless gates, performance smoke, and the budget CLI consume this single classifier and report schema.
+
+**Realtime Performance Matrix**:
+The sealed, serial, reference-machine qualification that binds one clean unchanged source SHA to attested fixtures and exact 30-minute playback, 120-minute authoring, real 4K60 dual-layer decode/publication, and Renderer 4K60/8K30 HDR-multilayer-multieffect-scopes evidence. The Renderer owns the visual workloads, timing budgets, report evaluator, and professional demand-driven Viewer texture grant; App supplies the real media and authoring producers without reinterpreting those facts. Missing hardware or fixtures is Unqualified, an executed failing gate is Failed, and neither may be presented as a skip or baseline pass.
+_Avoid_: Promoting developer smokes or compilation to qualification, parallel Cargo/GPU gates, test-only unlimited resource grants, 8K claims without warm-path allocation evidence, mixing reports from different machines/source revisions, treating COL-010 physical HDR display qualification as covered
 _Avoid_: Window-local Ready rules, duplicated health enums, treating texture registration without presentation/native-boundary proof as Ready
 
 **Viewer GPU Output Residency**:

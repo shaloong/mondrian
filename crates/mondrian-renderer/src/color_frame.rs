@@ -695,7 +695,7 @@ impl GpuColorFrameWgpuResourcePoolKey {
 }
 
 /// Bounded reuse policy for renderer-owned color-frame textures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GpuColorFrameWgpuResourcePoolOptions {
     /// Maximum idle textures retained for one exact extent/format/usage contract.
     pub max_per_contract: usize,

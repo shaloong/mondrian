@@ -236,12 +236,26 @@ pub enum ViewerGpuActiveWorkingSetEstimateError {
 /// `max_active_texture_bytes` and `max_active_textures` must remain stable for
 /// one machine/quality class so pressure cannot silently change frame
 /// semantics or precision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ViewerGpuExecutionResourceGrant {
     pub(crate) output_pool: crate::GpuColorFrameWgpuResourcePoolOptions,
     max_active_texture_bytes: u64,
     max_active_textures: u64,
 }
+
+/// Maximum duplicate idle textures retained for one exact contract by the
+/// professional realtime Viewer profile.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT: usize = 3;
+/// Demand-driven idle texture ceiling for the professional realtime Viewer.
+///
+/// This is not preallocated. It is large enough to retain an 8K Float32
+/// working set between frames and remains subject to product memory-pressure
+/// trimming.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Hard active texture-byte admission ceiling for the professional realtime Viewer.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Hard active texture-count admission ceiling for the professional realtime Viewer.
+pub const PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES: u64 = 160;
 
 impl ViewerGpuExecutionResourceGrant {
     /// Build an idle-pool grant while retaining compatibility with isolated
@@ -258,6 +272,32 @@ impl ViewerGpuExecutionResourceGrant {
             max_active_texture_bytes: u64::MAX,
             max_active_textures: u64::MAX,
         }
+    }
+
+    /// Return the shared product and qualification grant for professional
+    /// realtime 4K/8K Viewer execution.
+    pub const fn professional_realtime() -> Self {
+        Self::new(
+            PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_PER_CONTRACT,
+            PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES,
+        )
+        .with_active_limits(
+            PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURE_BYTES,
+            PROFESSIONAL_REALTIME_VIEWER_MAX_ACTIVE_TEXTURES,
+        )
+    }
+
+    /// Replace only the pressure-sensitive idle retention limits.
+    pub const fn with_idle_limits(
+        mut self,
+        max_idle_per_contract: usize,
+        max_idle_bytes: u64,
+    ) -> Self {
+        self.output_pool = crate::GpuColorFrameWgpuResourcePoolOptions {
+            max_per_contract: max_idle_per_contract,
+            max_retained_bytes: max_idle_bytes,
+        };
+        self
     }
 
     /// Install pressure-stable active-texture limits on this owner grant.

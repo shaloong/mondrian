@@ -1303,3 +1303,30 @@ Frame-local handles remain strongly typed and monotonic, while submitted texture
 storage is returned to the pool without a CPU completion wait and reused only
 through ordered queue semantics. Device reset first returns every stage's frame
 resources and then clears the shared pool, preventing stale-device reuse.
+# Realtime visual performance qualification
+
+The Renderer owns the versioned `realtime_visual_gpu_matrix_v1` decision
+contract. Its ignored hardware producer records the production
+`ViewerGpuExecutionRuntime`, rather than a standalone shader microbenchmark,
+for two immutable workloads: four-layer 3840×2160 at 60 fps and two-layer
+7680×4320 at 30 fps. Every contributing layer executes two fused point
+Effects; both workloads produce PQ Program Output in an RGBA16F carrier and
+run demand-driven RGB-parade scopes from the Program Output tap.
+
+The producer uses the bounded asynchronous Viewer timestamp-query ring. It
+reports complete-frame and per-stage GPU timestamps separately from CPU
+command-recording time, and records composite, fusion, color-stage, scope,
+presentation-lease, fallback, blocker, and output-format evidence. A warm
+snapshot and measured snapshot of the texture pool, OCIO shader/static
+pipeline/backend caches, and scopes resources prove that the measured interval
+does not allocate or prepare new GPU resources. Missing timestamp support,
+partial samples, a weakened workload, warm-path creation, a readback/upload,
+or a deadline miss fails closed under `sealed-required` policy.
+
+The professional Viewer texture grant is Renderer-owned so the App and the
+hardware gate cannot qualify different resource policies. Its 4 GiB idle and
+active byte limits are demand ceilings, not eager allocations; memory-pressure
+coordination may trim idle retention without changing active precision or
+semantic admission. This budget is deliberately large enough to retain an 8K
+RGBA32F working contract between frames. The gate cannot substitute an
+unlimited test-only grant.

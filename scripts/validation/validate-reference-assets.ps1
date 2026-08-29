@@ -43,6 +43,7 @@ $playbackPlanPath = Join-Path $contractRootAbsolute "playback-reference-gates.js
 $commercialEnginePath = Join-Path $contractRootAbsolute "windows-commercial-engine.json"
 $gpuColorProfilePath = Join-Path $contractRootAbsolute "gpu-color-qualification.json"
 $viewerDisplayProfilePath = Join-Path $contractRootAbsolute "viewer-display-qualification.json"
+$realtimeMatrixPath = Join-Path $contractRootAbsolute "realtime-performance-matrix.json"
 $contractPaths = @(
     $manifestPath,
     $goldenPath,
@@ -52,6 +53,7 @@ $contractPaths = @(
     $commercialEnginePath,
     $gpuColorProfilePath,
     $viewerDisplayProfilePath
+    $realtimeMatrixPath
 )
 
 foreach ($path in $contractPaths) {
@@ -69,6 +71,7 @@ $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFro
 $commercialEngine = Get-Content -LiteralPath $commercialEnginePath -Raw | ConvertFrom-Json
 $gpuColorProfile = Get-Content -LiteralPath $gpuColorProfilePath -Raw | ConvertFrom-Json
 $viewerDisplayProfile = Get-Content -LiteralPath $viewerDisplayProfilePath -Raw | ConvertFrom-Json
+$realtimeMatrix = Get-Content -LiteralPath $realtimeMatrixPath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
@@ -78,6 +81,17 @@ if ($gpuColorProfile.execution_policy -ne "sealed-required") { Add-Issue "error"
 $viewerDisplayScenarioIds = @($viewerDisplayProfile.scenarios | ForEach-Object { [string]$_.id })
 if ($viewerDisplayProfile.schema_version -ne 1) { Add-Issue "error" "viewer-display.schema-unsupported" "Unsupported Viewer display profile schema: $($viewerDisplayProfile.schema_version)" }
 if ($viewerDisplayProfile.execution_policy -ne "physical-display-hitl-required") { Add-Issue "error" "viewer-display.policy" "Viewer display qualification must remain physical-display HITL-required" }
+$realtimeGateIds = @($realtimeMatrix.gates | ForEach-Object { [string]$_.id })
+$realtimeDimensionIds = @($realtimeMatrix.required_dimensions | ForEach-Object { [string]$_ })
+if ($realtimeMatrix.schema_version -ne 1) { Add-Issue "error" "realtime-matrix.schema-unsupported" "Unsupported realtime performance matrix schema: $($realtimeMatrix.schema_version)" }
+if ($realtimeMatrix.execution_policy -ne "sealed-required") { Add-Issue "error" "realtime-matrix.policy" "Realtime performance qualification must use sealed-required execution" }
+if ($realtimeMatrix.machine_profile -ne $machineProfile.id) { Add-Issue "error" "realtime-matrix.machine-profile-mismatch" "Realtime performance matrix references a different machine profile" }
+if (@(Compare-Object @("long-authoring", "playback-reference", "real-4k60-dual-layer", "renderer-visual") ($realtimeGateIds | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "realtime-matrix.gates" "Realtime performance matrix must define the exact four sealed gates"
+}
+if (@(Compare-Object @("120-minute-authoring", "30-minute-audio-recovery", "30-minute-video-playback", "4k60-hdr-multilayer-multieffect-scopes", "8k30-hdr-multilayer-multieffect-scopes", "real-4k60-main10-dual-layer-decode-publish") ($realtimeDimensionIds | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "realtime-matrix.dimensions" "Realtime performance matrix coverage differs from the commercial contract"
+}
 if (@(Compare-Object @("display-p3", "hdr-pq", "icc-sdr") ($viewerDisplayScenarioIds | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "viewer-display.scenarios" "Viewer display qualification must require exact P3, HDR-PQ, and ICC scenarios"
 }

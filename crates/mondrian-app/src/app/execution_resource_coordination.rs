@@ -1616,13 +1616,23 @@ fn preview_viewer_gpu_resource_grant(
     class: MachineResourceClass,
     trim: ResourceTrimRequest,
 ) -> ViewerGpuExecutionResourceGrant {
+    if class == MachineResourceClass::Professional {
+        let professional = ViewerGpuExecutionResourceGrant::professional_realtime();
+        return match trim {
+            ResourceTrimRequest::None => professional,
+            ResourceTrimRequest::Speculative => {
+                professional.with_idle_limits(1, professional.max_idle_bytes())
+            }
+            ResourceTrimRequest::Aggressive => professional.with_idle_limits(0, 0),
+        };
+    }
     let (max_idle_per_contract, max_idle_bytes) = match class {
         MachineResourceClass::BelowMinimum => (1, 48 * MIB),
         MachineResourceClass::UnknownConservative | MachineResourceClass::MinimumSupported => {
             (2, 128 * MIB)
         }
         MachineResourceClass::Standard => (3, 256 * MIB),
-        MachineResourceClass::Professional => (3, 384 * MIB),
+        MachineResourceClass::Professional => unreachable!("handled above"),
     };
     let (max_active_texture_bytes, max_active_textures) = match class {
         MachineResourceClass::BelowMinimum => (384 * MIB as u64, 48),
@@ -1630,7 +1640,7 @@ fn preview_viewer_gpu_resource_grant(
             (768 * MIB as u64, 64)
         }
         MachineResourceClass::Standard => (2 * 1024 * MIB as u64, 96),
-        MachineResourceClass::Professional => (4 * 1024 * MIB as u64, 160),
+        MachineResourceClass::Professional => unreachable!("handled above"),
     };
     let idle_grant = match trim {
         ResourceTrimRequest::None => {
@@ -2322,7 +2332,7 @@ mod tests {
         );
         assert_eq!(
             professional.preview.viewer_gpu.grant.max_idle_bytes(),
-            384 * MIB as u64
+            mondrian_renderer::PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES
         );
         assert_eq!(
             minimum.preview.viewer_gpu.grant.max_active_texture_bytes(),
@@ -2642,7 +2652,7 @@ mod tests {
         assert_eq!(fresh.preview.viewer_gpu.grant.max_idle_per_contract(), 3);
         assert_eq!(
             fresh.preview.viewer_gpu.grant.max_idle_bytes(),
-            384 * MIB as u64
+            mondrian_renderer::PROFESSIONAL_REALTIME_VIEWER_MAX_IDLE_TEXTURE_BYTES
         );
         assert!(fresh.revision > critical.revision);
     }
