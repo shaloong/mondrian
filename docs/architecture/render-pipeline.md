@@ -13,6 +13,26 @@ the explicit numeric-composite bypass. This shared seam prevents consumer
 Adapters from deriving color semantics from scalar type or bit depth, and
 structurally prevents payload/intent domain mismatches after preparation.
 
+The renderer presents color execution as four deep Modules rather than one
+generic stage API:
+
+```text
+MediaInputColorContext
+  -> color::source
+  -> color::working
+  -> color::program_output (ProgramColorContext-derived boundary)
+  -> color::monitor (Viewer only)
+```
+
+Preview and Export may schedule those Modules differently but cannot plan a
+generic stage graph, fill Program Output fields, or own renderer backend
+caches. CPU work shares one `RenderCpuColorExecutionSession`; GPU work shares
+one `GpuColorExecutionSession`, frame namespace, resource table, and texture
+pool. Export can detach one exact resident Program Output for an encoder or
+request an explicit readback without seeing materialization internals. Viewer
+retains Program Output before local monitor adaptation for scopes and performs
+only one final quantization.
+
 Camera RAW does not add a renderer-side color path. Media supplies a
 `SourceLinearRgb + LinearRec709 + Full` Float32 frame; Source Frame Preparation
 validates that contract, normalizes alpha once, and performs the same immutable
@@ -1524,27 +1544,16 @@ RGBA8 `RenderPipeline`/`FrameCompositor` family is not a compatibility path:
 reintroducing a compositor requires the same ColorFrame identity, working-space
 semantics, resource grant, and Preview/Export parity as the production path.
 
-`RenderColorStagePlanner` sits between timeline evaluation/compositing and the
-CPU/GPU color executors. It produces ordered stage plans for CPU transforms,
-GPU OCIO transforms, upload, and readback. App and export crates should consume
-renderer stage plans instead of deciding CPU/GPU/readback behavior locally.
-`RenderOutputColorBoundaryPlanner` is the final-output boundary wrapper around
-that planner. Its CPU-only mode is the current correctness execution path;
-its PreferGpu mode must produce GPU/upload/readback stages plus explicit
-blocker diagnostics instead of silently falling back to a CPU output stage.
-`RenderOutputColorBoundaryExecutor` is the lower-level CPU final-output
-execution boundary: callers choose an explicit strategy at construction time,
-and the executor owns the final-output plan/execute sequence instead of
-exposing low-level transform executors to app/export code. App/export CPU
-reference callers use `execute_cpu_output_boundary_rgba8(...)`, which returns
-encoded RGBA8 pixels plus transform/stage diagnostics as one boundary contract;
-native GPU app/export callers must use
-`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
-with `RenderGpuOutputBoundaryRuntimeOwnedBackendContext`. GPU planning,
+Private color-stage planners sit between semantic Module entry points and the
+CPU/GPU executors. They produce ordered CPU transform, GPU OCIO, upload, and
+readback plans, but App and Export cannot consume or mutate those plans.
+`ProgramOutputModule` owns CPU final-output plan/execute sequencing and returns
+pixels plus transform/stage diagnostics as one contract. Native GPU Export uses
+`GpuColorExecutionSession::record_program_output(...)`; GPU planning,
 backend-object preparation, or recording failures are reported structurally and
 must not silently run the CPU executor.
-The Window Viewer holds `RenderGpuOutputBoundaryRuntime` for one live
-device/surface execution Session. Export constructs a separate runtime inside
+The Window Viewer owns the same private runtime for one live device/surface
+execution Session. Export constructs a separate `GpuColorExecutionSession` inside
 one `ExportVisualRenderSession`: it is cold at attempt start, may reuse backend
 objects only across frames of that attempt, and is released at terminal
 publication. Optional final-output recording/readback owns an independent frame

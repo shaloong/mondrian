@@ -7,6 +7,30 @@ ACES, and Custom OCIO are product-level modes over that shared integration, not
 three renderer engines. Missing processors or configs required by a selected
 mode must surface as errors instead of falling back to different color science.
 
+## Color execution Module boundaries
+
+Renderer color execution has four public semantic Modules: `color::source`,
+`color::working`, `color::program_output`, and `color::monitor`. Source consumes
+the Timeline-owned `MediaInputColorContext`; Program Output consumes the closed
+`ProgramColorContext`. App and Export therefore no longer assemble source or
+Program Output contracts from duplicated working/output/engine values.
+`ProgramOutputBoundary` has private state and read-only identity/role accessors,
+and a nested working-only context is rejected before output planning.
+
+The generic color-stage graph, planners, OCIO backend preparation, shader and
+backend-object caches, frame-id allocator, resource table, and materialization
+records are private Implementation. A hidden qualification Adapter exists only
+for ignored real-device accuracy/performance gates; it is not a Preview or
+Export integration Seam.
+
+CPU callers retain one owner-scoped `RenderCpuColorExecutionSession`. GPU
+callers retain one `GpuColorExecutionSession` shared by source, working,
+Program Output, and monitor work, so Module separation does not multiply
+shader caches, backend objects, texture pools, or frame tables. Program Output
+and monitor remain separate semantic stages; the CPU presentation path moves
+one Float32 raster through both and quantizes once, while GPU recording keeps
+the Program Output handle available for scopes and diagnostics.
+
 ## Camera RAW input boundary
 
 Camera RAW development is a source-materialization step before OCIO, not a
@@ -1536,28 +1560,24 @@ hand-assemble table entries. When the stage plan ends in `ReadbackToCpu`, the
 resource plan carries the matching `GpuColorFrameReadbackPlan`; preview/export
 must resolve and record that readback through the renderer-owned output
 boundary API instead of deriving it from texture format at the call site.
-`RenderGpuOutputBoundaryRuntime` owns GPU output state for one explicit
-execution lifetime. Preview retains it in the live Viewer device Session.
-Export creates a separate instance per queue attempt, permits reuse only across
+`GpuColorExecutionSession` owns GPU color state for one explicit execution
+lifetime. Preview retains the shared internal runtime in its live Viewer device
+Session. Export creates a Session per queue attempt, permits reuse only across
 frames of that attempt, scopes GPU-failure backoff to that attempt, and releases
-the instance before terminal publication. It keeps the OCIO shader cache, pure
-backend prep runtime, concrete backend-object runtime, GPU frame id allocator,
-and GPU frame table together without process-global or cross-job residency.
-`RenderGpuOutputBoundaryRuntime::record_wgpu_output_boundary_owned_backend(...)`
-is the preview/export-facing sequencing point for this output boundary: it
-plans the boundary, prepares runtime-owned backend objects, derives the resource
-plan, materializes resources, schedules the pass, records the OCIO fullscreen
-draw, and records the optional readback copy in one command encoder. Its
-per-submission inputs are grouped in
-`RenderGpuOutputBoundaryRuntimeOwnedBackendContext` so app/export code passes
-device, queue, encoder, and load operation without hand-threading wgpu
-pipelines, bind groups, pass nodes, or the frame table through each layer.
+the Session before terminal publication. It keeps the OCIO shader cache, pure
+backend prep runtime, concrete backend-object runtime, GPU frame-id allocator,
+and frame table together without process-global or cross-job residency.
+`record_program_output(...)` is the Export-facing sequencing point: it accepts
+CPU or resident GPU working input plus one small backend Adapter, plans and
+records the exact boundary, and returns only the output handle, optional
+readback, and diagnostics. The private `RenderGpuOutputBoundaryRuntime`
+Implementation still performs lowering and materialization; App/Export cannot
+thread pipelines, bind groups, pass nodes, caches, or the frame table.
 The record result carries `RenderColorStageDiagnostics`; preview and export
 must use that diagnostics payload as the authoritative evidence for native GPU
 OCIO usage, transfer/readback counts, and color-stage pixel budgets.
-Callers that already hold a stage or resource plan may use the lower-level
-recorders, but app/export scheduling should prefer the runtime-owned boundary API so
-final-output policy remains renderer-owned. `GpuColorFrameReadbackPlan`
+Only renderer Implementation and the hardware-qualification Adapter may use
+lower-level recorders. `GpuColorFrameReadbackPlan`
 and `GpuColorFrameReadback` are the only renderer-owned GPU-to-CPU boundary for
 encoded output frames; they currently read back only explicit `Rgba8Unorm` /
 `EncodedRgba8` contracts and do not reinterpret float targets. Preview and

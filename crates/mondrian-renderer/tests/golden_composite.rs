@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use mondrian_core::types::{BlendMode, ColorEngine, ColorSpace, WorkingColorSpace};
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame, execute_cpu_input_stage,
-    execute_cpu_output_boundary_rgba8, CpuColorFrame, CpuEncodedColorFrame, RenderInputTransform,
-    RenderOutputColorBoundary, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineCompositeScratch, TimelineEffectColorRuntime, TimelineMediaLayer,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRgba8, SourceColorModule},
+    composite_timeline_elements_color_frame, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, RenderCpuColorExecutionSession, RenderInputTransform,
+    TimelineCompositeElement, TimelineCompositeOptions, TimelineCompositeScratch,
+    TimelineEffectColorRuntime, TimelineMediaLayer,
 };
 
 const IDENTITY_TRANSFORM: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -60,32 +61,45 @@ fn identity_graph() -> Arc<mondrian_effects::CompiledEffectGraph> {
     mondrian_effects::compile_reference_render_graph(g).expect("compile identity graph")
 }
 
+fn prepare_source(source: CpuEncodedColorFrame, intent: &RenderInputTransform) -> CpuColorFrame {
+    let mut session = RenderCpuColorExecutionSession::default();
+    SourceColorModule::execute_cpu_with_intent(
+        &CpuSourceColorFrame::from(source),
+        intent,
+        &mut session,
+    )
+    .expect("prepare golden source")
+    .into_frame()
+}
+
+fn encode_boundary(frame: &CpuColorFrame, boundary: &ProgramOutputBoundary) -> ProgramOutputRgba8 {
+    let mut session = RenderCpuColorExecutionSession::default();
+    ProgramOutputModule::execute_cpu_rgba8(frame, boundary, &mut session)
+        .expect("encode golden Program Output")
+}
+
 fn encode_rec709(frame: &CpuColorFrame) -> Vec<u8> {
-    execute_cpu_output_boundary_rgba8(
+    encode_boundary(
         frame,
-        &RenderOutputColorBoundary::display(
+        &ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
     )
-    .expect("encode golden frame")
     .rgba
 }
 
 fn working_frame(w: u32, h: u32, rgba: Vec<u8>) -> CpuColorFrame {
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec709, rgba);
-    execute_cpu_input_stage(
-        &source,
+    prepare_source(
+        source,
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
     )
-    .expect("input transform golden frame")
-    .result
-    .frame
 }
 
 fn composite_single_layer(w: u32, h: u32, rgba: &[u8], opacity: f32, blend: BlendMode) -> Vec<u8> {
@@ -286,24 +300,18 @@ fn preview_display_and_export_delivery_boundaries_match_with_stable_hash() {
     )
     .expect("composite display/export parity frame");
 
-    let preview = execute_cpu_output_boundary_rgba8(
+    let preview = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::display(
+        &ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
-    )
-    .expect("preview display output boundary");
-    let export = execute_cpu_output_boundary_rgba8(
+    );
+    let export = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::export(
-            ColorSpace::Rec709,
-            false,
-            ColorEngine::mondrian_standard(),
-        ),
-    )
-    .expect("export delivery output boundary");
+        &ProgramOutputBoundary::export(ColorSpace::Rec709, false, ColorEngine::mondrian_standard()),
+    );
 
     assert_rgba8_equal(&preview.rgba, &export.rgba, w, h, "preview-export-rec709");
     assert_eq!(
@@ -325,36 +333,27 @@ fn golden_rec2020_working_to_srgb_output() {
     let h = 24;
     let source_rgba = gradient_rgba(w, h, 42);
     let source = CpuEncodedColorFrame::source_rgba8(w, h, ColorSpace::Rec2020, source_rgba);
-    let frame = execute_cpu_input_stage(
-        &source,
+    let frame = prepare_source(
+        source,
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec2020,
             false,
             ColorEngine::mondrian_standard(),
         ),
-    )
-    .expect("input to Rec.2020 working")
-    .result
-    .frame;
+    );
 
-    let preview = execute_cpu_output_boundary_rgba8(
+    let preview = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::display(
+        &ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
-    )
-    .expect("Rec.2020->sRGB display");
-    let export = execute_cpu_output_boundary_rgba8(
+    );
+    let export = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::export(
-            ColorSpace::Rec709,
-            false,
-            ColorEngine::mondrian_standard(),
-        ),
-    )
-    .expect("Rec.2020->sRGB export");
+        &ProgramOutputBoundary::export(ColorSpace::Rec709, false, ColorEngine::mondrian_standard()),
+    );
 
     assert_rgba8_equal(
         &preview.rgba,
@@ -466,24 +465,18 @@ fn golden_preview_export_parity_across_color_spaces() {
     )
     .expect("composite HDR parity frame");
 
-    let preview = execute_cpu_output_boundary_rgba8(
+    let preview = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::display(
+        &ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
-    )
-    .expect("preview display");
-    let export = execute_cpu_output_boundary_rgba8(
+    );
+    let export = encode_boundary(
         &frame,
-        &RenderOutputColorBoundary::export(
-            ColorSpace::Rec709,
-            false,
-            ColorEngine::mondrian_standard(),
-        ),
-    )
-    .expect("export delivery");
+        &ProgramOutputBoundary::export(ColorSpace::Rec709, false, ColorEngine::mondrian_standard()),
+    );
 
     assert_rgba8_equal(
         &preview.rgba,

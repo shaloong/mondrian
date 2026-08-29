@@ -4,14 +4,13 @@ use mondrian_core::types::{BlendMode, ColorEngine};
 use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_effects::{identity_compiled_effect_graph, lower_effect_graph_to_gpu_plan};
 use mondrian_renderer::{
+    color::{GpuColorExecutionSession, RenderColorStageDiagnostics},
     estimate_gpu_visual_frame_active_working_set, product_gpu_working_bytes_per_pixel,
     ColorFrameDomain, ColorFrameSpace, CpuColorFrame, GpuColorFrameIdAllocator,
-    GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadPlan, GpuContext, GpuVisualFrameActiveTextureDemand,
-    GpuVisualFrameActiveWorkingSetAdmissionError, GpuVisualFrameElement,
-    GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant, GpuVisualFrameExecutor,
-    GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer, RenderColorStageDiagnostics,
-    RenderGpuOutputBoundaryRuntime,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameUploadPlan, GpuContext,
+    GpuVisualFrameActiveTextureDemand, GpuVisualFrameActiveWorkingSetAdmissionError,
+    GpuVisualFrameElement, GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant,
+    GpuVisualFrameExecutor, GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer,
 };
 
 const IDENTITY_AFFINE: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -90,7 +89,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
         eprintln!("skipping GPU DataTexture visual test: no adapter available");
         return;
     };
-    let mut runtime = RenderGpuOutputBoundaryRuntime::new().expect("frame runtime");
+    let mut runtime = GpuColorExecutionSession::new().expect("frame runtime");
     let identity = Arc::new(
         lower_effect_graph_to_gpu_plan(
             &identity_compiled_effect_graph().expect("identity Effect graph"),
@@ -138,7 +137,7 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
             GpuVisualFrameActiveWorkingSetAdmissionError::GrantExceeded { .. }
         )
     ));
-    assert!(runtime.frame_table().is_empty());
+    assert_eq!(runtime.retained_frame_count(), 0);
 
     let executor = GpuVisualFrameExecutor::new(&context.device).expect("visual executor");
     let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -169,13 +168,9 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
 
     let readback_plan = GpuColorFrameReadbackPlan::encoded_rgba32float(record.output.clone())
         .expect("working Float32 readback plan");
-    let readback = GpuColorFrameReadback::record_copy(
-        &context.device,
-        &mut encoder,
-        &readback_plan,
-        runtime.frame_table().get(&record.output).expect("visual output resource"),
-    )
-    .expect("record working readback");
+    let readback = runtime
+        .record_readback(&context.device, &mut encoder, &readback_plan)
+        .expect("record working readback");
     context.queue.submit(std::iter::once(encoder.finish()));
     let slice = readback.slice(..);
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -245,7 +240,7 @@ async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
             frame_seed: 0,
         })),
     ];
-    let mut runtime = RenderGpuOutputBoundaryRuntime::new().expect("frame runtime");
+    let mut runtime = GpuColorExecutionSession::new().expect("frame runtime");
     let executor = GpuVisualFrameExecutor::new(&context.device).expect("visual executor");
     let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("export-spatial-composite-plan"),

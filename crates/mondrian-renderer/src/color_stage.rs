@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::ocio_gpu::{
     OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget, OcioGpuWgpuWrapperBindGroup,
 };
@@ -342,18 +344,43 @@ pub enum RenderOutputColorBoundaryTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderOutputColorBoundary {
     /// Caller-visible output target.
-    pub target: RenderOutputColorBoundaryTarget,
+    target: RenderOutputColorBoundaryTarget,
     /// Destination color space.
-    pub output_color_space: ColorSpace,
+    output_color_space: ColorSpace,
     /// OCIO display/view pair for presentation output.
-    pub display_view: Option<RenderOcioDisplayView>,
+    display_view: Option<RenderOcioDisplayView>,
     /// Whether tone mapping is requested.
-    pub tone_map: bool,
+    tone_map: bool,
     /// Color engine selected for this output boundary.
-    pub engine: ColorEngine,
+    engine: ColorEngine,
 }
 
 impl RenderOutputColorBoundary {
+    /// Semantic consumer role for this Program Output boundary.
+    pub const fn target(&self) -> RenderOutputColorBoundaryTarget {
+        self.target
+    }
+
+    /// Encoded Program Output identity.
+    pub const fn output_color_space(&self) -> ColorSpace {
+        self.output_color_space
+    }
+
+    /// Whether this boundary contains a rendering View/tone-map policy.
+    pub const fn tone_map(&self) -> bool {
+        self.tone_map
+    }
+
+    /// Project-owned color engine pinned into this boundary.
+    pub const fn engine(&self) -> &ColorEngine {
+        &self.engine
+    }
+
+    /// Explicit OCIO display/view binding, when authored by the Program intent.
+    pub const fn ocio_display_view(&self) -> Option<&RenderOcioDisplayView> {
+        self.display_view.as_ref()
+    }
+
     /// Resolve a product-level output-transform intent into one renderer-owned
     /// display or export boundary.
     ///

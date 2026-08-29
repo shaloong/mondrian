@@ -21,7 +21,7 @@ use mondrian_media::{
     PreviewDecodeSource, PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract,
     ProxyConfig, ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
-use mondrian_renderer::{RenderInputTransform, SourceFramePreparationIntent};
+use mondrian_renderer::{color::SourceColorModule, SourceFramePreparationIntent};
 use mondrian_timeline::sequence::{
     InputColorResolution, InputColorResolutionSource, MediaInputColorContext, ResolvedInputColor,
 };
@@ -214,10 +214,8 @@ pub(crate) fn resolve_preview_media_source(
     let (mut source_color, preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
             PreviewSourceColorContract::new(color_space, input_video_range),
-            SourceFramePreparationIntent::ColorManaged(RenderInputTransform::to_working(
-                request.input_color.working_color_space,
-                request.input_color.input_tone_map,
-                request.input_color.engine.clone(),
+            SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
+                request.input_color,
             )),
         ),
         ResolvedInputColor::Data => {

@@ -27,7 +27,8 @@ use mondrian_render_cache::{
     TimelineRenderCacheIdentityBuilder, TimelineRenderCacheQuality,
 };
 use mondrian_renderer::{
-    basic_title_raster_request_identity, execute_cpu_working_transform_with_session,
+    basic_title_raster_request_identity,
+    color::{RenderColorStageDiagnostics, WorkingColorModule},
     execute_prepared_visual_closure, prepare_bound_visual_frame_closure,
     project_basic_title_transform, BasicTitleRasterFrame, BasicTitleRasterRequestIdentity,
     ColorFrameAlpha, CpuColorFrame, PreparedHeterogeneousEffectRoute,
@@ -36,13 +37,12 @@ use mondrian_renderer::{
     PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
     PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
     PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
-    PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorStageDiagnostics,
-    RenderColorTransformDiagnostics, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
-    TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineCpuCompositePrecision,
-    TimelineEvaluationRequest, TimelineFrameExecutionRequest, TimelineMediaPlan,
-    TimelinePreviewEffectRouteError, TimelineRenderPlanElement, TimelineSolidColorLayer,
-    TimelineTemporalDemandBatch, TimelineTemporalSource, TimelineTemporalSourceDemand,
-    TimelineTransitionInputPlan,
+    PreparedVisualProgramBinding, PreparedVisualProgramCache, RenderColorTransformDiagnostics,
+    TimelineAdjustmentLayer, TimelineBasicTitlePlan, TimelineCompositeDiagnostics,
+    TimelineCompositeScratch, TimelineCpuCompositePrecision, TimelineEvaluationRequest,
+    TimelineFrameExecutionRequest, TimelineMediaPlan, TimelinePreviewEffectRouteError,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, TimelineTemporalDemandBatch,
+    TimelineTemporalSource, TimelineTemporalSourceDemand, TimelineTransitionInputPlan,
 };
 #[cfg(test)]
 use mondrian_renderer::{
@@ -2077,7 +2077,7 @@ fn materialize_prepared_nested_node(
 
     let mut working_frame = output.frame;
     if working_frame.descriptor().color_space.working() != Some(parent_working_color_space) {
-        let converted = execute_cpu_working_transform_with_session(
+        let converted = WorkingColorModule::execute_cpu(
             &working_frame,
             parent_working_color_space,
             color_context.engine().clone(),
@@ -2093,12 +2093,12 @@ fn materialize_prepared_nested_node(
             ))
         })?;
         facts.push(PreviewTimelineExecutionFact::ColorTransform(
-            converted.result.diagnostics,
+            converted.transform_diagnostics(),
         ));
         facts.push(PreviewTimelineExecutionFact::ColorStage(
-            converted.stage_diagnostics,
+            converted.stage_diagnostics(),
         ));
-        working_frame = converted.result.frame;
+        working_frame = converted.into_frame();
     }
     let frame_identity = nested_preview_frame_identity(
         sequence_id,

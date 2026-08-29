@@ -13,12 +13,12 @@ use mondrian_renderer::profile::{
     GpuTimestampToken,
 };
 use mondrian_renderer::{
-    evaluate_realtime_visual_performance, native_video_texture_device_features,
-    ocio_lut_filtering_device_features, request_adapter_with_native_video_preference,
-    GpuColorFrameTextureFormat, GpuProgramScopesRequest, RealtimePerformanceExecutionPolicy,
-    RealtimeVisualAdapterIdentity, RealtimeVisualFrameEvidence,
-    RealtimeVisualPerformanceObservation, RealtimeVisualScenarioId, RealtimeVisualWarmPathEvidence,
-    RenderMonitorAdaptation, RenderOutputColorBoundary, TimelineSolidColorLayer,
+    color::ProgramOutputBoundary, evaluate_realtime_visual_performance,
+    native_video_texture_device_features, ocio_lut_filtering_device_features,
+    request_adapter_with_native_video_preference, GpuColorFrameTextureFormat,
+    GpuProgramScopesRequest, RealtimePerformanceExecutionPolicy, RealtimeVisualAdapterIdentity,
+    RealtimeVisualFrameEvidence, RealtimeVisualPerformanceObservation, RealtimeVisualScenarioId,
+    RealtimeVisualWarmPathEvidence, RenderMonitorAdaptation, TimelineSolidColorLayer,
     ViewerGpuExecutionGpuStage, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
     ViewerGpuExecutionRuntime, ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision,
     ViewerGpuSourceLayer, ViewerSourceRect,
@@ -135,7 +135,7 @@ fn run_scenario(
             }))
         })
         .collect::<Vec<_>>();
-    let boundary = RenderOutputColorBoundary::display(
+    let boundary = ProgramOutputBoundary::display(
         workload.output_color_space,
         false,
         ColorEngine::mondrian_standard(),
@@ -312,7 +312,7 @@ fn run_scenario(
 fn request<'a>(
     workload: &mondrian_renderer::RealtimeVisualWorkload,
     layers: &'a [ViewerGpuExecutionLayer],
-    boundary: &'a RenderOutputColorBoundary,
+    boundary: &'a ProgramOutputBoundary,
     monitor: &'a RenderMonitorAdaptation,
     scopes: GpuProgramScopesRequest,
     timeline_frame: i64,

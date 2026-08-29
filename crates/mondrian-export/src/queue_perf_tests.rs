@@ -5,8 +5,9 @@ use mondrian_effects::{
     blend_rgba_f32_pixel_seeded, compile_reference_effect_graph, EffectRenderPlan,
 };
 use mondrian_renderer::{
-    composite_timeline_elements_color_frame_with_diagnostics, execute_cpu_input_stage,
-    CpuColorFrame, CpuEncodedColorFrame, RenderColorStageDiagnostics, RenderInputTransform,
+    color::{RenderColorStageDiagnostics, SourceColorModule},
+    composite_timeline_elements_color_frame_with_diagnostics, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, RenderCpuColorExecutionSession, RenderInputTransform,
     TimelineCompositeDiagnostics, TimelineCompositeElement, TimelineCompositeExecutionDiagnostics,
     TimelineCompositeOptions, TimelineCompositeScratch, TimelineEffectColorRuntime,
     TimelineMediaLayer,
@@ -137,19 +138,21 @@ fn generate_layer(
         data[base + 3] = 240;
     }
     let source = CpuEncodedColorFrame::source_rgba8(width, height, ColorSpace::Rec709, data);
-    let frame = execute_cpu_input_stage(
-        &source,
+    let mut color_session = RenderCpuColorExecutionSession::default();
+    let frame = SourceColorModule::execute_cpu_with_intent(
+        &CpuSourceColorFrame::from(source),
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
+        &mut color_session,
     )
     .expect("perf input transform");
-    let diagnostics = frame.stage_diagnostics;
+    let diagnostics = frame.stage_diagnostics();
     (
         Arc::new(DecodedVideoLayer {
-            frame: frame.result.frame,
+            frame: frame.into_frame(),
             is_data_texture: false,
             source_resolution: Resolution { width, height },
             picture_geometry: ResolvedPictureGeometry::square(Resolution { width, height })

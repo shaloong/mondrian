@@ -1080,17 +1080,17 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
     let mut diagnostics = ExportJobColorDiagnostics::default();
     diagnostics.record_frame_diagnostics(
         input_counts,
-        mondrian_renderer::RenderColorStageDiagnostics {
+        mondrian_renderer::color::RenderColorStageDiagnostics {
             total_stages: 2,
             cpu_input_stages: 1,
             cpu_output_stages: 1,
             gpu_blockers: 1,
-            gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+            gpu_blocker_breakdown: mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
                 render_pipeline_not_prepared: 1,
-                ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default()
             },
             stage_pixels: 960 * 540 * 2,
-            ..mondrian_renderer::RenderColorStageDiagnostics::default()
+            ..mondrian_renderer::color::RenderColorStageDiagnostics::default()
         },
         mondrian_renderer::TimelineCompositeDiagnostics {
             elements: 2,

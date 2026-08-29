@@ -19,8 +19,8 @@ use mondrian_media::{
 };
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_prepared_visual_program, execute_cpu_output_boundary, CpuColorFrame,
-    PreparedVisualProgram, RenderOutputColorBoundary, RenderOutputColorBoundaryTarget,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole},
+    evaluate_prepared_visual_program, CpuColorFrame, PreparedVisualProgram,
     TimelineCompositeScratch, TimelineEvaluationRequest, TimelineRenderPlanElement,
 };
 use mondrian_timeline::{Clip, ClipSourceTimeMap, Sequence};
@@ -1034,17 +1034,19 @@ fn render_program_reference_with_preference(
         .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
-    let boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Export,
+    let boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Export,
         program_output_color,
         resolved.plan.color_context.output_transform(),
         resolved.plan.color_context.output_tone_map(),
         resolved.plan.color_context.engine().clone(),
     )?;
-    let rgba = execute_cpu_output_boundary(&CpuColorFrame::working(flattened), &boundary)?
-        .result
-        .frame
-        .into_rgba();
+    let rgba = ProgramOutputModule::execute_cpu_rgba8(
+        &CpuColorFrame::working(flattened),
+        &boundary,
+        scratch.color_execution_mut(),
+    )?
+    .rgba;
     Ok(ProgramReference {
         evidence: ProgramReferenceEvidence {
             source_sample: decode_request.expected_source_sample,

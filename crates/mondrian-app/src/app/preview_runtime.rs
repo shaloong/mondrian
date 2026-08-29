@@ -157,23 +157,24 @@ use mondrian_media::{
     PreviewDecodeExecutionPath, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
     PreviewTemporalExtentSource, VideoColorDiagnostic,
 };
+#[cfg(test)]
 use mondrian_renderer::{
+    color::{ProgramOutputBoundary, ProgramOutputModule, SourceColorModule},
+    evaluate_prepared_visual_program, CpuEncodedColorFrame, CpuSourceColorFrame,
+    GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
+    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, PreparedVisualProgram,
+    RenderCpuColorExecutionSession, RenderInputTransform, TimelineAdjustmentLayer,
+    TimelineCompositeColorPath, TimelineCompositeElement, TimelineCompositeOptions,
+    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
+    TimelineRenderPlanElement, TimelineSolidColorLayer, ViewerGpuExecutionLayer,
+};
+use mondrian_renderer::{
+    color::{RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown},
     color_report_vocab, GpuCompositingDiagnostics, PreparedVisualProgramCacheDiagnostics,
-    RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
     RenderColorTransformDiagnostics, RenderColorTransformDirection, RenderMonitorAdaptation,
     TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeLegacyBreakdown,
     TimelineCompositeScratch, ViewerHeterogeneousGpuInput,
-};
-#[cfg(test)]
-use mondrian_renderer::{
-    evaluate_prepared_visual_program, execute_cpu_input_stage, CpuEncodedColorFrame,
-    CpuSourceColorFrame, GpuCompositingBlockerReason, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameTextureFormat, LinearFloatSource, PreparedVisualProgram,
-    RenderInputTransform, RenderOutputColorBoundary, TimelineAdjustmentLayer,
-    TimelineCompositeColorPath, TimelineCompositeElement, TimelineCompositeOptions,
-    TimelineEffectColorRuntime, TimelineEvaluationRequest, TimelineMediaLayer,
-    TimelineRenderPlanElement, TimelineSolidColorLayer, ViewerGpuExecutionLayer,
 };
 #[cfg(test)]
 use mondrian_timeline::sequence::ResolvedInputColor;

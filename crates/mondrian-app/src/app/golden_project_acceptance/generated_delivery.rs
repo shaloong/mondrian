@@ -45,8 +45,8 @@ use mondrian_media::{
 };
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    execute_cpu_output_boundary, CpuColorFrame, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget, TimelineCompositeScratch,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole},
+    CpuColorFrame, TimelineCompositeScratch,
 };
 use mondrian_timeline::clip::Transform2D;
 use mondrian_timeline::sequence::InputColorResolutionSource;
@@ -582,17 +582,19 @@ fn render_program_reference(
         .output_color_space()
         .color()
         .context("Golden Program Output is not an encoded color space")?;
-    let output_boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Export,
+    let output_boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Export,
         program_output_color,
         resolved.plan.color_context.output_transform(),
         resolved.plan.color_context.output_tone_map(),
         resolved.plan.color_context.engine().clone(),
     )?;
-    let rgba = execute_cpu_output_boundary(&flattened, &output_boundary)?
-        .result
-        .frame
-        .into_rgba();
+    let rgba = ProgramOutputModule::execute_cpu_rgba8(
+        &flattened,
+        &output_boundary,
+        scratch.color_execution_mut(),
+    )?
+    .rgba;
 
     let center = rgba8_at(
         &rgba,

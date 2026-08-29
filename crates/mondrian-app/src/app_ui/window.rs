@@ -70,15 +70,16 @@ use mondrian_core::{ProgramScopeScale, ProgramScopesTap, SignalComplianceContrac
 use mondrian_editor_state::state::PanelKind;
 use mondrian_platform::SystemPlatformService;
 #[cfg(test)]
-use mondrian_renderer::RenderOutputColorBoundary;
+use mondrian_renderer::color::ProgramOutputBoundary;
 use mondrian_renderer::{
+    color::{
+        ProgramOutputRole, RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
+        RenderGpuOutputRuntimeDiagnosticsReport, RenderGpuOutputStageDiagnosticsReport,
+    },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference, GpuProgramScopesRequest, GpuSignalMonitorRequest,
-    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntimeDiagnostics,
-    RenderGpuOutputBoundaryRuntimeRecordError, RenderGpuOutputRuntimeDiagnosticsReport,
-    RenderGpuOutputStageDiagnosticsReport, RenderGpuOutputStageResourcePlanError,
-    RenderOutputColorBoundaryTarget, ViewerGpuExecutionError, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
+    ViewerGpuExecutionError, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
     ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 use mondrian_ui_core::focus::FocusManager;
@@ -843,13 +844,13 @@ impl AppUiViewerGpuOutputFrameContext {
             width: frame.width,
             height: frame.height,
             external_texture_key,
-            output_target: AppUiViewerGpuOutputTarget::from(frame.program_output_boundary.target),
-            output_color_space: frame.program_output_boundary.output_color_space,
+            output_target: AppUiViewerGpuOutputTarget::from(frame.program_output_boundary.target()),
+            output_color_space: frame.program_output_boundary.output_color_space(),
             monitor_color_space: frame.monitor_adaptation.monitor_color_space(),
-            tone_map: frame.program_output_boundary.tone_map,
+            tone_map: frame.program_output_boundary.tone_map(),
             preview_candidate_id: Some(frame.candidate_id()),
             preview_candidate_state: AppUiViewerGpuOutputPreviewCandidateState::Ready,
-            display_view: frame.program_output_boundary.display_view.as_ref().map(|display_view| {
+            display_view: frame.program_output_boundary.ocio_display_view().map(|display_view| {
                 AppUiViewerGpuOutputDisplayView {
                     display: display_view.display.clone(),
                     view: display_view.view.clone(),
@@ -860,11 +861,11 @@ impl AppUiViewerGpuOutputFrameContext {
     }
 }
 
-impl From<RenderOutputColorBoundaryTarget> for AppUiViewerGpuOutputTarget {
-    fn from(target: RenderOutputColorBoundaryTarget) -> Self {
+impl From<ProgramOutputRole> for AppUiViewerGpuOutputTarget {
+    fn from(target: ProgramOutputRole) -> Self {
         match target {
-            RenderOutputColorBoundaryTarget::Display => Self::Display,
-            RenderOutputColorBoundaryTarget::Export => Self::Export,
+            ProgramOutputRole::Display => Self::Display,
+            ProgramOutputRole::Export => Self::Export,
         }
     }
 }
@@ -2362,12 +2363,12 @@ impl AppUiDisplayOutputContract {
     #[cfg(test)]
     fn presentation_readiness_for_boundary(
         &self,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
     ) -> AppUiDisplayPresentationReadinessDiagnostics {
-        if boundary.target != RenderOutputColorBoundaryTarget::Display {
-            return self.display_presentation_readiness_current(boundary.output_color_space);
+        if boundary.target() != ProgramOutputRole::Display {
+            return self.display_presentation_readiness_current(boundary.output_color_space());
         }
-        self.presentation_readiness_for_color_space(boundary.output_color_space)
+        self.presentation_readiness_for_color_space(boundary.output_color_space())
     }
 
     fn display_presentation_readiness_current(
@@ -2430,12 +2431,12 @@ impl AppUiDisplayOutputContract {
     #[cfg(test)]
     fn boundary_blocker(
         &self,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
     ) -> Option<AppUiDisplayBoundaryBlocker> {
-        if boundary.target != RenderOutputColorBoundaryTarget::Display {
+        if boundary.target() != ProgramOutputRole::Display {
             return None;
         }
-        self.boundary_blocker_for_color_space(boundary.output_color_space)
+        self.boundary_blocker_for_color_space(boundary.output_color_space())
     }
 
     fn boundary_blocker_for_color_space(
@@ -4316,7 +4317,7 @@ fn prepare_viewer_gpu_preview(
             frame = frame.frame,
             width = frame.width,
             height = frame.height,
-            program_output_color_space = ?frame.program_output_boundary.output_color_space,
+            program_output_color_space = ?frame.program_output_boundary.output_color_space(),
             monitor_color_space = ?frame.monitor_adaptation.monitor_color_space(),
             display_target = ?session.display_output_contract.display_target,
             surface_format = ?session.display_output_contract.surface_color.format,
@@ -4440,7 +4441,7 @@ fn prepare_viewer_gpu_preview(
             display_calibration,
             program_scopes: viewer_program_scopes_request(
                 program_scopes_requested,
-                frame.program_output_boundary.output_color_space,
+                frame.program_output_boundary.output_color_space(),
                 frame.monitor_adaptation.monitor_color_space(),
                 scopes_settings,
             )
@@ -4454,7 +4455,7 @@ fn prepare_viewer_gpu_preview(
                 None
             }),
             signal_monitoring: viewer_signal_monitor_request(
-                frame.program_output_boundary.output_color_space,
+                frame.program_output_boundary.output_color_space(),
                 frame.monitor_adaptation.monitor_color_space(),
                 scopes_settings,
             )
@@ -4485,43 +4486,28 @@ fn prepare_viewer_gpu_preview(
             }
             fail_viewer_gpu_frame(host, &mut frame);
             match &error {
-                ViewerGpuExecutionError::WorkingComposite(composite_error) => {
+                error if error.working_composite_blocker().is_some() => {
                     host.record_preview_gpu_compositing(
                         mondrian_renderer::GpuCompositingDiagnostics {
                             cpu_fallback_composites: 1,
                             cpu_composited_pixels: u64::from(frame.width)
                                 .saturating_mul(u64::from(frame.height)),
-                            first_blocker: match composite_error.as_ref() {
-                                mondrian_renderer::RenderGpuCompositeGraphRecordError::Composite(
-                                    mondrian_renderer::GpuCompositeError::Blocked { reason },
-                                ) => {
-                                    Some(*reason)
-                                }
-                                _ => Some(
-                                    mondrian_renderer::GpuCompositingBlockerReason::GpuUnavailable,
-                                ),
-                            },
+                            first_blocker: error.working_composite_blocker(),
                             ..mondrian_renderer::GpuCompositingDiagnostics::default()
                         },
                     );
                 }
-                ViewerGpuExecutionError::ProgramOutputBoundary(boundary_error) => {
+                error if error.is_program_output_failure() => {
                     session.viewer_gpu_output_telemetry.record_record_failure();
                     host.record_preview_cpu_output_fallback(frame.width, frame.height);
-                    if let RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
-                        RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
-                            breakdown,
-                            ..
-                        },
-                    ) = boundary_error.as_ref()
-                    {
+                    if let Some(breakdown) = error.program_output_blocker_breakdown() {
                         host.record_preview_gpu_output_blocker_breakdown(
-                            PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(*breakdown),
+                            PreviewGpuOutputBlockerBreakdown::from_renderer_breakdown(breakdown),
                         );
                     } else {
                         host.record_preview_gpu_output_blocker(
                             &PreviewGpuOutputBlocker::CpuFallbackRequested {
-                                reason: format!("{boundary_error:?}"),
+                                reason: error.to_string(),
                             },
                         );
                     }
@@ -6613,7 +6599,7 @@ mod tests {
     #[test]
     fn display_output_contract_blocks_hdr_boundary_on_sdr_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6654,7 +6640,7 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_sdr_boundary_on_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6666,7 +6652,7 @@ mod tests {
     #[test]
     fn display_output_contract_accepts_srgb_boundary_on_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Srgb,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6678,7 +6664,7 @@ mod tests {
     #[test]
     fn display_presentation_readiness_is_current_for_matching_srgb_surface() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6706,7 +6692,7 @@ mod tests {
     fn display_output_contract_blocks_display_p3_boundary_on_srgb_surface() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6734,7 +6720,7 @@ mod tests {
     fn display_presentation_readiness_reports_supported_p3_reconfiguration_required() {
         let mut contract = test_display_output_contract();
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6763,7 +6749,7 @@ mod tests {
         let mut contract = test_display_output_contract();
         contract.surface_color.color_space = wgpu::SurfaceColorSpace::DisplayP3;
         contract.format_color_spaces[0].display_p3 = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::DisplayP3,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6779,7 +6765,7 @@ mod tests {
         contract.surface_color.encoding = AppUiSurfaceEncoding::Pq;
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrPq;
         contract.format_color_spaces[0].bt2100_pq = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6796,7 +6782,7 @@ mod tests {
         contract.surface_color.hdr_mode = AppUiSurfaceHdrMode::HdrHlg;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2100Pq,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6827,7 +6813,7 @@ mod tests {
         contract.format_color_spaces[0].display_p3 = true;
         contract.format_color_spaces[0].bt2100_pq = true;
         contract.format_color_spaces[0].bt2100_hlg = true;
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::Rec2020,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6856,7 +6842,7 @@ mod tests {
     #[test]
     fn display_output_contract_blocks_log_boundary_without_surface_contract() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::SonySLog3SGamut3Cine,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -6880,7 +6866,7 @@ mod tests {
     #[test]
     fn display_presentation_readiness_reports_unsupported_log_presentation_intent() {
         let contract = test_display_output_contract();
-        let boundary = RenderOutputColorBoundary::display(
+        let boundary = ProgramOutputBoundary::display(
             ColorSpace::SonySLog3SGamut3Cine,
             false,
             mondrian_core::ColorEngine::mondrian_standard(),
@@ -7442,9 +7428,9 @@ mod tests {
             gpu_color_stages: 1,
             readback_stages: 1,
             gpu_blockers: 1,
-            gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
+            gpu_blocker_breakdown: mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
                 render_pipeline_not_prepared: 1,
-                ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
+                ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default()
             },
             stage_pixels: 30,
             ..RenderColorStageDiagnostics::default()
@@ -7467,10 +7453,11 @@ mod tests {
                 gpu_color_stages: 2,
                 readback_stages: 1,
                 gpu_blockers: 1,
-                gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                    render_pipeline_not_prepared: 1,
-                    ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                },
+                gpu_blocker_breakdown:
+                    mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                        render_pipeline_not_prepared: 1,
+                        ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default()
+                    },
                 stage_pixels: 50,
                 ..RenderColorStageDiagnostics::default()
             }
@@ -7486,10 +7473,12 @@ mod tests {
                     gpu_color_stages: 2,
                     readback_stages: 1,
                     gpu_blockers: 1,
-                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                        render_pipeline_not_prepared: 1,
-                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                    },
+                    gpu_blocker_breakdown:
+                        mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                            render_pipeline_not_prepared: 1,
+                            ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default(
+                            )
+                        },
                     stage_pixels: 50,
                 },
                 last_stage_report: Some(RenderGpuOutputStageDiagnosticsReport {
@@ -7498,10 +7487,12 @@ mod tests {
                     gpu_color_stages: 1,
                     readback_stages: 1,
                     gpu_blockers: 1,
-                    gpu_blocker_breakdown: mondrian_renderer::RenderColorStageGpuBlockerBreakdown {
-                        render_pipeline_not_prepared: 1,
-                        ..mondrian_renderer::RenderColorStageGpuBlockerBreakdown::default()
-                    },
+                    gpu_blocker_breakdown:
+                        mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown {
+                            render_pipeline_not_prepared: 1,
+                            ..mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown::default(
+                            )
+                        },
                     stage_pixels: 30,
                 }),
                 stage_total_stages: 5,

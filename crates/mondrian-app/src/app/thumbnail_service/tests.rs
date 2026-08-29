@@ -34,6 +34,7 @@ fn color_contract() -> ThumbnailColorContract {
         },
         camera_raw: None,
         working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+        missing_metadata_policy: MissingColorMetadataPolicy::AssumeRec709,
         output_color_space: ColorSpace::Srgb,
         tone_map: true,
         engine: ColorEngine::mondrian_standard(),
@@ -236,7 +237,7 @@ fn raster_contract_rejects_invalid_extent_and_payload() {
 #[test]
 fn boundary_resolves_shared_standard_output_intent() {
     let boundary = color_contract().output_boundary().expect("thumbnail boundary");
-    let display_view = boundary.display_view.expect("standard display/view");
+    let display_view = boundary.ocio_display_view().expect("standard display/view");
     assert_eq!(display_view.display, "sRGB - Display");
     assert_eq!(display_view.view, "Mondrian Standard SDR v2");
 }

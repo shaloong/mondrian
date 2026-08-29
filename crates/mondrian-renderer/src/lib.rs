@@ -8,11 +8,12 @@
 //! - `GpuFrameCompositor`：类型化工作域合成
 //! - `ViewerGpuExecutionRuntime`：有界 Viewer GPU 执行
 
+pub mod color;
 pub mod color_accuracy;
 pub mod color_frame;
 pub mod color_reference;
 pub mod color_report_vocab;
-pub mod color_stage;
+mod color_stage;
 pub mod color_transform;
 pub mod context;
 mod cpu_visual_execution;
@@ -96,7 +97,8 @@ pub use color_reference::{
     ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin, ColorReferencePayloadFormat,
     ColorReferencePixels, ColorReferenceValidationError,
 };
-pub use color_stage::{
+#[allow(unused_imports)]
+pub(crate) use color_stage::{
     execute_cpu_input_stage, execute_cpu_input_stage_float,
     execute_cpu_input_stage_float_with_session, execute_cpu_input_stage_with_session,
     execute_cpu_output_boundary, execute_cpu_output_boundary_float,

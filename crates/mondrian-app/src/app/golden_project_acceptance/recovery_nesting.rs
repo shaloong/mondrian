@@ -40,7 +40,7 @@ use mondrian_core::{
 use mondrian_export::preset::TimelineExportRange;
 use mondrian_playback::PreviewResolutionScale;
 use mondrian_renderer::{
-    evaluate_prepared_visual_program, PreparedVisualProgram, RenderColorStageDiagnostics,
+    color::RenderColorStageDiagnostics, evaluate_prepared_visual_program, PreparedVisualProgram,
     TimelineCompositeDiagnostics, TimelineCompositeScratch, TimelineEvaluationRequest,
     TimelineRenderPlanElement,
 };

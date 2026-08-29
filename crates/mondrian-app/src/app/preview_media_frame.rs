@@ -18,8 +18,8 @@ use mondrian_playback::FramePresentationQuality;
 #[cfg(test)]
 use mondrian_renderer::CpuSourceColorFrame;
 use mondrian_renderer::{
-    project_affine_to_sampled_extents, CpuColorFrame, PreparedSourceFrame,
-    RenderColorStageDiagnostics, RenderColorTransformDiagnostics, RenderColorTransformError,
+    color::RenderColorStageDiagnostics, project_affine_to_sampled_extents, CpuColorFrame,
+    PreparedSourceFrame, RenderColorTransformDiagnostics, RenderColorTransformError,
     RenderCpuColorExecutionSession, RenderInputTransform, ViewerGpuCpuYuvSource,
     ViewerGpuMediaSource, ViewerGpuNativeSource,
 };

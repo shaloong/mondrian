@@ -29,9 +29,7 @@ use mondrian_audio::{
     AudioRenderContract, AudioRenderRequest, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
-use mondrian_core::types::{
-    AssetId, ColorEngine, ColorSpace, FramePosition, OcioColorSpaceIdentity, Rational,
-};
+use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, Rational};
 use mondrian_core::{
     legalize_encoded_rgba_f32, AudioChannelLayout, AudioSamplePosition, AudioSampleRate,
     AudioSampleRounding, AudioSourceComponentId, ExecutionCancellationToken, FrameRounding,
@@ -54,14 +52,16 @@ use mondrian_media::{
     VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
+    color::{
+        GpuColorBackendContext, GpuColorExecutionSession, GpuProgramInput, GpuProgramOutputError,
+        ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, RenderColorStageDiagnostics,
+        RenderColorStageGpuBlockerBreakdown, SourceColorModule, WorkingColorModule,
+    },
     color_report_vocab, composite_timeline_elements_color_frame_with_diagnostics,
-    execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
-    execute_cpu_working_transform_with_session, execute_prepared_visual_closure,
-    prepare_decoded_cpu_source_frame, prepare_visual_frame_closure,
-    product_gpu_working_texture_format, project_affine_to_sampled_extents,
-    project_basic_title_transform, BasicTitleRasterizer, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle, GpuColorFrameReadbackPlan,
-    GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    execute_prepared_visual_closure, prepare_decoded_cpu_source_frame,
+    prepare_visual_frame_closure, project_affine_to_sampled_extents, project_basic_title_transform,
+    BasicTitleRasterizer, ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle,
+    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
     GpuColorFrameWgpuResourcePoolOptions, GpuContext, GpuResidentEncoderInputLease,
     GpuVisualFrameElement, GpuVisualFrameExecutionResourceGrant, GpuVisualFrameExecutor,
     GpuVisualFrameRecord, GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer,
@@ -73,12 +73,9 @@ use mondrian_renderer::{
     PreparedVisualExecutionNodeInputs, PreparedVisualFrameClosure,
     PreparedVisualFrameClosureRequest, PreparedVisualFrameEvaluation, PreparedVisualFrameNode,
     PreparedVisualFrameNodeId, PreparedVisualMaterializationContract, PreparedVisualNestedSample,
-    PreparedVisualProgram, RenderColorStageDiagnostics, RenderColorStageGpuBlockerBreakdown,
-    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderGpuOutputBoundaryRuntimeRecordError,
-    RenderGpuOutputExecutionResourceGrant, RenderInputTransform, RenderIntermediateColorTransform,
-    RenderOutputColorBoundary, SourceFramePreparationIntent, TimelineAdjustmentLayer,
-    TimelineBasicTitlePlan, TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
+    PreparedVisualProgram, RenderColorTransformGpuOptions, RenderGpuOutputExecutionResourceGrant,
+    SourceFramePreparationIntent, TimelineAdjustmentLayer, TimelineBasicTitlePlan,
+    TimelineCompositeColorPathSummary, TimelineCompositeDiagnostics,
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
     TimelineCpuCompositePrecision, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
@@ -88,7 +85,9 @@ use mondrian_renderer::{
     TimelineTransitionInputPlan,
 };
 #[cfg(test)]
-use mondrian_renderer::{PreparedVisualProgramCache, PreparedVisualProgramCacheConfig};
+use mondrian_renderer::{
+    PreparedVisualProgramCache, PreparedVisualProgramCacheConfig, RenderInputTransform,
+};
 use mondrian_storage::{
     DirectoryPublicationEvidence, DirectoryPublicationFailure, FilePublicationEvidence,
     FilePublicationFailure, FilePublicationMode, OwnedPublicationDirectory, OwnedPublicationFile,
@@ -136,10 +135,10 @@ fn export_frame_contract(bit_depth: DeliveryBitDepth) -> ExportFrameContract {
 /// high-precision fail-closed branch without mocking the color engine.
 fn cpu_output_boundary_float(
     frame: &CpuColorFrame,
-    boundary: &RenderOutputColorBoundary,
+    boundary: &ProgramOutputBoundary,
     session: &mut mondrian_renderer::RenderCpuColorExecutionSession,
 ) -> Result<
-    mondrian_renderer::RenderOutputColorBoundaryFloat,
+    mondrian_renderer::color::ProgramOutputFloat,
     mondrian_renderer::RenderColorTransformError,
 > {
     #[cfg(test)]
@@ -152,7 +151,7 @@ fn cpu_output_boundary_float(
             );
         }
     }
-    execute_cpu_output_boundary_float_with_session(frame, boundary, session)
+    ProgramOutputModule::execute_cpu_float(frame, boundary, session)
 }
 
 #[cfg(test)]
@@ -225,7 +224,7 @@ impl Drop for GpuVisualExecutionGuard {
 
 struct ExportGpuOutputBackend {
     context: Arc<GpuContext>,
-    runtime: RenderGpuOutputBoundaryRuntime,
+    runtime: GpuColorExecutionSession,
     visual: Option<GpuVisualFrameExecutor>,
     heterogeneous_runtime: HeterogeneousGpuContinuationRuntime,
 }
@@ -485,29 +484,22 @@ impl ExportGpuExecutionRuntime {
             backend.context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mondrian-export-gpu-nested-working-transform"),
             });
-        let record = backend
-            .runtime
-            .record_wgpu_intermediate_color_transform_owned_backend(
-                &RenderIntermediateColorTransform {
-                    output_identity: OcioColorSpaceIdentity::Working(target),
-                    output_domain: ColorFrameDomain::Working,
-                    output_encoding: ColorFrameEncoding::LinearFloat,
-                    engine,
-                },
-                frame,
-                product_gpu_working_texture_format(),
-                "export-nested-parent-working",
-                RenderColorTransformGpuOptions::default(),
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &backend.context.device,
-                    queue: &backend.context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                },
-            )
-            .map_err(|error| format!("nested GPU working-space transform failed: {error:?}"))?;
-        let output = record.materialized.output.clone();
-        let diagnostics = record.stage_diagnostics;
+        let record = WorkingColorModule::record_gpu(
+            &mut backend.runtime,
+            frame,
+            target,
+            engine,
+            RenderColorTransformGpuOptions::default(),
+            GpuColorBackendContext {
+                device: &backend.context.device,
+                queue: &backend.context.queue,
+                encoder: &mut encoder,
+                load_op: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            },
+        )
+        .map_err(|error| format!("nested GPU working-space transform failed: {error:?}"))?;
+        let output = record.output().clone();
+        let diagnostics = record.stage_diagnostics();
         backend.context.queue.submit(std::iter::once(encoder.finish()));
         Ok((output, diagnostics))
     }
@@ -515,7 +507,7 @@ impl ExportGpuExecutionRuntime {
     fn execute(
         &mut self,
         frame: &CpuColorFrame,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
         frame_contract: ExportFrameContract,
         legalizer: SignalLegalizer,
         cancellation: &ExecutionCancellationToken,
@@ -563,7 +555,7 @@ impl ExportGpuExecutionRuntime {
     fn execute_gpu_frame(
         &mut self,
         frame: &GpuColorFrameHandle,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
         frame_contract: ExportFrameContract,
         legalizer: SignalLegalizer,
         cancellation: &ExecutionCancellationToken,
@@ -597,7 +589,7 @@ impl ExportGpuExecutionRuntime {
     fn execute_resident(
         &mut self,
         frame: ExportGpuBoundaryInput<'_>,
-        boundary: &RenderOutputColorBoundary,
+        boundary: &ProgramOutputBoundary,
         boundary_texture_format: GpuColorFrameTextureFormat,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<ExportGpuResidentOutputAttemptOutcome, ExportGpuOutputExecutionError> {
@@ -703,7 +695,7 @@ fn build_export_gpu_output_runtime(
     Ok(Box::new(ExportGpuOutputBackend {
         visual: None,
         context,
-        runtime: RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool)
+        runtime: GpuColorExecutionSession::with_resource_pool(resource_pool)
             .map_err(|err| format!("create GPU output runtime failed: {err}"))?,
         heterogeneous_runtime,
     }))
@@ -803,7 +795,7 @@ enum ExportGpuBoundaryInput<'a> {
 fn execute_export_gpu_output_boundary_with_backend(
     backend: &mut ExportGpuOutputBackend,
     frame: ExportGpuBoundaryInput<'_>,
-    boundary: &RenderOutputColorBoundary,
+    boundary: &ProgramOutputBoundary,
     frame_contract: ExportFrameContract,
     legalizer: SignalLegalizer,
     active_grant: RenderGpuOutputExecutionResourceGrant,
@@ -828,64 +820,50 @@ fn execute_export_gpu_output_boundary_with_backend(
         output_residency: ColorFrameResidency::Cpu,
         ..RenderColorTransformGpuOptions::default()
     };
-    let record = match frame {
-        ExportGpuBoundaryInput::Cpu(frame) => {
-            backend.runtime.record_wgpu_output_boundary_owned_backend_with_grant(
-                boundary,
-                frame,
-                boundary_texture_format,
-                gpu_options,
-                active_grant,
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &backend.context.device,
-                    queue: &backend.context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-        }
-        ExportGpuBoundaryInput::Gpu(frame) => {
-            backend.runtime.record_wgpu_output_boundary_gpu_frame_owned_backend_with_grant(
-                boundary,
-                frame,
-                boundary_texture_format,
-                gpu_options,
-                active_grant,
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &backend.context.device,
-                    queue: &backend.context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-        }
-    }
-    .map_err(|error| match error {
-        RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet(_) => {
-            ExportGpuOutputExecutionError::Fallback(
+    let input = match frame {
+        ExportGpuBoundaryInput::Cpu(frame) => GpuProgramInput::Cpu(frame),
+        ExportGpuBoundaryInput::Gpu(frame) => GpuProgramInput::Gpu(frame),
+    };
+    let mut record = backend
+        .runtime
+        .record_program_output(
+            boundary,
+            input,
+            boundary_texture_format,
+            gpu_options,
+            active_grant,
+            GpuColorBackendContext {
+                device: &backend.context.device,
+                queue: &backend.context.queue,
+                encoder: &mut encoder,
+                load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            },
+        )
+        .map_err(|error| match error {
+            GpuProgramOutputError::ActiveWorkingSet => ExportGpuOutputExecutionError::Fallback(
                 ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
-            )
-        }
-        _ => ExportGpuOutputExecutionError::Fallback(
-            ExportGpuOutputFallbackReason::RecordBoundaryFailed,
-        ),
-    })?;
+            ),
+            _ => ExportGpuOutputExecutionError::Fallback(
+                ExportGpuOutputFallbackReason::RecordBoundaryFailed,
+            ),
+        })?;
 
     let submission_index = backend.context.queue.submit(std::iter::once(encoder.finish()));
-    let readback_buffer = record.readback_buffer.ok_or(ExportGpuOutputExecutionError::Fallback(
-        ExportGpuOutputFallbackReason::MissingReadbackBuffer,
-    ))?;
+    let readback_buffer =
+        record.take_readback_buffer().ok_or(ExportGpuOutputExecutionError::Fallback(
+            ExportGpuOutputFallbackReason::MissingReadbackBuffer,
+        ))?;
     let readback_plan = match boundary_texture_format {
         GpuColorFrameTextureFormat::Rgba8Unorm => {
-            GpuColorFrameReadbackPlan::encoded_rgba8(record.materialized.output)
+            GpuColorFrameReadbackPlan::encoded_rgba8(record.output().clone())
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
         GpuColorFrameTextureFormat::Rgba16Float => {
-            GpuColorFrameReadbackPlan::encoded_rgba16float(record.materialized.output)
+            GpuColorFrameReadbackPlan::encoded_rgba16float(record.output().clone())
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
         GpuColorFrameTextureFormat::Rgba32Float => {
-            GpuColorFrameReadbackPlan::encoded_rgba32float(record.materialized.output)
+            GpuColorFrameReadbackPlan::encoded_rgba32float(record.output().clone())
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?
         }
     };
@@ -912,7 +890,7 @@ fn execute_export_gpu_output_boundary_with_backend(
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
             if legalizer.is_active() {
                 let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space)
+                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
                         .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
                 legalize_encoded_rgba_f32(
                     bytemuck::cast_slice_mut(&mut f32_data),
@@ -929,7 +907,7 @@ fn execute_export_gpu_output_boundary_with_backend(
                 .map_err(|_| ExportGpuOutputFallbackReason::ReadbackUnpackFailed)?;
             if legalizer.is_active() {
                 let compliance =
-                    SignalComplianceContract::normalized_rgb(boundary.output_color_space)
+                    SignalComplianceContract::normalized_rgb(boundary.output_color_space())
                         .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
                 legalize_encoded_rgba_f32(
                     bytemuck::cast_slice_mut(&mut f32_data),
@@ -951,14 +929,14 @@ fn execute_export_gpu_output_boundary_with_backend(
 
     Ok(ExportGpuOutputAttemptOutcome {
         pipe_bytes,
-        stage_diagnostics: record.stage_diagnostics,
+        stage_diagnostics: record.stage_diagnostics(),
     })
 }
 
 fn execute_export_gpu_output_boundary_resident_with_backend(
     backend: &mut ExportGpuOutputBackend,
     frame: ExportGpuBoundaryInput<'_>,
-    boundary: &RenderOutputColorBoundary,
+    boundary: &ProgramOutputBoundary,
     boundary_texture_format: GpuColorFrameTextureFormat,
     active_grant: RenderGpuOutputExecutionResourceGrant,
     cancellation: &ExecutionCancellationToken,
@@ -974,52 +952,37 @@ fn execute_export_gpu_output_boundary_resident_with_backend(
         output_residency: ColorFrameResidency::Gpu,
         ..RenderColorTransformGpuOptions::default()
     };
-    let record = match frame {
-        ExportGpuBoundaryInput::Cpu(frame) => {
-            backend.runtime.record_wgpu_output_boundary_owned_backend_with_grant(
-                boundary,
-                frame,
-                boundary_texture_format,
-                options,
-                active_grant,
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &backend.context.device,
-                    queue: &backend.context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-        }
-        ExportGpuBoundaryInput::Gpu(frame) => {
-            backend.runtime.record_wgpu_output_boundary_gpu_frame_owned_backend_with_grant(
-                boundary,
-                frame,
-                boundary_texture_format,
-                options,
-                active_grant,
-                RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
-                    device: &backend.context.device,
-                    queue: &backend.context.queue,
-                    encoder: &mut encoder,
-                    load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                },
-            )
-        }
-    }
-    .map_err(|error| match error {
-        RenderGpuOutputBoundaryRuntimeRecordError::ActiveWorkingSet(_) => {
-            ExportGpuOutputExecutionError::Fallback(
+    let input = match frame {
+        ExportGpuBoundaryInput::Cpu(frame) => GpuProgramInput::Cpu(frame),
+        ExportGpuBoundaryInput::Gpu(frame) => GpuProgramInput::Gpu(frame),
+    };
+    let record = backend
+        .runtime
+        .record_program_output(
+            boundary,
+            input,
+            boundary_texture_format,
+            options,
+            active_grant,
+            GpuColorBackendContext {
+                device: &backend.context.device,
+                queue: &backend.context.queue,
+                encoder: &mut encoder,
+                load_op: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+            },
+        )
+        .map_err(|error| match error {
+            GpuProgramOutputError::ActiveWorkingSet => ExportGpuOutputExecutionError::Fallback(
                 ExportGpuOutputFallbackReason::ActiveWorkingSetRejected,
-            )
-        }
-        _ => ExportGpuOutputExecutionError::Fallback(
-            ExportGpuOutputFallbackReason::RecordBoundaryFailed,
-        ),
-    })?;
+            ),
+            _ => ExportGpuOutputExecutionError::Fallback(
+                ExportGpuOutputFallbackReason::RecordBoundaryFailed,
+            ),
+        })?;
     backend.context.queue.submit(std::iter::once(encoder.finish()));
     let source = backend
         .runtime
-        .take_resident_encoder_input(&record.materialized.output)
+        .take_resident_encoder_input(record.output())
         .map_err(|_| ExportGpuOutputFallbackReason::RecordBoundaryFailed)?;
     if let Some(visual) = backend.visual.as_ref() {
         visual.clear_frame_resources();
@@ -1027,7 +990,7 @@ fn execute_export_gpu_output_boundary_resident_with_backend(
     backend.runtime.clear_frame_resources();
     Ok(ExportGpuResidentOutputAttemptOutcome {
         source,
-        stage_diagnostics: record.stage_diagnostics,
+        stage_diagnostics: record.stage_diagnostics(),
     })
 }
 
@@ -4517,18 +4480,9 @@ fn render_timeline_frames_with_sink(
 /// an explicit OCIO view, or a colorimetric delivery.
 fn export_output_boundary_from_context(
     color_context: &ProgramColorContext,
-) -> Result<RenderOutputColorBoundary, String> {
-    let output_color_space = color_context.output_color_space().color().ok_or_else(|| {
-        "deliverable output boundary requires an encoded output color space".to_owned()
-    })?;
-    RenderOutputColorBoundary::from_intent(
-        mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
-        output_color_space,
-        color_context.output_transform(),
-        color_context.output_tone_map(),
-        color_context.engine().clone(),
-    )
-    .map_err(|error| error.to_string())
+) -> Result<ProgramOutputBoundary, String> {
+    ProgramOutputModule::boundary(ProgramOutputRole::Export, color_context)
+        .map_err(|error| error.to_string())
 }
 
 fn resolved_export_color_context(
@@ -5369,7 +5323,7 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
         })?;
         let parent_working = inbound.parent_working_color_space();
         if frame.descriptor().color_space.working() != Some(parent_working) {
-            let converted = execute_cpu_working_transform_with_session(
+            let converted = WorkingColorModule::execute_cpu(
                 &frame,
                 parent_working,
                 inputs.node().color_context().engine().clone(),
@@ -5377,9 +5331,9 @@ impl PreparedVisualExecutionAdapter<Vec<PreparedExportHeterogeneousElement>>
             )
             .map_err(|error| format!("nested working-space transform failed: {error}"))?;
             if let Some(diagnostics) = self.context.stage_diagnostics.as_deref_mut() {
-                diagnostics.accumulate(converted.stage_diagnostics);
+                diagnostics.accumulate(converted.stage_diagnostics());
             }
-            frame = converted.result.frame;
+            frame = converted.into_frame();
         }
         Ok(PreparedExportVisualOutput::NestedCpu(frame))
     }
@@ -6144,7 +6098,7 @@ fn finish_export_gpu_visual_output(
 ) -> Result<(), String> {
     let boundary = export_output_boundary_from_context(color_context)?;
     if color_context.output_tone_map()
-        && boundary.display_view.is_none()
+        && boundary.ocio_display_view().is_none()
         && let Some(diagnostics) = context.export_diagnostics.as_deref_mut()
     {
         diagnostics.record_output_transform_issue(
@@ -6689,7 +6643,7 @@ fn render_prepared_visual_node_into(
     let mut gpu_output_cpu_fallbacks = 0u64;
     let boundary = export_output_boundary_from_context(&color_context)?;
     if color_context.output_tone_map()
-        && boundary.display_view.is_none()
+        && boundary.ocio_display_view().is_none()
         && let Some(diagnostics) = context.export_diagnostics.as_deref_mut()
     {
         diagnostics.record_output_transform_issue(
@@ -6749,7 +6703,7 @@ fn render_prepared_visual_node_into(
                         let mut encoded = float_result.frame.into_rgba_f32();
                         if context.delivery_pixels.legalizer.is_active() {
                             let compliance = SignalComplianceContract::normalized_rgb(
-                                boundary.output_color_space,
+                                boundary.output_color_space(),
                             )
                             .map_err(|error| {
                                 format!("export legalizer contract failed: {error}")
@@ -6783,7 +6737,7 @@ fn render_prepared_visual_node_into(
                     }
                 }
             } else {
-                let encoded = execute_cpu_output_boundary_rgba8_with_session(
+                let encoded = ProgramOutputModule::execute_cpu_rgba8(
                     &rendered.frame,
                     &boundary,
                     context.visual_session.composite_scratch.color_execution_mut(),
@@ -6978,10 +6932,8 @@ fn resolve_export_source_preparation(
     let (source_contract, preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
             PreviewSourceColorContract::new(color_space, input_video_range),
-            SourceFramePreparationIntent::ColorManaged(RenderInputTransform::to_working(
-                color_context.working_color_space(),
-                auto_tone_map,
-                color_context.engine().clone(),
+            SourceFramePreparationIntent::ColorManaged(SourceColorModule::cpu_intent(
+                &color_context.media_input(auto_tone_map),
             )),
         ),
         ResolvedInputColor::Data => {
@@ -7998,7 +7950,7 @@ mod tests {
         EffectColorDomain, EffectGraphBuilderState, EffectNodeExt, EffectRenderOp,
         EffectRenderPlan, MaskOp, MaskShape, PreparedEffectProgram,
     };
-    use mondrian_renderer::RenderOutputColorBoundaryTarget;
+    use mondrian_renderer::color::ProgramOutputRole;
     use mondrian_timeline::clip::Clip;
     use mondrian_timeline::sequence::{
         MissingColorMetadataPolicy, Sequence, StaticHdrMetadataPolicy,
@@ -8275,17 +8227,18 @@ mod tests {
             ColorSpace::Rec709,
             rgba.to_vec(),
         );
-        mondrian_renderer::execute_cpu_input_stage(
-            &source,
-            &mondrian_renderer::RenderInputTransform::to_working(
-                WorkingColorSpace::LinearRec709,
-                false,
-                ColorEngine::mondrian_standard(),
-            ),
+        let settings = mondrian_timeline::sequence::SequenceSettings::default();
+        let context = settings
+            .root_program_color_context(&mondrian_core::ProjectColorEnvironment::default())
+            .expect("default Program color context");
+        let mut session = mondrian_renderer::RenderCpuColorExecutionSession::new(4);
+        mondrian_renderer::color::SourceColorModule::execute_cpu(
+            &mondrian_renderer::CpuSourceColorFrame::from(source),
+            &context.media_input(false),
+            &mut session,
         )
         .expect("test input transform")
-        .result
-        .frame
+        .into_frame()
     }
 
     fn heterogeneous_tracer_graph(
@@ -11075,10 +11028,10 @@ mod tests {
             .expect("valid sRGB rendering View context");
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
-        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
-        assert!(boundary.display_view.is_some());
-        assert!(boundary.tone_map);
-        let dv = boundary.display_view.as_ref().unwrap();
+        assert_eq!(boundary.target(), ProgramOutputRole::Export);
+        assert!(boundary.ocio_display_view().is_some());
+        assert!(boundary.tone_map());
+        let dv = boundary.ocio_display_view().expect("resolved display/view");
         assert_eq!(dv.display, "sRGB - Display");
         assert_eq!(dv.view, "Mondrian Standard SDR v2");
     }
@@ -11164,9 +11117,9 @@ mod tests {
 
         let boundary = export_output_boundary_from_context(&ctx).expect("encoded output");
         // The boundary has a view -> no issue should be recorded.
-        assert!(boundary.display_view.is_some());
-        assert!(boundary.tone_map);
-        assert_eq!(boundary.target, RenderOutputColorBoundaryTarget::Export);
+        assert!(boundary.ocio_display_view().is_some());
+        assert!(boundary.tone_map());
+        assert_eq!(boundary.target(), ProgramOutputRole::Export);
 
         let mut diagnostics = ExportJobColorDiagnostics::default();
         let mut canvas = vec![0u8; 2 * 2 * 4];

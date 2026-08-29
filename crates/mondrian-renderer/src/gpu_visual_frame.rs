@@ -320,7 +320,7 @@ pub enum GpuVisualFrameExecutionError {
 /// Long-lived renderer Implementation for prepared GPU visual frames.
 ///
 /// Frame ids, OCIO caches, and texture ownership remain in the caller-supplied
-/// [`RenderGpuOutputBoundaryRuntime`] so this executor composes directly with
+/// [`crate::color::GpuColorExecutionSession`] so this executor composes directly with
 /// Viewer or Export output stages without an intermediate transfer.
 pub struct GpuVisualFrameExecutor {
     compositor: GpuFrameCompositor,
@@ -355,12 +355,13 @@ impl GpuVisualFrameExecutor {
     /// Record a complete working-space visual graph without readback.
     pub fn record(
         &self,
-        runtime: &mut RenderGpuOutputBoundaryRuntime,
+        session: &mut crate::color::GpuColorExecutionSession,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         request: GpuVisualFrameRequest<'_>,
     ) -> Result<GpuVisualFrameRecord, GpuVisualFrameExecutionError> {
+        let runtime = session.runtime_mut();
         let retained_textures = u64::try_from(runtime.frame_table().len()).map_err(|_| {
             GpuVisualFrameActiveWorkingSetAdmissionError::Estimate(
                 GpuVisualFrameActiveWorkingSetEstimateError::RetainedResidencyOverflow,

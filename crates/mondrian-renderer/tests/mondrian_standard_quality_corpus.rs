@@ -4,10 +4,9 @@ use mondrian_core::{
     OutputTransformIntent, WorkingColorSpace, WorkingRgbaF32Frame,
 };
 use mondrian_renderer::{
-    compare_code_values, execute_cpu_output_boundary_float, execute_cpu_output_boundary_rgba8,
-    execute_cpu_source_input_stage, CodeValueAccuracyBudget, CpuColorFrame, CpuEncodedColorFrame,
-    CpuSourceColorFrame, RenderInputTransform, RenderOutputColorBoundary,
-    RenderOutputColorBoundaryTarget,
+    color::{ProgramOutputBoundary, ProgramOutputModule, ProgramOutputRole, SourceColorModule},
+    compare_code_values, CodeValueAccuracyBudget, CpuColorFrame, CpuEncodedColorFrame,
+    CpuSourceColorFrame, RenderCpuColorExecutionSession, RenderInputTransform,
 };
 use std::collections::BTreeSet;
 
@@ -251,26 +250,27 @@ fn standard_sdr_view_preserves_normal_rec709_within_one_code_value() {
         ColorSpace::Rec709,
         source_rgba.clone(),
     ));
-    let working = execute_cpu_source_input_stage(
+    let mut session = RenderCpuColorExecutionSession::default();
+    let working = SourceColorModule::execute_cpu_with_intent(
         &source,
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec2020,
             false,
             ColorEngine::mondrian_standard(),
         ),
+        &mut session,
     )
     .expect("production Rec.709 input boundary")
-    .result
-    .frame;
-    let boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Display,
+    .into_frame();
+    let boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Display,
         ColorSpace::Rec709,
         &OutputTransformIntent::mondrian_standard(),
         false,
         ColorEngine::mondrian_standard(),
     )
     .expect("default Mondrian Standard output intent");
-    let observed = execute_cpu_output_boundary_rgba8(&working, &boundary)
+    let observed = ProgramOutputModule::execute_cpu_rgba8(&working, &boundary, &mut session)
         .expect("production colorimetric Rec.709 output boundary")
         .rgba;
 
@@ -332,15 +332,16 @@ fn render_standard(input: &[[f32; 4]], output: ColorSpace) -> Vec<[f32; 4]> {
         data: input.to_vec(),
         color_space: WorkingColorSpace::LinearRec2020,
     });
-    let boundary = RenderOutputColorBoundary::from_intent(
-        RenderOutputColorBoundaryTarget::Display,
+    let boundary = ProgramOutputBoundary::from_intent(
+        ProgramOutputRole::Display,
         output,
         &OutputTransformIntent::mondrian_standard(),
         false,
         ColorEngine::mondrian_standard(),
     )
     .expect("Standard output intent");
-    execute_cpu_output_boundary_float(&frame, &boundary)
+    let mut session = RenderCpuColorExecutionSession::default();
+    ProgramOutputModule::execute_cpu_float(&frame, &boundary, &mut session)
         .expect("production CPU OCIO output boundary")
         .frame
         .rgba_f32()

@@ -38,6 +38,7 @@ use mondrian_renderer::NativeVideoImportGpuTimingDiagnostics;
 #[cfg(test)]
 use mondrian_renderer::ViewerGpuExecutionError;
 use mondrian_renderer::{
+    color::RenderColorStageDiagnostics,
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     profile::gpu_timestamp_query_device_features,
     profile::{GpuTimestampQueryRing, GpuTimestampStageMarker, GpuTimestampToken},
@@ -46,11 +47,10 @@ use mondrian_renderer::{
     GpuCompositorUniformArenaDiagnostics, GpuCreativeLutCacheDiagnostics,
     GpuNativeDecodedFrameImportSupport, GpuViewerSpatialRuntimeDiagnostics,
     NativeVideoImportCandidateTimingReceipt, NativeVideoImportGpuTimingPolicy,
-    NativeVideoImportGpuTimingSample, RenderColorStageDiagnostics,
-    ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest,
-    ViewerGpuExecutionRuntime, ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker,
-    ViewerGpuOutputPrecision, ViewerGpuPresentationOutputLease,
-    ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
+    NativeVideoImportGpuTimingSample, ViewerGpuExecutionCpuStageTimings,
+    ViewerGpuExecutionGpuStage, ViewerGpuExecutionRequest, ViewerGpuExecutionRuntime,
+    ViewerGpuExecutionRuntimeCreateError, ViewerGpuExecutionStageMarker, ViewerGpuOutputPrecision,
+    ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
 const HEADLESS_NATIVE_IMPORT_GPU_TIMING_DEFAULT_OBSERVATION_CAPACITY: usize = 65_536;

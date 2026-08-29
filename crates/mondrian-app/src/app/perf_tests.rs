@@ -92,10 +92,10 @@ use mondrian_platform::{PlaybackThreadScheduling, ProcessMemoryProbe, SystemPlat
 use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
-    GpuCompositingDiagnostics, GpuCompositorTextureBindingDiagnostics,
-    GpuCompositorUniformArenaDiagnostics, GpuViewerSpatialRuntimeDiagnostics,
-    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
-    NativeVideoImportGpuTimingPolicy, RenderColorStageDiagnostics,
+    color::RenderColorStageDiagnostics, GpuCompositingDiagnostics,
+    GpuCompositorTextureBindingDiagnostics, GpuCompositorUniformArenaDiagnostics,
+    GpuViewerSpatialRuntimeDiagnostics, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
     ViewerGpuExecutionCpuStageTimings, NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
 };
 use mondrian_timeline::track::Track;

@@ -11,7 +11,7 @@ use mondrian_core::{ExecutionCancellationToken, WorkingColorSpace};
 use mondrian_media::{DecodedVideoSurfaceFormat, PreviewDecodeExecutionPath};
 use mondrian_playback::{FramePresentationQuality, PlaybackEpoch};
 use mondrian_renderer::{
-    HeterogeneousGpuContinuationBinding, RenderMonitorAdaptation, RenderOutputColorBoundary,
+    color::ProgramOutputBoundary, HeterogeneousGpuContinuationBinding, RenderMonitorAdaptation,
     ViewerGpuExecutionLayer, ViewerHeterogeneousGpuCompletedBatch, ViewerHeterogeneousGpuInput,
 };
 use sha2::{Digest, Sha256};
@@ -297,7 +297,7 @@ pub(crate) struct PreviewGpuFrame {
     pub(crate) height: u32,
     pub(crate) working_color_space: WorkingColorSpace,
     pub(crate) working_input: PreviewGpuWorkingInput,
-    pub(crate) program_output_boundary: RenderOutputColorBoundary,
+    pub(crate) program_output_boundary: ProgramOutputBoundary,
     pub(crate) monitor_adaptation: RenderMonitorAdaptation,
     candidate_id: u64,
     generation: u64,
@@ -324,7 +324,7 @@ impl PreviewGpuFrame {
         height: u32,
         working_color_space: WorkingColorSpace,
         working_input: PreviewGpuWorkingInput,
-        program_output_boundary: RenderOutputColorBoundary,
+        program_output_boundary: ProgramOutputBoundary,
         monitor_adaptation: RenderMonitorAdaptation,
         candidate_id: u64,
         generation: u64,

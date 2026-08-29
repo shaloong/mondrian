@@ -23,7 +23,8 @@ use mondrian_media::{
 };
 use mondrian_playback::{FrameDemandIdentity, FrameExecutionId};
 use mondrian_renderer::{
-    prepare_decoded_cpu_source_frame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
+    color::RenderColorStageDiagnostics, prepare_decoded_cpu_source_frame,
+    RenderColorTransformDiagnostics,
 };
 
 use super::preview_access_mode::{

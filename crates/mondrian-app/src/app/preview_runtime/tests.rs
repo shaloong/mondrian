@@ -585,7 +585,7 @@ use mondrian_media::{
     VideoColorInterpretationConfidence, VideoColorSpaceSource, VideoStreamInfo,
 };
 use mondrian_renderer::{
-    ColorFrameDomain, RenderColorStageGpuBlockerBreakdown, ViewerGpuSourceLayer,
+    color::RenderColorStageGpuBlockerBreakdown, ColorFrameDomain, ViewerGpuSourceLayer,
     ViewerGpuTransitionInput,
 };
 use mondrian_timeline::clip::Clip;
@@ -1583,7 +1583,7 @@ fn gpu_candidate_separates_program_output_from_monitor_identity() {
     };
 
     assert_eq!(
-        frame.program_output_boundary.output_color_space,
+        frame.program_output_boundary.output_color_space(),
         ColorSpace::Rec709
     );
     assert_eq!(
@@ -8115,10 +8115,9 @@ fn preview_working_composite_boundary_uses_resolved_display_view() {
     let _output = composite_resolved_preview_working(2, 2, &[], &color_context, &mut scratch)
         .expect("empty preview composite");
 
-    let display_view = output_boundary_from_color_context(&color_context)
-        .expect("encoded preview output")
-        .display_view
-        .expect("resolved display/view");
+    let boundary =
+        output_boundary_from_color_context(&color_context).expect("encoded preview output");
+    let display_view = boundary.ocio_display_view().expect("resolved display/view");
     assert_eq!(display_view.display, "Rec.1886 Rec.709 - Display");
     assert_eq!(display_view.view, "Mondrian Standard SDR v2");
 }
@@ -8130,8 +8129,8 @@ fn preview_boundary_uses_colorimetric_intent_when_tone_map_is_disabled() {
     let boundary =
         output_boundary_from_color_context(&color_context).expect("encoded preview output");
 
-    assert_eq!(boundary.display_view, None);
-    assert!(!boundary.tone_map);
+    assert_eq!(boundary.ocio_display_view(), None);
+    assert!(!boundary.tone_map());
 }
 
 #[test]
@@ -9023,25 +9022,29 @@ fn preview_single_media_color_output_matches_export_composite_contract() {
         expected_frame.descriptor().color_space,
         color_context.working_color_space().into()
     );
-    let export_boundary = RenderOutputColorBoundary::from_intent(
-        mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+    let export_boundary = ProgramOutputBoundary::from_intent(
+        mondrian_renderer::color::ProgramOutputRole::Export,
         color_context.output_color_space().color().expect("encoded export output"),
         color_context.output_transform(),
         color_context.output_tone_map(),
         color_context.engine().clone(),
     )
     .expect("resolved export intent");
-    let export = mondrian_renderer::execute_cpu_output_boundary(&expected_frame, &export_boundary)
-        .expect("export color transform");
+    let export = ProgramOutputModule::execute_cpu_rgba8(
+        &expected_frame,
+        &export_boundary,
+        export_scratch.color_execution_mut(),
+    )
+    .expect("export color transform");
     assert_eq!(
-        export.result.diagnostics.output.domain,
+        export.color_diagnostics.output.domain,
         ColorFrameDomain::Export
     );
     assert_eq!(
         preview.color_stage_diagnostics.cpu_output_stages,
         export.stage_diagnostics.cpu_output_stages
     );
-    let expected = export.result.frame.into_rgba();
+    let expected = export.rgba;
 
     assert_eq!(preview.rgba, expected);
 }
@@ -9089,10 +9092,15 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         .expect("preview camera-log composite");
     preview_service.record_cpu_execution_evidence(&preview);
 
-    let export_input = execute_cpu_input_stage(&source, &input_transform)
-        .expect("export camera-log input transform");
+    let mut export_color_session = RenderCpuColorExecutionSession::default();
+    let export_input = SourceColorModule::execute_cpu_with_intent(
+        &CpuSourceColorFrame::from(source.clone()),
+        &input_transform,
+        &mut export_color_session,
+    )
+    .expect("export camera-log input transform");
     let export_elements = [TimelineCompositeElement::Media(TimelineMediaLayer {
-        frame: &export_input.result.frame,
+        frame: export_input.frame(),
         opacity: 1.0,
         blend_mode: BlendMode::Normal,
         transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
@@ -9112,19 +9120,21 @@ fn preview_camera_log_input_matches_export_frame_hash() {
         &mut export_scratch,
     )
     .expect("composite camera-log export frame");
-    let export_boundary = RenderOutputColorBoundary::from_intent(
-        mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+    let export_boundary = ProgramOutputBoundary::from_intent(
+        mondrian_renderer::color::ProgramOutputRole::Export,
         ColorSpace::Srgb,
         color_context.output_transform(),
         color_context.output_tone_map(),
         color_context.engine().clone(),
     )
     .expect("resolved export Standard SDR intent");
-    let export = mondrian_renderer::execute_cpu_output_boundary(&export_working, &export_boundary)
-        .expect("export camera-log output transform")
-        .result
-        .frame
-        .into_rgba();
+    let export = ProgramOutputModule::execute_cpu_rgba8(
+        &export_working,
+        &export_boundary,
+        export_scratch.color_execution_mut(),
+    )
+    .expect("export camera-log output transform")
+    .rgba;
 
     assert_eq!(preview.rgba, export);
     assert_eq!(
@@ -9156,17 +9166,18 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             200, 24, 16, 255, 40, 220, 96, 255, 12, 64, 240, 255, 240, 220, 40, 255,
         ],
     );
-    let frame = execute_cpu_input_stage(
-        &source,
+    let mut source_color_session = RenderCpuColorExecutionSession::default();
+    let frame = SourceColorModule::execute_cpu_with_intent(
+        &CpuSourceColorFrame::from(source),
         &RenderInputTransform::to_working(
             WorkingColorSpace::LinearRec2020,
             false,
             ColorEngine::mondrian_standard(),
         ),
+        &mut source_color_session,
     )
     .expect("media input transform")
-    .result
-    .frame;
+    .into_frame();
     let logical_resolution = Resolution {
         width: frame.descriptor().width,
         height: frame.descriptor().height,
@@ -9233,18 +9244,21 @@ fn preview_multilayer_color_output_matches_export_frame_hash() {
             &mut export_scratch,
         )
         .expect("composite multilayer export frame");
-    let export_boundary = RenderOutputColorBoundary::from_intent(
-        mondrian_renderer::RenderOutputColorBoundaryTarget::Export,
+    let export_boundary = ProgramOutputBoundary::from_intent(
+        mondrian_renderer::color::ProgramOutputRole::Export,
         color_context.output_color_space().color().expect("encoded export output"),
         color_context.output_transform(),
         color_context.output_tone_map(),
         color_context.engine().clone(),
     )
     .expect("resolved export intent");
-    let export_output =
-        mondrian_renderer::execute_cpu_output_boundary(&export_working.frame, &export_boundary)
-            .expect("export multilayer color transform");
-    let export = export_output.result.frame.clone().into_rgba();
+    let export_output = ProgramOutputModule::execute_cpu_rgba8(
+        &export_working.frame,
+        &export_boundary,
+        export_scratch.color_execution_mut(),
+    )
+    .expect("export multilayer color transform");
+    let export = export_output.rgba;
 
     assert_eq!(preview.rgba, export);
     let preview_export_hash = stable_rgba_hash(&preview.rgba);
@@ -11837,18 +11851,18 @@ fn test_native_source_frame(width: u32, height: u32) -> MediaPreviewNativeSource
 
 fn test_media_frame_rgba8(frame: &MediaPreviewFrame) -> Vec<u8> {
     let working = frame.working_frame().expect("test media working frame");
-    mondrian_renderer::execute_cpu_output_boundary(
+    let mut session = RenderCpuColorExecutionSession::default();
+    ProgramOutputModule::execute_cpu_rgba8(
         &working.frame,
-        &RenderOutputColorBoundary::display(
+        &ProgramOutputBoundary::display(
             ColorSpace::Rec709,
             false,
             ColorEngine::mondrian_standard(),
         ),
+        &mut session,
     )
     .expect("test media output transform")
-    .result
-    .frame
-    .into_rgba()
+    .rgba
 }
 
 fn stable_rgba_hash(rgba: &[u8]) -> u64 {

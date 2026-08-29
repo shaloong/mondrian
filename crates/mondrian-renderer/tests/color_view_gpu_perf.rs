@@ -9,14 +9,20 @@ use mondrian_effects::{
 };
 use mondrian_renderer::profile::{gpu_timestamp_query_device_features, GpuTimestampFrameTimer};
 use mondrian_renderer::{
+    color::{
+        qualification::{
+            RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeDiagnostics,
+            RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+        },
+        ProgramOutputBoundary,
+    },
     native_video_texture_device_features, ocio_lut_filtering_device_features,
     request_adapter_with_native_video_preference, ColorFrameDescriptor, ColorFrameDomain,
     ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
     GpuColorFrameTextureFormat, GpuColorQualificationExecutionPolicy, GpuCompositeLayer,
     GpuCompositeLayerSource, GpuCompositeRequest, GpuFrameCompositor, OcioGpuShaderPlan,
-    OcioGpuShaderRequest, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
-    RenderGpuOutputBoundaryRuntimeDiagnostics, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderInputTransform, RenderIntermediateColorTransform, RenderOutputColorBoundary,
+    OcioGpuShaderRequest, RenderColorTransformGpuOptions, RenderInputTransform,
+    RenderIntermediateColorTransform,
 };
 use serde::Serialize;
 use std::fs::OpenOptions;
@@ -49,8 +55,8 @@ struct ViewCase {
 }
 
 impl ViewCase {
-    fn boundary(&self) -> RenderOutputColorBoundary {
-        RenderOutputColorBoundary::display_view(
+    fn boundary(&self) -> ProgramOutputBoundary {
+        ProgramOutputBoundary::display_view(
             self.output_color_space,
             self.display,
             self.view,

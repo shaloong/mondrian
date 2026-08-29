@@ -15,7 +15,7 @@
 //! 3. **Frame residency / scheduling blockers** — working-frame or external
 //!    texture lifecycle issues detected during presentation scheduling.
 
-use mondrian_renderer::RenderColorStageGpuBlockerBreakdown;
+use mondrian_renderer::color::RenderColorStageGpuBlockerBreakdown;
 use serde::{Deserialize, Serialize};
 
 /// Typed reasons the GPU color output boundary cannot execute for preview.

@@ -2,7 +2,7 @@
 
 use anyhow::Context;
 use mondrian_media::{VideoColorDiagnosticIssueAggregate, VideoColorDiagnosticIssueSummary};
-use mondrian_renderer::{
+use mondrian_renderer::color::{
     RenderColorStageDiagnostics, RenderGpuOutputRuntimeDiagnosticsReport,
     RenderGpuOutputStageDiagnosticsReport,
 };

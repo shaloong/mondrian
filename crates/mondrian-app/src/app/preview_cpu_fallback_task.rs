@@ -12,7 +12,7 @@ use std::thread::{self, JoinHandle};
 use mondrian_playback::PlaybackEpoch;
 use mondrian_render_cache::{TimelineRenderCacheFrame, TimelineRenderCacheIdentity};
 use mondrian_renderer::{
-    CpuColorFrame, RenderColorStageDiagnostics, RenderColorTransformDiagnostics,
+    color::RenderColorStageDiagnostics, CpuColorFrame, RenderColorTransformDiagnostics,
     TimelineCompositeDiagnostics, TimelineCompositeScratch,
 };
 use mondrian_timeline::sequence::ProgramColorContext;

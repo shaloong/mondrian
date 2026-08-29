@@ -12,6 +12,23 @@ The working compositor clears its accumulation target to transparent black.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
+## GPU color execution ownership
+
+`GpuColorExecutionSession` is the public owner-scoped GPU color Interface. Its
+four semantic facets are source, working, Program Output, and monitor; all
+facets share one internal runtime, shader/backend caches, frame-id namespace,
+resource table, and exact-contract texture pool. Export records nested working
+conversion and Program Output through this Session and receives only the output
+handle, optional requested readback, and aggregate diagnostics. It cannot
+borrow the frame table or backend caches. `GpuVisualFrameExecutor` accepts the
+same Session, preserving resident visual output without a transfer.
+
+`RenderGpuOutputBoundaryRuntime` and owned backend contexts are private
+Implementation. Existing references below describe that internal recorder,
+not a product-level App/Export Interface. The hidden `color::qualification`
+Adapter exposes exact internals only to ignored real-device gates that must
+measure cache reuse and resource residency. Production code cannot use it.
+
 ## Working Float Policy
 
 `working_float_policy` is the single Renderer Module deciding the transient

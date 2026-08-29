@@ -584,7 +584,7 @@ impl ViewerGpuExecutionRuntime {
                     working_color_space: request.working_color_space,
                     layers: &gpu_layers,
                 },
-                request.program_output_boundary.engine.clone(),
+                request.program_output_boundary.engine().clone(),
                 RenderColorTransformGpuOptions::default(),
             )
             .map_err(|error| ViewerGpuExecutionError::WorkingComposite(Box::new(error)))?;
@@ -962,9 +962,9 @@ fn validate_program_monitor_contract(
     boundary: &RenderOutputColorBoundary,
     adaptation: &RenderMonitorAdaptation,
 ) -> Result<(), ViewerGpuExecutionError> {
-    if boundary.output_color_space != adaptation.program_output_color_space() {
+    if boundary.output_color_space() != adaptation.program_output_color_space() {
         return Err(ViewerGpuExecutionError::ProgramMonitorBoundaryMismatch {
-            program_boundary: boundary.output_color_space,
+            program_boundary: boundary.output_color_space(),
             adaptation_input: adaptation.program_output_color_space(),
         });
     }
@@ -980,7 +980,7 @@ fn validate_program_scopes_contract(
         return Ok(());
     };
     let expected = match request.tap() {
-        ProgramScopesTap::ProgramOutput => boundary.output_color_space,
+        ProgramScopesTap::ProgramOutput => boundary.output_color_space(),
         ProgramScopesTap::MonitorOutput => adaptation.monitor_color_space(),
     };
     if expected != request.signal_color_space() {
@@ -1005,7 +1005,7 @@ fn validate_signal_monitor_contract(
         .validate()
         .map_err(|error| ViewerGpuExecutionError::SignalMonitoring(Box::new(error)))?;
     let expected = match request.tap {
-        ProgramScopesTap::ProgramOutput => boundary.output_color_space,
+        ProgramScopesTap::ProgramOutput => boundary.output_color_space(),
         ProgramScopesTap::MonitorOutput => adaptation.monitor_color_space(),
     };
     if expected != request.compliance.signal_color_space {
@@ -1335,6 +1335,44 @@ pub enum ViewerGpuExecutionError {
     Calibration(String),
     #[error("Viewer GPU profiling stage marker failed: {0}")]
     StageMarker(String),
+}
+
+impl ViewerGpuExecutionError {
+    /// Return the stable compositor blocker represented by a working-graph failure.
+    pub fn working_composite_blocker(&self) -> Option<crate::GpuCompositingBlockerReason> {
+        let Self::WorkingComposite(error) = self else {
+            return None;
+        };
+        match error.as_ref() {
+            RenderGpuCompositeGraphRecordError::Composite(crate::GpuCompositeError::Blocked {
+                reason,
+            }) => Some(*reason),
+            _ => Some(crate::GpuCompositingBlockerReason::GpuUnavailable),
+        }
+    }
+
+    /// Whether failure occurred while recording the Program Output Module.
+    pub const fn is_program_output_failure(&self) -> bool {
+        matches!(self, Self::ProgramOutputBoundary(_))
+    }
+
+    /// Return deterministic native Program Output blockers without exposing stage IR.
+    pub fn program_output_blocker_breakdown(
+        &self,
+    ) -> Option<crate::color_stage::RenderColorStageGpuBlockerBreakdown> {
+        let Self::ProgramOutputBoundary(error) = self else {
+            return None;
+        };
+        match error.as_ref() {
+            RenderGpuOutputBoundaryRuntimeRecordError::ResourcePlan(
+                crate::color_stage::RenderGpuOutputStageResourcePlanError::NativeBlockersRemaining {
+                    breakdown,
+                    ..
+                },
+            ) => Some(*breakdown),
+            _ => None,
+        }
+    }
 }
 
 fn validate_product_working_handle(
@@ -1886,7 +1924,7 @@ fn prepare_source_layer<'a>(
                     compositor,
                     effect_plan,
                     input,
-                    request.program_output_boundary.engine.clone(),
+                    request.program_output_boundary.engine().clone(),
                     *frame_seed,
                     device,
                     queue,
@@ -1939,7 +1977,7 @@ fn prepare_source_layer<'a>(
                     compositor,
                     effect_plan,
                     materialized.output,
-                    request.program_output_boundary.engine.clone(),
+                    request.program_output_boundary.engine().clone(),
                     layer.frame_seed,
                     device,
                     queue,
