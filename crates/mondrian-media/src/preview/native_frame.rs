@@ -1,7 +1,8 @@
 use super::PreviewDecodeDiagnostics;
 use crate::decoder::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, DecodedVideoChromaLocation,
-    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceFormat,
+    DecodedVideoRange, DecodedVideoSampling, DecodedVideoSurfaceColorModel,
+    DecodedVideoSurfaceFormat,
 };
 use ffmpeg_next as ffmpeg;
 use std::any::Any;
@@ -847,10 +848,11 @@ fn validate_native_decoded_video_sampling(
             actual: sampling.bit_depth,
         });
     }
-    if matches!(
-        surface_format,
-        DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::P010
-    ) && sampling.chroma_location == DecodedVideoChromaLocation::Unknown
+    if surface_format.descriptor().is_some_and(|descriptor| {
+        descriptor.color_model == DecodedVideoSurfaceColorModel::Ycbcr
+            && descriptor.chroma_subsampling
+                != Some(crate::DecodedVideoSurfaceChromaSubsampling::Cs444)
+    }) && sampling.chroma_location == DecodedVideoChromaLocation::Unknown
     {
         return Err(PreviewNativeDecodedFrameError::MissingVideoChromaLocation { surface_format });
     }

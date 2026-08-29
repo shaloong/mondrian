@@ -19,6 +19,7 @@ use crate::{
 
 const DRM_FORMAT_NV12: u32 = fourcc(b'N', b'V', b'1', b'2');
 const DRM_FORMAT_P010: u32 = fourcc(b'P', b'0', b'1', b'0');
+const DRM_FORMAT_P012: u32 = fourcc(b'P', b'0', b'1', b'2');
 
 const fn fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
     u32::from_le_bytes([a, b, c, d])
@@ -77,7 +78,10 @@ impl VulkanNativeVideoImportBackend {
 
         let mut formats = vec![GpuNativeDecodedFrameTextureFormat::Nv12];
         if device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
-            formats.push(GpuNativeDecodedFrameTextureFormat::P010);
+            formats.extend([
+                GpuNativeDecodedFrameTextureFormat::P010,
+                GpuNativeDecodedFrameTextureFormat::P012,
+            ]);
         }
         let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::VaapiSurface],
@@ -163,12 +167,30 @@ impl DirectNativeYuvPlaneAdapter for VulkanNativeYuvPlaneAdapter {
             luma_format,
             "mondrian.native-video.vulkan-luma",
         )?;
+        let chroma_height = match plan
+            .source_texture_format
+            .physical_descriptor()
+            .and_then(|descriptor| descriptor.chroma_subsampling)
+        {
+            Some(mondrian_media::DecodedVideoSurfaceChromaSubsampling::Cs420) => {
+                native_frame.height.div_ceil(2)
+            }
+            Some(mondrian_media::DecodedVideoSurfaceChromaSubsampling::Cs422) => {
+                native_frame.height
+            }
+            _ => {
+                return Err(rejected(format!(
+                    "DRM PRIME Adapter cannot derive chroma extent for {:?}",
+                    plan.source_texture_format
+                )))
+            }
+        };
         let chroma = import_plane(
             device,
             drm_frame,
             planes[1],
             native_frame.width.div_ceil(2),
-            native_frame.height.div_ceil(2),
+            chroma_height,
             chroma_format,
             "mondrian.native-video.vulkan-chroma",
         )?;
@@ -183,6 +205,7 @@ fn validate_drm_layout(
     let expected_fourcc = match source {
         GpuNativeDecodedFrameTextureFormat::Nv12 => DRM_FORMAT_NV12,
         GpuNativeDecodedFrameTextureFormat::P010 => DRM_FORMAT_P010,
+        GpuNativeDecodedFrameTextureFormat::P012 => DRM_FORMAT_P012,
         other => {
             return Err(rejected(format!(
                 "DRM PRIME Adapter does not support {other:?}"
@@ -191,7 +214,7 @@ fn validate_drm_layout(
     };
     if frame.layers().len() != 1 {
         return Err(rejected(format!(
-            "DRM PRIME frame must expose one typed NV12/P010 layer, got {}",
+            "DRM PRIME frame must expose one typed two-plane YCbCr layer, got {}",
             frame.layers().len()
         )));
     }
@@ -215,7 +238,7 @@ fn plane_formats(
     source: GpuNativeDecodedFrameTextureFormat,
 ) -> (wgpu::TextureFormat, wgpu::TextureFormat) {
     match source {
-        GpuNativeDecodedFrameTextureFormat::P010 => (
+        GpuNativeDecodedFrameTextureFormat::P010 | GpuNativeDecodedFrameTextureFormat::P012 => (
             wgpu::TextureFormat::R16Unorm,
             wgpu::TextureFormat::Rg16Unorm,
         ),

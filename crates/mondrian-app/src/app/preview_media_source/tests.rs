@@ -224,6 +224,7 @@ fn gpu_admission() -> PreviewHardwareDecodeAdmissionState {
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,
         renderer_supports_p010: true,
+        renderer_supported_surface_hint_mask: 3,
     })
 }
 

@@ -154,8 +154,22 @@ pub(super) fn validate_device_feature(
         GpuNativeDecodedFrameTextureFormat::P010 => {
             (wgpu::Features::TEXTURE_FORMAT_P010, "TEXTURE_FORMAT_P010")
         }
-        GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
+        GpuNativeDecodedFrameTextureFormat::P012
+        | GpuNativeDecodedFrameTextureFormat::P016
+        | GpuNativeDecodedFrameTextureFormat::P210
+        | GpuNativeDecodedFrameTextureFormat::P212
+        | GpuNativeDecodedFrameTextureFormat::P216
+        | GpuNativeDecodedFrameTextureFormat::P410
+        | GpuNativeDecodedFrameTextureFormat::P412
+        | GpuNativeDecodedFrameTextureFormat::P416
+        | GpuNativeDecodedFrameTextureFormat::Y210
+        | GpuNativeDecodedFrameTextureFormat::Y212
+        | GpuNativeDecodedFrameTextureFormat::Xv30
+        | GpuNativeDecodedFrameTextureFormat::Xv36
+        | GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Rgba16Float
+        | GpuNativeDecodedFrameTextureFormat::Rgba32Float => {
             return Err(D3D12NativeTextureError::UnsupportedNativeTextureFormat { format });
         }
     };

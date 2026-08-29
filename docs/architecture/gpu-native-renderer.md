@@ -169,16 +169,23 @@ handles directly into Renderer resources or ask Platform code to probe a second
 graphics device.
 
 Native decoded surfaces are not modeled as `GpuColorFrameHandle` values because
-they may be multi-plane YCbCr surfaces such as NV12 or P010. The renderer import
-contract records the decoder handle family, source texture format, source color
+they may be multi-plane, packed YCbCr, or packed RGB resources. Media owns the
+canonical `DecodedVideoSurfaceDescriptor`: color model, chroma subsampling,
+plane layout, numeric encoding/alignment, component bit depth, alpha, and native
+payload eligibility. Renderer format validation and Viewer working-set estimates
+derive from that descriptor rather than maintaining independent NV12/P010
+switches. The renderer import contract records the decoder handle family, source texture format, source color
 space, target working color space, and a
 `GpuNativeDecodedFrameVideoSampling` contract. That sampling contract is the
 single place where the renderer learns limited/full range, YCbCr matrix,
 transfer characteristic, effective bit depth, and chroma siting. When a
-concrete backend reports readiness and support for that handle/format, the plan
+concrete backend reports readiness for that exact `(handle kind, source format,
+transfer mode)` route, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
-pass.
+pass. Aggregate handle and format lists are diagnostic projections only; they
+must never be crossed as a Cartesian product. Conflicting duplicate route facts
+fail support construction, and a missing exact pair fails admission.
 The request-only native estimate charges only the renderer-owned encoded-RGB
 and working outputs. The already-created decoder surface is governed by Media
 Frame Store residency and is not counted again as a renderer texture; direct
@@ -187,13 +194,18 @@ still rejects codec-aligned storage above a 2:1 visible-pixel envelope so a
 malformed or unexpectedly padded surface cannot escape bounded admission.
 Native YCbCr conversion and OCIO input conversion remain two explicit renderer
 passes with one color contract. `GpuNativeYuvDecoder` samples the native luma
-and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
+and chroma plane views into a renderer-owned `Rgba32Float` source frame whose
 descriptor is `Source + EncodedFloat`; this frame is encoded RGB in the resolved
 source color space, not linear working data. `RenderGpuInputStageResourcePlan`
 then consumes that already GPU-resident frame without an upload and executes the
 same OCIO source-to-working processor used by CPU-uploaded source frames into a
 renderer-owned `Rgba32Float` working texture. Callers cannot lower working
-precision. The native import plan owns distinct encoded-source and
+precision. Native RGBA16F/RGBA32F follows the parallel `GpuNativeRgbDecoder`
+Module: the Adapter-provided texture must exactly match the planned wgpu format,
+extent, and `TEXTURE_BINDING` usage; bilinear materialization preserves alpha,
+negative values, and values above one in RGBA32F before OCIO. No current FFmpeg
+platform Adapter advertises that RGB route, so the execution Seam is qualified
+but physical decoder support remains fail-closed. The native import plan owns distinct encoded-source and
 linear-working handles so a
 backend cannot skip, reorder, or mislabel either pass.
 
@@ -219,33 +231,38 @@ completion; abandoned candidates drop their unsubmitted buffer. This avoids
 both `Queue::write_texture`'s per-plane native staging allocation and a
 full-frame host memcpy on the transport/UI thread, while keeping upload
 ordering, cancellation, and memory ownership inside the Viewer runtime.
-The explicit layout contract distinguishes
-two-plane from three-plane storage, 4:2:0 from 4:2:2, and most-significant-bit
+Its encoded source output also uses the product RGBA32F policy; compact 10-bit
+YUV must not take an otherwise hidden RGBA16F shortcut. The explicit layout contract distinguishes
+two-plane from three-plane storage, 4:2:0, 4:2:2, and 4:4:4, and most-significant-bit
 P010 from FFmpeg's little-endian, least-significant-bit `YUV422P10LE`. Both layouts produce the same typed
 `Source + EncodedFloat` intermediate and therefore share color validation,
 OCIO execution, spatial scaling, and Viewer composition semantics.
 
 The YUV shader uses unfiltered `textureLoad` operations because YUV plane
 formats are not assumed filterable. It performs renderer-defined bilinear
-4:2:0 or 4:2:2 chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
+4:2:0, 4:2:2, or 4:4:4 chroma reconstruction using explicit Left, Center, or TopLeft sample origins,
 expands full or limited range in coded-value space, and applies BT.709 or
-BT.2020 non-constant-luminance matrix coefficients. P010 samples are first
-converted from normalized 16-bit storage (`code10 << 6`) back to exact 10-bit
-code values; treating `R16Unorm` directly as normalized 10-bit data is invalid.
+BT.2020 non-constant-luminance matrix coefficients. The same code path derives
+8/10/12/16-bit scaling and most/least-significant-bit alignment from the physical
+descriptor. P010/P012 MSB-aligned samples are converted from normalized 16-bit
+storage back to their exact code range; treating `R16Unorm` directly as normalized
+10/12-bit data is invalid.
 RGB values are not clipped before OCIO, preserving undershoot, overshoot, and
-HDR signal precision. A real-wgpu accuracy test covers shader compilation,
-plane bindings, range expansion, neutral chroma, and `Rgba16Float` readback.
+HDR signal precision. A small integration target executes P012 4:2:0, P212
+4:2:2, P416 4:4:4, and RGBA32F on real wgpu, covers shader compilation, plane
+bindings, range expansion, neutral chroma, exact texture validation, alpha, and
+extended-range RGBA32F readback without linking the renderer's giant unit target.
 The contract carries the complete `RenderInputTransform`, not only the target
 working color space. OCIO engine selection, tone-map policy, working space, and
 the required GPU backend therefore remain explicit through import planning.
 Native import rejects CPU OCIO backends so platform adapters cannot substitute
 an independent source-to-working transform.
-NV12 must validate as 8-bit YCbCr and P010 must validate as 10-bit YCbCr.
-Future 12/16-bit paths must add an explicit renderer format such as P016; they
-must not reinterpret P010. RGB/BGRA native surfaces must validate with an RGB
-matrix. YCbCr surfaces must fail closed when matrix or chroma siting is
-unspecified, because silent platform defaults are not acceptable for HDR/PQ/HLG
-playback.
+Every YCbCr format must validate its descriptor bit depth and subsampling;
+P012/P016, P210/P212/P216, P410/P412/P416, Y210/Y212, and XV30/XV36 are distinct
+identities and must not be reinterpreted as P010. RGB/BGRA/float native surfaces
+must validate with an RGB matrix. Subsampled YCbCr fails closed when chroma
+siting is unspecified; 4:4:4 permits `Unspecified` because it has no subsampled
+grid whose origin needs interpretation. Matrix and transfer remain mandatory.
 The sampling matrix and transfer must also exactly match the resolved source
 color space encoding; conflicting source labels and sampling facts are rejected
 before backend execution or GPU frame allocation.
@@ -260,7 +277,13 @@ potentially importable family, is not enough by itself to claim hardware decode
 playback, zero-copy, or low-copy frame residency. Diagnostics report the
 specific missing layer: decoder GPU handle absent, renderer backend not ready,
 unsupported handle kind, or unsupported source format.
-Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
+The Windows D3D12VA Adapter remains intentionally NV12/P010-only because the
+linked FFmpeg D3D12 frames contract exposes only those formats. Metal adds
+P210/P216 and P410/P416 plane views when 16-bit normalized texture support is
+enabled. The Linux Vulkan DRM-PRIME Adapter adds P012 under the same
+feature condition. Packed Y210/Y212/XV30/XV36, P212/P216/P410/P412/P416 on
+unimplemented backends, and renderer-native RGB float remain explicit blockers;
+being modeled in the shared descriptor is not execution support. Legacy DXVA2 and VDPAU can be FFmpeg CPU-transfer fallbacks, but they must not
 be presented as the modern GPU-native renderer import path.
 
 The app layer owns the combined readiness report because it is the first layer
@@ -285,7 +308,7 @@ device. The concrete import runtime created from that active Adapter/Device/Queu
 is the sole capability authority. Any copy step must be reported from actual
 execution evidence rather than a preflight label.
 Media may report a platform-preferred hardware decode candidate such as
-D3D12VA, D3D11VA, VideoToolbox, or VA-API plus expected NV12/P010 surface
+D3D12VA, D3D11VA, VideoToolbox, or VA-API plus its backend-specific surface
 formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
 VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
@@ -430,8 +453,9 @@ config for H.264/HEVC/etc., but it does not create an OS device, expose a
 native surface handle, or satisfy renderer import support by itself.
 The cached FFmpeg hardware device-context probe goes one step deeper by creating
 and releasing an `AVHWDeviceContext`, but it is still not a decoded-frame
-residency contract. Renderer readiness requires an actual decoded NV12/P010
-surface handle plus a platform import path that can sample that surface.
+residency contract. Renderer readiness requires an actual decoded surface handle
+plus one exact renderer-qualified handle/format route that can sample that
+surface; a descriptor-supported high-bit format alone proves no route.
 `HardwareDecodeCpuTransfer` is also not renderer readiness: it proves FFmpeg
 hardware decode can be configured and hardware frames can be transferred back to
 CPU RGBA, but the compositor still receives CPU-uploaded RGBA rather than a
@@ -450,7 +474,7 @@ resource identity and lifetime required by the renderer import backend. Both
 preview source contracts expose `DecodedGpuFrameHandleKind`,
 `DecodedVideoSurfaceFormat`, and `DecodedVideoSampling` (range, chroma location,
 and effective bit depth) when the decoder reported them. The window layer maps
-GPU-resident NV12/P010/RGBA facts into `GpuNativeDecodedFrameTextureFormat` and
+GPU-resident YCbCr/RGBA facts into `GpuNativeDecodedFrameTextureFormat` and
 combines decoder sampling with the resolved source color space into
 `GpuNativeDecodedFrameVideoSampling` only at the app readiness seam. Unknown
 range, unsupported chroma siting, bit depth mismatches, or RGB surfaces whose

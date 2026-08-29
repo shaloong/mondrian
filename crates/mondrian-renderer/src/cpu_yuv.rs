@@ -17,10 +17,10 @@ use std::sync::{mpsc, Arc};
 use crate::{
     native_video_sampling_from_decoded, product_gpu_working_texture_format, ColorFrameAlpha,
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
-    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameTextureFormat,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
-    GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
-    GpuYuvCodeAlignment, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
+    GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling, GpuYuvCodeAlignment,
+    RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
     RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
 };
 
@@ -391,7 +391,7 @@ pub(crate) fn record_cpu_yuv_frame(
             residency: ColorFrameResidency::Gpu,
             alpha: ColorFrameAlpha::Opaque,
         },
-        GpuColorFrameTextureFormat::Rgba16Float,
+        product_gpu_working_texture_format(),
         "viewer-cpu-yuv-encoded-source",
     )?;
     let working = GpuColorFrameHandle::new(

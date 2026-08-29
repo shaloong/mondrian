@@ -689,6 +689,24 @@ pub(super) fn decoded_native_surface_format_from_software_format(
     match software_format {
         ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_NV12 => Ok(DecodedVideoSurfaceFormat::Nv12),
         ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P010LE => Ok(DecodedVideoSurfaceFormat::P010),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P012LE => Ok(DecodedVideoSurfaceFormat::P012),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P016LE => Ok(DecodedVideoSurfaceFormat::P016),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P210LE => Ok(DecodedVideoSurfaceFormat::P210),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P212LE => Ok(DecodedVideoSurfaceFormat::P212),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P216LE => Ok(DecodedVideoSurfaceFormat::P216),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P410LE => Ok(DecodedVideoSurfaceFormat::P410),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P412LE => Ok(DecodedVideoSurfaceFormat::P412),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_P416LE => Ok(DecodedVideoSurfaceFormat::P416),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_Y210LE => Ok(DecodedVideoSurfaceFormat::Y210),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_Y212LE => Ok(DecodedVideoSurfaceFormat::Y212),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_XV30LE => Ok(DecodedVideoSurfaceFormat::Xv30),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_XV36LE => Ok(DecodedVideoSurfaceFormat::Xv36),
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGBAF16LE => {
+            Ok(DecodedVideoSurfaceFormat::Rgba16Float)
+        }
+        ffmpeg::ffi::AVPixelFormat::AV_PIX_FMT_RGBAF32LE => {
+            Ok(DecodedVideoSurfaceFormat::Rgba32Float)
+        }
         _ => Err(
             PreviewNativeFrameMaterializationError::UnsupportedHardwareSurfaceFormat {
                 software_format,

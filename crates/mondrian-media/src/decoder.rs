@@ -797,6 +797,30 @@ pub enum DecodedVideoSurfaceFormat {
     Nv12,
     /// 10-bit P010 two-plane YUV 4:2:0 surface.
     P010,
+    /// 12-bit P012 two-plane YUV 4:2:0 surface.
+    P012,
+    /// 16-bit P016 two-plane YUV 4:2:0 surface.
+    P016,
+    /// 10-bit P210 two-plane YUV 4:2:2 surface.
+    P210,
+    /// 12-bit P212 two-plane YUV 4:2:2 surface.
+    P212,
+    /// 16-bit P216 two-plane YUV 4:2:2 surface.
+    P216,
+    /// 10-bit P410 two-plane YUV 4:4:4 surface.
+    P410,
+    /// 12-bit P412 two-plane YUV 4:4:4 surface.
+    P412,
+    /// 16-bit P416 two-plane YUV 4:4:4 surface.
+    P416,
+    /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
+    Y210,
+    /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
+    Y212,
+    /// Packed 10-bit XV30-in-Y410 YCbCr 4:4:4 surface.
+    Xv30,
+    /// Packed 12-bit XV36-in-Y416 YCbCr 4:4:4 surface.
+    Xv36,
     /// Planar 8-bit YUV 4:2:0.
     Yuv420p,
     /// Planar 10-bit YUV 4:2:0.
@@ -809,8 +833,86 @@ pub enum DecodedVideoSurfaceFormat {
     Rgba8,
     /// Packed BGRA8.
     Bgra8,
+    /// Packed scene- or display-referred RGBA half-float.
+    Rgba16Float,
+    /// Packed scene- or display-referred RGBA single-precision float.
+    Rgba32Float,
     /// A known but currently non-native preview surface format.
     Other,
+}
+
+/// Color-family fact carried by a decoded surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceColorModel {
+    /// Luma plus blue- and red-difference chroma components.
+    Ycbcr,
+    /// Red, green, and blue components.
+    Rgb,
+}
+
+/// Chroma sampling grid carried by a decoded YCbCr surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceChromaSubsampling {
+    /// One chroma sample covers two horizontal by two vertical luma samples.
+    Cs420,
+    /// One chroma sample covers two horizontal by one vertical luma sample.
+    Cs422,
+    /// Chroma has the same sampling grid as luma.
+    Cs444,
+}
+
+/// Shader-visible plane organization of a decoded surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfacePlaneLayout {
+    /// Luma and an interleaved CbCr plane.
+    SemiPlanar,
+    /// Independent luma, Cb, and Cr planes.
+    Planar,
+    /// Packed YCbCr 4:2:2 words requiring an explicit GPU unpack Adapter.
+    PackedYuv422,
+    /// Packed YCbCr 4:4:4 words requiring an explicit GPU unpack Adapter.
+    PackedYuv444,
+    /// One packed RGBA plane.
+    PackedRgba,
+    /// One packed BGRA plane.
+    PackedBgra,
+}
+
+/// Numeric representation stored by each decoded-surface component.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecodedVideoSurfaceNumericEncoding {
+    /// Eight-bit unsigned normalized components.
+    Unorm8,
+    /// High-bit unsigned normalized components stored in sixteen-bit words.
+    Unorm16 {
+        /// Whether the effective code bits occupy the most-significant side.
+        most_significant_bits: bool,
+    },
+    /// Integer code components packed into layout-specific bit fields.
+    PackedUnsigned,
+    /// IEEE 754 binary16 components.
+    Float16,
+    /// IEEE 754 binary32 components.
+    Float32,
+}
+
+/// Complete physical interpretation of one known decoded surface format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DecodedVideoSurfaceDescriptor {
+    /// Color component family.
+    pub color_model: DecodedVideoSurfaceColorModel,
+    /// Chroma grid for YCbCr, absent for RGB.
+    pub chroma_subsampling: Option<DecodedVideoSurfaceChromaSubsampling>,
+    /// Physical plane organization.
+    pub plane_layout: DecodedVideoSurfacePlaneLayout,
+    /// Numeric component storage.
+    pub numeric_encoding: DecodedVideoSurfaceNumericEncoding,
+    /// Effective component precision in bits.
+    pub component_bit_depth: u8,
+    /// Whether the physical surface carries an alpha component.
+    pub has_alpha: bool,
+    /// Whether the media layer may retain this physical format as a native GPU payload.
+    pub native_gpu_payload: bool,
 }
 
 /// Authority-aware quantization-range contract carried into frame decode.
@@ -1611,12 +1713,46 @@ impl HwAccelBackend {
         match self {
             Self::None => Vec::new(),
             Self::Dxva2 | Self::Vdpau => Vec::new(),
-            Self::Cuda | Self::D3D12VA | Self::D3D11VA | Self::VideoToolbox | Self::Vaapi => {
-                vec![
-                    DecodedVideoSurfaceFormat::P010,
-                    DecodedVideoSurfaceFormat::Nv12,
-                ]
-            }
+            Self::D3D12VA => vec![
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::D3D11VA => vec![
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::VideoToolbox => vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::P416,
+                DecodedVideoSurfaceFormat::P410,
+                DecodedVideoSurfaceFormat::P216,
+                DecodedVideoSurfaceFormat::P210,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::Cuda => vec![
+                DecodedVideoSurfaceFormat::P016,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
+            Self::Vaapi => vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Rgba8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ],
         }
     }
 
@@ -1654,28 +1790,165 @@ impl DecodedVideoSurfaceFormat {
             Self::Unknown => "Unknown",
             Self::Nv12 => "Nv12",
             Self::P010 => "P010",
+            Self::P012 => "P012",
+            Self::P016 => "P016",
+            Self::P210 => "P210",
+            Self::P212 => "P212",
+            Self::P216 => "P216",
+            Self::P410 => "P410",
+            Self::P412 => "P412",
+            Self::P416 => "P416",
+            Self::Y210 => "Y210",
+            Self::Y212 => "Y212",
+            Self::Xv30 => "Xv30",
+            Self::Xv36 => "Xv36",
             Self::Yuv420p => "Yuv420p",
             Self::Yuv420p10le => "Yuv420p10le",
             Self::Yuv422p => "Yuv422p",
             Self::Yuv422p10le => "Yuv422p10le",
             Self::Rgba8 => "Rgba8",
             Self::Bgra8 => "Bgra8",
+            Self::Rgba16Float => "Rgba16Float",
+            Self::Rgba32Float => "Rgba32Float",
             Self::Other => "Other",
         }
     }
 
+    /// Return the complete physical descriptor for a modeled surface format.
+    pub const fn descriptor(self) -> Option<DecodedVideoSurfaceDescriptor> {
+        use DecodedVideoSurfaceChromaSubsampling::{Cs420, Cs422, Cs444};
+        use DecodedVideoSurfaceColorModel::{Rgb, Ycbcr};
+        use DecodedVideoSurfaceNumericEncoding::{
+            Float16, Float32, PackedUnsigned, Unorm16, Unorm8,
+        };
+        use DecodedVideoSurfacePlaneLayout::{
+            PackedBgra, PackedRgba, PackedYuv422, PackedYuv444, Planar, SemiPlanar,
+        };
+
+        let descriptor = match self {
+            Self::Unknown | Self::Other => return None,
+            Self::Nv12 => DecodedVideoSurfaceDescriptor {
+                color_model: Ycbcr,
+                chroma_subsampling: Some(Cs420),
+                plane_layout: SemiPlanar,
+                numeric_encoding: Unorm8,
+                component_bit_depth: 8,
+                has_alpha: false,
+                native_gpu_payload: true,
+            },
+            Self::P010
+            | Self::P012
+            | Self::P016
+            | Self::P210
+            | Self::P212
+            | Self::P216
+            | Self::P410
+            | Self::P412
+            | Self::P416 => {
+                let (chroma_subsampling, component_bit_depth) = match self {
+                    Self::P010 => (Cs420, 10),
+                    Self::P012 => (Cs420, 12),
+                    Self::P016 => (Cs420, 16),
+                    Self::P210 => (Cs422, 10),
+                    Self::P212 => (Cs422, 12),
+                    Self::P216 => (Cs422, 16),
+                    Self::P410 => (Cs444, 10),
+                    Self::P412 => (Cs444, 12),
+                    Self::P416 => (Cs444, 16),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout: SemiPlanar,
+                    numeric_encoding: Unorm16 { most_significant_bits: component_bit_depth < 16 },
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: true,
+                }
+            }
+            Self::Y210 | Self::Y212 | Self::Xv30 | Self::Xv36 => {
+                let (chroma_subsampling, plane_layout, component_bit_depth) = match self {
+                    Self::Y210 => (Cs422, PackedYuv422, 10),
+                    Self::Y212 => (Cs422, PackedYuv422, 12),
+                    Self::Xv30 => (Cs444, PackedYuv444, 10),
+                    Self::Xv36 => (Cs444, PackedYuv444, 12),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout,
+                    numeric_encoding: if matches!(self, Self::Xv30) {
+                        PackedUnsigned
+                    } else {
+                        Unorm16 { most_significant_bits: true }
+                    },
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: true,
+                }
+            }
+            Self::Yuv420p | Self::Yuv420p10le | Self::Yuv422p | Self::Yuv422p10le => {
+                let (chroma_subsampling, component_bit_depth, numeric_encoding) = match self {
+                    Self::Yuv420p => (Cs420, 8, Unorm8),
+                    Self::Yuv420p10le => (Cs420, 10, Unorm16 { most_significant_bits: false }),
+                    Self::Yuv422p => (Cs422, 8, Unorm8),
+                    Self::Yuv422p10le => (Cs422, 10, Unorm16 { most_significant_bits: false }),
+                    _ => unreachable!(),
+                };
+                DecodedVideoSurfaceDescriptor {
+                    color_model: Ycbcr,
+                    chroma_subsampling: Some(chroma_subsampling),
+                    plane_layout: Planar,
+                    numeric_encoding,
+                    component_bit_depth,
+                    has_alpha: false,
+                    native_gpu_payload: false,
+                }
+            }
+            Self::Rgba8 | Self::Bgra8 => DecodedVideoSurfaceDescriptor {
+                color_model: Rgb,
+                chroma_subsampling: None,
+                plane_layout: if matches!(self, Self::Rgba8) {
+                    PackedRgba
+                } else {
+                    PackedBgra
+                },
+                numeric_encoding: Unorm8,
+                component_bit_depth: 8,
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
+            Self::Rgba16Float | Self::Rgba32Float => DecodedVideoSurfaceDescriptor {
+                color_model: Rgb,
+                chroma_subsampling: None,
+                plane_layout: PackedRgba,
+                numeric_encoding: if matches!(self, Self::Rgba16Float) {
+                    Float16
+                } else {
+                    Float32
+                },
+                component_bit_depth: if matches!(self, Self::Rgba16Float) {
+                    16
+                } else {
+                    32
+                },
+                has_alpha: true,
+                native_gpu_payload: true,
+            },
+        };
+        Some(descriptor)
+    }
+
     /// Whether this decoded surface format can be carried as a native GPU payload.
     pub fn supports_native_gpu_payload(self) -> bool {
-        matches!(self, Self::Nv12 | Self::P010 | Self::Rgba8 | Self::Bgra8)
+        self.descriptor().is_some_and(|descriptor| descriptor.native_gpu_payload)
     }
 
     /// Effective bit depth for formats with a fixed Mondrian contract.
     pub fn fixed_bit_depth(self) -> Option<u8> {
-        match self {
-            Self::Nv12 | Self::Yuv420p | Self::Yuv422p | Self::Rgba8 | Self::Bgra8 => Some(8),
-            Self::P010 | Self::Yuv420p10le | Self::Yuv422p10le => Some(10),
-            Self::Unknown | Self::Other => None,
-        }
+        self.descriptor().map(|descriptor| descriptor.component_bit_depth)
     }
 }
 
@@ -1827,8 +2100,41 @@ mod tests {
         assert_eq!(
             HwAccelBackend::D3D11VA.preferred_surface_formats(),
             vec![
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
                 DecodedVideoSurfaceFormat::P010,
                 DecodedVideoSurfaceFormat::Nv12
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::VideoToolbox.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::P416,
+                DecodedVideoSurfaceFormat::P410,
+                DecodedVideoSurfaceFormat::P216,
+                DecodedVideoSurfaceFormat::P210,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
+            ]
+        );
+        assert_eq!(
+            HwAccelBackend::Vaapi.preferred_surface_formats(),
+            vec![
+                DecodedVideoSurfaceFormat::Bgra8,
+                DecodedVideoSurfaceFormat::Rgba8,
+                DecodedVideoSurfaceFormat::Xv36,
+                DecodedVideoSurfaceFormat::Xv30,
+                DecodedVideoSurfaceFormat::Y212,
+                DecodedVideoSurfaceFormat::Y210,
+                DecodedVideoSurfaceFormat::P012,
+                DecodedVideoSurfaceFormat::P010,
+                DecodedVideoSurfaceFormat::Nv12,
             ]
         );
         assert_eq!(
@@ -2097,6 +2403,136 @@ mod tests {
         assert!(!DecodedVideoSurfaceFormat::Yuv420p.supports_native_gpu_payload());
         assert!(!DecodedVideoSurfaceFormat::Yuv420p10le.supports_native_gpu_payload());
         assert!(!DecodedVideoSurfaceFormat::Other.supports_native_gpu_payload());
+    }
+
+    #[test]
+    fn native_high_bit_surface_matrix_has_exact_physical_descriptors() {
+        use DecodedVideoSurfaceChromaSubsampling::{Cs420, Cs422, Cs444};
+        use DecodedVideoSurfaceColorModel::{Rgb, Ycbcr};
+        use DecodedVideoSurfacePlaneLayout::{PackedRgba, PackedYuv422, PackedYuv444, SemiPlanar};
+
+        for (format, model, chroma, layout, bits, alpha) in [
+            (
+                DecodedVideoSurfaceFormat::P012,
+                Ycbcr,
+                Some(Cs420),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P016,
+                Ycbcr,
+                Some(Cs420),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P210,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P212,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P216,
+                Ycbcr,
+                Some(Cs422),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P410,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P412,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::P416,
+                Ycbcr,
+                Some(Cs444),
+                SemiPlanar,
+                16,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Y210,
+                Ycbcr,
+                Some(Cs422),
+                PackedYuv422,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Y212,
+                Ycbcr,
+                Some(Cs422),
+                PackedYuv422,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Xv30,
+                Ycbcr,
+                Some(Cs444),
+                PackedYuv444,
+                10,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Xv36,
+                Ycbcr,
+                Some(Cs444),
+                PackedYuv444,
+                12,
+                false,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Rgba16Float,
+                Rgb,
+                None,
+                PackedRgba,
+                16,
+                true,
+            ),
+            (
+                DecodedVideoSurfaceFormat::Rgba32Float,
+                Rgb,
+                None,
+                PackedRgba,
+                32,
+                true,
+            ),
+        ] {
+            let descriptor = format.descriptor().expect("modeled native format");
+            assert_eq!(descriptor.color_model, model, "{format:?}");
+            assert_eq!(descriptor.chroma_subsampling, chroma, "{format:?}");
+            assert_eq!(descriptor.plane_layout, layout, "{format:?}");
+            assert_eq!(descriptor.component_bit_depth, bits, "{format:?}");
+            assert_eq!(descriptor.has_alpha, alpha, "{format:?}");
+            assert!(descriptor.native_gpu_payload, "{format:?}");
+        }
     }
 
     #[test]

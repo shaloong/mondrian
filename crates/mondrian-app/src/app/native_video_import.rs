@@ -7,7 +7,7 @@
 
 use mondrian_media::{
     DecodedFrameResidency, DecodedGpuFrameHandleKind, HwAccelDeviceSelector,
-    PreviewHardwareDecodeRequest,
+    PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
 };
 #[cfg(test)]
 use mondrian_media::{
@@ -22,7 +22,7 @@ use mondrian_renderer::{
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling,
 };
 #[cfg(test)]
-use mondrian_renderer::{GpuVideoChromaLocation, GpuVideoRange};
+use mondrian_renderer::{GpuNativeDecodedFrameImportRoute, GpuVideoChromaLocation, GpuVideoRange};
 
 /// Stable reason playback cannot request GPU-resident decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -57,8 +57,6 @@ pub(crate) enum NativeVideoImportReadinessStatus {
     SourceVideoSamplingUnknown,
     /// The renderer backend cannot consume the decoded source texture format.
     RendererSourceTextureFormatUnsupported,
-    /// The renderer backend did not declare whether import copies pixels.
-    RendererImportModeUnknown,
     /// The full path can stay zero-copy.
     ReadyZeroCopy,
     /// The native path performs one declared GPU-local bridge copy.
@@ -128,6 +126,11 @@ pub(crate) fn evaluate_native_video_import_readiness(
         .source_texture_format
         .map(|format| input.renderer_support.supports_source_texture_format(format))
         .unwrap_or(false);
+    let renderer_import_mode = input.decoder_handle_kind.and_then(|handle_kind| {
+        input
+            .source_texture_format
+            .and_then(|format| input.renderer_support.import_mode_for(handle_kind, format))
+    });
 
     let base = NativeVideoImportReadiness {
         status: NativeVideoImportReadinessStatus::CpuDecodedMedia,
@@ -140,7 +143,7 @@ pub(crate) fn evaluate_native_video_import_readiness(
         renderer_unavailable_reason: input.renderer_support.unavailable_reason.clone(),
         renderer_supports_handle_kind,
         renderer_supports_source_texture_format,
-        renderer_import_mode: input.renderer_support.import_mode,
+        renderer_import_mode,
         reason: String::new(),
     };
 
@@ -151,7 +154,7 @@ pub(crate) fn evaluate_native_video_import_readiness(
         );
     }
 
-    let Some(_decoder_handle_kind) = input.decoder_handle_kind else {
+    let Some(decoder_handle_kind) = input.decoder_handle_kind else {
         return base.with_status(
             NativeVideoImportReadinessStatus::DecoderGpuHandleMissing,
             "decoder reported GPU residency without a native handle family",
@@ -186,18 +189,21 @@ pub(crate) fn evaluate_native_video_import_readiness(
             "renderer backend does not support the decoded source texture format",
         );
     }
+    let Some(import_mode) = input
+        .renderer_support
+        .import_mode_for(decoder_handle_kind, source_texture_format)
+    else {
+        return base.with_status(
+            NativeVideoImportReadinessStatus::RendererSourceTextureFormatUnsupported,
+            "renderer backend has no exact route for this decoder handle and source format",
+        );
+    };
     if input.source_video_sampling.is_none() {
         return base.with_status(
             NativeVideoImportReadinessStatus::SourceVideoSamplingUnknown,
             "native decoded-frame import requires explicit video sampling metadata",
         );
     }
-    let Some(import_mode) = input.renderer_support.import_mode else {
-        return base.with_status(
-            NativeVideoImportReadinessStatus::RendererImportModeUnknown,
-            "renderer backend did not declare its native import transfer mode",
-        );
-    };
     base.with_ready(import_mode)
 }
 
@@ -245,6 +251,7 @@ pub(crate) struct PlaybackHardwareDecodeAdmission {
     pub(crate) renderer_supported_source_texture_formats: u8,
     pub(crate) renderer_supports_nv12: bool,
     pub(crate) renderer_supports_p010: bool,
+    pub(crate) renderer_supported_surface_hint_mask: u16,
 }
 
 /// Resolve one hardware-decode request from the exact renderer-device Adapter.
@@ -262,10 +269,12 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
     let renderer_supports_p010 = renderer_support
         .supported_source_texture_formats
         .contains(&GpuNativeDecodedFrameTextureFormat::P010);
-    let renderer_native_import_ready = renderer_support.renderer_backend_ready
-        && !renderer_support.supported_handle_kinds.is_empty()
-        && !renderer_support.supported_source_texture_formats.is_empty()
-        && renderer_support.import_mode.is_some();
+    let renderer_supported_surface_hint_mask =
+        renderer_support.routes.iter().fold(0u16, |mask, route| {
+            mask | native_surface_hint_bit_for_format(route.source_texture_format)
+        });
+    let renderer_native_import_ready =
+        renderer_support.renderer_backend_ready && !renderer_support.routes.is_empty();
     let native_import_admission_ready = renderer_native_import_ready;
     let admission_blocker = if native_import_admission_ready {
         None
@@ -275,7 +284,7 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
         Some(PreviewHardwareDecodeAdmissionBlocker::HandleSupportMissing)
     } else if renderer_support.supported_source_texture_formats.is_empty() {
         Some(PreviewHardwareDecodeAdmissionBlocker::SourceTextureFormatSupportMissing)
-    } else if renderer_support.import_mode.is_none() {
+    } else if renderer_support.routes.is_empty() {
         Some(PreviewHardwareDecodeAdmissionBlocker::ImportModeMissing)
     } else {
         Some(PreviewHardwareDecodeAdmissionBlocker::SupportUnknown)
@@ -296,6 +305,61 @@ pub(crate) fn resolve_playback_hardware_decode_admission(
         renderer_supported_source_texture_formats,
         renderer_supports_nv12,
         renderer_supports_p010,
+        renderer_supported_surface_hint_mask,
+    }
+}
+
+pub(crate) const fn native_surface_hint_bit(hint: PreviewNativeSurfaceHint) -> u16 {
+    match hint {
+        PreviewNativeSurfaceHint::Nv12 => 1 << 0,
+        PreviewNativeSurfaceHint::P010 => 1 << 1,
+        PreviewNativeSurfaceHint::Yuv420p12 => 1 << 2,
+        PreviewNativeSurfaceHint::Yuv420p16 => 1 << 3,
+        PreviewNativeSurfaceHint::Yuv422p10 => 1 << 4,
+        PreviewNativeSurfaceHint::Yuv422p12 => 1 << 5,
+        PreviewNativeSurfaceHint::Yuv422p16 => 1 << 6,
+        PreviewNativeSurfaceHint::Yuv444p10 => 1 << 7,
+        PreviewNativeSurfaceHint::Yuv444p12 => 1 << 8,
+        PreviewNativeSurfaceHint::Yuv444p16 => 1 << 9,
+    }
+}
+
+const fn native_surface_hint_bit_for_format(format: GpuNativeDecodedFrameTextureFormat) -> u16 {
+    match format {
+        GpuNativeDecodedFrameTextureFormat::Nv12 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Nv12)
+        }
+        GpuNativeDecodedFrameTextureFormat::P010 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::P010)
+        }
+        GpuNativeDecodedFrameTextureFormat::P012 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv420p12)
+        }
+        GpuNativeDecodedFrameTextureFormat::P016 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv420p16)
+        }
+        GpuNativeDecodedFrameTextureFormat::P210 | GpuNativeDecodedFrameTextureFormat::Y210 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv422p10)
+        }
+        GpuNativeDecodedFrameTextureFormat::P212 | GpuNativeDecodedFrameTextureFormat::Y212 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv422p12)
+        }
+        GpuNativeDecodedFrameTextureFormat::P216 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv422p16)
+        }
+        GpuNativeDecodedFrameTextureFormat::P410 | GpuNativeDecodedFrameTextureFormat::Xv30 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv444p10)
+        }
+        GpuNativeDecodedFrameTextureFormat::P412 | GpuNativeDecodedFrameTextureFormat::Xv36 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv444p12)
+        }
+        GpuNativeDecodedFrameTextureFormat::P416 => {
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv444p16)
+        }
+        GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm
+        | GpuNativeDecodedFrameTextureFormat::Rgba16Float
+        | GpuNativeDecodedFrameTextureFormat::Rgba32Float => 0,
     }
 }
 
@@ -384,6 +448,7 @@ mod tests {
     #[test]
     fn playback_hardware_decode_admission_rejects_missing_transfer_mode() {
         let mut renderer_support = renderer_support();
+        renderer_support.routes.clear();
         renderer_support.import_mode = None;
 
         let admission = resolve_playback_hardware_decode_admission(&renderer_support);
@@ -499,6 +564,36 @@ mod tests {
             report.renderer_import_mode,
             Some(GpuNativeDecodedFrameImportMode::GpuBridgeCopy)
         );
+    }
+
+    #[test]
+    fn native_video_import_readiness_requires_one_exact_handle_format_route() {
+        let support = GpuNativeDecodedFrameImportSupport::try_ready_routes(vec![
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::P010,
+                import_mode: GpuNativeDecodedFrameImportMode::ZeroCopy,
+            },
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D12Resource,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Nv12,
+                import_mode: GpuNativeDecodedFrameImportMode::GpuBridgeCopy,
+            },
+        ])
+        .expect("non-Cartesian renderer route matrix");
+        let report = evaluate_native_video_import_readiness(NativeVideoImportReadinessInput {
+            renderer_support: support,
+            ..ready_input()
+        });
+
+        assert_eq!(
+            report.status,
+            NativeVideoImportReadinessStatus::RendererSourceTextureFormatUnsupported
+        );
+        assert!(report.renderer_supports_handle_kind);
+        assert!(report.renderer_supports_source_texture_format);
+        assert_eq!(report.renderer_import_mode, None);
+        assert!(report.reason.contains("no exact route"));
     }
 
     #[test]

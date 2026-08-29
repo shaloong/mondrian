@@ -13,7 +13,6 @@ use crate::{
     ViewerGpuSourceLayer, ViewerGpuTransitionInput, ViewerSourceRect,
 };
 use mondrian_effects::EffectColorDomain;
-use mondrian_media::DecodedVideoSurfaceFormat;
 
 /// Texture demand attributed to one Viewer execution stage family.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -634,18 +633,16 @@ fn estimate_source(
             if let Some(source) = native_source {
                 let width = source.native_frame.width;
                 let height = source.native_frame.height;
-                if !matches!(
-                    source.native_frame.surface_format,
-                    DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::P010
-                ) {
+                let Some(_surface_descriptor) = source.native_frame.surface_format.descriptor()
+                else {
                     return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
                         reason: "native source has an unsupported decoded surface format",
                     });
-                }
+                };
                 let encoded_rgb_bytes = checked_texture_bytes(
                     width,
                     height,
-                    8,
+                    working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 let working_bytes = checked_texture_bytes(
@@ -655,8 +652,9 @@ fn estimate_source(
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 // The media Frame Store governs the adopted decoder surface.
-                // Direct import allocates only the encoded-RGB and working
-                // outputs; it owns no duplicate YUV bridge texture.
+                // Every route materializes one product-precision encoded-RGB
+                // output before OCIO, then one working output. The media Frame
+                // Store separately governs the adopted decoder surface.
                 let bytes = encoded_rgb_bytes.checked_add(working_bytes).ok_or(
                     ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,

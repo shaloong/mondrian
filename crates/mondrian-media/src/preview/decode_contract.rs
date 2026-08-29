@@ -29,6 +29,22 @@ pub enum PreviewNativeSurfaceHint {
     Nv12,
     /// An opaque 10-bit 4:2:0 source may decode to a P010 hardware surface.
     P010,
+    /// A 12-bit 4:2:0 source may decode to a P012-family hardware surface.
+    Yuv420p12,
+    /// A 16-bit 4:2:0 source may decode to a P016-family hardware surface.
+    Yuv420p16,
+    /// A 10-bit 4:2:2 source may decode to a planar or packed platform surface.
+    Yuv422p10,
+    /// A 12-bit 4:2:2 source may decode to a planar or packed platform surface.
+    Yuv422p12,
+    /// A 16-bit 4:2:2 source may decode to a platform-native surface.
+    Yuv422p16,
+    /// A 10-bit 4:4:4 source may decode to a planar or packed platform surface.
+    Yuv444p10,
+    /// A 12-bit 4:4:4 source may decode to a planar or packed platform surface.
+    Yuv444p12,
+    /// A 16-bit 4:4:4 source may decode to a platform-native surface.
+    Yuv444p16,
 }
 
 /// Compact CPU YUV representation conservatively inferred from a probed source.
@@ -731,16 +747,16 @@ const fn native_surface_hint_from_pixel_format(
     match pixel_format {
         PixelFormat::Yuv420p | PixelFormat::Nv12 => Some(PreviewNativeSurfaceHint::Nv12),
         PixelFormat::Yuv420p10le | PixelFormat::P010 => Some(PreviewNativeSurfaceHint::P010),
+        PixelFormat::Yuv420p12le | PixelFormat::P012 => Some(PreviewNativeSurfaceHint::Yuv420p12),
+        PixelFormat::Yuv420p16le | PixelFormat::P016 => Some(PreviewNativeSurfaceHint::Yuv420p16),
+        PixelFormat::Yuv422p10le => Some(PreviewNativeSurfaceHint::Yuv422p10),
+        PixelFormat::Yuv422p12le => Some(PreviewNativeSurfaceHint::Yuv422p12),
+        PixelFormat::Yuv422p16le => Some(PreviewNativeSurfaceHint::Yuv422p16),
+        PixelFormat::Yuv444p10le => Some(PreviewNativeSurfaceHint::Yuv444p10),
+        PixelFormat::Yuv444p12le => Some(PreviewNativeSurfaceHint::Yuv444p12),
+        PixelFormat::Yuv444p16le => Some(PreviewNativeSurfaceHint::Yuv444p16),
         PixelFormat::Yuv422p
         | PixelFormat::Yuv444p
-        | PixelFormat::Yuv422p10le
-        | PixelFormat::Yuv444p10le
-        | PixelFormat::Yuv420p12le
-        | PixelFormat::Yuv422p12le
-        | PixelFormat::Yuv444p12le
-        | PixelFormat::Yuv420p16le
-        | PixelFormat::Yuv422p16le
-        | PixelFormat::Yuv444p16le
         | PixelFormat::Gbrp10le
         | PixelFormat::Gbrp12le
         | PixelFormat::Gbrp16le
@@ -749,9 +765,7 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Gbrap16le
         | PixelFormat::Rgb24
         | PixelFormat::Rgba
-        | PixelFormat::Rgba64le
-        | PixelFormat::P012
-        | PixelFormat::P016 => None,
+        | PixelFormat::Rgba64le => None,
     }
 }
 
@@ -793,6 +807,25 @@ fn native_surface_hint_from_stream(
                     VideoCodecProfile::HevcMain10
                         | VideoCodecProfile::HevcRangeExtensions
                         | VideoCodecProfile::Unknown
+                ) =>
+            {
+                Some(surface)
+            }
+            VideoCodec::Av1 | VideoCodec::Vp9 => Some(surface),
+            _ => None,
+        },
+        PreviewNativeSurfaceHint::Yuv420p12
+        | PreviewNativeSurfaceHint::Yuv420p16
+        | PreviewNativeSurfaceHint::Yuv422p10
+        | PreviewNativeSurfaceHint::Yuv422p12
+        | PreviewNativeSurfaceHint::Yuv422p16
+        | PreviewNativeSurfaceHint::Yuv444p10
+        | PreviewNativeSurfaceHint::Yuv444p12
+        | PreviewNativeSurfaceHint::Yuv444p16 => match &stream.codec {
+            VideoCodec::H265
+                if matches!(
+                    stream.codec_profile,
+                    VideoCodecProfile::HevcRangeExtensions | VideoCodecProfile::Unknown
                 ) =>
             {
                 Some(surface)

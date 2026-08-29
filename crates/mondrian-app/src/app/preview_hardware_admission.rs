@@ -8,7 +8,7 @@ use mondrian_media::{
     HwAccelDeviceSelector, PreviewHardwareDecodeRequest, PreviewNativeSurfaceHint,
 };
 
-use super::native_video_import::PlaybackHardwareDecodeAdmission;
+use super::native_video_import::{native_surface_hint_bit, PlaybackHardwareDecodeAdmission};
 
 /// One coherent device-bound renderer admission observation.
 ///
@@ -44,16 +44,9 @@ impl PreviewHardwareDecodeAdmissionState {
         if request != PreviewHardwareDecodeRequest::PreferGpuResident {
             return request;
         }
-        let supported = match (self.0, surface) {
-            (Some(admission), Some(PreviewNativeSurfaceHint::Nv12)) => {
-                admission.renderer_supports_nv12
-            }
-            (Some(admission), Some(PreviewNativeSurfaceHint::P010)) => {
-                admission.renderer_supports_p010
-            }
-            (_, None) => false,
-            (None, Some(_)) => false,
-        };
+        let supported = self.0.zip(surface).is_some_and(|(admission, surface)| {
+            admission.renderer_supported_surface_hint_mask & native_surface_hint_bit(surface) != 0
+        });
         if supported {
             request
         } else {
@@ -86,6 +79,9 @@ mod tests {
             renderer_supported_source_texture_formats: 1,
             renderer_supports_nv12: false,
             renderer_supports_p010: true,
+            renderer_supported_surface_hint_mask: native_surface_hint_bit(
+                PreviewNativeSurfaceHint::P010,
+            ),
         }
     }
 
@@ -132,6 +128,23 @@ mod tests {
 
         assert_eq!(
             state.request_for_surface(None),
+            PreviewHardwareDecodeRequest::PreferHardwareDecode
+        );
+    }
+
+    #[test]
+    fn high_bit_surface_requires_its_exact_renderer_hint() {
+        let mut admission = admission();
+        admission.renderer_supported_surface_hint_mask |=
+            native_surface_hint_bit(PreviewNativeSurfaceHint::Yuv444p16);
+        let state = PreviewHardwareDecodeAdmissionState::reported(admission);
+
+        assert_eq!(
+            state.request_for_surface(Some(PreviewNativeSurfaceHint::Yuv444p16)),
+            PreviewHardwareDecodeRequest::PreferGpuResident
+        );
+        assert_eq!(
+            state.request_for_surface(Some(PreviewNativeSurfaceHint::Yuv422p16)),
             PreviewHardwareDecodeRequest::PreferHardwareDecode
         );
     }

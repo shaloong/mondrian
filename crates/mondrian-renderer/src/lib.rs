@@ -81,11 +81,13 @@ pub use color_frame::{
     GpuNativeDecodedFrameImportBackend, GpuNativeDecodedFrameImportContract,
     GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportExecution,
     GpuNativeDecodedFrameImportMode, GpuNativeDecodedFrameImportPlan,
-    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportSource,
-    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameSourceDescriptor,
+    GpuNativeDecodedFrameImportPlanError, GpuNativeDecodedFrameImportRoute,
+    GpuNativeDecodedFrameImportSource, GpuNativeDecodedFrameImportSupport,
+    GpuNativeDecodedFrameImportSupportError, GpuNativeDecodedFrameSourceDescriptor,
     GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
-    GpuNativeDecodedFrameVideoSampling, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
-    SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
+    GpuNativeDecodedFrameVideoSampling, GpuNativeRgbDecodePlan, GpuNativeRgbDecodePlanError,
+    GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
+    ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
     import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
@@ -213,12 +215,14 @@ pub use native_video::{
     NativeVideoAdapterError, NativeVideoAdapterLuid,
 };
 pub use native_video::{
-    GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
-    GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
-    GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
-    GpuYuvCodeAlignment, NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
-    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
-    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, NativeVideoImportToken,
+    GpuNativeRgbDecodeRecordError, GpuNativeRgbDecoder, GpuNativeRgbPrepareError,
+    GpuNativeRgbPreparedPass, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
+    GpuNativeYuvDecodePlanError, GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder,
+    GpuNativeYuvPlaneViews, GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout,
+    GpuYuvChromaSubsampling, GpuYuvCodeAlignment, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, NativeVideoImportToken,
     GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO, NATIVE_VIDEO_IMPORT_GPU_TIMING_MAX_CAPACITY,
     NATIVE_VIDEO_IMPORT_GPU_TIMING_SCHEMA_VERSION,
 };

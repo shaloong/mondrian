@@ -4470,6 +4470,7 @@ fn preview_playback_schedule_counts_native_import_unavailable_current_frames() {
         renderer_supported_source_texture_formats: 0,
         renderer_supports_nv12: false,
         renderer_supports_p010: false,
+        renderer_supported_surface_hint_mask: 0,
     });
 
     service.record_preview_decode(
@@ -11944,6 +11945,7 @@ fn gpu_viewer_hardware_decode_admission_covers_every_access_mode() {
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,
         renderer_supports_p010: true,
+        renderer_supported_surface_hint_mask: 3,
     });
     assert_eq!(
         service.hardware_decode_request_for_access_mode(PreviewDecodeAccessMode::PlaybackCursor),
@@ -11992,6 +11994,7 @@ fn gpu_viewer_hardware_decode_admission_does_not_invent_native_payload_contract(
         renderer_supported_source_texture_formats: 1,
         renderer_supports_nv12: true,
         renderer_supports_p010: false,
+        renderer_supported_surface_hint_mask: 1,
     });
     let key = test_media_key(0);
     assert_eq!(
@@ -12910,6 +12913,7 @@ fn zero_copy_admission_is_not_published_without_renderer_device_root() {
                 renderer_supported_source_texture_formats: 2,
                 renderer_supports_nv12: true,
                 renderer_supports_p010: true,
+                renderer_supported_surface_hint_mask: 3,
             },
             None,
         )

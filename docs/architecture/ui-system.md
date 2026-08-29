@@ -1314,9 +1314,9 @@ layer. Cache miss, corruption, queue pressure, or worker failure keeps ordinary
 production materialization authoritative. The cache never puts filesystem,
 compression, or GPU readback work on the Window/presentation thread.
 The product window and renderer context use the same renderer-owned wgpu device
-feature contract for native NV12/P010 texture formats. Adapter-supported format
-features are requested during device creation; P010 additionally requires the
-16-bit normalized plane-view feature. Renderer native-import support carries a
+feature contract for native texture formats. Adapter-supported format features
+are requested during device creation; every 16-bit normalized plane-view route
+requires the corresponding feature. Renderer native-import support carries a
 typed decoder-device selector through playback-only preview jobs so hybrid-GPU
 systems create decoder resources on the renderer's physical adapter. App
 diagnostics continue to
@@ -1325,8 +1325,9 @@ synchronization, adoption, sampling, and input-transform bridge is connected.
 Device feature enablement alone must never promote hardware decode admission.
 The physical `PreviewDecodeSource` has already filtered its native surface hint
 through codec/profile/sampling evidence. App then intersects that hint with the
-active Renderer device's handle, NV12/P010, import-mode, and decoder-device
-selector observation. A preferred request may fall back once inside the
+active Renderer device's exact `(handle, format, import mode)` routes and
+decoder-device selector observation. Aggregate handle and format counts are
+diagnostics, not combinable capability authority. A preferred request may fall back once inside the
 media-owned Session; a required-residency request remains fail-closed.
 During playback startup, the Preview Adapter schedules future media payloads
 under the active priming deadline and recursively checks the next timeline

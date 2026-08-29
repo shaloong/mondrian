@@ -744,11 +744,11 @@ The source cannot be constructed from a relative physical path or an incomplete
 filesystem revision; reusable identity never depends on the process working
 directory.
 `FitWithin` requires a non-empty CPU-addressable extent, while `NativeSource`
-requires proven opaque sampling and an NV12/P010 candidate. Both retain the
-same non-empty, aspect-preserving materialization target. A native decoder may
-still return its full physical surface, but Preview scale remains part of the
-decode/cache identity and crosses into renderer import; different Viewer
-scales cannot alias merely because both use the same native surface.
+requires proven opaque sampling and a codec/profile-qualified native surface
+hint. Both retain the same non-empty, aspect-preserving materialization target.
+A native decoder returns its full physical surface; that source-sized decode
+identity is reusable across Viewer scale changes, while the separate renderer
+materialization extent remains part of the presentation execution contract.
 `PreviewDecodeRequest::from_key` projects this
 contract into the existing access-mode execution Interface without rebuilding
 path, revision, stream, time, geometry, or source color independently. App
@@ -2327,6 +2327,18 @@ the same resolver. Decode Session state, resizing, pixel copying, hardware-plan
 selection, and renderer color interpretation remain outside this Module, so
 the color seam is narrow without creating a second frame object model.
 
+`DecodedVideoSurfaceDescriptor` is the canonical physical surface vocabulary.
+It models RGB versus YCbCr, 4:2:0/4:2:2/4:4:4, semi-planar/planar/packed layout,
+UNORM or float encoding and code alignment, component bit depth, alpha, and
+native-payload eligibility. FFmpeg pixel and hardware-frame `sw_format`
+Adapters lower NV12; P010/P012/P016; P210/P212/P216; P410/P412/P416;
+Y210/Y212; XV30/XV36; BGRA/RGBA; and RGBA16F/RGBA32F into that vocabulary.
+Backend preference matrices remain backend-specific: the linked D3D12VA
+contract is NV12/P010-only; D3D11VA exposes its actual DXGI-backed subset;
+VideoToolbox exposes its available bi-planar families; VA-API/CUDA candidates
+remain planning evidence. A shared descriptor never promotes a candidate to a
+renderer route.
+
 `mondrian_media::preview::frame_materialization` owns the next execution
 boundary. It consumes a decoded FFmpeg frame plus the prepared hardware plan
 and produces exactly one CPU RGBA8, CPU scene-linear float, compact CPU YUV, or
@@ -2378,12 +2390,13 @@ which is neither the correct hardware-surface lifetime operation nor a checked
 failure boundary. The media-internal retained candidate type owns the cloned
 `AVFrame` until selection/conversion finishes.
 A handle-kind-only payload is invalid because it can masquerade as GPU
-residency without an importable resource. Native payloads are
-limited to renderer-importable surface families such as NV12, P010, RGBA8, and
-BGRA8; unknown or planar CPU formats must fail closed before reaching the app
-or renderer. They must also carry `DecodedVideoSampling` at construction time:
-range must be explicit, bit depth must match the native surface contract, and
-subsampled NV12/P010 payloads must have explicit chroma location. This remains
+residency without an importable resource. Native payloads are limited to the
+descriptor-qualified families above; unknown and ordinary CPU planar formats
+fail closed before reaching the app or renderer. They must also carry
+`DecodedVideoSampling` at construction time: range must be explicit, bit depth
+must match the native surface contract, and subsampled YCbCr payloads must have
+explicit chroma location. 4:4:4 permits unspecified chroma location because no
+subsampled grid origin exists. This remains
 media payload evidence, not color interpretation; unsupported-but-explicit
 chroma siting can be rejected later by the app/renderer admission boundary, but
 missing sampling facts must not escape the media native-frame constructor.
@@ -2402,8 +2415,11 @@ and retries the same semantic request once through a fresh software Session.
 Success reports `RuntimeHardwareFailure`, and the exact source revision/stream
 is quarantined from another hardware attempt for 30 seconds so every frame does
 not repeat the same driver failure. `RequireGpuResident` never takes this path.
-Sources without a proven NV12/P010 native hint do not attempt GPU-resident
-admission under the current renderer contract.
+Sources without a codec/profile-qualified native hint do not attempt
+GPU-resident admission. App intersects that hint with the exact route matrix
+published by the active renderer generation; a high-bit hint unsupported by
+that device/backend remains hardware-decode CPU-transfer eligible but cannot
+request GPU residency.
 On multi-adapter Windows systems, a native-import admission attaches the typed
 `D3D12VaAdapterIndex` selector derived from the renderer's physical DXGI
 adapter. The active DX12 Renderer creates an FFmpeg D3D12VA device root over
@@ -2466,10 +2482,10 @@ adopted directly by wgpu, and sampled without a bridge texture or pixel copy.
 The Renderer queue waits on FFmpeg's decode fence, performs explicit
 `COMMON -> shader resource -> COMMON` transitions, and retains the Media frame
 lease plus command allocators until its completion fence proves the final read.
-On macOS, the Metal Adapter
-validates the CVPixelBuffer FourCC/plane extent and retains each
+On macOS, the Metal Adapter validates NV12/P010 plus qualified
+P210/P216/P410/P416 CVPixelBuffer FourCC/plane extents and retains each
 `CVMetalTexture` and Media frame lease through GPU submission completion. On Linux, the
-Vulkan Adapter accepts only a typed one-layer NV12/P010 DRM PRIME descriptor
+Vulkan Adapter accepts typed one-layer NV12/P010/P012 DRM PRIME descriptors
 with exactly two bounds-checked planes, duplicates each selected object FD for
 Vulkan ownership, preserves offset/pitch/modifier, and retains the Media frame
 lease through GPU submission completion; other DRM layouts fail
@@ -2483,9 +2499,9 @@ trait for `PreviewNativeDecodedFrame`. App readiness code delegates to that
 mapping instead of copying renderer format policy back into the media/app
 layers.
 When native payloads reach the renderer import contract, renderer-side video
-sampling metadata is mandatory. `Nv12` is 8-bit YCbCr and `P010` is 10-bit
-YCbCr; 12/16-bit hardware surfaces require a distinct future format such as
-P016 rather than overloading P010. The app/readiness layer must pass explicit
+sampling metadata is mandatory. Every 8/10/12/16-bit 4:2:0/4:2:2/4:4:4 or RGB
+identity retains its distinct surface format rather than overloading P010. The
+app/readiness layer must pass explicit
 limited/full range, YCbCr matrix, transfer characteristic, and chroma-location
 facts resolved from media metadata / user interpretation. Platform adapters for
 D3D12/D3D11, VideoToolbox/IOSurface, and VA-API/DMABUF must import handles

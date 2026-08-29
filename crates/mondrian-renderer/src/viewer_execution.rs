@@ -578,8 +578,9 @@ pub fn native_video_sampling_from_decoded(
     if decoded.bit_depth != expected_native_source_bit_depth(source_texture_format) {
         return None;
     }
-    let (matrix, chroma_location) = match source_texture_format {
-        GpuNativeDecodedFrameTextureFormat::Nv12 | GpuNativeDecodedFrameTextureFormat::P010 => {
+    let physical = source_texture_format.physical_descriptor()?;
+    let (matrix, chroma_location) = match physical.color_model {
+        mondrian_media::DecodedVideoSurfaceColorModel::Ycbcr => {
             let matrix = match decoded.matrix {
                 DecodedVideoMatrix::Unknown
                 | DecodedVideoMatrix::Unsupported
@@ -596,8 +597,7 @@ pub fn native_video_sampling_from_decoded(
                 decoded_chroma_location_to_gpu(decoded.chroma_location)?,
             )
         }
-        GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
+        mondrian_media::DecodedVideoSurfaceColorModel::Rgb => {
             if source_color_space.encoding().matrix != ColorMatrixCoefficients::Rgb {
                 return None;
             }
@@ -617,12 +617,9 @@ pub fn native_video_sampling_from_decoded(
 }
 
 fn expected_native_source_bit_depth(format: GpuNativeDecodedFrameTextureFormat) -> u8 {
-    match format {
-        GpuNativeDecodedFrameTextureFormat::Nv12
-        | GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-        | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => 8,
-        GpuNativeDecodedFrameTextureFormat::P010 => 10,
-    }
+    format
+        .physical_descriptor()
+        .map_or(0, |descriptor| descriptor.component_bit_depth)
 }
 
 fn decoded_chroma_location_to_gpu(

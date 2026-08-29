@@ -52,7 +52,9 @@ pub use audio_source::{
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
-    DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigMethods,
+    DecodedVideoSampling, DecodedVideoSurfaceChromaSubsampling, DecodedVideoSurfaceColorModel,
+    DecodedVideoSurfaceDescriptor, DecodedVideoSurfaceFormat, DecodedVideoSurfaceNumericEncoding,
+    DecodedVideoSurfacePlaneLayout, HwAccelBackend, HwAccelCodecConfigMethods,
     HwAccelCodecConfigProbe, HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat,
     HwAccelProbe, HwDeviceContextPool, HwDeviceContextPoolDiagnostics, HwDeviceContextPoolPolicy,
     RendererHwAccelDeviceContext, RendererHwAccelDeviceContextCreateError,

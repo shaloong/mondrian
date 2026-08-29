@@ -11,7 +11,13 @@ use objc2_core_video::{
     kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,
     kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange,
     kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
-    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, CVMetalTexture, CVMetalTextureCache,
+    kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+    kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange,
+    kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,
+    kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange,
+    kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange, CVMetalTexture, CVMetalTextureCache,
     CVMetalTextureGetTexture, CVPixelBuffer, CVPixelBufferGetHeightOfPlane,
     CVPixelBufferGetPixelFormatType, CVPixelBufferGetPlaneCount, CVPixelBufferGetWidthOfPlane,
 };
@@ -99,7 +105,13 @@ impl MetalNativeVideoImportBackend {
 
         let mut formats = vec![GpuNativeDecodedFrameTextureFormat::Nv12];
         if device.features().contains(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM) {
-            formats.push(GpuNativeDecodedFrameTextureFormat::P010);
+            formats.extend([
+                GpuNativeDecodedFrameTextureFormat::P010,
+                GpuNativeDecodedFrameTextureFormat::P210,
+                GpuNativeDecodedFrameTextureFormat::P216,
+                GpuNativeDecodedFrameTextureFormat::P410,
+                GpuNativeDecodedFrameTextureFormat::P416,
+            ]);
         }
         let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
             vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
@@ -233,7 +245,7 @@ impl DirectNativeYuvPlaneAdapter for MetalNativeYuvPlaneAdapter {
         let pixel_buffer = unsafe { pixel_buffer_ptr.as_ref() };
         if CVPixelBufferGetPlaneCount(pixel_buffer) != 2 {
             return Err(rejected(
-                "CVPixelBuffer is not a two-plane 4:2:0 surface".to_owned(),
+                "CVPixelBuffer is not a two-plane YCbCr surface".to_owned(),
             ));
         }
         let actual_format = CVPixelBufferGetPixelFormatType(pixel_buffer);
@@ -273,6 +285,46 @@ fn metal_plane_formats(
                 kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange
                     | kCVPixelFormatType_420YpCbCr10BiPlanarFullRange
             ) =>
+        {
+            Ok((
+                (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
+                (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
+            ))
+        }
+        GpuNativeDecodedFrameTextureFormat::P210
+            if matches!(
+                actual,
+                kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange
+                    | kCVPixelFormatType_422YpCbCr10BiPlanarFullRange
+            ) =>
+        {
+            Ok((
+                (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
+                (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
+            ))
+        }
+        GpuNativeDecodedFrameTextureFormat::P216
+            if actual == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange =>
+        {
+            Ok((
+                (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
+                (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
+            ))
+        }
+        GpuNativeDecodedFrameTextureFormat::P410
+            if matches!(
+                actual,
+                kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange
+                    | kCVPixelFormatType_444YpCbCr10BiPlanarFullRange
+            ) =>
+        {
+            Ok((
+                (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),
+                (MTLPixelFormat::RG16Unorm, wgpu::TextureFormat::Rg16Unorm),
+            ))
+        }
+        GpuNativeDecodedFrameTextureFormat::P416
+            if actual == kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange =>
         {
             Ok((
                 (MTLPixelFormat::R16Unorm, wgpu::TextureFormat::R16Unorm),

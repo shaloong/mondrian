@@ -1586,10 +1586,38 @@ pub enum GpuNativeDecodedFrameTextureFormat {
     Nv12,
     /// 10-bit P010 two-plane YCbCr surface.
     P010,
+    /// 12-bit P012 two-plane YCbCr 4:2:0 surface.
+    P012,
+    /// 16-bit P016 two-plane YCbCr 4:2:0 surface.
+    P016,
+    /// 10-bit P210 two-plane YCbCr 4:2:2 surface.
+    P210,
+    /// 12-bit P212 two-plane YCbCr 4:2:2 surface.
+    P212,
+    /// 16-bit P216 two-plane YCbCr 4:2:2 surface.
+    P216,
+    /// 10-bit P410 two-plane YCbCr 4:4:4 surface.
+    P410,
+    /// 12-bit P412 two-plane YCbCr 4:4:4 surface.
+    P412,
+    /// 16-bit P416 two-plane YCbCr 4:4:4 surface.
+    P416,
+    /// Packed 10-bit Y210 YCbCr 4:2:2 surface.
+    Y210,
+    /// Packed 12-bit Y212-in-Y216 YCbCr 4:2:2 surface.
+    Y212,
+    /// Packed 10-bit XV30-in-Y410 YCbCr 4:4:4 surface.
+    Xv30,
+    /// Packed 12-bit XV36-in-Y416 YCbCr 4:4:4 surface.
+    Xv36,
     /// Single-plane 8-bit normalized RGBA surface.
     Rgba8Unorm,
     /// Single-plane 8-bit normalized BGRA surface.
     Bgra8Unorm,
+    /// Single-plane RGBA half-float surface.
+    Rgba16Float,
+    /// Single-plane RGBA single-precision float surface.
+    Rgba32Float,
 }
 
 impl GpuNativeDecodedFrameTextureFormat {
@@ -1598,8 +1626,53 @@ impl GpuNativeDecodedFrameTextureFormat {
         match self {
             Self::Nv12 => "Nv12",
             Self::P010 => "P010",
+            Self::P012 => "P012",
+            Self::P016 => "P016",
+            Self::P210 => "P210",
+            Self::P212 => "P212",
+            Self::P216 => "P216",
+            Self::P410 => "P410",
+            Self::P412 => "P412",
+            Self::P416 => "P416",
+            Self::Y210 => "Y210",
+            Self::Y212 => "Y212",
+            Self::Xv30 => "Xv30",
+            Self::Xv36 => "Xv36",
             Self::Rgba8Unorm => "Rgba8Unorm",
             Self::Bgra8Unorm => "Bgra8Unorm",
+            Self::Rgba16Float => "Rgba16Float",
+            Self::Rgba32Float => "Rgba32Float",
+        }
+    }
+
+    /// Return the media-owned physical descriptor for this renderer format.
+    pub const fn physical_descriptor(
+        self,
+    ) -> Option<mondrian_media::DecodedVideoSurfaceDescriptor> {
+        self.media_surface_format().descriptor()
+    }
+
+    /// Return the canonical media-layer surface format represented by this format.
+    pub const fn media_surface_format(self) -> DecodedVideoSurfaceFormat {
+        match self {
+            Self::Nv12 => DecodedVideoSurfaceFormat::Nv12,
+            Self::P010 => DecodedVideoSurfaceFormat::P010,
+            Self::P012 => DecodedVideoSurfaceFormat::P012,
+            Self::P016 => DecodedVideoSurfaceFormat::P016,
+            Self::P210 => DecodedVideoSurfaceFormat::P210,
+            Self::P212 => DecodedVideoSurfaceFormat::P212,
+            Self::P216 => DecodedVideoSurfaceFormat::P216,
+            Self::P410 => DecodedVideoSurfaceFormat::P410,
+            Self::P412 => DecodedVideoSurfaceFormat::P412,
+            Self::P416 => DecodedVideoSurfaceFormat::P416,
+            Self::Y210 => DecodedVideoSurfaceFormat::Y210,
+            Self::Y212 => DecodedVideoSurfaceFormat::Y212,
+            Self::Xv30 => DecodedVideoSurfaceFormat::Xv30,
+            Self::Xv36 => DecodedVideoSurfaceFormat::Xv36,
+            Self::Rgba8Unorm => DecodedVideoSurfaceFormat::Rgba8,
+            Self::Bgra8Unorm => DecodedVideoSurfaceFormat::Bgra8,
+            Self::Rgba16Float => DecodedVideoSurfaceFormat::Rgba16Float,
+            Self::Rgba32Float => DecodedVideoSurfaceFormat::Rgba32Float,
         }
     }
 }
@@ -1611,8 +1684,22 @@ impl TryFrom<DecodedVideoSurfaceFormat> for GpuNativeDecodedFrameTextureFormat {
         match format {
             DecodedVideoSurfaceFormat::Nv12 => Ok(Self::Nv12),
             DecodedVideoSurfaceFormat::P010 => Ok(Self::P010),
+            DecodedVideoSurfaceFormat::P012 => Ok(Self::P012),
+            DecodedVideoSurfaceFormat::P016 => Ok(Self::P016),
+            DecodedVideoSurfaceFormat::P210 => Ok(Self::P210),
+            DecodedVideoSurfaceFormat::P212 => Ok(Self::P212),
+            DecodedVideoSurfaceFormat::P216 => Ok(Self::P216),
+            DecodedVideoSurfaceFormat::P410 => Ok(Self::P410),
+            DecodedVideoSurfaceFormat::P412 => Ok(Self::P412),
+            DecodedVideoSurfaceFormat::P416 => Ok(Self::P416),
+            DecodedVideoSurfaceFormat::Y210 => Ok(Self::Y210),
+            DecodedVideoSurfaceFormat::Y212 => Ok(Self::Y212),
+            DecodedVideoSurfaceFormat::Xv30 => Ok(Self::Xv30),
+            DecodedVideoSurfaceFormat::Xv36 => Ok(Self::Xv36),
             DecodedVideoSurfaceFormat::Rgba8 => Ok(Self::Rgba8Unorm),
             DecodedVideoSurfaceFormat::Bgra8 => Ok(Self::Bgra8Unorm),
+            DecodedVideoSurfaceFormat::Rgba16Float => Ok(Self::Rgba16Float),
+            DecodedVideoSurfaceFormat::Rgba32Float => Ok(Self::Rgba32Float),
             DecodedVideoSurfaceFormat::Unknown
             | DecodedVideoSurfaceFormat::Yuv420p
             | DecodedVideoSurfaceFormat::Yuv420p10le
@@ -1715,21 +1802,24 @@ impl GpuNativeDecodedFrameVideoSampling {
             });
         }
 
-        match source_texture_format {
-            GpuNativeDecodedFrameTextureFormat::Nv12 => {
-                self.validate_ycbcr(source_texture_format, 8)
+        let descriptor = source_texture_format.physical_descriptor().ok_or_else(|| {
+            GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
+                source_texture_format,
+                reason: "native surface has no physical descriptor".to_owned(),
             }
-            GpuNativeDecodedFrameTextureFormat::P010 => {
-                self.validate_ycbcr(source_texture_format, 10)
+        })?;
+        match descriptor.color_model {
+            mondrian_media::DecodedVideoSurfaceColorModel::Ycbcr => {
+                self.validate_ycbcr(source_texture_format, descriptor.component_bit_depth)
             }
-            GpuNativeDecodedFrameTextureFormat::Rgba8Unorm
-            | GpuNativeDecodedFrameTextureFormat::Bgra8Unorm => {
-                if self.bit_depth != 8 {
+            mondrian_media::DecodedVideoSurfaceColorModel::Rgb => {
+                if self.bit_depth != descriptor.component_bit_depth {
                     return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
                         source_texture_format,
                         reason: format!(
-                            "{} requires 8-bit sampling metadata, got {}",
+                            "{} requires {}-bit component metadata, got {}",
                             source_texture_format.as_str(),
+                            descriptor.component_bit_depth,
                             self.bit_depth
                         ),
                     });
@@ -1778,7 +1868,11 @@ impl GpuNativeDecodedFrameVideoSampling {
                 ),
             });
         }
-        if self.chroma_location == GpuVideoChromaLocation::Unspecified {
+        let chroma_is_subsampled = source_texture_format
+            .physical_descriptor()
+            .and_then(|descriptor| descriptor.chroma_subsampling)
+            != Some(mondrian_media::DecodedVideoSurfaceChromaSubsampling::Cs444);
+        if chroma_is_subsampled && self.chroma_location == GpuVideoChromaLocation::Unspecified {
             return Err(GpuNativeDecodedFrameImportPlanError::InvalidVideoSampling {
                 source_texture_format,
                 reason: format!(
@@ -1800,6 +1894,17 @@ pub enum GpuNativeDecodedFrameImportMode {
     GpuBridgeCopy,
 }
 
+/// One exact native decoded-surface import route implemented by a renderer Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GpuNativeDecodedFrameImportRoute {
+    /// Decoder resource family accepted by this route.
+    pub handle_kind: DecodedGpuFrameHandleKind,
+    /// Physical source format accepted by this route.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Transfer implementation used by this exact handle/format pair.
+    pub import_mode: GpuNativeDecodedFrameImportMode,
+}
+
 /// Renderer backend capability contract for importing native decoded frames.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GpuNativeDecodedFrameImportSupport {
@@ -1813,6 +1918,9 @@ pub struct GpuNativeDecodedFrameImportSupport {
     pub supported_handle_kinds: Vec<DecodedGpuFrameHandleKind>,
     /// Decoder source texture formats accepted by the backend.
     pub supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
+    /// Exact handle/format/mode routes. This is the admission authority; the two
+    /// lists above are aggregate diagnostics and never imply a Cartesian product.
+    pub routes: Vec<GpuNativeDecodedFrameImportRoute>,
     /// Physical transfer mode implemented by this exact backend/device binding.
     pub import_mode: Option<GpuNativeDecodedFrameImportMode>,
     /// Decoder device that produces resources on the renderer's physical adapter.
@@ -1830,6 +1938,7 @@ impl GpuNativeDecodedFrameImportSupport {
             ),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            routes: Vec::new(),
             import_mode: None,
             hardware_decode_device_selector: None,
         }
@@ -1846,6 +1955,7 @@ impl GpuNativeDecodedFrameImportSupport {
             unavailable_reason: Some(reason.into()),
             supported_handle_kinds: Vec::new(),
             supported_source_texture_formats: Vec::new(),
+            routes: Vec::new(),
             import_mode: None,
             hardware_decode_device_selector: None,
         }
@@ -1880,15 +1990,81 @@ impl GpuNativeDecodedFrameImportSupport {
         supported_source_texture_formats: Vec<GpuNativeDecodedFrameTextureFormat>,
         import_mode: GpuNativeDecodedFrameImportMode,
     ) -> Self {
+        let routes = supported_handle_kinds
+            .iter()
+            .flat_map(|handle_kind| {
+                supported_source_texture_formats.iter().map(|source_texture_format| {
+                    GpuNativeDecodedFrameImportRoute {
+                        handle_kind: *handle_kind,
+                        source_texture_format: *source_texture_format,
+                        import_mode,
+                    }
+                })
+            })
+            .collect();
         Self {
             renderer_backend_ready: true,
             renderer_backend_label: None,
             unavailable_reason: None,
             supported_handle_kinds,
             supported_source_texture_formats,
+            routes,
             import_mode: Some(import_mode),
             hardware_decode_device_selector: None,
         }
+    }
+
+    /// Build support from exact routes, preserving per-format transfer modes.
+    pub fn try_ready_routes(
+        routes: Vec<GpuNativeDecodedFrameImportRoute>,
+    ) -> Result<Self, GpuNativeDecodedFrameImportSupportError> {
+        let mut canonical_routes = Vec::new();
+        for route in routes {
+            if let Some(existing) =
+                canonical_routes.iter().find(|existing: &&GpuNativeDecodedFrameImportRoute| {
+                    existing.handle_kind == route.handle_kind
+                        && existing.source_texture_format == route.source_texture_format
+                })
+            {
+                if existing.import_mode != route.import_mode {
+                    return Err(GpuNativeDecodedFrameImportSupportError::ConflictingRoute {
+                        handle_kind: route.handle_kind,
+                        source_texture_format: route.source_texture_format,
+                        first_mode: existing.import_mode,
+                        second_mode: route.import_mode,
+                    });
+                }
+                continue;
+            }
+            canonical_routes.push(route);
+        }
+        let routes = canonical_routes;
+        let mut supported_handle_kinds = Vec::new();
+        let mut supported_source_texture_formats = Vec::new();
+        for route in &routes {
+            if !supported_handle_kinds.contains(&route.handle_kind) {
+                supported_handle_kinds.push(route.handle_kind);
+            }
+            if !supported_source_texture_formats.contains(&route.source_texture_format) {
+                supported_source_texture_formats.push(route.source_texture_format);
+            }
+        }
+        let import_mode = routes
+            .first()
+            .map(|route| route.import_mode)
+            .filter(|mode| routes.iter().all(|route| route.import_mode == *mode));
+        Ok(Self {
+            renderer_backend_ready: !routes.is_empty(),
+            renderer_backend_label: None,
+            unavailable_reason: routes
+                .is_empty()
+                .then(|| "renderer backend exposes no native decoded-frame routes".to_owned()),
+            supported_handle_kinds,
+            supported_source_texture_formats,
+            routes,
+            import_mode,
+            hardware_decode_device_selector: None,
+        })
     }
 
     /// Attach a renderer backend label to this support contract.
@@ -1921,6 +2097,38 @@ impl GpuNativeDecodedFrameImportSupport {
     ) -> bool {
         self.supported_source_texture_formats.contains(&texture_format)
     }
+
+    /// Return the transfer mode for one exact decoder handle and physical format.
+    pub fn import_mode_for(
+        &self,
+        handle_kind: DecodedGpuFrameHandleKind,
+        texture_format: GpuNativeDecodedFrameTextureFormat,
+    ) -> Option<GpuNativeDecodedFrameImportMode> {
+        let mut matches = self.routes.iter().filter(|route| {
+            route.handle_kind == handle_kind && route.source_texture_format == texture_format
+        });
+        let first = matches.next()?.import_mode;
+        matches.all(|route| route.import_mode == first).then_some(first)
+    }
+}
+
+/// Error returned when native import route evidence is internally contradictory.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeDecodedFrameImportSupportError {
+    /// One handle/format pair cannot have two physical transfer modes.
+    #[error(
+        "native import route {handle_kind:?} + {source_texture_format:?} conflicts: {first_mode:?} versus {second_mode:?}"
+    )]
+    ConflictingRoute {
+        /// Decoder handle family.
+        handle_kind: DecodedGpuFrameHandleKind,
+        /// Physical source format.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+        /// First declared transfer mode.
+        first_mode: GpuNativeDecodedFrameImportMode,
+        /// Conflicting transfer mode.
+        second_mode: GpuNativeDecodedFrameImportMode,
+    },
 }
 
 impl Default for GpuNativeDecodedFrameImportSupport {
@@ -2021,6 +2229,17 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
+        if support
+            .import_mode_for(contract.handle_kind, contract.source_texture_format)
+            .is_none()
+        {
+            return Err(
+                GpuNativeDecodedFrameImportPlanError::UnsupportedImportRoute {
+                    handle_kind: contract.handle_kind,
+                    source_texture_format: contract.source_texture_format,
+                },
+            );
+        }
         contract
             .video_sampling
             .validate_for(contract.source_texture_format, contract.source_color_space)?;
@@ -2031,6 +2250,11 @@ impl GpuNativeDecodedFrameImportPlan {
                 },
             );
         }
+        let source_descriptor = contract.source_texture_format.physical_descriptor().ok_or(
+            GpuNativeDecodedFrameImportPlanError::UnsupportedSourceTextureFormat {
+                source_texture_format: contract.source_texture_format,
+            },
+        )?;
         let encoded_source_descriptor = ColorFrameDescriptor {
             width: contract.output_width,
             height: contract.output_height,
@@ -2038,12 +2262,16 @@ impl GpuNativeDecodedFrameImportPlan {
             domain: ColorFrameDomain::Source,
             encoding: ColorFrameEncoding::EncodedFloat,
             residency: ColorFrameResidency::Gpu,
-            alpha: ColorFrameAlpha::Opaque,
+            alpha: if source_descriptor.has_alpha {
+                ColorFrameAlpha::StraightCoverage
+            } else {
+                ColorFrameAlpha::Opaque
+            },
         };
         let encoded_source_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             encoded_source_descriptor,
-            GpuColorFrameTextureFormat::Rgba16Float,
+            product_gpu_working_texture_format(),
             format!("{}.encoded-source", contract.label),
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::EncodedSourceFrameHandle)?;
@@ -2078,6 +2306,86 @@ impl GpuNativeDecodedFrameImportPlan {
     }
 }
 
+/// Validated direct RGB native-surface path into the shared OCIO input stage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuNativeRgbDecodePlan {
+    /// Physical decoded RGB format admitted by the exact renderer route.
+    pub source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    /// Visible physical source extent sampled by the RGB materialization pass.
+    pub source_width: u32,
+    /// Visible physical source height sampled by the RGB materialization pass.
+    pub source_height: u32,
+    /// Imported encoded RGB texture consumed by OCIO without a YCbCr pass.
+    pub encoded_source_frame: GpuColorFrameHandle,
+    /// Product working-frame destination.
+    pub working_frame: GpuColorFrameHandle,
+    /// Shared source-to-working OCIO transform.
+    pub input_transform: RenderInputTransform,
+}
+
+impl GpuNativeRgbDecodePlan {
+    /// Lower one native import plan into the direct RGB execution Seam.
+    pub fn from_import_plan(
+        import: &GpuNativeDecodedFrameImportPlan,
+    ) -> Result<Self, GpuNativeRgbDecodePlanError> {
+        let physical = import.source_texture_format.physical_descriptor().ok_or(
+            GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                format: import.source_texture_format,
+            },
+        )?;
+        if physical.color_model != mondrian_media::DecodedVideoSurfaceColorModel::Rgb {
+            return Err(GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                format: import.source_texture_format,
+            });
+        }
+        match physical.numeric_encoding {
+            mondrian_media::DecodedVideoSurfaceNumericEncoding::Unorm8
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::Float16
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::Float32 => {}
+            mondrian_media::DecodedVideoSurfaceNumericEncoding::Unorm16 { .. }
+            | mondrian_media::DecodedVideoSurfaceNumericEncoding::PackedUnsigned => {
+                return Err(GpuNativeRgbDecodePlanError::UnsupportedSourceFormat {
+                    format: import.source_texture_format,
+                })
+            }
+        }
+        let expected = product_gpu_working_texture_format();
+        if import.encoded_source_frame.texture_format() != expected {
+            return Err(GpuNativeRgbDecodePlanError::EncodedSourceFormatMismatch {
+                expected,
+                actual: import.encoded_source_frame.texture_format(),
+            });
+        }
+        Ok(Self {
+            source_texture_format: import.source_texture_format,
+            source_width: import.source_width,
+            source_height: import.source_height,
+            encoded_source_frame: import.encoded_source_frame.clone(),
+            working_frame: import.working_frame.clone(),
+            input_transform: import.input_transform.clone(),
+        })
+    }
+}
+
+/// Error returned when a native surface cannot use the direct RGB Seam.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum GpuNativeRgbDecodePlanError {
+    /// YCbCr or unsupported packed inputs require another materialization path.
+    #[error("native decoded surface {format:?} is not a direct RGB texture")]
+    UnsupportedSourceFormat {
+        /// Rejected physical format.
+        format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The encoded-source handle would reinterpret the imported texture.
+    #[error("native RGB encoded source format {actual:?} does not match {expected:?}")]
+    EncodedSourceFormatMismatch {
+        /// Format required by the physical surface.
+        expected: GpuColorFrameTextureFormat,
+        /// Planned renderer format.
+        actual: GpuColorFrameTextureFormat,
+    },
+}
+
 /// Error returned when native decoded-frame import cannot be planned.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum GpuNativeDecodedFrameImportPlanError {
@@ -2110,6 +2418,14 @@ pub enum GpuNativeDecodedFrameImportPlanError {
     #[error("unsupported native decoded frame source texture format {source_texture_format:?}")]
     UnsupportedSourceTextureFormat {
         /// Unsupported decoder source texture format.
+        source_texture_format: GpuNativeDecodedFrameTextureFormat,
+    },
+    /// The backend lists the handle and format but not their exact combination.
+    #[error("unsupported native decoded frame route {handle_kind:?} + {source_texture_format:?}")]
+    UnsupportedImportRoute {
+        /// Decoder handle family.
+        handle_kind: DecodedGpuFrameHandleKind,
+        /// Physical source texture format.
         source_texture_format: GpuNativeDecodedFrameTextureFormat,
     },
     /// Native decoded frames must use the renderer OCIO GPU input path.
@@ -3798,7 +4114,7 @@ mod tests {
         );
         assert_eq!(
             plan.encoded_source_frame.texture_format(),
-            GpuColorFrameTextureFormat::Rgba16Float
+            GpuColorFrameTextureFormat::Rgba32Float
         );
         assert_eq!(plan.working_frame.id().raw(), 501);
         assert_eq!(
@@ -3931,6 +4247,121 @@ mod tests {
             }
             other => panic!("expected invalid video sampling, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn native_import_routes_do_not_form_a_cartesian_capability_product() {
+        let support = GpuNativeDecodedFrameImportSupport::try_ready_routes(vec![
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D12Resource,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::P010,
+                import_mode: GpuNativeDecodedFrameImportMode::ZeroCopy,
+            },
+            GpuNativeDecodedFrameImportRoute {
+                handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+                source_texture_format: GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+                import_mode: GpuNativeDecodedFrameImportMode::GpuBridgeCopy,
+            },
+        ])
+        .expect("non-conflicting exact routes");
+
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D12Resource,
+                GpuNativeDecodedFrameTextureFormat::P010,
+            ),
+            Some(GpuNativeDecodedFrameImportMode::ZeroCopy)
+        );
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D11Texture2D,
+                GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            ),
+            Some(GpuNativeDecodedFrameImportMode::GpuBridgeCopy)
+        );
+        assert_eq!(
+            support.import_mode_for(
+                DecodedGpuFrameHandleKind::D3D12Resource,
+                GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            ),
+            None
+        );
+        assert_eq!(
+            support.import_mode, None,
+            "mixed routes have no false global mode"
+        );
+    }
+
+    #[test]
+    fn native_import_routes_reject_conflicting_transfer_evidence() {
+        let route = GpuNativeDecodedFrameImportRoute {
+            handle_kind: DecodedGpuFrameHandleKind::D3D11Texture2D,
+            source_texture_format: GpuNativeDecodedFrameTextureFormat::Rgba16Float,
+            import_mode: GpuNativeDecodedFrameImportMode::ZeroCopy,
+        };
+        let mut conflict = route;
+        conflict.import_mode = GpuNativeDecodedFrameImportMode::GpuBridgeCopy;
+        assert!(matches!(
+            GpuNativeDecodedFrameImportSupport::try_ready_routes(vec![route, conflict]),
+            Err(GpuNativeDecodedFrameImportSupportError::ConflictingRoute { .. })
+        ));
+    }
+
+    #[test]
+    fn native_rgb_half_and_float_keep_their_source_precision_until_ocio() {
+        for (source_texture_format, bits) in [
+            (GpuNativeDecodedFrameTextureFormat::Rgba16Float, 16),
+            (GpuNativeDecodedFrameTextureFormat::Rgba32Float, 32),
+        ] {
+            let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+                vec![DecodedGpuFrameHandleKind::D3D11Texture2D],
+                vec![source_texture_format],
+            );
+            let mut contract = native_import_contract();
+            contract.source_texture_format = source_texture_format;
+            contract.source_color_space = ColorSpace::Srgb;
+            contract.video_sampling = GpuNativeDecodedFrameVideoSampling::from_source_color_space(
+                ColorSpace::Srgb,
+                GpuVideoRange::Full,
+                bits,
+                GpuVideoChromaLocation::Unspecified,
+            );
+            let mut ids = GpuColorFrameIdAllocator::new(700).expect("frame ids");
+            let import =
+                GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+                    .expect("qualified RGB native import");
+            let rgb = GpuNativeRgbDecodePlan::from_import_plan(&import)
+                .expect("direct RGB execution plan");
+            assert_eq!(
+                rgb.encoded_source_frame.texture_format(),
+                GpuColorFrameTextureFormat::Rgba32Float,
+                "native RGB materialization must never stage through half"
+            );
+            assert_eq!(
+                rgb.working_frame.texture_format(),
+                GpuColorFrameTextureFormat::Rgba32Float
+            );
+            assert_eq!(
+                rgb.encoded_source_frame.descriptor().alpha,
+                ColorFrameAlpha::StraightCoverage
+            );
+        }
+    }
+
+    #[test]
+    fn native_444_allows_unspecified_chroma_siting() {
+        let support = GpuNativeDecodedFrameImportSupport::ready_zero_copy(
+            vec![DecodedGpuFrameHandleKind::CVPixelBuffer],
+            vec![GpuNativeDecodedFrameTextureFormat::P412],
+        );
+        let mut contract = native_import_contract();
+        contract.handle_kind = DecodedGpuFrameHandleKind::CVPixelBuffer;
+        contract.source_texture_format = GpuNativeDecodedFrameTextureFormat::P412;
+        contract.video_sampling.bit_depth = 12;
+        contract.video_sampling.chroma_location = GpuVideoChromaLocation::Unspecified;
+        let mut ids = GpuColorFrameIdAllocator::new(800).expect("frame ids");
+        GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &support)
+            .expect("4:4:4 has no chroma siting ambiguity");
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

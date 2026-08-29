@@ -3,6 +3,7 @@
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod direct_backend;
 mod gpu_timing;
+mod rgb_decode;
 
 pub use gpu_timing::{
     NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
@@ -88,6 +89,10 @@ mod yuv_decode;
 /// renderer texture.
 pub const GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO: u64 = 2;
 
+pub use rgb_decode::{
+    GpuNativeRgbDecodeRecordError, GpuNativeRgbDecoder, GpuNativeRgbPrepareError,
+    GpuNativeRgbPreparedPass,
+};
 pub use yuv_decode::{
     GpuNativeVideoExtent, GpuNativeYuvDecodePlan, GpuNativeYuvDecodePlanError,
     GpuNativeYuvDecodeRecordError, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews,
