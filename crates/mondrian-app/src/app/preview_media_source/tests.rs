@@ -187,6 +187,7 @@ fn video_asset_with_physical_stream_and_interpretation(
             color_metadata,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth,
             has_alpha,
             avg_bitrate: 20_000_000,

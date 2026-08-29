@@ -11,6 +11,7 @@ pub mod audio_mix;
 pub mod audio_time;
 pub mod authoring;
 pub mod automation;
+pub mod camera_raw;
 pub mod color;
 pub mod color_models;
 pub mod color_science;
@@ -50,6 +51,7 @@ pub use authoring::{
     AuthoringSet, AuthoringSnapshot, AUTHORING_FOOTPRINT_VERSION,
 };
 pub use automation::*;
+pub use camera_raw::*;
 pub use color::*;
 pub use color_models::*;
 pub use color_science::*;

@@ -8,8 +8,9 @@ use mondrian_assets::AssetRecord;
 use mondrian_core::types::{ColorEngine, ColorSpace};
 use mondrian_core::{OutputTransformIntent, WorkingColorSpace};
 use mondrian_media::{
-    DecodedRgbaEncoding, DecodedVideoRangeContract, PreviewDecodeAccessMode, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
+    DecodedRgbaEncoding, DecodedVideoRange, DecodedVideoRangeContract, PreviewDecodeAccessMode,
+    PreviewDecodeOutcome, PreviewDecodeRequest, PreviewDecodeSessionContext,
+    PreviewSourceColorContract,
 };
 use mondrian_renderer::{
     execute_cpu_input_stage_with_session, execute_cpu_output_boundary_rgba8_with_session,
@@ -82,6 +83,7 @@ pub(super) struct ThumbnailColorContract {
     pub(super) tone_map: bool,
     pub(super) engine: ColorEngine,
     pub(super) output_transform: OutputTransformIntent,
+    pub(super) camera_raw: Option<mondrian_media::CameraRawDecodeIntent>,
 }
 
 impl ThumbnailColorContract {
@@ -120,10 +122,14 @@ impl ThumbnailColorContract {
                 ));
             }
         };
-        let source_range = DecodedVideoRangeContract::from_interpretation(
-            asset.interpretation.range,
-            primary_video.color_range,
-        );
+        let source_range = if primary_video.camera_raw.is_some() {
+            DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
+        } else {
+            DecodedVideoRangeContract::from_interpretation(
+                asset.interpretation.range,
+                primary_video.color_range,
+            )
+        };
         let output_color_space = context.output_color_space().color().ok_or_else(|| {
             failure(
                 ThumbnailFailureReason::InternalOutputIdentity,
@@ -136,6 +142,22 @@ impl ThumbnailColorContract {
                 format!("thumbnail raster contract does not support {output_color_space:?}"),
             ));
         }
+        let camera_raw = primary_video
+            .camera_raw
+            .as_ref()
+            .map(|raw| {
+                mondrian_media::CameraRawDecodeIntent::new(
+                    raw.adapter,
+                    asset.interpretation.camera_raw,
+                )
+                .map_err(|error| {
+                    failure(
+                        ThumbnailFailureReason::DecodeFailed,
+                        format!("invalid camera RAW thumbnail contract: {error}"),
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Self {
             video_stream_index: primary_video.index,
             source_color_space,
@@ -145,6 +167,7 @@ impl ThumbnailColorContract {
             tone_map: context.output_tone_map(),
             engine: context.engine().clone(),
             output_transform: context.output_transform().clone(),
+            camera_raw,
         })
     }
 
@@ -174,7 +197,7 @@ pub(super) fn decode_thumbnail(
         media_preview_access_mode_for_intent(MediaPreviewAccessIntent::DeterministicStill),
         PreviewDecodeAccessMode::RandomAccessStillFrame
     );
-    let request = PreviewDecodeRequest::new(
+    let mut request = PreviewDecodeRequest::new(
         job.key.path.as_path(),
         mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -186,6 +209,9 @@ pub(super) fn decode_thumbnail(
     .with_video_stream_index(job.key.color.video_stream_index)
     .with_max_size(Some(THUMBNAIL_MAX_WIDTH), Some(THUMBNAIL_MAX_HEIGHT))
     .with_fingerprint(job.key.fingerprint);
+    if let Some(camera_raw) = job.key.color.camera_raw {
+        request = request.with_camera_raw(camera_raw);
+    }
     let cancellation = job.cancellation.clone();
     let (width, height, rgba) =
         match decode_context.decode_cancellable(request, move || cancellation.is_canceled()) {

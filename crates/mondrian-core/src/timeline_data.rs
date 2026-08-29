@@ -156,6 +156,9 @@ pub struct AssetMediaInterpretation {
     /// Payload kind that decides whether color management applies at all.
     #[serde(default)]
     pub payload: AssetColorPayload,
+    /// Camera RAW controls used only when the media probe admits a RAW Adapter.
+    #[serde(default)]
+    pub camera_raw: crate::CameraRawInterpretation,
 }
 
 /// Overrides for media asset metadata.

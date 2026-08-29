@@ -3923,6 +3923,7 @@ fn reduced_test_stream() -> crate::info::VideoStreamInfo {
         color_metadata: None,
         color_metadata_hints: Vec::new(),
         hdr_metadata: Vec::new(),
+        camera_raw: None,
         bit_depth: 8,
         has_alpha: false,
         avg_bitrate: 1,

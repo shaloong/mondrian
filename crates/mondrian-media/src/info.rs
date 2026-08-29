@@ -518,6 +518,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     crate::ffmpeg_runtime::ensure_ffmpeg_initialized(path)?;
+    let camera_raw = crate::camera_raw::probe_camera_raw_metadata(path)?;
 
     let input =
         ffmpeg::format::input(path).map_err(|e| mondrian_core::MondrianError::MediaOpen {
@@ -578,6 +579,12 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         pixel_format = probed_pixel_format;
                         pixel_format_proven = true;
                     }
+                    if let Some(raw) = camera_raw.as_ref() {
+                        width = raw.width;
+                        height = raw.height;
+                        pixel_format = camera_raw_pixel_format(raw);
+                        pixel_format_proven = true;
+                    }
                     let color_range = decoded_video_range_from_ffmpeg(decoder.color_range());
                     bit_depth = pixel_format.bit_depth();
                     has_alpha = pixel_format.has_alpha();
@@ -622,6 +629,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                         } else {
                             None
                         },
+                        camera_raw: camera_raw.clone().map(Box::new),
                     });
                     continue;
                 }
@@ -654,6 +662,7 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     has_alpha,
                     avg_bitrate: 0,
                     total_frames,
+                    camera_raw: camera_raw.clone().map(Box::new),
                 });
             }
             ffmpeg::media::Type::Audio => {
@@ -1933,7 +1942,29 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
         Pixel::P010LE => Some(PixelFormat::P010),
         Pixel::P012LE => Some(PixelFormat::P012),
         Pixel::P016LE => Some(PixelFormat::P016),
+        Pixel::BAYER_RGGB8 => Some(PixelFormat::BayerRggb8),
+        Pixel::BAYER_BGGR8 => Some(PixelFormat::BayerBggr8),
+        Pixel::BAYER_GBRG8 => Some(PixelFormat::BayerGbrg8),
+        Pixel::BAYER_GRBG8 => Some(PixelFormat::BayerGrbg8),
+        Pixel::BAYER_RGGB16LE => Some(PixelFormat::BayerRggb16le),
+        Pixel::BAYER_BGGR16LE => Some(PixelFormat::BayerBggr16le),
+        Pixel::BAYER_GBRG16LE => Some(PixelFormat::BayerGbrg16le),
+        Pixel::BAYER_GRBG16LE => Some(PixelFormat::BayerGrbg16le),
         _ => None,
+    }
+}
+
+fn camera_raw_pixel_format(raw: &mondrian_core::CameraRawMetadata) -> PixelFormat {
+    use mondrian_core::CameraRawCfaPattern;
+    match (raw.cfa_pattern, raw.bit_depth <= 8) {
+        (CameraRawCfaPattern::Rggb, true) => PixelFormat::BayerRggb8,
+        (CameraRawCfaPattern::Bggr, true) => PixelFormat::BayerBggr8,
+        (CameraRawCfaPattern::Gbrg, true) => PixelFormat::BayerGbrg8,
+        (CameraRawCfaPattern::Grbg, true) => PixelFormat::BayerGrbg8,
+        (CameraRawCfaPattern::Rggb, false) => PixelFormat::BayerRggb16le,
+        (CameraRawCfaPattern::Bggr, false) => PixelFormat::BayerBggr16le,
+        (CameraRawCfaPattern::Gbrg, false) => PixelFormat::BayerGbrg16le,
+        (CameraRawCfaPattern::Grbg, false) => PixelFormat::BayerGrbg16le,
     }
 }
 

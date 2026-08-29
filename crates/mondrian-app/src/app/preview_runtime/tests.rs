@@ -1108,6 +1108,7 @@ fn rec709_video_media_info(file_size: u64) -> MediaInfo {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth: 10,
             has_alpha: false,
             avg_bitrate: 20_000_000,

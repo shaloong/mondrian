@@ -469,6 +469,12 @@ impl AppState {
         &mut self,
         payload: AssetSetInterpretationPayload,
     ) -> Result<()> {
+        payload.interpretation.camera_raw.validate().map_err(|error| {
+            MondrianError::WorkflowStepFailed {
+                step_id: "set_asset_interpretation".to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
         let library = self.asset_library_handle().ok_or_else(|| {
             let reason = "素材库未连接".to_string();
             self.set_status_hint(format!("解释素材失败：{reason}"), true);
@@ -4382,6 +4388,14 @@ mod tests {
         let events = state.event_bus.subscribe();
         let interpretation = AssetMediaInterpretation {
             color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2100Pq },
+            camera_raw: mondrian_core::CameraRawInterpretation {
+                exposure_millistops: 1_000,
+                white_balance: mondrian_core::CameraRawWhiteBalance::TemperatureTint {
+                    temperature_kelvin: 5_600,
+                    tint_milli: 25,
+                },
+                debayer_quality: mondrian_core::CameraRawDebayerQuality::Bilinear,
+            },
             ..AssetMediaInterpretation::default()
         };
 
@@ -4406,6 +4420,31 @@ mod tests {
         assert!(events.try_iter().any(|event| matches!(event, AppEvent::AssetLibraryReloaded)));
 
         remove_temp_path(&library_root);
+    }
+
+    #[test]
+    fn dispatch_assets_set_interpretation_rejects_invalid_camera_raw_bounds() {
+        let mut state = AppState::new();
+        let error = state
+            .dispatch_action(assets_set_interpretation_action(
+                AssetsSetInterpretationPayload {
+                    asset_id: AssetId::new(),
+                    interpretation: AssetMediaInterpretation {
+                        camera_raw: mondrian_core::CameraRawInterpretation {
+                            exposure_millistops: 5_001,
+                            ..mondrian_core::CameraRawInterpretation::default()
+                        },
+                        ..AssetMediaInterpretation::default()
+                    },
+                },
+            ))
+            .expect_err("invalid RAW interpretation must fail closed");
+
+        assert!(matches!(
+            error,
+            MondrianError::WorkflowStepFailed { ref step_id, ref reason }
+                if step_id == "set_asset_interpretation" && reason.contains("outside")
+        ));
     }
 
     #[test]

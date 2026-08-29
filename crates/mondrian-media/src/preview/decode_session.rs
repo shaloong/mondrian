@@ -2640,6 +2640,7 @@ fn decode_preview_frame_outcome_in_sessions(
         hardware_decode_request,
         hardware_decode_device_selector,
         source_color,
+        camera_raw,
     } = request;
     let started_at = Instant::now();
     if should_cancel() {
@@ -2648,6 +2649,54 @@ fn decode_preview_frame_outcome_in_sessions(
                 PreviewDecodeCancellationCheckpoint::BeforeInputOpen,
             ),
         ));
+    }
+    ensure_ffmpeg_initialized(path)?;
+    // A caller-supplied complete revision authorized the request's probe,
+    // color contract, and cache identity. Recheck it at the execution worker
+    // before either the dedicated RAW Adapter or a reusable decoder Session
+    // can execute under stale source semantics.
+    let fingerprint = resolve_preview_execution_fingerprint(path, fingerprint)?;
+    if let Some(camera_raw) = camera_raw {
+        if representation.is_native_surface() || representation.is_compact_cpu_yuv() {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "camera RAW execution requires CPU scene-linear float output".to_owned(),
+            });
+        }
+        if source_color.color_space() != Some(mondrian_core::ColorSpace::LinearRec709) {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: format!(
+                    "camera RAW execution requires LinearRec709 source identity, got {:?}",
+                    source_color.color_space()
+                ),
+            });
+        }
+        match crate::camera_raw::decode_camera_raw_frame(
+            path,
+            video_stream_index,
+            max_width,
+            max_height,
+            camera_raw,
+            should_cancel.as_ref(),
+        ) {
+            Ok(frame) => {
+                let frame = frame.with_access_mode(access_mode).with_elapsed(started_at.elapsed());
+                return finalize_preview_decode_outcome(
+                    path,
+                    fingerprint,
+                    PreviewDecodeOutcome::FloatFrame(frame),
+                );
+            }
+            Err(_) if should_cancel() => {
+                return Ok(PreviewDecodeOutcome::Canceled(
+                    PreviewDecodeCancellation::cooperative(
+                        PreviewDecodeCancellationCheckpoint::PacketRead,
+                    ),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
     let output_lease_wait_started_at = Instant::now();
     let selected_slot = loop {
@@ -2672,12 +2721,6 @@ fn decode_preview_frame_outcome_in_sessions(
         std::thread::sleep(Duration::from_micros(250));
     };
     let output_lease_wait_us = duration_us(output_lease_wait_started_at.elapsed());
-    ensure_ffmpeg_initialized(path)?;
-    // A caller-supplied complete revision authorized the request's probe,
-    // color contract, and cache identity. Recheck it at the execution worker
-    // after any output-lease wait so a replacement cannot enter an existing or
-    // newly opened decoder Session under stale semantics.
-    let fingerprint = resolve_preview_execution_fingerprint(path, fingerprint)?;
     let outcome: Result<PreviewDecodeOutcome> = {
         let slot = sessions.slot_mut(selected_slot);
         let backend = preview_decode_backend();

@@ -16,6 +16,16 @@ identities. They are not native window surface color spaces; viewer
 presentation still passes through the configured display/view transform before
 targeting an sRGB, Display P3, PQ, or HLG surface.
 
+Interpret Footage projects Camera RAW controls only when the media probe carries
+a supported typed RAW contract. Its draft owns the complete
+`AssetMediaInterpretation`; Exposure, As Shot/manual white balance, and Debayer
+menus update that draft, and Confirm dispatches one existing Asset
+`SetInterpretation` transaction. Color-space and encoded-range selectors are
+disabled for RAW because the Adapter's output is explicitly scene-linear
+Rec.709 full-range Float32. Non-RAW assets omit the RAW controls from the
+retained Widget tree. The import picker includes DNG, but extension spelling
+alone never grants RAW execution authority.
+
 ## Crate Split
 
 - `mondrian-ui-core`: widget trait, event types, accessibility, focus/shortcut/tooltip traits, tree traversal.

@@ -341,6 +341,22 @@ pub enum AudioCodec {
 /// Encoded pixel format identified by a media probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PixelFormat {
+    /// 8-bit RGGB Bayer color-filter array.
+    BayerRggb8,
+    /// 8-bit BGGR Bayer color-filter array.
+    BayerBggr8,
+    /// 8-bit GBRG Bayer color-filter array.
+    BayerGbrg8,
+    /// 8-bit GRBG Bayer color-filter array.
+    BayerGrbg8,
+    /// 16-bit RGGB Bayer color-filter array.
+    BayerRggb16le,
+    /// 16-bit BGGR Bayer color-filter array.
+    BayerBggr16le,
+    /// 16-bit GBRG Bayer color-filter array.
+    BayerGbrg16le,
+    /// 16-bit GRBG Bayer color-filter array.
+    BayerGrbg16le,
     /// Planar YUV 4:2:0, 8-bit.
     Yuv420p,
     /// Planar YUV 4:2:2, 8-bit.
@@ -397,6 +413,10 @@ impl PixelFormat {
     /// Nominal component bit depth.
     pub const fn bit_depth(self) -> u8 {
         match self {
+            Self::BayerRggb16le
+            | Self::BayerBggr16le
+            | Self::BayerGbrg16le
+            | Self::BayerGrbg16le => 16,
             Self::Yuv420p10le | Self::Yuv422p10le | Self::Yuv444p10le | Self::P010 => 10,
             Self::Gbrp10le | Self::Gbrap10le => 10,
             Self::Yuv420p12le
@@ -437,6 +457,21 @@ impl PixelFormat {
                 | Self::Gbrap10le
                 | Self::Gbrap12le
                 | Self::Gbrap16le
+        )
+    }
+
+    /// Whether samples form a one-component camera color-filter array.
+    pub const fn is_bayer(self) -> bool {
+        matches!(
+            self,
+            Self::BayerRggb8
+                | Self::BayerBggr8
+                | Self::BayerGbrg8
+                | Self::BayerGrbg8
+                | Self::BayerRggb16le
+                | Self::BayerBggr16le
+                | Self::BayerGbrg16le
+                | Self::BayerGrbg16le
         )
     }
 }
@@ -1385,11 +1420,18 @@ pub struct VideoStreamInfo {
     pub avg_bitrate: u64,
     /// Exact or bounded-probe-proven frame count.
     pub total_frames: Option<u64>,
+    /// Camera RAW probe facts when a closed RAW Adapter owns this stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_raw: Option<Box<crate::CameraRawMetadata>>,
 }
 
 impl VideoStreamInfo {
     /// Return the only source identity allowed to drive media pixels.
     pub fn executable_color_space(&self) -> Option<ColorSpace> {
+        if let Some(raw) = self.camera_raw.as_ref() {
+            return (raw.has_color_matrix && raw.has_as_shot_neutral)
+                .then_some(ColorSpace::LinearRec709);
+        }
         self.color_interpretation.executable_color_space_from_probe(
             self.proven_sampling(),
             self.color_metadata.as_ref(),
@@ -1545,6 +1587,7 @@ pub fn is_picture_file_extension(path: &Path) -> bool {
     matches!(
         extension.to_ascii_lowercase().as_str(),
         "bmp"
+            | "dng"
             | "dpx"
             | "exr"
             | "gif"
@@ -1584,6 +1627,7 @@ mod tests {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth,
             has_alpha,
             avg_bitrate: 20_000_000,
@@ -1620,6 +1664,31 @@ mod tests {
             warnings: Vec::new(),
             user_overridable: true,
         }
+    }
+
+    #[test]
+    fn camera_raw_requires_complete_development_metadata_for_execution() {
+        let mut stream = video_stream(true, 16, false);
+        stream.pixel_format = PixelFormat::BayerRggb16le;
+        stream.camera_raw = Some(Box::new(crate::CameraRawMetadata {
+            adapter: crate::CameraRawAdapter::Dng,
+            cfa_pattern: crate::CameraRawCfaPattern::Rggb,
+            width: 3_840,
+            height: 2_160,
+            bit_depth: 16,
+            compression: 1,
+            camera_make: None,
+            camera_model: None,
+            has_color_matrix: true,
+            has_as_shot_neutral: true,
+        }));
+        assert_eq!(
+            stream.executable_color_space(),
+            Some(ColorSpace::LinearRec709)
+        );
+
+        stream.camera_raw.as_mut().expect("RAW metadata").has_color_matrix = false;
+        assert_eq!(stream.executable_color_space(), None);
     }
 
     fn color_metadata_with_matrix(matrix: VideoColorTag) -> VideoColorMetadata {

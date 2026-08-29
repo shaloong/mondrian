@@ -9,7 +9,11 @@
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 
-use mondrian_core::{Resolution, SourceSampleTarget, SourceSamplingBoundary, TimelineTime};
+use mondrian_core::{
+    CameraRawAdapter, CameraRawInterpretation, ColorSpace, Resolution, SourceSampleTarget,
+    SourceSamplingBoundary, TimelineTime,
+};
+use serde::{Deserialize, Serialize};
 
 use super::{MediaFileFingerprint, PreviewHardwareDecodeRequest, PreviewSourceColorContract};
 use crate::info::{PixelFormat, VideoCodec, VideoCodecProfile, VideoStreamInfo};
@@ -17,6 +21,66 @@ use crate::proxy::{
     ProxyArtifactManifest, ProxyEncodingProfile, PROXY_MANIFEST_VERSION,
     PROXY_PRIMARY_VIDEO_STREAM_INDEX,
 };
+
+/// Versioned Camera RAW development identity shared by Preview and Export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CameraRawDecodeIntent {
+    /// Source Adapter proven by the media probe.
+    adapter: CameraRawAdapter,
+    /// Persistent author controls.
+    interpretation: CameraRawInterpretation,
+    /// Exact algorithm revision included in every decode/cache identity.
+    algorithm_version: u16,
+}
+
+impl CameraRawDecodeIntent {
+    /// Current deterministic DNG development algorithm revision.
+    pub const ALGORITHM_VERSION: u16 = 1;
+
+    /// Build and validate an executable RAW development identity.
+    pub fn new(
+        adapter: CameraRawAdapter,
+        interpretation: CameraRawInterpretation,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        interpretation.validate().map_err(|error| {
+            PreviewDecodeContractError::InvalidCameraRawInterpretation { reason: error.to_string() }
+        })?;
+        Ok(Self {
+            adapter,
+            interpretation,
+            algorithm_version: Self::ALGORITHM_VERSION,
+        })
+    }
+
+    /// Source Adapter proven by the media probe.
+    pub const fn adapter(self) -> CameraRawAdapter {
+        self.adapter
+    }
+
+    /// Persistent author controls carried by this exact execution identity.
+    pub const fn interpretation(self) -> CameraRawInterpretation {
+        self.interpretation
+    }
+
+    /// Exact development algorithm revision.
+    pub const fn algorithm_version(self) -> u16 {
+        self.algorithm_version
+    }
+
+    fn validate_current(self) -> Result<(), PreviewDecodeContractError> {
+        self.interpretation.validate().map_err(|error| {
+            PreviewDecodeContractError::InvalidCameraRawInterpretation { reason: error.to_string() }
+        })?;
+        if self.algorithm_version != Self::ALGORITHM_VERSION {
+            return Err(
+                PreviewDecodeContractError::UnsupportedCameraRawAlgorithmVersion {
+                    algorithm_version: self.algorithm_version,
+                },
+            );
+        }
+        Ok(())
+    }
+}
 
 /// Decoder-native surface family conservatively inferred from physical source evidence.
 ///
@@ -523,6 +587,7 @@ pub struct PreviewDecodeKey {
     source_sample: SourceSampleTarget,
     representation: PreviewDecodeRepresentation,
     source_color: PreviewSourceColorContract,
+    camera_raw: Option<CameraRawDecodeIntent>,
 }
 
 impl PreviewDecodeKey {
@@ -552,7 +617,30 @@ impl PreviewDecodeKey {
             source_sample,
             representation,
             source_color,
+            camera_raw: None,
         })
+    }
+
+    /// Build a validated exact decode key for a probe-admitted camera RAW source.
+    pub fn new_camera_raw(
+        source: PreviewDecodeSource,
+        source_sample: SourceSampleTarget,
+        representation: PreviewDecodeRepresentation,
+        source_color: PreviewSourceColorContract,
+        camera_raw: CameraRawDecodeIntent,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        camera_raw.validate_current()?;
+        if representation.is_native_surface() || representation.is_compact_cpu_yuv() {
+            return Err(PreviewDecodeContractError::CameraRawRequiresCpuFloat);
+        }
+        if source_color.color_space() != Some(ColorSpace::LinearRec709) {
+            return Err(PreviewDecodeContractError::CameraRawRequiresLinearRec709 {
+                actual: source_color.color_space(),
+            });
+        }
+        let mut key = Self::new(source, source_sample, representation, source_color)?;
+        key.camera_raw = Some(camera_raw);
+        Ok(key)
     }
 
     /// Selected physical file and stream revision.
@@ -573,6 +661,11 @@ impl PreviewDecodeKey {
     /// App-resolved source color/range facts used by media conversion.
     pub const fn source_color(&self) -> PreviewSourceColorContract {
         self.source_color
+    }
+
+    /// Camera RAW development identity, when the probe admitted one.
+    pub const fn camera_raw(&self) -> Option<CameraRawDecodeIntent> {
+        self.camera_raw
     }
 }
 
@@ -629,6 +722,27 @@ fn validate_representation_for_source(
 /// Invalid or incomplete physical Preview decode contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PreviewDecodeContractError {
+    /// RAW author controls failed their closed bounds.
+    #[error("invalid camera RAW interpretation: {reason}")]
+    InvalidCameraRawInterpretation {
+        /// Stable validation reason.
+        reason: String,
+    },
+    /// Serialized or external state selected a development revision this build cannot execute.
+    #[error("unsupported camera RAW algorithm version {algorithm_version}")]
+    UnsupportedCameraRawAlgorithmVersion {
+        /// Unrecognized development revision.
+        algorithm_version: u16,
+    },
+    /// Camera RAW output is always CPU-addressable scene-linear float in this slice.
+    #[error("camera RAW Preview decode requires CPU float output")]
+    CameraRawRequiresCpuFloat,
+    /// Camera RAW Adapter output has one explicit source identity.
+    #[error("camera RAW Preview decode requires LinearRec709 source identity, got {actual:?}")]
+    CameraRawRequiresLinearRec709 {
+        /// Contradictory input identity.
+        actual: Option<ColorSpace>,
+    },
     /// Empty paths cannot identify a physical source.
     #[error("Preview decode source path is empty")]
     EmptySourcePath,
@@ -765,7 +879,15 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Gbrap16le
         | PixelFormat::Rgb24
         | PixelFormat::Rgba
-        | PixelFormat::Rgba64le => None,
+        | PixelFormat::Rgba64le
+        | PixelFormat::BayerRggb8
+        | PixelFormat::BayerBggr8
+        | PixelFormat::BayerGbrg8
+        | PixelFormat::BayerGrbg8
+        | PixelFormat::BayerRggb16le
+        | PixelFormat::BayerBggr16le
+        | PixelFormat::BayerGbrg16le
+        | PixelFormat::BayerGrbg16le => None,
     }
 }
 
@@ -894,6 +1016,7 @@ mod tests {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth: pixel_format.bit_depth(),
             has_alpha: pixel_format.has_alpha(),
             avg_bitrate: 1,
@@ -1510,5 +1633,68 @@ mod tests {
                 "{representation:?} must not reinterpret technical channels"
             );
         }
+    }
+
+    #[test]
+    fn camera_raw_author_controls_rotate_decode_identity_and_request_projection() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/frame.dng"),
+            exact_fingerprint(43),
+            &video_stream(0, PixelFormat::BayerRggb16le, true),
+        )
+        .expect("valid RAW source");
+        let sample = SourceSampleTarget::covering(TimelineTime::ZERO);
+        let color = PreviewSourceColorContract::automatic(
+            ColorSpace::LinearRec709,
+            super::super::DecodedVideoRange::Full,
+        );
+        let base_intent =
+            CameraRawDecodeIntent::new(CameraRawAdapter::Dng, CameraRawInterpretation::default())
+                .expect("base RAW intent");
+        let raised_intent = CameraRawDecodeIntent::new(
+            CameraRawAdapter::Dng,
+            CameraRawInterpretation {
+                exposure_millistops: 1_000,
+                ..CameraRawInterpretation::default()
+            },
+        )
+        .expect("raised RAW intent");
+        let base = PreviewDecodeKey::new_camera_raw(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            color,
+            base_intent,
+        )
+        .expect("base RAW key");
+        let raised = PreviewDecodeKey::new_camera_raw(
+            source.clone(),
+            sample,
+            PreviewDecodeRepresentation::NativeCpu,
+            color,
+            raised_intent,
+        )
+        .expect("raised RAW key");
+
+        assert_ne!(base, raised);
+        assert_eq!(base.camera_raw(), Some(base_intent));
+        assert_eq!(
+            super::super::PreviewDecodeRequest::from_key(
+                &base,
+                super::super::PreviewDecodeAccessMode::RandomAccessStillFrame,
+            )
+            .camera_raw,
+            Some(base_intent)
+        );
+        assert_eq!(
+            PreviewDecodeKey::new_camera_raw(
+                source,
+                sample,
+                PreviewDecodeRepresentation::NativeSurface,
+                color,
+                base_intent,
+            ),
+            Err(PreviewDecodeContractError::CameraRawRequiresCpuFloat)
+        );
     }
 }

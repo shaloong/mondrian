@@ -7,6 +7,24 @@ ACES, and Custom OCIO are product-level modes over that shared integration, not
 three renderer engines. Missing processors or configs required by a selected
 mode must surface as errors instead of falling back to different color science.
 
+## Camera RAW input boundary
+
+Camera RAW development is a source-materialization step before OCIO, not a
+creative Effect or output transform. A typed DNG/CinemaDNG probe admits the
+Media-owned Adapter; that Adapter produces scene-linear Rec.709 RGBA32F after
+deterministic CFA reconstruction, authored/as-shot white balance, exposure,
+camera matrix inversion, and chromatic adaptation. Renderer then consumes the
+same `Source Frame Preparation` contract used by Preview and Export and applies
+the configured source-to-working transform exactly once.
+
+The persistent controls use fixed-point values so they remain exact author and
+cache identity. RAW output is always full-range float; ordinary encoded-video
+range overrides are ignored and disabled in Interpret Footage. Missing
+ColorMatrix or AsShotNeutral evidence, unsupported CFA geometry, Adapter drift,
+or algorithm-version drift fails closed. This slice supports one DNG or one
+single-frame CinemaDNG file; it does not claim proprietary RAW formats or a
+CinemaDNG folder-sequence model.
+
 The Rust integration pins `ocio-rs` 0.2.1 revision `933c65dc` with the `bundled`
 feature enabled, so normal application builds exercise the real OpenColorIO
 bridge rather than a stub runtime. Its Windows bundled path consumes the exact

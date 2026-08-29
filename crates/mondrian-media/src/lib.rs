@@ -12,6 +12,7 @@ mod audio_device;
 mod audio_output;
 mod audio_playback;
 pub mod audio_source;
+mod camera_raw;
 pub mod decoder;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
@@ -49,6 +50,7 @@ pub use audio_source::{
     AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics, AudioSourceReader,
     AudioSourceSelection,
 };
+pub use camera_raw::probe_camera_raw_metadata;
 pub use decoder::{
     resolve_decoded_video_range, DecodedFrameResidency, DecodedGpuFrameHandleKind,
     DecodedVideoChromaLocation, DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract,
@@ -85,11 +87,11 @@ pub use packet_identity::{
 pub use preview::{
     clear_thread_local_preview_decode_session, decode_preview_frame_cancellable,
     preview_decode_backend, preview_decode_cpu_budget, run_preview_demux_worker,
-    CpuYuvChromaPlaneLayout, CpuYuvChromaPlanes, CpuYuvChromaSubsampling, CpuYuvFrame, CpuYuvPlane,
-    CpuYuvSampleFormat, DecodedRgbaAlphaMode, DecodedRgbaEncoding, DecodedRgbaFrameContract,
-    FfmpegD3D11TextureView, FfmpegD3D12TextureView, FfmpegNativeDecodedFrameResource,
-    FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame, MediaFileChangeStamp,
-    MediaFileFingerprint, MediaFileObjectIdentity, PreviewCompactCpuYuvHint,
+    CameraRawDecodeIntent, CpuYuvChromaPlaneLayout, CpuYuvChromaPlanes, CpuYuvChromaSubsampling,
+    CpuYuvFrame, CpuYuvPlane, CpuYuvSampleFormat, DecodedRgbaAlphaMode, DecodedRgbaEncoding,
+    DecodedRgbaFrameContract, FfmpegD3D11TextureView, FfmpegD3D12TextureView,
+    FfmpegNativeDecodedFrameResource, FfmpegNativeDecodedFrameResourceError, FloatRgbaFrame,
+    MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity, PreviewCompactCpuYuvHint,
     PreviewDecodeAccessMode, PreviewDecodeAdaptiveHints, PreviewDecodeAlphaPresence,
     PreviewDecodeBackend, PreviewDecodeCancellation, PreviewDecodeCancellationCheckpoint,
     PreviewDecodeCancellationCheckpointEvidence, PreviewDecodeCancellationEvidence,

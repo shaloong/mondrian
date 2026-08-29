@@ -13,6 +13,15 @@ the explicit numeric-composite bypass. This shared seam prevents consumer
 Adapters from deriving color semantics from scalar type or bit depth, and
 structurally prevents payload/intent domain mismatches after preparation.
 
+Camera RAW does not add a renderer-side color path. Media supplies a
+`SourceLinearRgb + LinearRec709 + Full` Float32 frame; Source Frame Preparation
+validates that contract, normalizes alpha once, and performs the same immutable
+input-to-working transform used for any other scene-linear source. Preview,
+Thumbnail, and Export may schedule differently but cannot demosaic, reapply RAW
+white balance/exposure, reinterpret range, or bypass the shared preparation
+seam. The current RAW Adapter is CPU-resident, so GPU-resident debayer and
+source-surface residency remain explicit unimplemented optimizations.
+
 Pointwise gamut/highlight grades stay in the same prepared Effect graph used by
 Preview and Export. CPU normalized-RGBA8 and Float32 dispatch call the same
 compiled grade objects; the production working compositor lowers them to two

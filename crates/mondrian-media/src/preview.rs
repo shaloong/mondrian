@@ -40,15 +40,17 @@ mod execution_progress;
 mod external_decode;
 mod frame_contract;
 mod frame_materialization;
+pub(crate) use frame_materialization::resize_float_rgba;
 mod hardware_decode;
 mod native_frame;
 mod playback_ring;
 mod seek_index;
 
 pub use decode_contract::{
-    PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence, PreviewDecodeContractError,
-    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
-    PreviewDecodeSource, PreviewNativeSurfaceHint, PreviewRepresentationQuality,
+    CameraRawDecodeIntent, PreviewCompactCpuYuvHint, PreviewDecodeAlphaPresence,
+    PreviewDecodeContractError, PreviewDecodeKey, PreviewDecodePayloadRequirement,
+    PreviewDecodeRepresentation, PreviewDecodeSource, PreviewNativeSurfaceHint,
+    PreviewRepresentationQuality,
 };
 pub use demux_worker::run_preview_demux_worker;
 pub use seek_index::{
@@ -119,7 +121,7 @@ use frame_materialization::materialize_decoded_frame;
 use frame_materialization::materialize_decoded_frame_with_session_output_lease;
 #[cfg(test)]
 use frame_materialization::{
-    convert_decoded_to_rgba, decoded_native_surface_format_from_software_format, resize_float_rgba,
+    convert_decoded_to_rgba, decoded_native_surface_format_from_software_format,
     PreviewNativeFrameMaterializationError,
 };
 #[cfg(test)]
@@ -213,6 +215,8 @@ pub enum PreviewDecodePath {
     InProcessFfmpegCpuRgba,
     /// In-process FFmpeg decoder preserved scene-linear CPU RGBA f32 samples.
     InProcessFfmpegCpuFloat,
+    /// In-process DNG/CinemaDNG Adapter returned developed scene-linear RGBA32F.
+    InProcessCameraRawDng,
     /// In-process FFmpeg decoder retained compact CPU YUV planes for GPU materialization.
     InProcessFfmpegCpuYuv,
     /// In-process FFmpeg decoder returned a retained native hardware surface.
@@ -496,6 +500,8 @@ pub struct PreviewDecodeRequest<'a> {
     pub hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     /// Resolved source color and range contract required by CPU YUV conversion.
     pub source_color: PreviewSourceColorContract,
+    /// Probe-admitted Camera RAW development identity.
+    pub camera_raw: Option<CameraRawDecodeIntent>,
 }
 
 /// Semantic interpretation of decoded RGB samples at the Media/Renderer seam.
@@ -614,6 +620,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color: key.source_color(),
+            camera_raw: key.camera_raw(),
         }
     }
 
@@ -637,6 +644,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color,
+            camera_raw: None,
         }
     }
 
@@ -658,6 +666,12 @@ impl<'a> PreviewDecodeRequest<'a> {
     /// Complete revisions are execution preconditions, not cache hints.
     pub fn with_fingerprint(mut self, fingerprint: MediaFileFingerprint) -> Self {
         self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    /// Select a probe-admitted Camera RAW development path.
+    pub const fn with_camera_raw(mut self, camera_raw: CameraRawDecodeIntent) -> Self {
+        self.camera_raw = Some(camera_raw);
         self
     }
 
@@ -1123,6 +1137,7 @@ impl PreviewDecodePath {
         match self {
             Self::InProcessFfmpegCpuRgba => "InProcessFfmpegCpuRgba",
             Self::InProcessFfmpegCpuFloat => "InProcessFfmpegCpuFloat",
+            Self::InProcessCameraRawDng => "InProcessCameraRawDng",
             Self::InProcessFfmpegCpuYuv => "InProcessFfmpegCpuYuv",
             Self::InProcessFfmpegNative => "InProcessFfmpegNative",
             Self::ExternalFfmpegCpuRgba => "ExternalFfmpegCpuRgba",

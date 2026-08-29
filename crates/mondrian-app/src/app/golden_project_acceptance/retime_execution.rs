@@ -104,6 +104,7 @@ fn golden_hero_retime_is_one_exact_contract_across_author_preview_audio_export_a
                 color_metadata: None,
                 color_metadata_hints: Vec::new(),
                 hdr_metadata: Vec::new(),
+                camera_raw: None,
                 bit_depth: 8,
                 has_alpha: false,
                 avg_bitrate: 8_000_000,

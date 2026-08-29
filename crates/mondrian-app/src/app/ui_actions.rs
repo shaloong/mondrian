@@ -441,6 +441,9 @@ pub struct AppShellVideoSignalDiagnostics {
     /// Raw container/stream/file-name hints captured by the same media probe.
     #[serde(default)]
     pub color_metadata_hints: Vec<VideoColorMetadataHint>,
+    /// Camera RAW facts proven by the media Adapter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub camera_raw: Option<mondrian_core::CameraRawMetadata>,
 }
 
 /// Effective input-to-working identities resolved before opening Interpret Footage.

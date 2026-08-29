@@ -16,10 +16,10 @@ use mondrian_core::{
     PictureInterpretationOverrides, Resolution, ResolvedPictureGeometry, TimelineTime,
 };
 use mondrian_media::{
-    DecodedVideoMatrix, DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeKey,
-    PreviewDecodePayloadRequirement, PreviewDecodeRepresentation, PreviewDecodeSource,
-    PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract, ProxyConfig,
-    ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
+    DecodedVideoMatrix, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
+    PreviewDecodeKey, PreviewDecodePayloadRequirement, PreviewDecodeRepresentation,
+    PreviewDecodeSource, PreviewSourceColorContract, ProxyArtifactManifest, ProxyColorContract,
+    ProxyConfig, ProxyGenerator, ProxyStatus, VideoColorDiagnostic, VideoStreamInfo,
 };
 use mondrian_renderer::{RenderInputTransform, SourceFramePreparationIntent};
 use mondrian_timeline::sequence::{
@@ -154,7 +154,7 @@ pub(crate) enum PreviewMediaSourceUnavailableReason {
 /// Exhaustive result of adapting one asset into Preview execution semantics.
 #[derive(Debug, Clone)]
 pub(crate) enum PreviewMediaSourceOutcome {
-    Ready(ResolvedPreviewMediaSource),
+    Ready(Box<ResolvedPreviewMediaSource>),
     ColorRejected(RejectedPreviewMediaSource),
     Unavailable(UnavailablePreviewMediaSource),
 }
@@ -203,10 +203,14 @@ pub(crate) fn resolve_preview_media_source(
         executable_color_space,
         request.input_color,
     );
-    let input_video_range = DecodedVideoRangeContract::from_interpretation(
-        request.asset.interpretation.range,
-        primary_video.color_range,
-    );
+    let input_video_range = if primary_video.camera_raw.is_some() {
+        DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full }
+    } else {
+        DecodedVideoRangeContract::from_interpretation(
+            request.asset.interpretation.range,
+            primary_video.color_range,
+        )
+    };
     let (mut source_color, preparation_intent) = match input_color_resolution.resolved {
         ResolvedInputColor::Color(color_space) => (
             PreviewSourceColorContract::new(color_space, input_video_range),
@@ -247,7 +251,9 @@ pub(crate) fn resolve_preview_media_source(
     }
     let source_has_alpha = proven_sampling.has_alpha;
     let resolved_path = match resolve_preview_media_decode_path(
-        request.prefer_proxy && !source_color.is_data_texture(),
+        request.prefer_proxy
+            && !source_color.is_data_texture()
+            && primary_video.camera_raw.is_none(),
         source_has_alpha,
         source_path,
         primary_video,
@@ -314,12 +320,28 @@ pub(crate) fn resolve_preview_media_source(
             );
         }
     };
-    let decode = match PreviewDecodeKey::new(
-        decode_source,
-        request.source_sample,
-        representation,
-        source_color,
-    ) {
+    let decode_result = match primary_video.camera_raw.as_ref() {
+        Some(raw) => mondrian_media::CameraRawDecodeIntent::new(
+            raw.adapter,
+            request.asset.interpretation.camera_raw,
+        )
+        .and_then(|intent| {
+            PreviewDecodeKey::new_camera_raw(
+                decode_source,
+                request.source_sample,
+                representation,
+                source_color,
+                intent,
+            )
+        }),
+        None => PreviewDecodeKey::new(
+            decode_source,
+            request.source_sample,
+            representation,
+            source_color,
+        ),
+    };
+    let decode = match decode_result {
         Ok(decode) => decode,
         Err(error) => {
             return unavailable(
@@ -339,17 +361,17 @@ pub(crate) fn resolve_preview_media_source(
         preparation_intent,
     };
 
-    let proxy_generation = (!source_color.is_data_texture())
+    let proxy_generation = (!source_color.is_data_texture() && primary_video.camera_raw.is_none())
         .then(|| {
             proxy_generation_intent(&request, source_path, path_resolution, source_fingerprint)
         })
         .flatten();
-    PreviewMediaSourceOutcome::Ready(ResolvedPreviewMediaSource {
+    PreviewMediaSourceOutcome::Ready(Box::new(ResolvedPreviewMediaSource {
         key,
         path_resolution,
         input_color_resolution,
         proxy_generation,
-    })
+    }))
 }
 
 /// Resolve the exact input-color decision shared by Preview evaluation paths.

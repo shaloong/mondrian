@@ -466,6 +466,7 @@ mod tests {
             color_metadata: None,
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth: 10,
             has_alpha: false,
             avg_bitrate: 205_000_000,

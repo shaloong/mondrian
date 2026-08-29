@@ -3367,6 +3367,7 @@ fn asset_grid_asset_context_menu_items(
                             sampling: video.proven_sampling(),
                             color_metadata: video.color_metadata.clone(),
                             color_metadata_hints: video.color_metadata_hints.clone(),
+                            camera_raw: video.camera_raw.as_deref().cloned(),
                         },
                     ),
                     input_pipeline: input_pipeline.cloned(),

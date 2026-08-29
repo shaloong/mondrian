@@ -32,6 +32,7 @@ fn color_contract() -> ThumbnailColorContract {
         source_range: DecodedVideoRangeContract::Automatic {
             probed_range: DecodedVideoRange::Limited,
         },
+        camera_raw: None,
         working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
         output_color_space: ColorSpace::Srgb,
         tone_map: true,
@@ -159,6 +160,7 @@ fn video_media_info(file_size: u64) -> MediaInfo {
         color_metadata: None,
         color_metadata_hints: Vec::new(),
         hdr_metadata: Vec::new(),
+        camera_raw: None,
         bit_depth: 8,
         has_alpha: false,
         avg_bitrate: 10_000_000,

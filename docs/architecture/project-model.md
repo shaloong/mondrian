@@ -30,6 +30,15 @@ Project state. See [Timeline Render Cache](timeline-render-cache.md).
 `mondrian-core` keeps only shared project metadata and settings types. It does
 not define a second top-level project container.
 
+Camera RAW controls are asset-library author state, not Project/Sequence/Clip
+duplicates. `AssetMediaInterpretation.camera_raw` stores exact fixed-point
+exposure, camera-versus-authored white balance, and debayer quality. Probe facts
+such as CFA, bit depth, camera model, ColorMatrix, and AsShotNeutral remain in
+the media snapshot. The immutable Export dependency freezes both sets, while
+the versioned runtime development intent combines them at the Media boundary.
+One Asset `SetInterpretation` action replaces the complete interpretation
+atomically; dialog draft changes do not write SQLite.
+
 `document_revision` advances only after an explicit project save succeeds. It
 is persistence/conflict evidence, not author-semantic identity. Each persisted
 Sequence owns an independent monotonic `SequenceRevision`; Playback, Preview,
@@ -638,7 +647,7 @@ fields and older or future document versions fail closed; no alias, fallback,
 default synthesis, or inferred migration is promised during Alpha.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is
-v5. Its ordered `PRAGMA user_version` registry applies each step in one
+v6. Its ordered `PRAGMA user_version` registry applies each step in one
 transaction, validates the resulting tables and columns, and rolls back both
 DDL and version on failure. SQLite migrates only the extracted runtime copy;
 opening never rewrites the source `.mdp`.

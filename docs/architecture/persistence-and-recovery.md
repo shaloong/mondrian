@@ -22,10 +22,14 @@ decodes them under a 256 MiB per-still allocation cap and validates canonical
 RGBA8 structure and declared dimensions before admitting the Project.
 
 The archive format, Project document schema, and SQLite schema are independent
-version axes. The current values are archive v1, document v25, and library v5.
-Library v5 canonicalizes persisted native audio layout evidence as exact,
-unspecified, or unsupported; its v4 migration is a field-scoped transactional
-JSON rewrite and never interprets asset names or stream labels. An archive is
+version axes. The current values are archive v1, document v25, and library v6.
+Library v5 canonicalized persisted native audio layout evidence as exact,
+unspecified, or unsupported; its v4 migration was a field-scoped transactional
+JSON rewrite and never interpreted asset names or stream labels. Library v6
+normalizes every `AssetMediaInterpretation` JSON record with the default Camera
+RAW controls and validates their closed fixed-point bounds transactionally.
+The `.mdp` Manifest carries library schema v6; Project JSON does not duplicate
+RAW settings. An archive is
 accepted only when all three declarations match their registered
 contracts. During Alpha, old and future document schemas fail closed; absence
 of a migration is explicit and is never replaced by broad serde defaults.

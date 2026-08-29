@@ -112,6 +112,10 @@ pub fn project_file_filters() -> Vec<FileFilter> {
 pub fn media_import_filters() -> Vec<FileFilter> {
     vec![
         FileFilter::new("视频", vec!["mp4", "mov", "mkv", "webm", "avi"]),
+        FileFilter::new(
+            "图片 / Camera RAW",
+            vec!["dng", "dpx", "exr", "png", "jpg", "jpeg", "tif", "tiff"],
+        ),
         FileFilter::new("音频", vec!["mp3", "wav", "aac", "flac", "m4a"]),
     ]
 }

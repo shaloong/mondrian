@@ -376,7 +376,7 @@ fn read_ffmpeg_f32_plane_sample(
     })
 }
 
-pub(super) fn resize_float_rgba(
+pub(crate) fn resize_float_rgba(
     source: &[f32],
     source_width: u32,
     source_height: u32,

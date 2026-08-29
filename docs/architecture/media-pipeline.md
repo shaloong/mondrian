@@ -12,6 +12,32 @@ decode-contract Interface rather than silently entering color management.
 
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
+## Camera RAW Adapter
+
+`.dng` is an admitted picture extension only after the probe proves exactly one
+picture frame. The bounded TIFF/DNG parser publishes typed CFA pattern, raster,
+bit depth, compression, camera identity, ColorMatrix availability, and
+AsShotNeutral availability on `VideoStreamInfo`. Bayer sampling is explicit in
+`PixelFormat`; a probe-admitted RAW stream has the executable source identity
+`LinearRec709` rather than inheriting generic CICP interpretation.
+
+The dedicated CPU Adapter uses FFmpeg only for TIFF/DNG packet decompression
+and DNG black/white normalization. It requires a Bayer 8/16-bit output matching
+the probed 2x2 CFA, then performs deterministic bilinear or edge-aware
+demosaic, camera/as-authored white balance, exposure, camera-to-XYZ development,
+D50-to-D65 adaptation, and scene-linear Rec.709 output. The resulting
+`FloatRgbaFrame` is tagged `SourceLinearRgb` and
+`InProcessCameraRawDng`; generic RGB swscale is never an admitted RAW path.
+Probe scratch bytes are released before FFmpeg opens the image.
+
+`CameraRawDecodeIntent` binds Adapter, exact fixed-point controls, and algorithm
+version into the Preview key. Thumbnail and Export carry the same value and use
+the same decode Session Adapter. RAW proxy selection/generation, compact CPU
+YUV, and decoder-native GPU surfaces are disabled until their artifacts can
+bind the complete development identity. Current execution is whole-frame CPU
+Float32 and therefore remains a performance gap for high-resolution bursts;
+image-sequence authoring and tiled/GPU debayer belong to later work.
+
 ## Picture scan and stored geometry
 
 Media probing publishes one typed `PictureStreamMetadata` contract containing

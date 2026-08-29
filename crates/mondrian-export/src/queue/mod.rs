@@ -4345,6 +4345,7 @@ struct ExportDecodeCacheKey {
     decode_resolution: Resolution,
     source_resolution: Resolution,
     picture_geometry: ResolvedPictureGeometry,
+    camera_raw: Option<mondrian_media::CameraRawDecodeIntent>,
 }
 
 impl ExportDecodeCacheKey {
@@ -4374,6 +4375,24 @@ impl ExportDecodeCacheKey {
                 dependency.path.display()
             )
         })?;
+        let camera_raw = dependency
+            .source_video_stream
+            .as_ref()
+            .and_then(|stream| stream.camera_raw.as_ref())
+            .map(|raw| {
+                mondrian_media::CameraRawDecodeIntent::new(
+                    raw.adapter,
+                    dependency.interpretation.camera_raw,
+                )
+                .map_err(|error| {
+                    format!(
+                        "asset={} path={} invalid camera RAW export contract: {error}",
+                        asset_id,
+                        dependency.path.display()
+                    )
+                })
+            })
+            .transpose()?;
         Ok(Self {
             asset_id,
             source_path: dependency.path.clone(),
@@ -4386,6 +4405,7 @@ impl ExportDecodeCacheKey {
             decode_resolution,
             source_resolution,
             picture_geometry,
+            camera_raw,
         })
     }
 }
@@ -6203,7 +6223,13 @@ fn resolve_export_source_preparation(
             dependency
                 .color_diagnostic
                 .as_ref()
-                .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space),
+                .and_then(mondrian_media::VideoColorDiagnostic::executable_color_space)
+                .or_else(|| {
+                    dependency
+                        .source_video_stream
+                        .as_ref()
+                        .and_then(mondrian_media::VideoStreamInfo::executable_color_space)
+                }),
             color_context.working_color_space(),
         );
     if let Some(counts) = input_color_counts {
@@ -6938,6 +6964,14 @@ fn resolve_export_input_video_range(
     asset_id: AssetId,
     interpretation: mondrian_core::timeline_data::AssetMediaInterpretation,
 ) -> DecodedVideoRangeContract {
+    if media_dependencies
+        .get(&asset_id)
+        .and_then(|dependency| dependency.source_video_stream.as_ref())
+        .and_then(|stream| stream.camera_raw.as_ref())
+        .is_some()
+    {
+        return DecodedVideoRangeContract::Automatic { probed_range: DecodedVideoRange::Full };
+    }
     let detected = media_dependencies
         .get(&asset_id)
         .and_then(|dependency| dependency.color_diagnostic.as_ref())
@@ -7033,7 +7067,7 @@ fn decode_video_layer_scaled(
             path.display()
         )
     })?;
-    let media_request = PreviewDecodeRequest::new(
+    let mut media_request = PreviewDecodeRequest::new(
         path,
         source_sample,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
@@ -7045,6 +7079,24 @@ fn decode_video_layer_scaled(
     )
     .with_video_stream_index(video_stream_index)
     .with_fingerprint(dependency.source_fingerprint);
+    if let Some(raw) = dependency
+        .source_video_stream
+        .as_ref()
+        .and_then(|stream| stream.camera_raw.as_ref())
+    {
+        let intent = mondrian_media::CameraRawDecodeIntent::new(
+            raw.adapter,
+            dependency.interpretation.camera_raw,
+        )
+        .map_err(|error| {
+            format!(
+                "asset={} path={} invalid camera RAW export contract: {error}",
+                asset_id,
+                path.display()
+            )
+        })?;
+        media_request = media_request.with_camera_raw(intent);
+    }
     let decode_cancellation = cancellation.clone();
     let outcome =
         decode_context.decode_cancellable(media_request, move || decode_cancellation.is_canceled());
@@ -9286,6 +9338,18 @@ mod tests {
         assert_ne!(original, changed);
         let mut changed = original.clone();
         changed.source_resolution.width /= 2;
+        assert_ne!(original, changed);
+        let mut changed = original.clone();
+        changed.camera_raw = Some(
+            mondrian_media::CameraRawDecodeIntent::new(
+                mondrian_core::CameraRawAdapter::Dng,
+                mondrian_core::CameraRawInterpretation {
+                    exposure_millistops: 1_000,
+                    ..mondrian_core::CameraRawInterpretation::default()
+                },
+            )
+            .expect("valid RAW cache identity"),
+        );
         assert_ne!(original, changed);
     }
 

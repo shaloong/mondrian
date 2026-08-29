@@ -5,6 +5,7 @@ use mondrian_core::timeline_data::{
     AssetMediaInterpretation, MediaColorInterpretation, MediaRangeInterpretation, MediaSignalRange,
 };
 use mondrian_core::types::{AssetId, ColorSpace, OcioColorSpaceIdentity};
+use mondrian_core::{CameraRawDebayerQuality, CameraRawWhiteBalance};
 use mondrian_media::{
     DecodedVideoRange, DetectedColorInterpretation, VideoColorDetectionMethod,
     VideoColorInterpretationConfidence, VideoColorInterpretationEvidence,
@@ -26,6 +27,8 @@ const CARD_MIN_WIDTH: f32 = 500.0;
 const CARD_WIDTH: f32 = 620.0;
 const CARD_MIN_HEIGHT: f32 = 500.0;
 const CARD_HEIGHT: f32 = 580.0;
+const RAW_CARD_MIN_HEIGHT: f32 = 650.0;
+const RAW_CARD_HEIGHT: f32 = 720.0;
 const CONTENT_PADDING: f32 = 24.0;
 const TITLE_FONT_SIZE: f32 = 18.0;
 const BODY_FONT_SIZE: f32 = 13.0;
@@ -114,6 +117,12 @@ pub struct InterpretAssetDialog {
     color_space_dropdown: Dropdown,
     range_label: Label,
     range_dropdown: Dropdown,
+    raw_exposure_label: Label,
+    raw_exposure_dropdown: Dropdown,
+    raw_white_balance_label: Label,
+    raw_white_balance_dropdown: Dropdown,
+    raw_quality_label: Label,
+    raw_quality_dropdown: Dropdown,
     diagnostics_label: Label,
     apply_button: Button,
     cancel_button: Button,
@@ -122,11 +131,30 @@ pub struct InterpretAssetDialog {
 impl InterpretAssetDialog {
     /// Build an Interpret Footage dialog.
     pub fn new(draft: AppUiInterpretAssetDraft) -> Self {
+        let raw_active = draft
+            .video_signal
+            .as_ref()
+            .and_then(|signal| signal.camera_raw.as_ref())
+            .is_some();
         let mut dialog = Self {
             id: WidgetId::new(),
             surface: DialogSurface::new(
-                Size::new(CARD_MIN_WIDTH, CARD_MIN_HEIGHT),
-                Size::new(CARD_WIDTH, CARD_HEIGHT),
+                Size::new(
+                    CARD_MIN_WIDTH,
+                    if raw_active {
+                        RAW_CARD_MIN_HEIGHT
+                    } else {
+                        CARD_MIN_HEIGHT
+                    },
+                ),
+                Size::new(
+                    CARD_WIDTH,
+                    if raw_active {
+                        RAW_CARD_HEIGHT
+                    } else {
+                        CARD_HEIGHT
+                    },
+                ),
             )
             .with_content_padding(CONTENT_PADDING),
             bounds: Rect::ZERO,
@@ -154,6 +182,21 @@ impl InterpretAssetDialog {
             ),
             range_label: row_label("信号范围"),
             range_dropdown: range_dropdown_for(AssetMediaInterpretation::default(), None),
+            raw_exposure_label: row_label("RAW 曝光"),
+            raw_exposure_dropdown: raw_exposure_dropdown_for(
+                AssetMediaInterpretation::default(),
+                raw_active,
+            ),
+            raw_white_balance_label: row_label("RAW 白平衡"),
+            raw_white_balance_dropdown: raw_white_balance_dropdown_for(
+                AssetMediaInterpretation::default(),
+                raw_active,
+            ),
+            raw_quality_label: row_label("去马赛克"),
+            raw_quality_dropdown: raw_quality_dropdown_for(
+                AssetMediaInterpretation::default(),
+                raw_active,
+            ),
             diagnostics_label: Label::new(String::new())
                 .muted()
                 .with_font_size(BODY_FONT_SIZE)
@@ -180,16 +223,45 @@ impl InterpretAssetDialog {
     }
 
     fn refresh_controls(&mut self) {
+        let raw_active = self.raw_active();
+        let raw_controls_enabled = raw_active && self.can_apply();
         self.asset_label.set_text(self.draft.asset_name.clone());
         self.status_value_label.set_text(interpretation_status(&self.draft));
         self.color_space_dropdown = color_space_dropdown_for(
             self.draft.interpretation,
             self.draft.auto_interpretation.as_ref(),
             self.draft.video_signal.as_ref(),
-        );
+        )
+        .enabled(!raw_active);
         self.range_dropdown =
-            range_dropdown_for(self.draft.interpretation, self.draft.video_signal.as_ref());
+            range_dropdown_for(self.draft.interpretation, self.draft.video_signal.as_ref())
+                .enabled(!raw_active);
+        self.raw_exposure_dropdown =
+            raw_exposure_dropdown_for(self.draft.interpretation, raw_controls_enabled);
+        self.raw_white_balance_dropdown =
+            raw_white_balance_dropdown_for(self.draft.interpretation, raw_controls_enabled);
+        self.raw_quality_dropdown =
+            raw_quality_dropdown_for(self.draft.interpretation, raw_controls_enabled);
+        self.apply_button = Button::new("应用")
+            .enabled(self.can_apply())
+            .on_click(app_shell_confirm_interpret_asset_dialog_action());
         self.diagnostics_label.set_text(input_color_diagnostics_text(&self.draft));
+    }
+
+    fn raw_active(&self) -> bool {
+        self.draft
+            .video_signal
+            .as_ref()
+            .and_then(|signal| signal.camera_raw.as_ref())
+            .is_some()
+    }
+
+    fn can_apply(&self) -> bool {
+        self.draft
+            .video_signal
+            .as_ref()
+            .and_then(|signal| signal.camera_raw.as_ref())
+            .is_none_or(|raw| raw.has_color_matrix && raw.has_as_shot_neutral)
     }
 }
 
@@ -309,6 +381,94 @@ fn range_draft_update_action(
     })
 }
 
+fn raw_exposure_dropdown_for(interpretation: AssetMediaInterpretation, enabled: bool) -> Dropdown {
+    let current = interpretation.camera_raw.exposure_millistops;
+    let presets = [-2_000_i16, -1_000, 0, 1_000, 2_000];
+    let items = presets
+        .into_iter()
+        .map(|exposure_millistops| {
+            let mut updated = interpretation;
+            updated.camera_raw.exposure_millistops = exposure_millistops;
+            MenuItem::new(
+                raw_exposure_label(exposure_millistops),
+                raw_draft_update_action(updated),
+            )
+            .checked(current == exposure_millistops)
+        })
+        .collect();
+    Dropdown::new(raw_exposure_label(current), items).enabled(enabled)
+}
+
+fn raw_exposure_label(exposure_millistops: i16) -> String {
+    format!("{:+.1} EV", f32::from(exposure_millistops) / 1_000.0)
+}
+
+fn raw_white_balance_dropdown_for(
+    interpretation: AssetMediaInterpretation,
+    enabled: bool,
+) -> Dropdown {
+    let current = interpretation.camera_raw.white_balance;
+    let mut items = vec![MenuItem::new(
+        "As Shot（相机元数据）",
+        raw_white_balance_action(interpretation, CameraRawWhiteBalance::CameraMetadata),
+    )
+    .checked(current == CameraRawWhiteBalance::CameraMetadata)];
+    items.extend(
+        [3_200_u16, 4_300, 5_600, 6_500].into_iter().map(|temperature_kelvin| {
+            let white_balance =
+                CameraRawWhiteBalance::TemperatureTint { temperature_kelvin, tint_milli: 0 };
+            MenuItem::new(
+                format!("{temperature_kelvin} K · Tint 0"),
+                raw_white_balance_action(interpretation, white_balance),
+            )
+            .checked(current == white_balance)
+        }),
+    );
+    let label = match current {
+        CameraRawWhiteBalance::CameraMetadata => "As Shot（相机元数据）".to_owned(),
+        CameraRawWhiteBalance::TemperatureTint { temperature_kelvin, tint_milli } => {
+            format!("{temperature_kelvin} K · Tint {tint_milli:+}")
+        }
+    };
+    Dropdown::new(label, items).enabled(enabled)
+}
+
+fn raw_white_balance_action(
+    mut interpretation: AssetMediaInterpretation,
+    white_balance: CameraRawWhiteBalance,
+) -> mondrian_editor_state::Action {
+    interpretation.camera_raw.white_balance = white_balance;
+    raw_draft_update_action(interpretation)
+}
+
+fn raw_quality_dropdown_for(interpretation: AssetMediaInterpretation, enabled: bool) -> Dropdown {
+    let current = interpretation.camera_raw.debayer_quality;
+    let items = [
+        (CameraRawDebayerQuality::Bilinear, "Bilinear（快速）"),
+        (CameraRawDebayerQuality::EdgeAware, "Edge Aware（高质量）"),
+    ]
+    .into_iter()
+    .map(|(quality, label)| {
+        let mut updated = interpretation;
+        updated.camera_raw.debayer_quality = quality;
+        MenuItem::new(label, raw_draft_update_action(updated)).checked(current == quality)
+    })
+    .collect();
+    let label = match current {
+        CameraRawDebayerQuality::Bilinear => "Bilinear（快速）",
+        CameraRawDebayerQuality::EdgeAware => "Edge Aware（高质量）",
+    };
+    Dropdown::new(label, items).enabled(enabled)
+}
+
+fn raw_draft_update_action(
+    interpretation: AssetMediaInterpretation,
+) -> mondrian_editor_state::Action {
+    app_shell_interpret_asset_draft_changed_action(InterpretAssetDraftUpdatePayload {
+        interpretation,
+    })
+}
+
 fn range_auto_option_label(signal: Option<&AppShellVideoSignalDiagnostics>) -> String {
     let detected = signal.map(|signal| range_label_text(signal.range)).unwrap_or("Unknown");
     format!("自动 — {detected}")
@@ -338,6 +498,10 @@ fn auto_executable_color_space(
     signal: Option<&AppShellVideoSignalDiagnostics>,
 ) -> Option<ColorSpace> {
     let signal = signal?;
+    if let Some(raw) = signal.camera_raw.as_ref() {
+        return (raw.has_color_matrix && raw.has_as_shot_neutral)
+            .then_some(ColorSpace::LinearRec709);
+    }
     auto_interpretation.and_then(|interpretation| {
         interpretation.executable_color_space_from_probe(
             signal.sampling,
@@ -479,6 +643,26 @@ fn video_signal_summary(draft: &AppUiInterpretAssetDraft) -> String {
         return "Range/Primaries/Transfer/Matrix：无视频信号".to_owned();
     };
     let detected_range = range_label_text(signal.range);
+    if let Some(raw) = signal.camera_raw.as_ref() {
+        let camera = match (&raw.camera_make, &raw.camera_model) {
+            (Some(make), Some(model)) => format!("{make} {model}"),
+            (Some(make), None) => make.clone(),
+            (None, Some(model)) => model.clone(),
+            (None, None) => "未标记相机".to_owned(),
+        };
+        return format!(
+            "Camera RAW：{:?} · {}x{} · {}-bit · CFA {:?} · compression {} · {} · ColorMatrix={} · AsShotNeutral={}",
+            raw.adapter,
+            raw.width,
+            raw.height,
+            raw.bit_depth,
+            raw.cfa_pattern,
+            raw.compression,
+            camera,
+            raw.has_color_matrix,
+            raw.has_as_shot_neutral
+        );
+    }
     let range = match draft.interpretation.range {
         MediaRangeInterpretation::Auto => format!("{detected_range}（自动/探测）"),
         MediaRangeInterpretation::Override { range: MediaSignalRange::Full } => {
@@ -661,6 +845,48 @@ impl Widget for InterpretAssetDialog {
             ROW_HEIGHT,
         ));
 
+        if self.raw_active() {
+            row_y += ROW_HEIGHT + ROW_GAP;
+            self.raw_exposure_label.layout(Rect::new(
+                content.x,
+                row_y,
+                LABEL_COLUMN_WIDTH,
+                ROW_HEIGHT,
+            ));
+            self.raw_exposure_dropdown.layout(Rect::new(
+                control_x,
+                row_y,
+                control_width.min(360.0),
+                ROW_HEIGHT,
+            ));
+            row_y += ROW_HEIGHT + ROW_GAP;
+            self.raw_white_balance_label.layout(Rect::new(
+                content.x,
+                row_y,
+                LABEL_COLUMN_WIDTH,
+                ROW_HEIGHT,
+            ));
+            self.raw_white_balance_dropdown.layout(Rect::new(
+                control_x,
+                row_y,
+                control_width.min(360.0),
+                ROW_HEIGHT,
+            ));
+            row_y += ROW_HEIGHT + ROW_GAP;
+            self.raw_quality_label.layout(Rect::new(
+                content.x,
+                row_y,
+                LABEL_COLUMN_WIDTH,
+                ROW_HEIGHT,
+            ));
+            self.raw_quality_dropdown.layout(Rect::new(
+                control_x,
+                row_y,
+                control_width.min(360.0),
+                ROW_HEIGHT,
+            ));
+        }
+
         row_y += ROW_HEIGHT + ROW_GAP;
         self.diagnostics_label.layout(Rect::new(
             content.x,
@@ -684,10 +910,11 @@ impl Widget for InterpretAssetDialog {
                 (ctx.dispatch)(app_shell_close_modal_action());
                 EventResult::Handled
             }
-            UiEvent::KeyDown { key: KeyCode::Enter, .. } => {
+            UiEvent::KeyDown { key: KeyCode::Enter, .. } if self.can_apply() => {
                 (ctx.dispatch)(app_shell_confirm_interpret_asset_dialog_action());
                 EventResult::Handled
             }
+            UiEvent::KeyDown { key: KeyCode::Enter, .. } => EventResult::Handled,
             UiEvent::MouseDown { position, .. }
                 if self.surface.is_outside_card(self.card, *position) =>
             {
@@ -699,6 +926,17 @@ impl Widget for InterpretAssetDialog {
                 }
                 if self.range_dropdown.event(event, ctx) == EventResult::Handled {
                     return EventResult::Handled;
+                }
+                if self.raw_active() {
+                    for dropdown in [
+                        &mut self.raw_exposure_dropdown,
+                        &mut self.raw_white_balance_dropdown,
+                        &mut self.raw_quality_dropdown,
+                    ] {
+                        if dropdown.event(event, ctx) == EventResult::Handled {
+                            return EventResult::Handled;
+                        }
+                    }
                 }
                 for button in [&mut self.apply_button, &mut self.cancel_button] {
                     if button.event(event, ctx) == EventResult::Handled {
@@ -723,6 +961,14 @@ impl Widget for InterpretAssetDialog {
         self.cancel_button.paint(ctx);
         self.color_space_dropdown.paint(ctx);
         self.range_dropdown.paint(ctx);
+        if self.raw_active() {
+            self.raw_exposure_label.paint(ctx);
+            self.raw_exposure_dropdown.paint(ctx);
+            self.raw_white_balance_label.paint(ctx);
+            self.raw_white_balance_dropdown.paint(ctx);
+            self.raw_quality_label.paint(ctx);
+            self.raw_quality_dropdown.paint(ctx);
+        }
     }
 
     fn hit_test(&self, point: Point) -> bool {
@@ -730,10 +976,30 @@ impl Widget for InterpretAssetDialog {
     }
 
     fn child_count(&self) -> usize {
-        11
+        if self.raw_active() {
+            17
+        } else {
+            11
+        }
     }
 
     fn child(&self, index: usize) -> Option<&dyn Widget> {
+        if !self.raw_active() {
+            return match index {
+                0 => Some(&self.title_label),
+                1 => Some(&self.asset_label),
+                2 => Some(&self.status_label),
+                3 => Some(&self.status_value_label),
+                4 => Some(&self.color_space_label),
+                5 => Some(&self.color_space_dropdown),
+                6 => Some(&self.range_label),
+                7 => Some(&self.range_dropdown),
+                8 => Some(&self.diagnostics_label),
+                9 => Some(&self.apply_button),
+                10 => Some(&self.cancel_button),
+                _ => None,
+            };
+        }
         match index {
             0 => Some(&self.title_label),
             1 => Some(&self.asset_label),
@@ -744,13 +1010,35 @@ impl Widget for InterpretAssetDialog {
             6 => Some(&self.range_label),
             7 => Some(&self.range_dropdown),
             8 => Some(&self.diagnostics_label),
-            9 => Some(&self.apply_button),
-            10 => Some(&self.cancel_button),
+            9 => Some(&self.raw_exposure_label),
+            10 => Some(&self.raw_exposure_dropdown),
+            11 => Some(&self.raw_white_balance_label),
+            12 => Some(&self.raw_white_balance_dropdown),
+            13 => Some(&self.raw_quality_label),
+            14 => Some(&self.raw_quality_dropdown),
+            15 => Some(&self.apply_button),
+            16 => Some(&self.cancel_button),
             _ => None,
         }
     }
 
     fn child_mut(&mut self, index: usize) -> Option<&mut dyn Widget> {
+        if !self.raw_active() {
+            return match index {
+                0 => Some(&mut self.title_label),
+                1 => Some(&mut self.asset_label),
+                2 => Some(&mut self.status_label),
+                3 => Some(&mut self.status_value_label),
+                4 => Some(&mut self.color_space_label),
+                5 => Some(&mut self.color_space_dropdown),
+                6 => Some(&mut self.range_label),
+                7 => Some(&mut self.range_dropdown),
+                8 => Some(&mut self.diagnostics_label),
+                9 => Some(&mut self.apply_button),
+                10 => Some(&mut self.cancel_button),
+                _ => None,
+            };
+        }
         match index {
             0 => Some(&mut self.title_label),
             1 => Some(&mut self.asset_label),
@@ -761,8 +1049,14 @@ impl Widget for InterpretAssetDialog {
             6 => Some(&mut self.range_label),
             7 => Some(&mut self.range_dropdown),
             8 => Some(&mut self.diagnostics_label),
-            9 => Some(&mut self.apply_button),
-            10 => Some(&mut self.cancel_button),
+            9 => Some(&mut self.raw_exposure_label),
+            10 => Some(&mut self.raw_exposure_dropdown),
+            11 => Some(&mut self.raw_white_balance_label),
+            12 => Some(&mut self.raw_white_balance_dropdown),
+            13 => Some(&mut self.raw_quality_label),
+            14 => Some(&mut self.raw_quality_dropdown),
+            15 => Some(&mut self.apply_button),
+            16 => Some(&mut self.cancel_button),
             _ => None,
         }
     }
@@ -865,6 +1159,90 @@ mod tests {
             )),
             Some(true)
         );
+    }
+
+    #[test]
+    fn camera_raw_dialog_exposes_only_raw_development_controls() {
+        let draft = AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Frame.dng",
+            AssetMediaInterpretation::default(),
+            None,
+        )
+        .with_input_diagnostics(Some(camera_raw_signal()), None);
+        let dialog = InterpretAssetDialog::new(draft);
+
+        assert!(dialog.raw_active());
+        assert_eq!(dialog.child_count(), 17);
+        assert!(!dialog.color_space_dropdown.is_enabled());
+        assert!(!dialog.range_dropdown.is_enabled());
+        assert!(dialog.raw_exposure_dropdown.is_enabled());
+        assert!(dialog.raw_white_balance_dropdown.is_enabled());
+        assert!(dialog.raw_quality_dropdown.is_enabled());
+        assert!(dialog.diagnostics_label.text().contains("Camera RAW"));
+        assert!(dialog.diagnostics_label.text().contains("Synthetic DNG"));
+    }
+
+    #[test]
+    fn incomplete_camera_raw_metadata_disables_development_commit() {
+        let mut signal = camera_raw_signal();
+        signal.camera_raw.as_mut().expect("RAW metadata").has_color_matrix = false;
+        let dialog = InterpretAssetDialog::new(
+            AppUiInterpretAssetDraft::new(
+                AssetId::new(),
+                "Incomplete.dng",
+                AssetMediaInterpretation::default(),
+                None,
+            )
+            .with_input_diagnostics(Some(signal), None),
+        );
+
+        assert!(dialog.raw_active());
+        assert!(!dialog.can_apply());
+        assert!(!dialog.apply_button.is_enabled());
+        assert!(!dialog.raw_exposure_dropdown.is_enabled());
+        assert!(!dialog.raw_white_balance_dropdown.is_enabled());
+        assert!(!dialog.raw_quality_dropdown.is_enabled());
+    }
+
+    #[test]
+    fn non_raw_dialog_keeps_raw_controls_out_of_the_widget_tree() {
+        let dialog = InterpretAssetDialog::new(AppUiInterpretAssetDraft::new(
+            AssetId::new(),
+            "Shot.mov",
+            AssetMediaInterpretation::default(),
+            Some(detected_interpretation(ColorSpace::Rec709)),
+        ));
+
+        assert!(!dialog.raw_active());
+        assert_eq!(dialog.child_count(), 11);
+        assert!(dialog.child(10).is_some());
+        assert!(dialog.child(11).is_none());
+    }
+
+    #[test]
+    fn camera_raw_dropdown_actions_replace_one_complete_draft() {
+        let interpretation = AssetMediaInterpretation {
+            color: MediaColorInterpretation::Override { color_space: ColorSpace::Rec2020 },
+            payload: AssetColorPayload::NonColorData,
+            ..AssetMediaInterpretation::default()
+        };
+        let dialog = InterpretAssetDialog::new(
+            AppUiInterpretAssetDraft::new(AssetId::new(), "Frame.dng", interpretation, None)
+                .with_input_diagnostics(Some(camera_raw_signal()), None),
+        );
+        let mut expected = interpretation;
+        expected.camera_raw.exposure_millistops = 1_000;
+        let action = raw_draft_update_action(expected);
+        let payload = draft_update_payload_from_action(&action);
+
+        assert_eq!(
+            dialog.raw_exposure_dropdown.checked_for_action(&action),
+            Some(false)
+        );
+        assert_eq!(payload.interpretation, expected);
+        assert_eq!(payload.interpretation.color, interpretation.color);
+        assert_eq!(payload.interpretation.payload, interpretation.payload);
     }
 
     #[test]
@@ -1114,8 +1492,34 @@ mod tests {
                 sampling: Some(sampling),
                 color_metadata: Some(metadata),
                 color_metadata_hints: Vec::new(),
+                camera_raw: None,
             },
         )
+    }
+
+    fn camera_raw_signal() -> AppShellVideoSignalDiagnostics {
+        AppShellVideoSignalDiagnostics {
+            range: DecodedVideoRange::Full,
+            sampling: Some(mondrian_media::ProvenVideoSampling {
+                pixel_format: mondrian_core::PixelFormat::BayerRggb16le,
+                bit_depth: 16,
+                has_alpha: false,
+            }),
+            color_metadata: None,
+            color_metadata_hints: Vec::new(),
+            camera_raw: Some(mondrian_core::CameraRawMetadata {
+                adapter: mondrian_core::CameraRawAdapter::Dng,
+                cfa_pattern: mondrian_core::CameraRawCfaPattern::Rggb,
+                width: 8,
+                height: 8,
+                bit_depth: 16,
+                compression: 1,
+                camera_make: Some("Mondrian".to_owned()),
+                camera_model: Some("Synthetic DNG".to_owned()),
+                has_color_matrix: true,
+                has_as_shot_neutral: true,
+            }),
+        }
     }
 
     fn draft_update_payload_from_action(action: &Action) -> InterpretAssetDraftUpdatePayload {

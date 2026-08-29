@@ -37,7 +37,7 @@ pub const PROJECT_FORMAT_VERSION: u32 = 1;
 /// Current canonical project document schema version.
 pub const PROJECT_DOCUMENT_SCHEMA_VERSION: u32 = 25;
 /// Current embedded asset-library SQLite schema version.
-pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 5;
+pub const PROJECT_LIBRARY_SCHEMA_VERSION: u32 = 6;
 
 /// Final namespace semantics for one atomic Project archive publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

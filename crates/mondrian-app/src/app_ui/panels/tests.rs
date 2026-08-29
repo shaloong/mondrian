@@ -6667,6 +6667,7 @@ fn test_video_media_info(path: &Path) -> mondrian_media::MediaInfo {
             color_metadata: Some(color_metadata),
             color_metadata_hints: Vec::new(),
             hdr_metadata: Vec::new(),
+            camera_raw: None,
             bit_depth: 8,
             has_alpha: false,
             avg_bitrate: 10_000_000,

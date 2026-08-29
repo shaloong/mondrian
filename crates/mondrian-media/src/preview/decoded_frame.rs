@@ -225,7 +225,7 @@ impl DecodedRgbaFrameContract {
         }
     }
 
-    pub(super) fn source_linear(source: PreviewSourceColorContract) -> Self {
+    pub(crate) fn source_linear(source: PreviewSourceColorContract) -> Self {
         debug_assert!(!source.is_data_texture());
         Self {
             source,
@@ -390,7 +390,7 @@ impl RgbaFrame {
 }
 
 impl FloatRgbaFrame {
-    pub(super) fn new(
+    pub(crate) fn new(
         width: u32,
         height: u32,
         data: Vec<f32>,
