@@ -15,6 +15,7 @@ pub mod color_report_vocab;
 pub mod color_stage;
 pub mod color_transform;
 pub mod context;
+mod cpu_visual_execution;
 mod cpu_yuv;
 mod creative_lut_gpu;
 pub mod display_calibration;
@@ -327,10 +328,10 @@ pub use timeline_composite::{
     TimelineCompositeDomainBlockerBreakdown, TimelineCompositeElement, TimelineCompositeError,
     TimelineCompositeExecutionDiagnostics, TimelineCompositeFrame,
     TimelineCompositeLegacyBreakdown, TimelineCompositeOptions, TimelineCompositeScratch,
-    TimelineCpuCompositeAdmission, TimelineCpuCompositePrecision, TimelineCpuWorkingSetDiagnostics,
-    TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetGrant,
-    TimelineCrossDissolveLayer, TimelineEffectColorRuntime, TimelineMediaLayer,
-    TimelineSolidColorLayer, TimelineTransitionInput,
+    TimelineCpuCompositeAdmission, TimelineCpuCompositePrecision, TimelineCpuExecutionPolicy,
+    TimelineCpuWorkingSetDiagnostics, TimelineCpuWorkingSetError, TimelineCpuWorkingSetEstimate,
+    TimelineCpuWorkingSetGrant, TimelineCrossDissolveLayer, TimelineEffectColorRuntime,
+    TimelineMediaLayer, TimelineSolidColorLayer, TimelineTransitionInput,
 };
 pub use timeline_effect_routes::{
     PreparedTimelinePreviewEffectRoute, PreparedTimelinePreviewEffectRoutes,

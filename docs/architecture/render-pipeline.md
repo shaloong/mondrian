@@ -221,6 +221,26 @@ still the explicit input residency boundary pending decoder-surface residency,
 and the encoder pipe remains the explicit output readback boundary pending a
 GPU-surface encoder contract.
 
+The CPU route enters one deep Renderer-owned CPU Visual Execution Module
+through `TimelineCompositeScratch`. Preview fallback and each Export visual
+Session own separate instances. The Module lazily creates a bounded pool of at
+most eight workers and runs only full-frame independent kernels above its
+configured threshold; it never uses Rayon's process-global pool or changes
+pixel order inside one pixel. One worker is an explicit scalar-reference
+policy. Runtime SIMD is selected inside the same Module only for a separately
+qualified opaque Cross Dissolve kernel; partial-alpha pixels retain the
+canonical scalar coverage algebra. The public execution diagnostics prove
+parallel dispatches and SIMD pixel counts rather than inferring acceleration
+from machine capability.
+
+Cross Dissolve endpoint canvases are checked out from two owner-retained
+Float32 buffers and restored on both success and failure. Their active bytes
+remain covered by the conservative three-frame Transition estimate. Retention
+is optional: actual capacities participate in the existing retained-scratch
+grant and are synchronously released after a frame when the owner cannot keep
+them. Diagnostics expose reuse hits. This adds Leverage at one compositing Seam
+without creating a parallel Preview/Export buffer policy.
+
 Before every visual node records, the Module checks the existing frame-table
 residency left by child nodes together with conservative new upload,
 source-domain, Transition, adjustment, and working-composite textures. Both

@@ -28,6 +28,8 @@ serde_json = { workspace = true }
 sha2       = { workspace = true }
 lru        = "0.18"
 parking_lot = { workspace = true }
+pulp = { workspace = true }
+rayon = { workspace = true }
 cosmic-text = { workspace = true }
 fontdb = { workspace = true }
 

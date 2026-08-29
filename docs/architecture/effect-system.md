@@ -928,9 +928,15 @@ cache policy.
 Its opacity is a stochastic gate; accepted pixels perform a full source-over so
 opacity is not multiplied into alpha a second time.
 
-Adjustment-layer passes use `apply_compiled_effect_graph_pass_rgba_f32(...)`
-when the graph is float-capable. This keeps ordinary color-correction layers in
-the same linear working frame instead of forcing an RGBA8 scratch boundary.
+Adjustment-layer passes use the owned
+`EffectExecutionSession::apply_compiled_pass_rgba_f32_owned(...)` Interface
+when the graph is float-capable. The Renderer transfers its accumulated canvas
+across that Seam; Effects borrows it while evaluating the graph, then blends
+the processed result back into the same allocation. The compatibility
+borrowed Interface performs one explicit copy before delegating. This keeps
+ordinary color-correction layers in the same linear working frame, removes a
+second post-effect full-frame base clone, and preserves ownership Locality
+without exposing executor Implementation details.
 Media, solid-color, and float-capable adjustment timeline layers use
 `blend_rgba_f32_pixel_seeded(...)` for built-in blend modes while remaining in
 the float/linear compositor. Dissolve uses the same stable frame/pixel seed

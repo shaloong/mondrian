@@ -1149,6 +1149,40 @@ impl EffectExecutionSession {
                 actual: base.len(),
             });
         }
+        self.apply_compiled_pass_rgba_f32_owned(
+            base.to_vec(),
+            width,
+            height,
+            compiled,
+            opacity,
+            blend_mode,
+            frame_seed,
+        )
+    }
+
+    /// Execute and blend one adjustment graph into an owned Float32 base.
+    ///
+    /// The caller transfers the base allocation across the Effect execution
+    /// Seam. Non-trivial passes reuse it for the blended output instead of
+    /// cloning a second full-frame base after graph execution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_compiled_pass_rgba_f32_owned(
+        &mut self,
+        mut base: Vec<[f32; 4]>,
+        width: u32,
+        height: u32,
+        compiled: &CompiledEffectGraph,
+        opacity: f32,
+        blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
+        let required_len = width as usize * height as usize;
+        if base.len() != required_len {
+            return Err(EffectFloatExecutionError::InputSizeMismatch {
+                expected: required_len,
+                actual: base.len(),
+            });
+        }
         admit_single_frame_execution(
             compiled,
             EffectProcessingBackend::Cpu,
@@ -1156,18 +1190,17 @@ impl EffectExecutionSession {
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
         if required_len == 0 {
-            return Ok(Vec::new());
+            return Ok(base);
         }
         let mode = blend_mode.unwrap_or(BlendMode::Normal);
         let opacity = opacity.clamp(0.0, 1.0);
         if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
-            return Ok(base.to_vec());
+            return Ok(base);
         }
 
-        let processed = self.apply_compiled_rgba_f32(base, width, height, compiled, frame_seed)?;
-        let mut out = base.to_vec();
-        blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
-        Ok(out)
+        let processed = self.apply_compiled_rgba_f32(&base, width, height, compiled, frame_seed)?;
+        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
+        Ok(base)
     }
 }
 
@@ -1227,6 +1260,47 @@ impl EffectExecutionSession {
                 actual: base.len(),
             });
         }
+        self.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
+            base.to_vec(),
+            width,
+            height,
+            compiled,
+            opacity,
+            blend_mode,
+            frame_seed,
+            domain_cache_key,
+            processor,
+        )
+    }
+
+    /// Execute and blend one adjustment graph into an owned Float32 base while
+    /// resolving explicit RGB processing-domain transitions.
+    ///
+    /// This is the ownership-preserving counterpart to
+    /// [`Self::apply_compiled_pass_rgba_f32_with_domain_processor`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_compiled_pass_rgba_f32_owned_with_domain_processor<F>(
+        &mut self,
+        mut base: Vec<[f32; 4]>,
+        width: u32,
+        height: u32,
+        compiled: &CompiledEffectGraph,
+        opacity: f32,
+        blend_mode: Option<BlendMode>,
+        frame_seed: i64,
+        domain_cache_key: EffectDomainProcessorCacheKey,
+        processor: F,
+    ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError>
+    where
+        F: FnMut(&mut [[f32; 4]], EffectDomainTransition) -> Result<(), String>,
+    {
+        let required_len = width as usize * height as usize;
+        if base.len() != required_len {
+            return Err(EffectFloatExecutionError::InputSizeMismatch {
+                expected: required_len,
+                actual: base.len(),
+            });
+        }
         admit_single_frame_execution(
             compiled,
             EffectProcessingBackend::Cpu,
@@ -1234,16 +1308,16 @@ impl EffectExecutionSession {
         )
         .map_err(EffectFloatExecutionError::ExecutionContract)?;
         if required_len == 0 {
-            return Ok(Vec::new());
+            return Ok(base);
         }
         let mode = blend_mode.unwrap_or(BlendMode::Normal);
         let opacity = opacity.clamp(0.0, 1.0);
         if !has_positive_coverage(opacity) || compiled.graph().is_identity() {
-            return Ok(base.to_vec());
+            return Ok(base);
         }
 
         let processed = self.apply_compiled_rgba_f32_with_domain_processor(
-            base,
+            &base,
             width,
             height,
             compiled,
@@ -1251,9 +1325,8 @@ impl EffectExecutionSession {
             domain_cache_key,
             processor,
         )?;
-        let mut out = base.to_vec();
-        blend_rgba_f32_in_place(&mut out, &processed, opacity, mode, frame_seed);
-        Ok(out)
+        blend_rgba_f32_in_place(&mut base, &processed, opacity, mode, frame_seed);
+        Ok(base)
     }
 }
 
@@ -2485,6 +2558,32 @@ mod tests {
         assert!((output[0][1] - 0.375).abs() <= 1.0e-6);
         assert!((output[0][2] - 0.1875).abs() <= 1.0e-6);
         assert_eq!(output[0][3], 1.0);
+    }
+
+    #[test]
+    fn owned_float_effect_graph_pass_reuses_the_base_allocation() {
+        let compiled = compile_reference_effect_graph(&EffectRenderPlan {
+            ops: vec![color_adjust(1.0, 1.0, 1.0)],
+        })
+        .expect("compile color adjust graph");
+        let base = vec![[1.25, 0.25, 0.125, 1.0]; 64];
+        let base_allocation = base.as_ptr();
+        let mut session = EffectExecutionSession::default();
+
+        let output = session
+            .apply_compiled_pass_rgba_f32_owned(
+                base,
+                8,
+                8,
+                &compiled,
+                0.5,
+                Some(BlendMode::Normal),
+                0,
+            )
+            .expect("owned float color adjust pass");
+
+        assert_eq!(output.as_ptr(), base_allocation);
+        assert!((output[0][0] - 1.875).abs() <= 1.0e-6);
     }
 
     #[test]

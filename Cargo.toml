@@ -103,6 +103,7 @@ crossbeam-queue = "0.3"
 parking_lot       = "0.12"
 dashmap           = "6"
 pulp              = "0.22"
+rayon             = "1"
 
 # ---- ID / 时间 ----
 uuid             = { version = "1",    features = ["v4", "serde"] }

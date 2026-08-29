@@ -1072,6 +1072,14 @@ ticket, and drops late generation/epoch results. This is real execution rather
 than a diagnostic-only `CpuFallbackRequested` state. Creation of a replacement
 healthy GPU generation explicitly exits fallback and invalidates the old
 execution generation before GPU admission resumes.
+That Adapter's single scheduling worker is not the pixel-kernel parallelism
+authority. Its retained `TimelineCompositeScratch` owns the bounded CPU Visual
+Execution Module used by Export as well: full-frame Normal blends and Cross
+Dissolve may dispatch to that owner-local pool, opaque Dissolve may use
+runtime-selected SIMD, Adjustment passes reuse the transferred base allocation,
+and Transition endpoints reuse grant-bounded scratch. The pool, SIMD choice,
+and scratch Implementation remain behind the compositor Interface so Window,
+media, and Export Adapters cannot acquire a second execution interpretation.
 Preview resolution is sampling density, not timeline geometry. Source and
 sequence transforms are evaluated in their full authoring extents, then
 `project_affine_to_sampled_extents` projects that affine into the decoded and

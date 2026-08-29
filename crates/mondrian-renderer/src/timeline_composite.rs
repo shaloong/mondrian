@@ -1,3 +1,6 @@
+use crate::cpu_visual_execution::{
+    blend_normal_pixel, CpuVisualExecutionSession, CpuVisualKernelEvidence, MAX_OWNER_WORKERS,
+};
 use crate::{
     ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
     ColorFrameResidency, ColorFrameSpace, CpuColorFrame,
@@ -27,6 +30,7 @@ use std::{
 };
 
 mod transition;
+#[cfg(test)]
 pub(crate) use transition::cross_dissolve_straight_rgba_f32;
 use transition::{
     composite_transition_input_f32, composite_transition_input_rgba8,
@@ -196,12 +200,25 @@ pub struct TimelineCompositeScratch {
     solid_fill: Vec<u8>,
     solid_fill_f32: Vec<[f32; 4]>,
     solid_effect_f32: Vec<[f32; 4]>,
+    transition_left_f32: Vec<[f32; 4]>,
+    transition_right_f32: Vec<[f32; 4]>,
+    cpu_visual_execution: CpuVisualExecutionSession,
     effect_execution: EffectExecutionSession,
     color_execution: crate::RenderCpuColorExecutionSession,
     cpu_working_set_grant: TimelineCpuWorkingSetGrant,
 }
 
 impl TimelineCompositeScratch {
+    /// Reconfigure this Preview/Export owner's bounded CPU visual worker pool.
+    ///
+    /// Reconfiguration discards the previous pool after all synchronous work
+    /// has completed. A replacement is created lazily only when a qualifying
+    /// full-frame kernel executes.
+    pub fn reconfigure_cpu_execution(&mut self, policy: TimelineCpuExecutionPolicy) {
+        self.cpu_visual_execution
+            .reconfigure(policy.worker_threads, policy.parallel_pixel_threshold);
+    }
+
     /// Evaluate a prepared visual frame through this exact Preview/Export
     /// owner's dynamic-topology residency.
     pub fn evaluate_prepared_visual_program(
@@ -429,7 +446,7 @@ impl TimelineCompositeScratch {
         self.retained_scratch_capacities().into_iter().fold(0_u64, u64::saturating_add)
     }
 
-    fn retained_scratch_capacities(&self) -> [u64; 6] {
+    fn retained_scratch_capacities(&self) -> [u64; 8] {
         let float_pixel_bytes = std::mem::size_of::<[f32; 4]>();
         [
             u64::try_from(self.media_source.capacity()).unwrap_or(u64::MAX),
@@ -439,6 +456,10 @@ impl TimelineCompositeScratch {
             u64::try_from(self.solid_fill_f32.capacity().saturating_mul(float_pixel_bytes))
                 .unwrap_or(u64::MAX),
             u64::try_from(self.solid_effect_f32.capacity().saturating_mul(float_pixel_bytes))
+                .unwrap_or(u64::MAX),
+            u64::try_from(self.transition_left_f32.capacity().saturating_mul(float_pixel_bytes))
+                .unwrap_or(u64::MAX),
+            u64::try_from(self.transition_right_f32.capacity().saturating_mul(float_pixel_bytes))
                 .unwrap_or(u64::MAX),
         ]
     }
@@ -450,6 +471,8 @@ impl TimelineCompositeScratch {
         self.solid_fill = Vec::new();
         self.solid_fill_f32 = Vec::new();
         self.solid_effect_f32 = Vec::new();
+        self.transition_left_f32 = Vec::new();
+        self.transition_right_f32 = Vec::new();
     }
 
     fn prepare_cpu_working_set(
@@ -491,6 +514,44 @@ impl TimelineCompositeScratch {
     }
 }
 
+/// Owner-local CPU visual execution policy shared by Preview and Export.
+///
+/// The worker count is clamped to `1..=8`; one selects deterministic serial
+/// execution. The pixel threshold is clamped to at least one pixel. Neither
+/// setting affects authored pixels or permits use of Rayon's global pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineCpuExecutionPolicy {
+    worker_threads: usize,
+    parallel_pixel_threshold: usize,
+}
+
+impl TimelineCpuExecutionPolicy {
+    /// Construct a bounded owner-local CPU execution policy.
+    pub fn new(worker_threads: usize, parallel_pixel_threshold: usize) -> Self {
+        Self {
+            worker_threads: worker_threads.clamp(1, MAX_OWNER_WORKERS),
+            parallel_pixel_threshold: parallel_pixel_threshold.max(1),
+        }
+    }
+
+    /// Return the exact bounded worker count.
+    pub const fn worker_threads(self) -> usize {
+        self.worker_threads
+    }
+
+    /// Return the full-frame pixel threshold for parallel dispatch.
+    pub const fn parallel_pixel_threshold(self) -> usize {
+        self.parallel_pixel_threshold
+    }
+}
+
+impl Default for TimelineCpuExecutionPolicy {
+    fn default() -> Self {
+        let available = std::thread::available_parallelism().map_or(1, usize::from);
+        Self::new(available.saturating_sub(1), 256 * 1024)
+    }
+}
+
 /// A CPU composite result paired with color-path diagnostics for the plan.
 #[derive(Debug, Clone)]
 pub struct TimelineCompositeFrame {
@@ -517,6 +578,25 @@ pub struct TimelineCompositeExecutionDiagnostics {
     /// Transparent Float32 canvases initialized by fusing the first two exact
     /// full-frame identity/Normal media layers into one output write.
     pub fused_first_two_full_frame_normal_blends: u64,
+    /// Pixel kernels dispatched through this owner's bounded worker pool.
+    pub owner_parallel_kernel_dispatches: u64,
+    /// Pixels processed by a runtime-selected SIMD kernel.
+    pub runtime_vectorized_pixels: u64,
+    /// Transition endpoint buffers satisfied from retained capacity.
+    pub reused_transition_scratch_buffers: u64,
+    /// Adjustment passes that reused the caller-owned base allocation.
+    pub owned_adjustment_base_reuses: u64,
+}
+
+impl TimelineCompositeExecutionDiagnostics {
+    fn observe_kernel(&mut self, evidence: CpuVisualKernelEvidence) {
+        self.owner_parallel_kernel_dispatches = self
+            .owner_parallel_kernel_dispatches
+            .saturating_add(evidence.parallel_dispatches);
+        self.runtime_vectorized_pixels = self
+            .runtime_vectorized_pixels
+            .saturating_add(evidence.runtime_vectorized_pixels);
+    }
 }
 
 /// Counters describing which timeline composite path was used and why.
@@ -690,7 +770,7 @@ impl Default for TimelineCpuWorkingSetGrant {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RetainedScratchRequirements {
-    bytes: [u64; 6],
+    bytes: [u64; 8],
 }
 
 impl RetainedScratchRequirements {
@@ -833,7 +913,7 @@ pub fn estimate_timeline_cpu_working_set(
 ) -> Result<TimelineCpuWorkingSetEstimate, TimelineCpuWorkingSetError> {
     let output_rgba8_bytes = checked_frame_bytes(width, height, 4)?;
     let output_float_bytes = checked_frame_bytes(width, height, 16)?;
-    let mut retained = RetainedScratchRequirements { bytes: [0; 6] };
+    let mut retained = RetainedScratchRequirements { bytes: [0; 8] };
 
     let active_bytes = match precision {
         TimelineCpuCompositePrecision::Float32 => {
@@ -1477,7 +1557,7 @@ fn composite_supported_elements_to_working_frame(
                         execution.direct_first_layer_initializations.saturating_add(1);
                 } else {
                     ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
-                    alpha_blend_f32_layer(
+                    let kernel = alpha_blend_f32_layer(
                         &mut canvas,
                         width as usize,
                         height as usize,
@@ -1488,7 +1568,9 @@ fn composite_supported_elements_to_working_frame(
                         layer.blend_mode,
                         layer.transform,
                         layer.frame_seed,
+                        &mut scratch.cpu_visual_execution,
                     );
+                    execution.observe_kernel(kernel);
                 }
                 has_composited_layer = true;
             }
@@ -1523,7 +1605,7 @@ fn composite_supported_elements_to_working_frame(
                         )?;
                         scratch.solid_effect_f32.as_slice()
                     };
-                    alpha_blend_f32_layer(
+                    let kernel = alpha_blend_f32_layer(
                         &mut canvas,
                         width as usize,
                         height as usize,
@@ -1534,7 +1616,9 @@ fn composite_supported_elements_to_working_frame(
                         layer.blend_mode,
                         layer.transform,
                         layer.frame_seed,
+                        &mut scratch.cpu_visual_execution,
                     );
+                    execution.observe_kernel(kernel);
                 }
                 has_composited_layer = true;
             }
@@ -1549,7 +1633,7 @@ fn composite_supported_elements_to_working_frame(
                 canvas = apply_effect_graph_pass_f32(
                     &mut scratch.effect_execution,
                     &mut scratch.color_execution,
-                    &canvas,
+                    canvas,
                     width,
                     height,
                     &layer.effect_graph,
@@ -1558,28 +1642,50 @@ fn composite_supported_elements_to_working_frame(
                     layer.frame_seed,
                     runtime,
                 )?;
+                execution.owned_adjustment_base_reuses =
+                    execution.owned_adjustment_base_reuses.saturating_add(1);
             }
             TimelineCompositeElement::CrossDissolve(transition) => {
                 ensure_float_canvas_initialized(&mut canvas, pixel_count, initial_pixel);
-                let mut left = canvas.clone();
-                composite_transition_input_f32(
-                    &mut left,
-                    width,
-                    height,
-                    &transition.left,
-                    runtime,
-                    scratch,
-                )?;
-                let mut right = canvas.clone();
-                composite_transition_input_f32(
-                    &mut right,
-                    width,
-                    height,
-                    &transition.right,
-                    runtime,
-                    scratch,
-                )?;
-                cross_dissolve_straight_rgba_f32(&mut canvas, &left, &right, transition.progress);
+                let mut left = std::mem::take(&mut scratch.transition_left_f32);
+                let mut right = std::mem::take(&mut scratch.transition_right_f32);
+                execution.reused_transition_scratch_buffers = execution
+                    .reused_transition_scratch_buffers
+                    .saturating_add(u64::from(left.capacity() >= pixel_count))
+                    .saturating_add(u64::from(right.capacity() >= pixel_count));
+                left.clear();
+                left.extend_from_slice(&canvas);
+                right.clear();
+                right.extend_from_slice(&canvas);
+                let transition_result = (|| {
+                    composite_transition_input_f32(
+                        &mut left,
+                        width,
+                        height,
+                        &transition.left,
+                        runtime,
+                        scratch,
+                    )?;
+                    composite_transition_input_f32(
+                        &mut right,
+                        width,
+                        height,
+                        &transition.right,
+                        runtime,
+                        scratch,
+                    )?;
+                    Ok::<_, EffectFloatExecutionError>(scratch.cpu_visual_execution.cross_dissolve(
+                        &mut canvas,
+                        &left,
+                        &right,
+                        transition.progress,
+                    ))
+                })();
+                left.clear();
+                right.clear();
+                scratch.transition_left_f32 = left;
+                scratch.transition_right_f32 = right;
+                execution.observe_kernel(transition_result?);
                 has_composited_layer = true;
             }
         }
@@ -1685,7 +1791,7 @@ fn apply_effect_graph_f32(
 fn apply_effect_graph_pass_f32(
     session: &mut EffectExecutionSession,
     color_session: &mut crate::RenderCpuColorExecutionSession,
-    input: &[[f32; 4]],
+    input: Vec<[f32; 4]>,
     width: u32,
     height: u32,
     graph: &CompiledEffectGraph,
@@ -1695,7 +1801,7 @@ fn apply_effect_graph_pass_f32(
     runtime: TimelineEffectColorRuntime<'_>,
 ) -> Result<Vec<[f32; 4]>, EffectFloatExecutionError> {
     if graph.domain_plan().requires_conversion() {
-        session.apply_compiled_pass_rgba_f32_with_domain_processor(
+        session.apply_compiled_pass_rgba_f32_owned_with_domain_processor(
             input,
             width,
             height,
@@ -1707,7 +1813,7 @@ fn apply_effect_graph_pass_f32(
             |pixels, transition| runtime.process_transition(pixels, transition, color_session),
         )
     } else {
-        session.apply_compiled_pass_rgba_f32(
+        session.apply_compiled_pass_rgba_f32_owned(
             input, width, height, graph, opacity, blend_mode, frame_seed,
         )
     }
@@ -2154,24 +2260,20 @@ fn alpha_blend_f32_layer(
     blend_mode: BlendMode,
     transform: [f32; 6],
     frame_seed: i64,
-) {
+    cpu_execution: &mut CpuVisualExecutionSession,
+) -> CpuVisualKernelEvidence {
     let opacity = opacity.clamp(0.0, 1.0);
     if !has_positive_coverage(opacity) {
-        return;
+        return CpuVisualKernelEvidence::default();
     }
 
     if is_identity_transform(transform) {
         let width = dst_w.min(src_w);
         let height = dst_h.min(src_h);
         if blend_mode == BlendMode::Normal && width == dst_w && width == src_w {
-            for (dst_row, src_row) in
-                dst.chunks_exact_mut(dst_w).zip(src.chunks_exact(src_w)).take(height)
-            {
-                for (dst_px, src_px) in dst_row.iter_mut().zip(src_row) {
-                    *dst_px = blend_normal_rgba_f32_pixel(*dst_px, *src_px, opacity);
-                }
-            }
-            return;
+            let destination = &mut dst[..height.saturating_mul(dst_w)];
+            let source = &src[..height.saturating_mul(src_w)];
+            return cpu_execution.blend_normal_full_frame(destination, source, opacity);
         }
         for y in 0..height {
             for x in 0..width {
@@ -2186,11 +2288,11 @@ fn alpha_blend_f32_layer(
                 );
             }
         }
-        return;
+        return CpuVisualKernelEvidence::default();
     }
 
     let Some(inv) = invert_affine(transform) else {
-        return;
+        return CpuVisualKernelEvidence::default();
     };
 
     for dy in 0..dst_h {
@@ -2213,6 +2315,7 @@ fn alpha_blend_f32_layer(
             );
         }
     }
+    CpuVisualKernelEvidence::default()
 }
 
 #[inline]
@@ -2227,27 +2330,7 @@ fn initialize_normal_rgba_f32_pixel(source: [f32; 4], opacity: f32) -> [f32; 4] 
 
 #[inline]
 fn blend_normal_rgba_f32_pixel(base_px: [f32; 4], blend_px: [f32; 4], opacity: f32) -> [f32; 4] {
-    let base_alpha = base_px[3].clamp(0.0, 1.0);
-    let blend_alpha = (blend_px[3] * opacity).clamp(0.0, 1.0);
-    if !has_positive_coverage(blend_alpha) {
-        return base_px;
-    }
-    if !has_positive_coverage(base_alpha) {
-        return [blend_px[0], blend_px[1], blend_px[2], blend_alpha];
-    }
-
-    let inverse_blend_alpha = 1.0 - blend_alpha;
-    let out_alpha = blend_alpha + base_alpha * inverse_blend_alpha;
-    if !has_positive_coverage(out_alpha) {
-        return [0.0, 0.0, 0.0, 0.0];
-    }
-    let base_weight = base_alpha * inverse_blend_alpha;
-    [
-        (blend_px[0] * blend_alpha + base_px[0] * base_weight) / out_alpha,
-        (blend_px[1] * blend_alpha + base_px[1] * base_weight) / out_alpha,
-        (blend_px[2] * blend_alpha + base_px[2] * base_weight) / out_alpha,
-        out_alpha,
-    ]
+    blend_normal_pixel(base_px, blend_px, opacity)
 }
 
 fn sample_src_f32_bilinear(

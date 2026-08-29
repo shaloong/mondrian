@@ -63,6 +63,7 @@ pub(super) fn composite_transition_input_f32(
                 layer.blend_mode,
                 layer.transform,
                 layer.frame_seed,
+                &mut scratch.cpu_visual_execution,
             );
         }
         TimelineTransitionInput::SolidColor(layer) => {
@@ -105,6 +106,7 @@ pub(super) fn composite_transition_input_f32(
                     layer.blend_mode,
                     layer.transform,
                     layer.frame_seed,
+                    &mut scratch.cpu_visual_execution,
                 );
             }
         }
@@ -112,6 +114,7 @@ pub(super) fn composite_transition_input_f32(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn cross_dissolve_straight_rgba_f32(
     output: &mut [[f32; 4]],
     left: &[[f32; 4]],

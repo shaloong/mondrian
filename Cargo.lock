@@ -2583,6 +2583,8 @@ dependencies = [
  "objc2-metal 0.3.2",
  "parking_lot",
  "pollster",
+ "pulp",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
