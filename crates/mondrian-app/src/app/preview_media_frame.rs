@@ -33,6 +33,7 @@ pub(crate) struct MediaPreviewFrame {
     logical_resolution: Resolution,
     source_to_display_affine: [f32; 6],
     identity: PreviewSemanticIdentity,
+    render_cache_source_fingerprint: Option<Arc<[u8; 32]>>,
     cross_call_reusable: bool,
     presentation_quality: FramePresentationQuality,
     decode_execution: PreviewDecodeExecutionSummary,
@@ -63,6 +64,7 @@ impl MediaPreviewFrame {
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -85,6 +87,7 @@ impl MediaPreviewFrame {
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -107,6 +110,7 @@ impl MediaPreviewFrame {
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -129,6 +133,7 @@ impl MediaPreviewFrame {
             logical_resolution,
             source_to_display_affine: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
             identity,
+            render_cache_source_fingerprint: Some(Arc::new(identity.semantic_fingerprint())),
             cross_call_reusable: true,
             presentation_quality,
             decode_execution,
@@ -215,6 +220,20 @@ impl MediaPreviewFrame {
     /// Complete semantic identity of the decoded or generated source frame.
     pub(crate) fn identity(&self) -> PreviewSemanticIdentity {
         self.identity
+    }
+
+    /// Canonical provider-independent source identity for persistent working-frame reuse.
+    pub(crate) fn render_cache_source_fingerprint(&self) -> Option<[u8; 32]> {
+        self.render_cache_source_fingerprint.as_deref().copied()
+    }
+
+    /// Attach source-Adapter canonical identity without changing Viewer identity.
+    pub(crate) fn with_render_cache_source_fingerprint(
+        mut self,
+        fingerprint: Option<[u8; 32]>,
+    ) -> Self {
+        self.render_cache_source_fingerprint = fingerprint.map(Arc::new);
+        self
     }
 
     /// Whether this frame may participate in semantic cross-call cache reuse.

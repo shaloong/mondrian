@@ -22,6 +22,16 @@ impl TimelineRenderCacheFrame {
         identity: TimelineRenderCacheIdentity,
         frame: WorkingRgbaF32Frame,
     ) -> Result<Self, TimelineRenderCacheFrameValidationError> {
+        if let Some((expected_width, expected_height)) = identity.expected_extent()
+            && (frame.width != expected_width || frame.height != expected_height)
+        {
+            return Err(TimelineRenderCacheFrameValidationError::IdentityExtent {
+                expected_width,
+                expected_height,
+                actual_width: frame.width,
+                actual_height: frame.height,
+            });
+        }
         let expected_pixels = u64::from(frame.width)
             .checked_mul(u64::from(frame.height))
             .ok_or(TimelineRenderCacheFrameValidationError::ExtentOverflow)?;
@@ -55,6 +65,20 @@ impl TimelineRenderCacheFrame {
 /// Invalid working-frame shape supplied by a cache producer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TimelineRenderCacheFrameValidationError {
+    /// Physical payload extent differs from the identity envelope.
+    #[error(
+        "Timeline render-cache frame extent {actual_width}x{actual_height} differs from identity {expected_width}x{expected_height}"
+    )]
+    IdentityExtent {
+        /// Width bound into the identity.
+        expected_width: u32,
+        /// Height bound into the identity.
+        expected_height: u32,
+        /// Supplied payload width.
+        actual_width: u32,
+        /// Supplied payload height.
+        actual_height: u32,
+    },
     /// Width/height byte arithmetic overflowed.
     #[error("Timeline render-cache frame extent overflowed")]
     ExtentOverflow,
@@ -379,6 +403,33 @@ mod tests {
                 1_048_576,
             ),
             Err(TimelineRenderCacheArtifactError::WorkingColorSpaceMismatch)
+        ));
+    }
+
+    #[test]
+    fn publication_rejects_payload_outside_identity_extent() {
+        let materialization =
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                b"extent-contract",
+            );
+        let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+            mondrian_core::ResolvedVisualFrameIdentity::from_materialization(materialization),
+            2,
+            1,
+            TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+            TimelineRenderCacheAlpha::StraightCoverage,
+        );
+        assert!(matches!(
+            TimelineRenderCacheFrame::new(
+                identity,
+                WorkingRgbaF32Frame {
+                    width: 1,
+                    height: 2,
+                    data: vec![[0.0; 4]; 2],
+                    color_space: WorkingColorSpace::LinearRec709,
+                },
+            ),
+            Err(TimelineRenderCacheFrameValidationError::IdentityExtent { .. })
         ));
     }
 }

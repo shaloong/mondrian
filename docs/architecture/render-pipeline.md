@@ -97,6 +97,17 @@ TimelineEvaluationRequest
   -> Display or Export Encode
 ```
 
+For persistent working-frame reuse, each Preview materialization Adapter emits
+one exhaustive `ResolvedVisualNodeMaterializationIdentity`. The Renderer-owned
+Prepared Visual Module combines it with exact node time/raster/working/engine
+semantics to produce the opaque `ResolvedVisualFrameIdentity`; nested outputs
+carry that identity recursively into their parent. `mondrian-render-cache`
+accepts only this complete value and a physical extent/format/alpha envelope.
+This Seam is intentionally different from the Viewer presentation key and from
+the conservative Prepared Visual Author Fingerprint: Program Output, monitor,
+scheduling/provider evidence, and semantically irrelevant author revisions do
+not invalidate pre-output working pixels.
+
 Grade hierarchy is materialized in that shared path with the exact order
 `Group Pre -> Clip Effects/Masks -> Clip Grade -> Group Post -> Track
 Composite -> Timeline Grade`. The first four scopes compile into each selected

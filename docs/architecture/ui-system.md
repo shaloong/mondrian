@@ -38,6 +38,13 @@ alone never grants RAW execution authority.
 - `mondrian-ui-widgets`: controls and editor-specific reusable surfaces.
 - `mondrian-app::app_ui`: product shell and panel adapters.
 
+Outside `app_ui`, `mondrian-app::preview_render_cache_identity` is the narrow
+source Adapter for persistent resolved-visual identity. It exhaustively
+canonicalizes materialized Preview layers and media source semantics, normalizes
+equivalent CPU/native decode providers, and supplies only the resulting typed
+leaf identity to Renderer. It does not own Prepared Visual traversal, artifact
+storage, Viewer presentation identity, or Program Output/monitor semantics.
+
 `app_ui::panels` is the aggregate projection and dock-composition Module, not
 the owner of every panel's control Implementation. Property-oriented Mixer and
 Inspector construction lives behind the internal

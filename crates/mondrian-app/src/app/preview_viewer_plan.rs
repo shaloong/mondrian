@@ -26,8 +26,7 @@ use mondrian_renderer::{
 use mondrian_timeline::sequence::ProgramColorContext;
 
 use super::preview_execution::{
-    PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentity,
-    PreviewSemanticIdentityBuilder,
+    PreviewDecodeExecutionSummary, PreviewOutputKey, PreviewSemanticIdentityBuilder,
 };
 use super::preview_media_frame::MediaPreviewFrame;
 
@@ -247,65 +246,6 @@ pub(crate) fn viewer_preview_cache_key_for_resolved_plan(
         }
     }
     PreviewOutputKey::new(sequence_id, width, height, builder.finish_identity())
-}
-
-/// Stable identity of only the resolved media revisions/source samples in one plan.
-///
-/// Generated layers are represented by their position tags so a media-free plan
-/// still has one deterministic fingerprint. Effect and color semantics remain
-/// separate cache-key components.
-pub(crate) fn viewer_preview_media_fingerprint(
-    elements: &[ResolvedPreviewElement],
-) -> PreviewSemanticIdentity {
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.media-set.v1");
-    elements.len().hash(&mut builder);
-    for element in elements {
-        match element {
-            ResolvedPreviewElement::Media { frame, .. } => {
-                1_u8.hash(&mut builder);
-                frame.identity().hash(&mut builder);
-            }
-            ResolvedPreviewElement::CrossDissolve { left, right, .. } => {
-                2_u8.hash(&mut builder);
-                hash_transition_media_identity(left, &mut builder);
-                hash_transition_media_identity(right, &mut builder);
-            }
-            ResolvedPreviewElement::SolidColor(_)
-            | ResolvedPreviewElement::HeterogeneousSolidColor { .. }
-            | ResolvedPreviewElement::Adjustment(_) => 0_u8.hash(&mut builder),
-        }
-    }
-    builder.finish_identity()
-}
-
-/// Stable identity of the exact working/output color contract shaping a plan.
-pub(crate) fn viewer_preview_color_fingerprint(
-    color_context: &ProgramColorContext,
-) -> PreviewSemanticIdentity {
-    let mut builder = PreviewSemanticIdentityBuilder::new(b"mondrian.preview.color-context.v1");
-    color_context.working_color_space().hash(&mut builder);
-    color_context.output_color_space().hash(&mut builder);
-    color_context.output_tone_map().hash(&mut builder);
-    color_context.engine().hash(&mut builder);
-    color_context.output_transform().hash(&mut builder);
-    builder.finish_identity()
-}
-
-fn hash_transition_media_identity(
-    input: &ResolvedPreviewTransitionInput,
-    builder: &mut PreviewSemanticIdentityBuilder,
-) {
-    match input {
-        ResolvedPreviewTransitionInput::Media { frame, .. } => {
-            1_u8.hash(builder);
-            frame.identity().hash(builder);
-        }
-        ResolvedPreviewTransitionInput::Transparent
-        | ResolvedPreviewTransitionInput::SolidColor(_)
-        | ResolvedPreviewTransitionInput::HeterogeneousSolidColor { .. } => {
-            0_u8.hash(builder);
-        }
-    }
 }
 
 fn hash_transition_input(input: &ResolvedPreviewTransitionInput, hasher: &mut impl Hasher) {

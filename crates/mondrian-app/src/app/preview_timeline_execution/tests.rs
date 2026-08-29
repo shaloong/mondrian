@@ -248,6 +248,41 @@ fn solid_plan_is_ui_independent_and_has_mandatory_cache_identity() {
 }
 
 #[test]
+fn program_output_only_change_reuses_pre_output_working_cache_identity() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let sequence = solid_sequence("program-output-cache", Color::from_rgba8(30, 60, 90, 255));
+    let target = Resolution { width: 64, height: 36 };
+    let resolve = |sequence: &Sequence| {
+        let mut unexpected_media = |_| panic!("solid plan must not request media");
+        let result = resolve_preview_timeline(
+            sequence,
+            &[],
+            3,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(sequence),
+            &mut unexpected_media,
+            &mut |_| panic!("solid plan must not request titles"),
+        );
+        let PreviewTimelineResolution::Ready(result) = result else {
+            panic!("solid Timeline should resolve");
+        };
+        result
+    };
+
+    let rec709 = resolve(&sequence);
+    let mut display_p3 = sequence.clone();
+    display_p3.settings.color.program_output.color_space = ColorSpace::DisplayP3;
+    let display_p3 = resolve(&display_p3);
+
+    assert_ne!(rec709.plan.cache_key, display_p3.plan.cache_key);
+    assert_eq!(
+        rec709.plan.render_cache_identity, display_p3.plan.render_cache_identity,
+        "encoded Program Output must remain downstream of cached working pixels"
+    );
+}
+
+#[test]
 fn preview_execution_admission_fails_before_media_demand_or_decode() {
     use mondrian_effects::{
         register_effect_definition, EffectColorDomainContract, EffectDefinition, EffectDeterminism,
@@ -1690,6 +1725,68 @@ fn nested_sequence_propagates_non_reusable_inner_execution_semantics() {
         "a nested stateful/uncacheable dependency must prevent outer Viewer reuse"
     );
     assert!(resolved.plan.render_cache_identity.is_none());
+}
+
+#[test]
+fn nested_child_source_change_rotates_root_render_cache_identity() {
+    ensure_mondrian_default_ocio_loaded().expect("default OCIO");
+    let target = Resolution { width: 1, height: 1 };
+    let asset_id = AssetId::new();
+    let mut child = Sequence::new("nested-identity-child");
+    child.settings.resolution = target;
+    let child_time_base = child.time_base();
+    child.video_tracks[0]
+        .add_clip(
+            Clip::new(asset_id, TimelineTime::ZERO, tt(24, child_time_base)).expect("child media"),
+        )
+        .expect("insert child media");
+
+    let mut root = Sequence::new("nested-identity-root");
+    root.settings.resolution = target;
+    let root_time_base = root.time_base();
+    root.video_tracks[0]
+        .add_clip(
+            Clip::new_nested_sequence(child.id, TimelineTime::ZERO, tt(24, root_time_base), None)
+                .expect("nested placement"),
+        )
+        .expect("insert nested placement");
+
+    let resolve = |salt: u64| {
+        let mut media_frame = |request: PreviewTimelineMediaRequest| {
+            let mut identity =
+                PreviewSemanticIdentityBuilder::new(b"mondrian.preview.test-nested-identity.v1");
+            std::hash::Hash::hash(&request.asset_id, &mut identity);
+            std::hash::Hasher::write_u64(&mut identity, salt);
+            PreviewTimelineMediaFrame::Ready(MediaPreviewFrame::from_working(
+                CpuColorFrame::working(mondrian_core::WorkingRgbaF32Frame {
+                    width: 1,
+                    height: 1,
+                    data: vec![[0.25, 0.5, 0.75, 1.0]],
+                    color_space: request.input_color.working_color_space,
+                }),
+                target,
+                identity.finish_identity(),
+                FramePresentationQuality::Ready,
+                PreviewDecodeExecutionSummary::default(),
+            ))
+        };
+        let result = resolve_preview_timeline(
+            &root,
+            std::slice::from_ref(&child),
+            0,
+            target,
+            PreviewResolutionScale::Full,
+            color_context(&root),
+            &mut media_frame,
+            &mut |_| panic!("media-only nesting must not request titles"),
+        );
+        let PreviewTimelineResolution::Ready(result) = result else {
+            panic!("nested Preview must resolve");
+        };
+        result.plan.render_cache_identity.expect("reusable identity")
+    };
+
+    assert_ne!(resolve(1), resolve(2));
 }
 
 #[test]

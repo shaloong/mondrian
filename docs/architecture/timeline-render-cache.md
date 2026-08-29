@@ -13,15 +13,31 @@ same renderer Viewer output stages as an ordinary composite. It cannot encode
 an sRGB UI raster, display profile, stale presentation decision, Playback
 epoch, GPU texture owner, decoder lease, or Export quality substitution.
 
-The versioned SHA-256 identity binds:
+The identity is complete by construction rather than a caller-filled digest
+bag. `mondrian-core` carries opaque resolved-visual value types; Renderer binds
+one exhaustive node materialization to exact Prepared Visual time, authored and
+execution rasters, working space, color-engine identity, and a render-semantics
+epoch. The Preview source Adapter canonicalizes every resolved element,
+including transforms, opacity/blend, compiled Effect fingerprint and required
+frame seed, generated-source identity, recursive nested-frame identity, and
+every exact media source revision/sample/interpretation.
 
-- the deterministic recursive Prepared Visual author closure;
-- the resolved Viewer program/Effect graph identity;
-- every resolved media revision and exact source sample;
-- the working and Program Output color contract;
-- the exact root frame, materialization extent and resolved Preview quality;
-- the authored Preview format discriminator plus physical cache format and
-  alpha interpretation.
+The media projection deliberately normalizes `NativeCpu`, compact CPU YUV, and
+native decoder surfaces to the same Full semantic representation. Reduced and
+proxy rasters remain distinct. Decoder/provider/backend choice, selected GPU
+handle, queue generation, and diagnostic execution path cannot rotate a
+persistent content identity when the promised pixels are the same. Conversely,
+source revision, source sample, picture geometry, alpha interpretation, input
+color/RAW development, working space, Effect graph, transform, or raster
+quality names a different identity.
+
+`mondrian-render-cache` accepts only that opaque resolved identity plus the
+physical artifact envelope: exact output extent, lossless RGBA32F format, and
+straight-coverage alpha. There is no public partial builder or raw-digest
+constructor. Program Output, authored Preview codec/format, monitor/ICC,
+Scopes, signal warnings, scheduling, and author revision are excluded because
+they do not shape the cached pre-Program-Output working pixels. Viewer output
+identity remains a separate presentation key.
 
 Only a cross-call-reusable resolved plan with
 `SequencePreviewSettings::cache_enabled` may receive an identity. Stateful,
@@ -32,12 +48,21 @@ of clearing unrelated cache entries.
 
 ## Artifact and Store
 
-Version 1 stores independent little-endian RGBA32F frames compressed losslessly
+Artifact schema version 1 stores independent little-endian RGBA32F frames compressed losslessly
 with Zstandard. The header binds the complete key, dimensions, decoded and
 compressed lengths, format/alpha contracts, and SHA-256 of decoded bytes.
 Reads enforce both compressed and decoded byte limits before accepting pixels;
 truncation, checksum mismatch, identity mismatch and decompression overflow
-fail closed. One corrupt content address is removed locally.
+fail closed. Publication and decode also verify that payload dimensions match
+the extent carried by the typed identity envelope. One corrupt content address
+is removed locally.
+
+Canonical identity schema 2 lives in the independent `timeline-render-v2`
+Store namespace. Old v1 artifacts are never interpreted under the new semantic
+contract and age out under their former namespace without a destructive global
+clear. Canonical encodings are domain-separated, length-delimited and covered
+by a golden digest test; future pixel-algorithm changes must bump the render
+semantics epoch or namespace.
 
 Complete bytes are published through `mondrian-storage`'s sibling temporary
 file and typed durable atomic-publication boundary. The Store uses two-level

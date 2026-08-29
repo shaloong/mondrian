@@ -275,6 +275,13 @@ impl std::fmt::Display for BasicTitleRasterRequestIdentity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BasicTitleRasterIdentity([u8; 32]);
 
+impl BasicTitleRasterIdentity {
+    /// Stable digest of the complete shaped/rasterized title request.
+    pub const fn digest(self) -> [u8; 32] {
+        self.0
+    }
+}
+
 impl std::fmt::Display for BasicTitleRasterIdentity {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write_hex_identity(self.0, formatter)

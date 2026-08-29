@@ -17,7 +17,6 @@ pub use artifact::{
 };
 pub use identity::{
     TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
-    TimelineRenderCacheIdentityBuilder, TimelineRenderCacheQuality,
 };
 pub use service::{
     TimelineRenderCacheConfig, TimelineRenderCacheDiagnostics, TimelineRenderCacheLookup,

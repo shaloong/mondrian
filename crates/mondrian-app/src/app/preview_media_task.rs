@@ -957,6 +957,8 @@ fn decode_media_preview_inner(
     let deadline_at = job.deadline_at;
     let demand_identity = job.demand_identity;
     let execution_id = job.execution_id;
+    let render_cache_source_fingerprint =
+        super::preview_render_cache_identity::canonical_media_source_fingerprint(&job.key).ok();
     let hardware_decode_request = if job.key.source_has_alpha() {
         PreviewHardwareDecodeRequest::Auto
     } else {
@@ -1033,6 +1035,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
                     .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
@@ -1118,6 +1121,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
                     .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
@@ -1206,6 +1210,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
                     .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),
@@ -1309,6 +1314,7 @@ fn decode_media_preview_inner(
                         presentation_quality,
                         PreviewDecodeExecutionSummary::from_path(decode_execution),
                     )
+                    .with_render_cache_source_fingerprint(render_cache_source_fingerprint)
                     .with_picture_geometry(picture_geometry)
                     .with_cross_call_reuse(decode_diagnostics.selected_pts.is_some()),
                 ),

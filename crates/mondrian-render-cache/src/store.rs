@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const CACHE_NAMESPACE: &str = "timeline-render-v1";
+const CACHE_NAMESPACE: &str = "timeline-render-v2";
 const ARTIFACT_EXTENSION: &str = "mrc";
 
 #[derive(Debug, thiserror::Error)]

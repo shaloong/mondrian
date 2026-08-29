@@ -1,5 +1,9 @@
+use mondrian_core::ResolvedVisualFrameIdentity;
 use sha2::{Digest, Sha256};
-use std::fmt;
+use std::{
+    fmt,
+    hash::{Hash, Hasher},
+};
 
 /// Stable on-disk payload representation selected by the cache author.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -19,27 +23,6 @@ impl TimelineRenderCacheFormat {
         match code {
             1 => Some(Self::LosslessRgba32FloatZstd),
             _ => None,
-        }
-    }
-}
-
-/// Spatial/source quality represented by one cached Timeline result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TimelineRenderCacheQuality {
-    /// Full-resolution source materialization.
-    Full,
-    /// Half-resolution source materialization.
-    Half,
-    /// Proxy-backed source materialization.
-    Proxy,
-}
-
-impl TimelineRenderCacheQuality {
-    const fn code(self) -> u8 {
-        match self {
-            Self::Full => 1,
-            Self::Half => 2,
-            Self::Proxy => 3,
         }
     }
 }
@@ -67,28 +50,69 @@ impl TimelineRenderCacheAlpha {
 }
 
 /// Complete content-addressed identity of one cached Timeline frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TimelineRenderCacheIdentity([u8; 32]);
+#[derive(Debug, Clone, Copy)]
+pub struct TimelineRenderCacheIdentity {
+    digest: [u8; 32],
+    expected_extent: Option<(u32, u32)>,
+}
 
 impl TimelineRenderCacheIdentity {
-    /// Construct from an already-domain-separated SHA-256 digest.
-    pub const fn from_digest(digest: [u8; 32]) -> Self {
-        Self(digest)
+    pub(crate) const fn from_digest(digest: [u8; 32]) -> Self {
+        Self { digest, expected_extent: None }
+    }
+
+    /// Bind one complete resolved visual identity to its physical cache envelope.
+    pub fn for_resolved_visual(
+        visual: ResolvedVisualFrameIdentity,
+        width: u32,
+        height: u32,
+        format: TimelineRenderCacheFormat,
+        alpha: TimelineRenderCacheAlpha,
+    ) -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"mondrian.timeline-render-cache.identity.v2");
+        field(&mut hasher, b"resolved-visual", &visual.digest());
+        field(&mut hasher, b"width", &width.to_le_bytes());
+        field(&mut hasher, b"height", &height.to_le_bytes());
+        field(&mut hasher, b"format", &[format.code()]);
+        field(&mut hasher, b"alpha", &[alpha.code()]);
+        Self {
+            digest: hasher.finalize().into(),
+            expected_extent: Some((width, height)),
+        }
     }
 
     /// Stable digest used for artifact verification and path fan-out.
     pub const fn digest(self) -> [u8; 32] {
-        self.0
+        self.digest
+    }
+
+    pub(crate) const fn expected_extent(self) -> Option<(u32, u32)> {
+        self.expected_extent
     }
 
     /// Lowercase hexadecimal filename identity.
     pub fn hex(self) -> String {
         let mut output = String::with_capacity(64);
-        for byte in self.0 {
+        for byte in self.digest {
             use std::fmt::Write as _;
             let _ = write!(output, "{byte:02x}");
         }
         output
+    }
+}
+
+impl PartialEq for TimelineRenderCacheIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.digest == other.digest
+    }
+}
+
+impl Eq for TimelineRenderCacheIdentity {}
+
+impl Hash for TimelineRenderCacheIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.digest.hash(state);
     }
 }
 
@@ -98,131 +122,43 @@ impl fmt::Display for TimelineRenderCacheIdentity {
     }
 }
 
-/// Canonical builder for a stable Timeline render-cache identity.
-///
-/// Callers must supply stable semantic fingerprints, never process-local
-/// pointer values or cache generations. Length-prefixing every byte string
-/// prevents concatenation ambiguity.
-pub struct TimelineRenderCacheIdentityBuilder {
-    hasher: Sha256,
-}
-
-impl TimelineRenderCacheIdentityBuilder {
-    /// Start the current cache-key schema.
-    pub fn new() -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(b"mondrian.timeline-render-cache.identity.v1");
-        Self { hasher }
-    }
-
-    /// Bind the complete recursive Prepared Visual author fingerprint.
-    pub fn visual_author_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
-        self.field(b"visual-author", &fingerprint);
-        self
-    }
-
-    /// Bind compiled program/effect semantics for this exact resolved frame.
-    pub fn program_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
-        self.field(b"program", &fingerprint);
-        self
-    }
-
-    /// Bind all resolved media revisions and exact source samples.
-    pub fn media_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
-        self.field(b"media", &fingerprint);
-        self
-    }
-
-    /// Bind the working/output color context that shaped the composite.
-    pub fn color_fingerprint(mut self, fingerprint: [u8; 32]) -> Self {
-        self.field(b"color", &fingerprint);
-        self
-    }
-
-    /// Bind the exact root Timeline frame.
-    pub fn frame(mut self, frame: i64) -> Self {
-        self.field(b"frame", &frame.to_le_bytes());
-        self
-    }
-
-    /// Bind materialized output geometry.
-    pub fn extent(mut self, width: u32, height: u32) -> Self {
-        self.field(b"width", &width.to_le_bytes());
-        self.field(b"height", &height.to_le_bytes());
-        self
-    }
-
-    /// Bind Preview source/materialization quality.
-    pub fn quality(mut self, quality: TimelineRenderCacheQuality) -> Self {
-        self.field(b"quality", &[quality.code()]);
-        self
-    }
-
-    /// Bind alpha and physical cache format contracts.
-    pub fn format(
-        mut self,
-        format: TimelineRenderCacheFormat,
-        alpha: TimelineRenderCacheAlpha,
-    ) -> Self {
-        self.field(b"format", &[format.code()]);
-        self.field(b"alpha", &[alpha.code()]);
-        self
-    }
-
-    /// Finish the canonical digest.
-    pub fn finish(self) -> TimelineRenderCacheIdentity {
-        TimelineRenderCacheIdentity::from_digest(self.hasher.finalize().into())
-    }
-
-    fn field(&mut self, label: &[u8], value: &[u8]) {
-        self.hasher.update((label.len() as u64).to_le_bytes());
-        self.hasher.update(label);
-        self.hasher.update((value.len() as u64).to_le_bytes());
-        self.hasher.update(value);
-    }
-}
-
-impl Default for TimelineRenderCacheIdentityBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
+fn field(hasher: &mut Sha256, label: &[u8], value: &[u8]) {
+    hasher.update((label.len() as u64).to_le_bytes());
+    hasher.update(label);
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn identity(frame: i64, quality: TimelineRenderCacheQuality) -> TimelineRenderCacheIdentity {
-        TimelineRenderCacheIdentityBuilder::new()
-            .visual_author_fingerprint([1; 32])
-            .program_fingerprint([2; 32])
-            .media_fingerprint([3; 32])
-            .color_fingerprint([4; 32])
-            .frame(frame)
-            .extent(3840, 2160)
-            .quality(quality)
-            .format(
-                TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-                TimelineRenderCacheAlpha::StraightCoverage,
-            )
-            .finish()
+    fn identity(bytes: &[u8], width: u32) -> TimelineRenderCacheIdentity {
+        let materialization =
+            mondrian_core::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(bytes);
+        let visual = ResolvedVisualFrameIdentity::from_materialization(materialization);
+        TimelineRenderCacheIdentity::for_resolved_visual(
+            visual,
+            width,
+            2160,
+            TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+            TimelineRenderCacheAlpha::StraightCoverage,
+        )
     }
 
     #[test]
-    fn exact_frame_and_quality_are_identity() {
-        assert_ne!(
-            identity(10, TimelineRenderCacheQuality::Full),
-            identity(11, TimelineRenderCacheQuality::Full)
-        );
-        assert_ne!(
-            identity(10, TimelineRenderCacheQuality::Full),
-            identity(10, TimelineRenderCacheQuality::Half)
-        );
+    fn resolved_visual_and_extent_are_identity() {
+        assert_ne!(identity(b"frame-10", 3840), identity(b"frame-11", 3840));
+        assert_ne!(identity(b"frame-10", 3840), identity(b"frame-10", 1920));
     }
 
     #[test]
     fn hexadecimal_identity_is_complete() {
-        let hex = identity(10, TimelineRenderCacheQuality::Full).hex();
+        let hex = identity(b"frame-10", 3840).hex();
+        assert_eq!(
+            hex,
+            "85f05971f32b99e5b72830d8c58d3cfc3bcb021f2f5bc6ac85e10938e8161fd7"
+        );
         assert_eq!(hex.len(), 64);
         assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()));
     }

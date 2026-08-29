@@ -205,6 +205,7 @@ fn default_config() -> Result<TimelineRenderCacheConfig, String> {
 mod tests {
     use super::*;
     use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
+    use mondrian_render_cache::{TimelineRenderCacheAlpha, TimelineRenderCacheFormat};
     use std::time::{Duration, Instant};
 
     fn wait_until(mut condition: impl FnMut() -> bool) {
@@ -224,7 +225,17 @@ mod tests {
         )
         .expect("service");
         let mut adapter = PreviewTimelineRenderCache::with_service(service);
-        let identity = TimelineRenderCacheIdentity::from_digest([42; 32]);
+        let materialization =
+            mondrian_renderer::ResolvedVisualNodeMaterializationIdentity::from_canonical_bytes(
+                b"preview-render-cache-adapter-test",
+            );
+        let identity = TimelineRenderCacheIdentity::for_resolved_visual(
+            mondrian_renderer::ResolvedVisualFrameIdentity::from_materialization(materialization),
+            2,
+            1,
+            TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+            TimelineRenderCacheAlpha::StraightCoverage,
+        );
         let frame = TimelineRenderCacheFrame::new(
             identity,
             WorkingRgbaF32Frame {

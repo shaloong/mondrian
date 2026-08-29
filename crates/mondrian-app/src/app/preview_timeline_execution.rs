@@ -24,7 +24,6 @@ use mondrian_effects::{
 use mondrian_playback::{FramePresentationQuality, PreviewResolutionScale};
 use mondrian_render_cache::{
     TimelineRenderCacheAlpha, TimelineRenderCacheFormat, TimelineRenderCacheIdentity,
-    TimelineRenderCacheIdentityBuilder, TimelineRenderCacheQuality,
 };
 use mondrian_renderer::{
     basic_title_raster_request_identity,
@@ -61,8 +60,7 @@ use super::preview_media_frame::{project_preview_media_transform, MediaPreviewFr
 use super::preview_unavailability::{PreviewOutputStage, PreviewUnavailability};
 use super::preview_viewer_plan::{
     resolved_preview_decode_execution, resolved_preview_presentation_quality,
-    viewer_preview_cache_key_for_resolved_plan, viewer_preview_color_fingerprint,
-    viewer_preview_media_fingerprint, viewer_preview_plan_allows_cross_call_reuse,
+    viewer_preview_cache_key_for_resolved_plan, viewer_preview_plan_allows_cross_call_reuse,
     ResolvedPreviewElement, ResolvedPreviewTransitionInput,
 };
 
@@ -467,7 +465,6 @@ where
             };
         }
     };
-    let visual_author = preview_render_cache_visual_author_fingerprint(&closure);
     if let Err(error) = scratch.borrow().admit_cpu_active_working_set(
         materialization_bytes,
         TimelineCpuCompositePrecision::Float32,
@@ -505,7 +502,7 @@ where
             };
         }
     };
-    let PreparedPreviewVisualOutput::Root(elements) = root else {
+    let PreparedPreviewVisualOutput::Root { elements, resolved_visual_identity } = root else {
         return PreviewTimelineResolution::Unavailable {
             reason: PreviewUnavailability::failed(
                 PreviewOutputStage::TimelineEvaluation,
@@ -524,37 +521,17 @@ where
         &color_context,
     );
     let cache_reusable = viewer_preview_plan_allows_cross_call_reuse(&elements);
-    let render_cache_identity =
-        (cache_reusable && sequence.settings.preview.cache_enabled).then(|| {
-            let mut program =
-                PreviewSemanticIdentityBuilder::new(b"mondrian.preview.render-cache-program.v1");
-            cache_key.plan_identity.hash(&mut program);
-            preview_render_format_code(sequence.settings.preview.format).hash(&mut program);
-            TimelineRenderCacheIdentityBuilder::new()
-                .visual_author_fingerprint(visual_author)
-                .program_fingerprint(program.finish_identity().semantic_fingerprint())
-                .media_fingerprint(
-                    viewer_preview_media_fingerprint(&elements).semantic_fingerprint(),
-                )
-                .color_fingerprint(
-                    viewer_preview_color_fingerprint(&color_context).semantic_fingerprint(),
-                )
-                .frame(frame)
-                .extent(target_resolution.width, target_resolution.height)
-                .quality(
-                    if resolved_preview_presentation_quality(&elements)
-                        == FramePresentationQuality::Ready
-                    {
-                        TimelineRenderCacheQuality::Full
-                    } else {
-                        TimelineRenderCacheQuality::Half
-                    },
-                )
-                .format(
-                    TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
-                    TimelineRenderCacheAlpha::StraightCoverage,
-                )
-                .finish()
+    let render_cache_identity = (cache_reusable && sequence.settings.preview.cache_enabled)
+        .then_some(resolved_visual_identity)
+        .flatten()
+        .map(|visual| {
+            TimelineRenderCacheIdentity::for_resolved_visual(
+                visual,
+                target_resolution.width,
+                target_resolution.height,
+                TimelineRenderCacheFormat::LosslessRgba32FloatZstd,
+                TimelineRenderCacheAlpha::StraightCoverage,
+            )
         });
     PreviewTimelineResolution::Ready(ResolvedPreviewTimeline {
         plan: ResolvedPreviewPlan {
@@ -568,30 +545,6 @@ where
         #[cfg(test)]
         semantic_trace,
     })
-}
-
-fn preview_render_format_code(format: mondrian_timeline::sequence::PreviewRenderFormat) -> u8 {
-    match format {
-        mondrian_timeline::sequence::PreviewRenderFormat::IFrameOnly => 1,
-        mondrian_timeline::sequence::PreviewRenderFormat::ProResProxy => 2,
-        mondrian_timeline::sequence::PreviewRenderFormat::DnxHrLb => 3,
-        mondrian_timeline::sequence::PreviewRenderFormat::LosslessRgba => 4,
-    }
-}
-
-fn preview_render_cache_visual_author_fingerprint<T>(
-    closure: &PreparedVisualFrameClosure<T>,
-) -> [u8; 32] {
-    let mut identity =
-        PreviewSemanticIdentityBuilder::new(b"mondrian.preview.visual-author-closure.v1");
-    closure.len().hash(&mut identity);
-    for node in closure.nodes() {
-        node.sequence_id().hash(&mut identity);
-        node.sequence_revision().hash(&mut identity);
-        node.frame().hash(&mut identity);
-        node.program().visual_author_fingerprint().hash(&mut identity);
-    }
-    identity.finish_identity().semantic_fingerprint()
 }
 
 #[derive(Clone, Copy)]
@@ -715,7 +668,10 @@ impl<'a> PreviewTimelineGraph<'a> {
 }
 
 enum PreparedPreviewVisualOutput {
-    Root(Option<Vec<ResolvedPreviewElement>>),
+    Root {
+        elements: Option<Vec<ResolvedPreviewElement>>,
+        resolved_visual_identity: Option<mondrian_renderer::ResolvedVisualFrameIdentity>,
+    },
     Nested(MediaPreviewFrame),
 }
 
@@ -748,8 +704,19 @@ where
     ) -> Result<Self::Output, Self::Error> {
         let node = inputs.node();
         let resolved = resolve_prepared_visual_node(self, &inputs)?;
+        let resolved_visual_identity =
+            super::preview_render_cache_identity::canonical_resolved_node_materialization(
+                resolved.as_deref().unwrap_or_default(),
+            )
+            .ok()
+            .and_then(|materialization| {
+                mondrian_renderer::resolved_visual_frame_identity(node, materialization).ok()
+            });
         if inputs.is_root() {
-            return Ok(PreparedPreviewVisualOutput::Root(resolved));
+            return Ok(PreparedPreviewVisualOutput::Root {
+                elements: resolved,
+                resolved_visual_identity,
+            });
         }
         let inbound = inputs.inbound_binding().ok_or_else(|| {
             PreviewTimelineAbort::Unavailable(PreviewUnavailability::failed(
@@ -768,6 +735,7 @@ where
             inbound.parent_working_color_space(),
             node.color_context().clone(),
             resolved.unwrap_or_default(),
+            resolved_visual_identity,
             self.scratch,
             &mut self.facts,
         )?;
@@ -815,7 +783,7 @@ fn prepared_preview_nested_output<'a>(
 ) -> Result<&'a MediaPreviewFrame, PreviewTimelineAbort> {
     match inputs.nested_output(placement, sample) {
         Some(PreparedPreviewVisualOutput::Nested(frame)) => Ok(frame),
-        Some(PreparedPreviewVisualOutput::Root(_)) => Err(PreviewTimelineAbort::Unavailable(
+        Some(PreparedPreviewVisualOutput::Root { .. }) => Err(PreviewTimelineAbort::Unavailable(
             PreviewUnavailability::failed(
                 PreviewOutputStage::TimelineEvaluation,
                 format!(
@@ -2010,6 +1978,7 @@ where
         ))
     })?;
     let frame_identity = basic_title_preview_frame_identity(&raster);
+    let render_cache_source_fingerprint = raster.identity().digest();
     Ok((
         MediaPreviewFrame::from_working(
             raster.into_frame(),
@@ -2017,7 +1986,8 @@ where
             frame_identity,
             mondrian_playback::FramePresentationQuality::Ready,
             super::preview_execution::PreviewDecodeExecutionSummary::default(),
-        ),
+        )
+        .with_render_cache_source_fingerprint(Some(render_cache_source_fingerprint)),
         transform,
     ))
 }
@@ -2030,6 +2000,7 @@ fn materialize_prepared_nested_node(
     parent_working_color_space: mondrian_core::WorkingColorSpace,
     color_context: ProgramColorContext,
     resolved: Vec<ResolvedPreviewElement>,
+    resolved_visual_identity: Option<mondrian_renderer::ResolvedVisualFrameIdentity>,
     scratch: &RefCell<TimelineCompositeScratch>,
     facts: &mut Vec<PreviewTimelineExecutionFact>,
 ) -> Result<MediaPreviewFrame, PreviewTimelineAbort> {
@@ -2114,6 +2085,9 @@ fn materialize_prepared_nested_node(
         frame_identity,
         presentation_quality,
         decode_execution,
+    )
+    .with_render_cache_source_fingerprint(
+        resolved_visual_identity.map(|identity| identity.digest()),
     )
     .with_cross_call_reuse(cross_call_reusable))
 }

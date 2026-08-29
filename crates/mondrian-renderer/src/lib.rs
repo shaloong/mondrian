@@ -37,6 +37,7 @@ pub mod profile;
 pub mod program_scopes_gpu;
 pub mod realtime_performance;
 mod resident_encode;
+mod resolved_visual_identity;
 pub mod shot_match;
 pub mod signal_monitor;
 pub mod source_frame_preparation;
@@ -211,6 +212,7 @@ pub use heterogeneous_gpu::{
     HeterogeneousGpuSubmissionAuthority, HeterogeneousGpuSubmittedContinuation,
     HeterogeneousGpuSubmittedEvidence,
 };
+pub use mondrian_core::{ResolvedVisualFrameIdentity, ResolvedVisualNodeMaterializationIdentity};
 #[cfg(target_os = "windows")]
 pub use native_video::{
     inspect_d3d12_native_decoded_frame, D3D12NativeDecodedFrameInspection,
@@ -332,6 +334,7 @@ pub use resident_encode::{
     D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
     D3D12ResidentEncodeSubmissionError,
 };
+pub use resolved_visual_identity::{resolved_visual_frame_identity, ResolvedVisualIdentityError};
 pub use shot_match::{
     analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,
 };
