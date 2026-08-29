@@ -2,10 +2,10 @@ use crate::ocio_gpu::{
     OcioGpuWgpuRenderPassRecorder, OcioGpuWgpuRenderPassTarget, OcioGpuWgpuWrapperBindGroup,
 };
 use crate::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    CpuColorTransformExecutor, CpuEncodedColorFrame, CpuEncodedFloatColorFrame,
-    CpuSourceColorFrame, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocationError,
+    product_gpu_working_texture_format, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
+    ColorFrameResidency, CpuColorFrame, CpuColorTransformExecutor, CpuEncodedColorFrame,
+    CpuEncodedFloatColorFrame, CpuSourceColorFrame, GpuColorFrameAllocationPlan,
+    GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameId, GpuColorFrameIdAllocationError,
     GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackError,
     GpuColorFrameReadbackPlan, GpuColorFrameResource, GpuColorFrameResourceTable,
     GpuColorFrameResourceTableError, GpuColorFrameTextureFormat, GpuColorFrameUploadError,
@@ -960,7 +960,7 @@ impl RenderGpuOutputBoundaryRuntime {
         let plan = GpuColorFrameUploadPlan::from_cpu_color_frame(
             self.frame_ids.allocate().map_err(RenderGpuWorkingFrameUploadError::FrameId)?,
             frame,
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             "gpu-working-frame-upload",
         )
         .map_err(RenderGpuWorkingFrameUploadError::Plan)?;
@@ -1122,7 +1122,7 @@ impl RenderGpuOutputBoundaryRuntime {
             .record_wgpu_planned_color_transform_owned_backend(
                 to_working_plan,
                 &effect.output,
-                GpuColorFrameTextureFormat::Rgba32Float,
+                product_gpu_working_texture_format(),
                 "effect-domain-working-output",
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
                     device,
@@ -2797,7 +2797,7 @@ impl RenderGpuOutputStageResourcePlan {
         let input_upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
             ids.allocate().map_err(RenderGpuOutputStageResourcePlanError::FrameId)?,
             frame,
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             "color-stage-working-input",
         )
         .map_err(RenderGpuOutputStageResourcePlanError::InputUpload)?;
@@ -3179,7 +3179,7 @@ impl RenderGpuInputStageResourcePlan {
         let output = GpuColorFrameHandle::new(
             ids.allocate().map_err(RenderGpuInputStageResourcePlanError::FrameId)?,
             planned.gpu_output,
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             "color-stage-working-output",
         )
         .map_err(RenderGpuInputStageResourcePlanError::OutputHandle)?;
@@ -3244,7 +3244,7 @@ impl RenderGpuInputStageResourcePlan {
                 },
             );
         }
-        if output.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+        if output.texture_format() != product_gpu_working_texture_format() {
             return Err(
                 RenderGpuInputStageResourcePlanError::UnsupportedOutputTextureFormat {
                     texture_format: output.texture_format(),

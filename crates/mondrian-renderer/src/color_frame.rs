@@ -1,4 +1,5 @@
 use crate::color_transform::{RenderColorTransformBackend, RenderInputTransform};
+use crate::working_float_policy::product_gpu_working_texture_format;
 use mondrian_core::{
     display_calibration::DisplayCalibrationKey, timeline_data::AlphaInterpretation,
     types::ColorSpace, ColorMatrixCoefficients, ColorTransferCharacteristic, WorkingColorSpace,
@@ -1258,7 +1259,7 @@ impl GpuColorFrameUploadPlan {
         texture_format: GpuColorFrameTextureFormat,
         label: impl Into<String>,
     ) -> Result<Self, GpuColorFrameUploadError> {
-        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+        if texture_format != product_gpu_working_texture_format() {
             return Err(GpuColorFrameUploadError::UnsupportedCpuFloatTextureFormat {
                 texture_format,
             });
@@ -2058,7 +2059,7 @@ impl GpuNativeDecodedFrameImportPlan {
         let working_frame = GpuColorFrameHandle::new(
             ids.allocate()?,
             working_descriptor,
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             contract.label,
         )
         .map_err(GpuNativeDecodedFrameImportPlanError::WorkingFrameHandle)?;
@@ -3086,6 +3087,17 @@ impl CpuSourceColorFrame {
             Self::EncodedRgba8(frame) => frame.descriptor(),
             Self::EncodedFloat(frame) => frame.descriptor(),
             Self::LinearFloat(frame) => frame.descriptor(),
+        }
+    }
+
+    /// Exact GPU texture format used by the current source-upload Implementation.
+    ///
+    /// This is intentionally distinct from the post-transform working format:
+    /// encoded and linear Float32 CPU payloads are uploaded without repacking.
+    pub const fn gpu_upload_texture_format(&self) -> GpuColorFrameTextureFormat {
+        match self {
+            Self::EncodedRgba8(_) => GpuColorFrameTextureFormat::Rgba8Unorm,
+            Self::EncodedFloat(_) | Self::LinearFloat(_) => GpuColorFrameTextureFormat::Rgba32Float,
         }
     }
 

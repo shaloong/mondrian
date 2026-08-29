@@ -598,6 +598,13 @@ config pins its `scene_linear` role to `Linear Rec.2020`, and the package
 contract validates the same mapping. The working values are unbounded
 scene-linear floats, not a 0..1 display signal and not a request to clip colors
 to the BT.2020 triangle. Negative components and values above one are preserved.
+That semantic identity does not prescribe a GPU storage width. Renderer owns a
+separate fail-closed Working Float Policy Module: today its qualified product
+Implementation is RGBA32F, while RGBA16F requires independently sealed
+end-to-end quality evidence, same-device performance benefit, and complete
+compositor/Effects/AlphaMask/heterogeneous/Viewer/Export qualification. Output
+carriers, LUTs, DataTextures, AlphaMasks, and deliverable pipe formats keep
+their own typed storage contracts and cannot be used to infer working precision.
 The package identity is also an authoring constraint: every Standard Project
 Sequence and its future-Sequence template must use Linear Rec.2020. Project
 validation, Sequence actions, and Project-environment replacement reject any

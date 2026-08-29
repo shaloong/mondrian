@@ -212,6 +212,16 @@ explicit stock-OCIO GPU intermediate transform. The root handle enters Program
 Output/legalization/packing directly and performs exactly one readback at the
 encoder-pipe boundary. There is no nested or graph-internal readback.
 
+The GPU Visual Module and Viewer share the Renderer-owned Working Float Policy
+Interface. The current product decision is RGBA32F because no sealed Float16
+quality/performance bundle exists and the Effects/heterogeneous Implementations
+are not Float16-qualified. Each GPU visual record carries the exact decision;
+all nodes in one Export attempt must agree, and `ExportJobVisualDiagnostics`
+retains that decision beside peak active bytes/textures. Nested child-to-parent
+working transforms allocate the same selected format. Estimation, execution,
+and recorded output are compared explicitly, so a future policy change cannot
+quietly produce 8-byte estimates for 16-byte textures.
+
 GPU selection is whole-closure and pre-start. An unsupported graph, temporal
 closure, heterogeneous route, unavailable device, or active-resource rejection
 selects the complete CPU route before GPU pixels start. Once the GPU Adapter

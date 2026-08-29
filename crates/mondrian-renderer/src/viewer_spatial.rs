@@ -1,18 +1,18 @@
 //! Working-linear spatial processing for Viewer presentation.
 //!
 //! Spatial filtering must happen before an OCIO display/output transform. This
-//! module therefore accepts and produces only GPU-resident RGBA32F working
-//! frames. Downscales build a bounded box-prefilter pyramid before a separable
+//! module therefore accepts and produces only GPU-resident textures matching
+//! the product working-float policy. Downscales build a bounded box-prefilter pyramid before a separable
 //! Lanczos3 reconstruction pass, keeping the final filter footprint bounded.
 
 use std::sync::Arc;
 
 use crate::{
-    ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
-    ColorFrameResidency, ColorFrameSpace, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameHandleError, GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator,
-    GpuColorFrameResource, GpuColorFrameTextureFormat, GpuColorFrameWgpuResource,
-    GpuColorFrameWgpuResourcePool,
+    product_gpu_working_texture_format, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
+    ColorFrameEncoding, ColorFrameResidency, ColorFrameSpace, GpuColorFrameAllocationPlan,
+    GpuColorFrameHandle, GpuColorFrameHandleError, GpuColorFrameIdAllocationError,
+    GpuColorFrameIdAllocator, GpuColorFrameResource, GpuColorFrameTextureFormat,
+    GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use thiserror::Error;
@@ -217,7 +217,7 @@ impl GpuViewerSpatialPlan {
                 height: output_height,
                 ..descriptor
             },
-            GpuColorFrameTextureFormat::Rgba32Float,
+            product_gpu_working_texture_format(),
             "viewer-working-spatial-output",
         )?;
         Ok(Self { input, output, source_rect })
@@ -245,8 +245,10 @@ fn validate_spatial_request(
     {
         return Err(GpuViewerSpatialPlanError::InputNotWorkingLinear { actual: descriptor });
     }
-    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
-        return Err(GpuViewerSpatialPlanError::InputNotRgba32Float {
+    let expected = product_gpu_working_texture_format();
+    if input.texture_format() != expected {
+        return Err(GpuViewerSpatialPlanError::InputWorkingFormatMismatch {
+            expected,
             actual: input.texture_format(),
         });
     }
@@ -289,9 +291,11 @@ pub enum GpuViewerSpatialPlanError {
         /// Rejected input descriptor.
         actual: ColorFrameDescriptor,
     },
-    /// Working storage is not the mandatory 32-bit float format.
-    #[error("Viewer spatial input must use RGBA32F, got {actual:?}")]
-    InputNotRgba32Float {
+    /// Working storage does not match the selected product policy.
+    #[error("Viewer spatial input must use {expected:?}, got {actual:?}")]
+    InputWorkingFormatMismatch {
+        /// Selected product working format.
+        expected: GpuColorFrameTextureFormat,
         /// Rejected storage format.
         actual: GpuColorFrameTextureFormat,
     },
@@ -705,7 +709,7 @@ impl GpuViewerSpatialPipeline {
                     entry_point: Some(entry_point),
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba32Float,
+                        format: product_gpu_working_texture_format().to_wgpu(),
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -889,7 +893,7 @@ fn allocate_private_working_resource(
             residency: ColorFrameResidency::Gpu,
             alpha,
         },
-        GpuColorFrameTextureFormat::Rgba32Float,
+        product_gpu_working_texture_format(),
         label,
     )?;
     Ok(resource_pool.acquire(device, &GpuColorFrameAllocationPlan::for_handle(handle)))
@@ -933,7 +937,7 @@ mod tests {
         let half = working_handle(&mut ids, 4, 4, GpuColorFrameTextureFormat::Rgba16Float);
         assert!(matches!(
             GpuViewerSpatialPlan::new(&mut ids, half, ViewerSourceRect::FULL, 2, 2),
-            Err(GpuViewerSpatialPlanError::InputNotRgba32Float { .. })
+            Err(GpuViewerSpatialPlanError::InputWorkingFormatMismatch { .. })
         ));
 
         let anisotropic =

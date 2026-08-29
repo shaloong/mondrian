@@ -19,7 +19,7 @@ use crate::{
     GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuProgramScopesError,
     GpuProgramScopesRecord, GpuProgramScopesRequest, GpuProgramScopesRuntime,
     GpuProgramScopesRuntimeDiagnostics, GpuSignalMonitorError, GpuSignalMonitorRequest,
-    GpuSignalMonitorRuntime, GpuViewerSpatialRuntimeDiagnostics,
+    GpuSignalMonitorRuntime, GpuViewerSpatialRuntimeDiagnostics, GpuWorkingFloatDecision,
     HeterogeneousGpuCompletedContinuation, HeterogeneousGpuContinuationError,
     HeterogeneousGpuRecordResources, HeterogeneousGpuRecordedContinuation,
     HeterogeneousGpuSubmittedContinuation, NativeVideoImportCandidateTimingReceipt,
@@ -34,7 +34,7 @@ use crate::{
     ViewerGpuActiveWorkingSetEstimateError, ViewerGpuExecutionLayer,
     ViewerGpuExecutionResourceGrant, ViewerGpuMediaSource, ViewerGpuNativeSource,
     ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
-    ViewerSourceRect,
+    ViewerSourceRect, PRODUCT_GPU_WORKING_FLOAT_DECISION,
 };
 use mondrian_core::display_calibration::DisplayCalibrationLut3d;
 use mondrian_core::types::{BlendMode, Color, SequenceId};
@@ -579,6 +579,7 @@ impl ViewerGpuExecutionRuntime {
                 RenderColorTransformGpuOptions::default(),
             )
             .map_err(|error| ViewerGpuExecutionError::WorkingComposite(Box::new(error)))?;
+        validate_product_working_handle("composite", &composite.output)?;
         compositing_diagnostics.accumulate(composite.compositing_diagnostics);
         let residency = prepared.residency;
         let fallback_reasons = prepared.fallback_reasons;
@@ -610,6 +611,7 @@ impl ViewerGpuExecutionRuntime {
         };
         let spatial_diagnostics = self.spatial.diagnostics();
         let spatial_output = spatial_record.output().clone();
+        validate_product_working_handle("spatial", &spatial_output)?;
         if matches!(spatial_record, GpuViewerSpatialRecord::Materialized(_)) {
             let spatial_resource = self
                 .spatial
@@ -800,6 +802,7 @@ impl ViewerGpuExecutionRuntime {
             program_output,
             program_scopes,
             output,
+            working_float_decision: PRODUCT_GPU_WORKING_FLOAT_DECISION,
             output_owner: Some(output_owner),
             stage_diagnostics,
             compositing_diagnostics,
@@ -1025,6 +1028,8 @@ pub struct ViewerGpuExecutionRecord {
     pub program_scopes: Option<GpuProgramScopesRecord>,
     /// Renderer output handle whose private ownership authority can be consumed once.
     pub output: GpuColorFrameHandle,
+    /// Product working-format decision shared with prepared Export execution.
+    pub working_float_decision: GpuWorkingFloatDecision,
     output_owner: Option<ViewerGpuExecutionOutputOwner>,
     /// Accumulated input and output color-stage diagnostics.
     pub stage_diagnostics: RenderColorStageDiagnostics,
@@ -1288,6 +1293,16 @@ pub enum ViewerGpuExecutionError {
     EffectDomain(String),
     #[error("Viewer GPU working output is missing: {0}")]
     WorkingOutputMissing(String),
+    /// Actual GPU working storage disagreed with the policy used for admission.
+    #[error("Viewer GPU {stage} working output must use {expected:?}, got {actual:?}")]
+    WorkingFloatPolicyMismatch {
+        /// Stable working stage identity.
+        stage: &'static str,
+        /// Policy-selected format.
+        expected: GpuColorFrameTextureFormat,
+        /// Actual recorded output format.
+        actual: GpuColorFrameTextureFormat,
+    },
     #[error("Viewer GPU spatial processing failed: {0}")]
     Spatial(String),
     #[error("Viewer GPU spatial output disappeared before the display boundary")]
@@ -1311,6 +1326,22 @@ pub enum ViewerGpuExecutionError {
     Calibration(String),
     #[error("Viewer GPU profiling stage marker failed: {0}")]
     StageMarker(String),
+}
+
+fn validate_product_working_handle(
+    stage: &'static str,
+    handle: &GpuColorFrameHandle,
+) -> Result<(), ViewerGpuExecutionError> {
+    let expected = PRODUCT_GPU_WORKING_FLOAT_DECISION.format().texture_format();
+    let actual = handle.texture_format();
+    if actual != expected {
+        return Err(ViewerGpuExecutionError::WorkingFloatPolicyMismatch {
+            stage,
+            expected,
+            actual,
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2519,6 +2550,7 @@ mod tests {
             program_output: output.clone(),
             program_scopes: None,
             output,
+            working_float_decision: PRODUCT_GPU_WORKING_FLOAT_DECISION,
             output_owner: Some(ViewerGpuExecutionOutputOwner::ColorOutput),
             stage_diagnostics: RenderColorStageDiagnostics::default(),
             compositing_diagnostics: GpuCompositingDiagnostics::default(),

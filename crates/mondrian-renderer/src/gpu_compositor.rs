@@ -14,12 +14,12 @@ use crate::gpu_composite_execution::{
     GpuCompositeRect, GpuCompositeSourceCrop,
 };
 use crate::{
-    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
-    GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
-    GpuColorFrameHandle, GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator,
-    GpuColorFrameResource, GpuColorFrameResourceTable, GpuColorFrameTextureFormat,
-    GpuColorFrameUploadPlan, GpuColorFrameUploader, GpuColorFrameWgpuResource,
-    GpuColorFrameWgpuResourcePool,
+    product_gpu_working_texture_format, ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding,
+    ColorFrameResidency, CpuColorFrame, GpuColorFrameAllocationPlan,
+    GpuColorFrameBindGroupCacheKeyAllocationError, GpuColorFrameHandle,
+    GpuColorFrameIdAllocationError, GpuColorFrameIdAllocator, GpuColorFrameResource,
+    GpuColorFrameResourceTable, GpuColorFrameTextureFormat, GpuColorFrameUploadPlan,
+    GpuColorFrameUploader, GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool,
 };
 use bytemuck::{Pod, Zeroable};
 use mondrian_core::{
@@ -1111,7 +1111,7 @@ pub fn evaluate_gpu_compositing_capability(
 /// Source layer accepted by the native GPU working-space compositor.
 #[derive(Debug, Clone, Copy)]
 pub enum GpuCompositeLayerSource<'a> {
-    /// CPU working-space frame that will be uploaded to an Rgba32Float texture.
+    /// CPU working-space frame uploaded to the policy-selected working texture.
     CpuFrame(&'a CpuColorFrame),
     /// CPU RGBA numeric data uploaded as `NonColorData + DataTexture` and
     /// admitted to working compositing only through the explicit bypass.
@@ -1276,8 +1276,10 @@ pub enum GpuCompositeError {
         /// Unsupported input texture format.
         texture_format: GpuColorFrameTextureFormat,
     },
-    /// Alpha-mask execution requires RGBA32F source and mask textures.
-    #[error("GPU alpha-mask pass requires RGBA32F textures, got {texture_format:?}")]
+    /// Alpha-mask execution requires the selected working texture format.
+    #[error(
+        "GPU alpha-mask pass requires the selected working texture format, got {texture_format:?}"
+    )]
     AlphaMaskTextureFormatUnsupported {
         /// Unsupported source or mask texture format.
         texture_format: GpuColorFrameTextureFormat,
@@ -1474,7 +1476,7 @@ impl GpuFrameCompositor {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba32Float,
+                    format: product_gpu_working_texture_format().to_wgpu(),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1519,7 +1521,7 @@ impl GpuFrameCompositor {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba32Float,
+                    format: product_gpu_working_texture_format().to_wgpu(),
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1558,7 +1560,7 @@ impl GpuFrameCompositor {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
+            format: product_gpu_working_texture_format().to_wgpu(),
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -1723,7 +1725,7 @@ impl GpuFrameCompositor {
                     let upload = GpuColorFrameUploadPlan::from_cpu_color_frame(
                         ids.allocate()?,
                         frame,
-                        GpuColorFrameTextureFormat::Rgba32Float,
+                        product_gpu_working_texture_format(),
                         format!("gpu-composite-layer-{index}"),
                     )
                     .map_err(GpuCompositeError::Upload)?;
@@ -2869,7 +2871,7 @@ fn validate_alpha_mask_inputs(
         });
     }
     for texture_format in [input.texture_format(), mask.texture_format()] {
-        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+        if texture_format != product_gpu_working_texture_format() {
             return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
         }
     }
@@ -2897,7 +2899,7 @@ fn validate_alpha_mask_pair(
         }
     }
     for texture_format in [left.texture_format(), right.texture_format()] {
-        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+        if texture_format != product_gpu_working_texture_format() {
             return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
         }
     }
@@ -2951,7 +2953,7 @@ fn validate_matte_mix_inputs(
         graded.texture_format(),
         matte.texture_format(),
     ] {
-        if texture_format != GpuColorFrameTextureFormat::Rgba32Float {
+        if texture_format != product_gpu_working_texture_format() {
             return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported { texture_format });
         }
     }
@@ -2976,7 +2978,7 @@ fn validate_qualifier_input(
     if actual != expected {
         return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
     }
-    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+    if input.texture_format() != product_gpu_working_texture_format() {
         return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported {
             texture_format: input.texture_format(),
         });
@@ -2999,7 +3001,7 @@ fn validate_matte_preview_input(input: &GpuColorFrameHandle) -> Result<(), GpuCo
     if actual != expected {
         return Err(GpuCompositeError::SourceDescriptorMismatch { expected, actual });
     }
-    if input.texture_format() != GpuColorFrameTextureFormat::Rgba32Float {
+    if input.texture_format() != product_gpu_working_texture_format() {
         return Err(GpuCompositeError::AlphaMaskTextureFormatUnsupported {
             texture_format: input.texture_format(),
         });
@@ -3106,7 +3108,7 @@ fn single_layer_gpu_passthrough<'a>(
         && layer.effect_plan.is_none_or(CompiledEffectGpuPlan::is_identity)
         && descriptor.width == request.width
         && descriptor.height == request.height
-        && handle.texture_format() == GpuColorFrameTextureFormat::Rgba32Float;
+        && handle.texture_format() == product_gpu_working_texture_format();
     preserves_pixels.then_some(handle)
 }
 
@@ -3617,7 +3619,7 @@ fn create_working_resource(
     let handle = GpuColorFrameHandle::new(
         ids.allocate()?,
         descriptor,
-        GpuColorFrameTextureFormat::Rgba32Float,
+        product_gpu_working_texture_format(),
         label,
     )?;
     let allocation = GpuColorFrameAllocationPlan::for_handle(handle);

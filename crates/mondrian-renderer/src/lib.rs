@@ -46,6 +46,7 @@ pub mod viewer_runtime;
 pub mod viewer_working_set;
 #[cfg(feature = "validation")]
 mod visual_execution_validation;
+pub mod working_float_policy;
 pub use heterogeneous_cpu::{
     HeterogeneousCpuPrefixBatchCompletion, HeterogeneousCpuPrefixBatchError,
     HeterogeneousCpuPrefixBatchExecutor, HeterogeneousCpuPrefixBatchGrant,
@@ -378,6 +379,13 @@ pub use visual_execution_validation::{
     PreparedVisualExecutionNodeTrace, PreparedVisualExecutionSampleTrace,
     PreparedVisualExecutionSemanticTrace, PreparedVisualExecutionTemporalBatchTrace,
     PreparedVisualExecutionTemporalSourceKindTrace, PreparedVisualExecutionTemporalSourceTrace,
+};
+pub use working_float_policy::{
+    product_gpu_working_bytes_per_pixel, product_gpu_working_texture_format,
+    GpuWorkingFloat16ImplementationQualification, GpuWorkingFloatBlockers, GpuWorkingFloatDecision,
+    GpuWorkingFloatDecisionReason, GpuWorkingFloatFormat, GpuWorkingFloatPerformanceEvidence,
+    GpuWorkingFloatPolicy, GpuWorkingFloatPreference, GpuWorkingFloatQualityEvidence,
+    PRODUCT_GPU_WORKING_FLOAT_DECISION, PRODUCT_GPU_WORKING_FLOAT_POLICY,
 };
 mod basic_title;
 pub use basic_title::{

@@ -12,6 +12,36 @@ The working compositor clears its accumulation target to transparent black.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
+## Working Float Policy
+
+`working_float_policy` is the single Renderer Module deciding the transient
+scene-linear GPU storage representation. Its Interface separates project
+working-color identity from `Rgba16Float`/`Rgba32Float` execution storage and
+publishes an immutable `GpuWorkingFloatDecision` with the exact reason and
+admitted report fingerprints. Viewer compositing/spatial processing,
+`GpuVisualFrameExecutor`, nested Export working transforms, and their active
+resource estimates consume the same decision. Both execution records carry it;
+Export retains it in job diagnostics. A recorded working handle whose texture
+format differs from the decision fails before it can be described as a valid
+Viewer or Export result.
+
+The production decision remains RGBA32F. RGBA16F is eligible only when a sealed
+independent end-to-end quality report, a same-device same-suite performance
+report proving lower p95 GPU time and active bytes, and complete Float16
+qualification of compositor, Effects, AlphaMask, heterogeneous execution, and
+Viewer/Export parity are all present. Missing, mismatched, failed, or
+non-beneficial evidence selects RGBA32F; memory pressure is never permission to
+reduce precision. The current Effects GPU lowering and heterogeneous
+CPU-prefix/GPU-suffix Implementation are Float32-only, so their explicit
+contracts remain qualification blockers rather than being mechanically
+relabeled.
+
+Program Output, monitor/presentation carriers, encoded native-video sources,
+Export pipe formats, RGBA32F LUTs, typed DataTextures/AlphaMasks, and the
+lossless Render Cache have separate storage contracts. They do not inherit the
+working-float decision. In particular, an encoded output `Rgba16Float` is not
+evidence that scene-linear compositing is Float16-qualified.
+
 The compositor records through one checked **Composite Execution Plan**. The
 planner is a pure Renderer Module: it owns transformed Layer ROI, conservative
 per-Layer damage, unchanged-accumulator preservation, bounded tile draws, and
@@ -85,6 +115,10 @@ native-resource grant. An idle-pool hit still counts as active while checked
 out; a heterogeneous sub-grant does not replace the enclosing Viewer grant;
 and returning an intermediate to the idle pool does not authorize the next
 frame.
+Every scene-working term uses the policy-selected bytes per pixel. CPU source
+upload demand instead uses its actual upload Implementation format, and the
+display-calibration LUT retains its own RGBA32F byte contract; neither is
+guessed from a generic color descriptor.
 
 Offline deliverables use the sibling `GpuVisualFrameExecutor` Module. It accepts
 only resolved working sources, typed DataTextures, already-resident nested

@@ -14,11 +14,12 @@ use mondrian_core::WorkingColorSpace;
 use mondrian_effects::{CompiledEffectGpuPlan, EffectColorDomain};
 
 use crate::{
-    CpuColorFrame, GpuColorFrameHandle, GpuCompositeError, GpuCompositeLayer,
-    GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics, GpuFrameCompositor,
-    RenderColorStageDiagnostics, RenderColorTransformGpuOptions,
-    RenderGpuCompositeGraphRecordError, RenderGpuEffectDomainRecordError,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
+    product_gpu_working_bytes_per_pixel, CpuColorFrame, GpuColorFrameHandle, GpuCompositeError,
+    GpuCompositeLayer, GpuCompositeLayerSource, GpuCompositeRequest, GpuCompositingDiagnostics,
+    GpuFrameCompositor, GpuWorkingFloatDecision, RenderColorStageDiagnostics,
+    RenderColorTransformGpuOptions, RenderGpuCompositeGraphRecordError,
+    RenderGpuEffectDomainRecordError, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, PRODUCT_GPU_WORKING_FLOAT_DECISION,
 };
 
 /// Typed pixels or procedural values entering GPU visual execution.
@@ -279,6 +280,8 @@ pub struct GpuVisualFrameRequest<'a> {
 pub struct GpuVisualFrameRecord {
     /// GPU-resident working result retained in the shared frame table.
     pub output: GpuColorFrameHandle,
+    /// Product working-format decision shared with Viewer execution.
+    pub working_float_decision: GpuWorkingFloatDecision,
     /// GPU compositor path evidence.
     pub compositing_diagnostics: GpuCompositingDiagnostics,
     /// Explicit OCIO stage evidence. DataTexture input bypasses contribute zero stages.
@@ -304,6 +307,14 @@ pub enum GpuVisualFrameExecutionError {
     /// Final stack/adjustment graph recording failed.
     #[error("GPU visual composite graph failed: {0:?}")]
     CompositeGraph(Box<RenderGpuCompositeGraphRecordError>),
+    /// Actual GPU working storage disagreed with the policy used for admission.
+    #[error("GPU visual working output must use {expected:?}, got {actual:?}")]
+    WorkingFloatPolicyMismatch {
+        /// Policy-selected format.
+        expected: crate::GpuColorFrameTextureFormat,
+        /// Actual recorded output format.
+        actual: crate::GpuColorFrameTextureFormat,
+    },
 }
 
 /// Long-lived renderer Implementation for prepared GPU visual frames.
@@ -466,8 +477,17 @@ impl GpuVisualFrameExecutor {
             .map_err(|error| GpuVisualFrameExecutionError::CompositeGraph(Box::new(error)))?;
         compositing_diagnostics.accumulate(graph.compositing_diagnostics);
         color_stage_diagnostics.accumulate(graph.color_stage_diagnostics);
+        let expected = PRODUCT_GPU_WORKING_FLOAT_DECISION.format().texture_format();
+        let actual = graph.output.texture_format();
+        if actual != expected {
+            return Err(GpuVisualFrameExecutionError::WorkingFloatPolicyMismatch {
+                expected,
+                actual,
+            });
+        }
         Ok(GpuVisualFrameRecord {
             output: graph.output,
+            working_float_decision: PRODUCT_GPU_WORKING_FLOAT_DECISION,
             compositing_diagnostics,
             color_stage_diagnostics,
             external_adjustment_passes: graph.external_adjustment_passes,
@@ -759,7 +779,7 @@ fn repeated_texture_demand(
 ) -> Result<GpuVisualFrameActiveTextureDemand, GpuVisualFrameActiveWorkingSetEstimateError> {
     let one = u64::from(width)
         .checked_mul(u64::from(height))
-        .and_then(|pixels| pixels.checked_mul(16))
+        .and_then(|pixels| pixels.checked_mul(u64::from(product_gpu_working_bytes_per_pixel())))
         .ok_or(GpuVisualFrameActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
     let bytes = one
         .checked_mul(textures)

@@ -8,9 +8,9 @@
 //! monitor, or calibration texture can be created.
 
 use crate::{
-    ColorFrameEncoding, GpuColorFrameTextureFormat, HeterogeneousGpuRecordingRequirements,
-    ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuSourceLayer,
-    ViewerGpuTransitionInput, ViewerSourceRect,
+    product_gpu_working_bytes_per_pixel, GpuColorFrameTextureFormat,
+    HeterogeneousGpuRecordingRequirements, ViewerGpuExecutionLayer, ViewerGpuExecutionRequest,
+    ViewerGpuSourceLayer, ViewerGpuTransitionInput, ViewerSourceRect,
 };
 use mondrian_effects::EffectColorDomain;
 use mondrian_media::DecodedVideoSurfaceFormat;
@@ -374,7 +374,7 @@ pub fn estimate_viewer_gpu_active_working_set(
                         ViewerGpuActiveTextureDemand::checked_repeated_texture(
                             request.width,
                             request.height,
-                            16,
+                            working_bytes_per_pixel(),
                             3,
                             ViewerGpuActiveWorkingSetStage::Effects,
                         )?,
@@ -422,7 +422,7 @@ pub fn estimate_viewer_gpu_active_working_set(
                         ViewerGpuActiveTextureDemand::checked_repeated_texture(
                             request.width,
                             request.height,
-                            16,
+                            working_bytes_per_pixel(),
                             textures,
                             ViewerGpuActiveWorkingSetStage::Transitions,
                         )?,
@@ -446,7 +446,7 @@ pub fn estimate_viewer_gpu_active_working_set(
     estimate.working_composite = ViewerGpuActiveTextureDemand::checked_repeated_texture(
         request.width,
         request.height,
-        16,
+        working_bytes_per_pixel(),
         composite_textures,
         ViewerGpuActiveWorkingSetStage::WorkingComposite,
     )?;
@@ -610,7 +610,7 @@ fn estimate_source(
                 let working_bytes = checked_texture_bytes(
                     source.materialization_width,
                     source.materialization_height,
-                    16,
+                    working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 let bytes = u64::try_from(source.frame.retained_bytes())
@@ -651,7 +651,7 @@ fn estimate_source(
                 let working_bytes = checked_texture_bytes(
                     width,
                     height,
-                    16,
+                    working_bytes_per_pixel(),
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 // The media Frame Store governs the adopted decoder surface.
@@ -670,11 +670,8 @@ fn estimate_source(
             }
             if let Some(source) = gpu_source {
                 let descriptor = source.source.descriptor();
-                let source_bpp = match descriptor.encoding {
-                    ColorFrameEncoding::EncodedRgba8 => 4,
-                    ColorFrameEncoding::LinearFloat | ColorFrameEncoding::EncodedFloat => 16,
-                    ColorFrameEncoding::DeviceFloat => 16,
-                };
+                let source_bpp =
+                    u64::from(source.source.gpu_upload_texture_format().bytes_per_pixel());
                 estimate.source_preparation.checked_add(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
@@ -688,7 +685,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
                         descriptor.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -701,7 +698,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         descriptor.width,
                         descriptor.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -727,7 +724,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_repeated_texture(
                         effect_width,
                         effect_height,
-                        16,
+                        working_bytes_per_pixel(),
                         effect_textures,
                         ViewerGpuActiveWorkingSetStage::Effects,
                     )?,
@@ -742,7 +739,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_texture(
                         request.width,
                         request.height,
-                        16,
+                        working_bytes_per_pixel(),
                         ViewerGpuActiveWorkingSetStage::SourcePreparation,
                     )?,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
@@ -751,7 +748,7 @@ fn estimate_source(
                     ViewerGpuActiveTextureDemand::checked_repeated_texture(
                         request.width,
                         request.height,
-                        16,
+                        working_bytes_per_pixel(),
                         3,
                         ViewerGpuActiveWorkingSetStage::Effects,
                     )?,
@@ -799,7 +796,12 @@ fn observe_effect_extent(
     width: u32,
     height: u32,
 ) -> Result<(), ViewerGpuActiveWorkingSetEstimateError> {
-    let bytes = checked_texture_bytes(width, height, 16, ViewerGpuActiveWorkingSetStage::Effects)?;
+    let bytes = checked_texture_bytes(
+        width,
+        height,
+        working_bytes_per_pixel(),
+        ViewerGpuActiveWorkingSetStage::Effects,
+    )?;
     if current.is_none_or(|(_, _, current_bytes)| bytes > current_bytes) {
         *current = Some((width, height, bytes));
     }
@@ -831,7 +833,7 @@ fn estimate_spatial(
             ViewerGpuActiveTextureDemand::checked_texture(
                 selected_width,
                 selected_height,
-                16,
+                working_bytes_per_pixel(),
                 ViewerGpuActiveWorkingSetStage::Spatial,
             )?,
             ViewerGpuActiveWorkingSetStage::Spatial,
@@ -841,7 +843,7 @@ fn estimate_spatial(
         ViewerGpuActiveTextureDemand::checked_texture(
             request.output_width,
             selected_height,
-            16,
+            working_bytes_per_pixel(),
             ViewerGpuActiveWorkingSetStage::Spatial,
         )?,
         ViewerGpuActiveWorkingSetStage::Spatial,
@@ -850,12 +852,16 @@ fn estimate_spatial(
         ViewerGpuActiveTextureDemand::checked_texture(
             request.output_width,
             request.output_height,
-            16,
+            working_bytes_per_pixel(),
             ViewerGpuActiveWorkingSetStage::Spatial,
         )?,
         ViewerGpuActiveWorkingSetStage::Spatial,
     )?;
     Ok(demand)
+}
+
+const fn working_bytes_per_pixel() -> u64 {
+    product_gpu_working_bytes_per_pixel() as u64
 }
 
 fn should_prefilter(

@@ -15,13 +15,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 
 use crate::{
-    native_video_sampling_from_decoded, ColorFrameAlpha, ColorFrameDescriptor, ColorFrameDomain,
-    ColorFrameEncoding, ColorFrameResidency, GpuColorFrameAllocationPlan, GpuColorFrameHandle,
-    GpuColorFrameTextureFormat, GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent,
-    GpuNativeYuvDecodePlan, GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout,
-    GpuYuvChromaSubsampling, GpuYuvCodeAlignment, RenderColorTransformGpuOptions,
-    RenderGpuOutputBoundaryRuntime, RenderGpuOutputBoundaryRuntimeOwnedBackendContext,
-    RenderInputTransform,
+    native_video_sampling_from_decoded, product_gpu_working_texture_format, ColorFrameAlpha,
+    ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency,
+    GpuColorFrameAllocationPlan, GpuColorFrameHandle, GpuColorFrameTextureFormat,
+    GpuNativeDecodedFrameTextureFormat, GpuNativeVideoExtent, GpuNativeYuvDecodePlan,
+    GpuNativeYuvDecoder, GpuNativeYuvPlaneViews, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
+    GpuYuvCodeAlignment, RenderColorTransformGpuOptions, RenderGpuOutputBoundaryRuntime,
+    RenderGpuOutputBoundaryRuntimeOwnedBackendContext, RenderInputTransform,
 };
 
 /// Viewer-owned compact-plane upload cache.
@@ -405,7 +405,7 @@ pub(crate) fn record_cpu_yuv_frame(
             residency: ColorFrameResidency::Gpu,
             alpha: ColorFrameAlpha::StraightCoverage,
         },
-        GpuColorFrameTextureFormat::Rgba32Float,
+        product_gpu_working_texture_format(),
         "viewer-cpu-yuv-working",
     )?;
     let chroma_subsampling = match frame.chroma_subsampling {

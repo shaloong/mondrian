@@ -57,13 +57,14 @@ use mondrian_renderer::{
     execute_cpu_output_boundary_float_with_session, execute_cpu_output_boundary_rgba8_with_session,
     execute_cpu_working_transform_with_session, execute_prepared_visual_closure,
     prepare_decoded_cpu_source_frame, prepare_visual_frame_closure,
-    project_affine_to_sampled_extents, project_basic_title_transform, BasicTitleRasterizer,
-    ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle,
-    GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
+    product_gpu_working_texture_format, project_affine_to_sampled_extents,
+    project_basic_title_transform, BasicTitleRasterizer, ColorFrameDomain, ColorFrameEncoding,
+    ColorFrameResidency, CpuColorFrame, GpuColorFrameHandle, GpuColorFrameReadbackPlan,
+    GpuColorFrameTextureFormat, GpuColorFrameWgpuResourcePool,
     GpuColorFrameWgpuResourcePoolOptions, GpuContext, GpuVisualFrameElement,
     GpuVisualFrameExecutionResourceGrant, GpuVisualFrameExecutor, GpuVisualFrameRecord,
     GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer, GpuVisualTransitionInput,
-    HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
+    GpuWorkingFloatDecision, HeterogeneousCpuPrefixSource, HeterogeneousGpuCompletedEvidence,
     HeterogeneousGpuCompletedFrame, HeterogeneousGpuContinuationError,
     HeterogeneousGpuContinuationRequest, HeterogeneousGpuContinuationRuntime, PreparedSourceFrame,
     PreparedVisualChildCanvasPolicy, PreparedVisualExecutionAdapter, PreparedVisualExecutionError,
@@ -487,7 +488,7 @@ impl ExportGpuExecutionRuntime {
                     engine,
                 },
                 frame,
-                GpuColorFrameTextureFormat::Rgba32Float,
+                product_gpu_working_texture_format(),
                 "export-nested-parent-working",
                 RenderColorTransformGpuOptions::default(),
                 RenderGpuOutputBoundaryRuntimeOwnedBackendContext {
@@ -996,6 +997,8 @@ pub struct ExportJobVisualDiagnostics {
     pub gpu_visual_peak_active_bytes: u64,
     /// High-water active texture count admitted by the GPU Visual Module.
     pub gpu_visual_peak_active_textures: u64,
+    /// Working-float selection shared by every completed GPU visual node.
+    pub gpu_visual_working_float_decision: Option<GpuWorkingFloatDecision>,
     /// Distinct conservative heterogeneous route contracts frozen by preflight.
     pub heterogeneous_route_contracts: u64,
     /// Frames whose heterogeneous attempt crossed into CPU-prefix execution.
@@ -5214,6 +5217,16 @@ fn render_prepared_visual_node_gpu(
         },
         context.cancellation,
     )?;
+    match context.visual_session.visual_diagnostics.gpu_visual_working_float_decision {
+        Some(existing) if existing != record.working_float_decision => {
+            return Err("Export GPU visual nodes disagreed on working-float policy".to_owned());
+        }
+        Some(_) => {}
+        None => {
+            context.visual_session.visual_diagnostics.gpu_visual_working_float_decision =
+                Some(record.working_float_decision);
+        }
+    }
     context.visual_session.visual_diagnostics.gpu_visual_nodes_completed = context
         .visual_session
         .visual_diagnostics

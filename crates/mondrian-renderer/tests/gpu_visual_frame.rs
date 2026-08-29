@@ -4,13 +4,14 @@ use mondrian_core::types::{BlendMode, ColorEngine};
 use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
 use mondrian_effects::{identity_compiled_effect_graph, lower_effect_graph_to_gpu_plan};
 use mondrian_renderer::{
-    estimate_gpu_visual_frame_active_working_set, ColorFrameDomain, ColorFrameSpace, CpuColorFrame,
-    GpuColorFrameIdAllocator, GpuColorFrameReadback, GpuColorFrameReadbackPlan,
-    GpuColorFrameTextureFormat, GpuColorFrameUploadPlan, GpuContext,
-    GpuVisualFrameActiveTextureDemand, GpuVisualFrameActiveWorkingSetAdmissionError,
-    GpuVisualFrameElement, GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant,
-    GpuVisualFrameExecutor, GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer,
-    RenderColorStageDiagnostics, RenderGpuOutputBoundaryRuntime,
+    estimate_gpu_visual_frame_active_working_set, product_gpu_working_bytes_per_pixel,
+    ColorFrameDomain, ColorFrameSpace, CpuColorFrame, GpuColorFrameIdAllocator,
+    GpuColorFrameReadback, GpuColorFrameReadbackPlan, GpuColorFrameTextureFormat,
+    GpuColorFrameUploadPlan, GpuContext, GpuVisualFrameActiveTextureDemand,
+    GpuVisualFrameActiveWorkingSetAdmissionError, GpuVisualFrameElement,
+    GpuVisualFrameExecutionError, GpuVisualFrameExecutionResourceGrant, GpuVisualFrameExecutor,
+    GpuVisualFrameRequest, GpuVisualFrameSource, GpuVisualSourceLayer, RenderColorStageDiagnostics,
+    RenderGpuOutputBoundaryRuntime,
 };
 
 const IDENTITY_AFFINE: [f32; 6] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -73,9 +74,13 @@ fn visual_working_set_estimate_includes_retained_closure_and_numeric_upload() {
     .expect("checked visual working set");
 
     assert_eq!(estimate.retained_closure.bytes, 10);
-    assert_eq!(estimate.source_uploads.bytes, 2 * 16);
-    assert_eq!(estimate.working_composite.bytes, 2 * 2 * 16);
-    assert_eq!(estimate.total().bytes, 10 + 2 * 16 + 2 * 2 * 16);
+    let working_bpp = u64::from(product_gpu_working_bytes_per_pixel());
+    assert_eq!(estimate.source_uploads.bytes, 2 * working_bpp);
+    assert_eq!(estimate.working_composite.bytes, 2 * 2 * working_bpp);
+    assert_eq!(
+        estimate.total().bytes,
+        10 + 2 * working_bpp + 2 * 2 * working_bpp
+    );
     assert_eq!(estimate.total().textures, 4);
 }
 
