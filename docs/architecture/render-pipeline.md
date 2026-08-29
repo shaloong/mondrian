@@ -939,11 +939,14 @@ adaptation reuse its bounded OCIO processors on the same execution owner.
 Export owns the same resource only inside one job; Thumbnail owns one inside
 its dedicated worker. Convenience color helpers construct an uncached
 reference Session, so production loops must call their `_with_session`
-variants. No processor cache is hidden in thread-local or process-global state.
-This prevents a reopened Project with deliberately identical durable IDs and
-revisions from reusing process-local programs produced by the prior open
-lifetime. Export render sessions are snapshot-local cache owners and therefore
-start with a fresh scope. The
+variants. CPU execution handles and their mutable dynamic properties are never
+thread-local or process-shared. A bounded Core-owned OCIO Engine Artifact
+Registry is the deliberate exception: exact engine/request keys retain only
+immutable parent Processor graphs and use per-key single-flight construction.
+Reopened Projects may reuse such a graph only when their complete pinned engine
+identity and endpoints are equal; Project/Sequence IDs and revisions do not
+authorize reuse. Export render sessions remain snapshot-local execution-handle
+owners and therefore start with fresh mutable scope. The
 `PreparedVisualProgram::dependency_refresh_required` Interface is reserved for
 background observation: registry revision, retryable external-change blockers,
 and stale prepared dependencies request atomic eviction; permanent
@@ -1574,19 +1577,24 @@ declared CPU output fallback, but it does not poison the required
 CPU-prefix/GPU-tail backend. Once that shared backend is `Ready`, the only
 post-submit output-route failure that changes it to backoff is expiry of the
 bounded total GPU-readback deadline, where completion is no longer known. No
-runtime, frame table, or backoff state is process-global or shared between
-Viewer and Export jobs.
-The runtime owns the OCIO shader cache, pure backend prep cache, concrete
+runtime, device object, mutable uniform buffer, frame table, or backoff state is
+process-global or shared between Viewer and Export jobs. A bounded
+process-global plain-artifact registry may share one exact immutable OCIO
+shader/LUT/binding/uniform plan because its key includes the complete engine,
+request, language, and dynamic values; it owns no wgpu handle.
+The runtime owns an OCIO shader-plan front cache, pure backend prep cache, concrete
 backend-object cache, GPU frame id allocator, and GPU frame resource table, and
 exposes an executor-level record method that accepts only the per-submission
 device/queue/encoder/load-op context. Lower-level code that already owns a
 prepared pipeline, OCIO bind group, and pass node may still use
 `RenderGpuOutputBoundaryBackendContext`.
 Every `OcioGpuShaderRequest` carries the exact `ColorEngine`; this engine is part
-of the shader-cache key and is used by core while selecting the config and
-extracting the Processor shader. A Standard plan cannot be reused by ACES or
-Custom OCIO solely because source, destination, display, and view strings match.
-Normal project-engine switching does not flush unrelated warm shader plans.
+of both owner and shared plain-artifact keys. Core selects the process-global
+config only when the exact static parent Processor graph is absent, then derives
+the plain shader bundle without that lease. A Standard plan cannot be reused by
+ACES or Custom OCIO solely because source, destination, display, and view
+strings match. Normal project-engine switching does not flush unrelated warm
+shader plans.
 Every OCIO reuse and concrete-resource admission decision uses a private,
 domain-separated 32-byte canonical identity. Public `u64` shader, layout,
 resource, and node keys are diagnostic projections only. The full identity is

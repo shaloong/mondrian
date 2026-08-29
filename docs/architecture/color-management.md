@@ -397,11 +397,22 @@ All OCIO config mutations are centralized in `mondrian_core::ocio` through
 - A monotonic generation counter for cache invalidation
 
 `OCIO_CONFIG_OPERATION` serializes the exact sequence of selecting a config and
-constructing a CPU Processor or extracting a GPU shader. The lease ends before
-CPU pixel application and before any GPU execution, so frames do not serialize
-on a process-wide color lock. This is required because the current `ocio-rs`
-bridge exposes OCIO's process-global current config during construction even
-though the baked Processor itself is independent afterward.
+building the first immutable parent `Processor` graph for one exact static
+engine/request identity. A bounded 256-entry **OCIO Engine Artifact Registry**
+retains those graphs and uses one per-key single-flight cell, so independent
+keys do not wait on a registry-wide build lock and concurrent identical cold
+requests enter the config lease once. Failed cells are removed and remain
+retryable. The lease ends before owner CPU-handle derivation, CPU pixel
+application, GPU descriptor extraction, or GPU execution. This is required
+because the current `ocio-rs` bridge exposes OCIO's process-global current
+config during parent graph construction even though the baked graph is
+independent afterward.
+
+Every installed Config uses OCIO processor caching with
+`PROCESSOR_CACHE_ENABLED` but explicitly without
+`PROCESSOR_CACHE_SHARE_DYN_PROPERTIES`; changing that policy clears the old
+Config processor cache. The shared parent graph may therefore derive separate
+Preview/Export CPU handles without sharing mutable dynamic-property state.
 
 Global config installation, cache invalidation, config serialization, Standard
 transform construction, and GPU descriptor extraction use `ocio-rs`'s fallible
@@ -409,18 +420,20 @@ APIs. A bridge failure leaves Mondrian's source identity and generation
 unchanged and is reported to the caller; no path may silently retain a stale
 config or panic at the FFI boundary.
 
-CPU Processors live in a bounded, explicit `OcioCpuProcessorSession` keyed by
-the complete `ColorEngine`, config revision, encoded/working endpoint
-identities, and display/view when applicable. Immutable embedded and built-in
-packages use their pinned engine identity as the stable revision, so switching
-Standard -> ACES -> Standard inside one owner does not discard a warm Standard
-Processor. A validated Custom engine already contains its config and
+CPU execution handles live in a bounded, explicit `OcioCpuProcessorSession`
+keyed by the static `ColorEngine`, encoded/working endpoint identities, and
+display/view when applicable. The process registry owns only the immutable
+parent graph; every Preview, Export, or derived-media owner independently
+derives and retains its mutable CPU handle. Switching Standard -> ACES ->
+Standard inside one owner does not discard a warm Standard handle. A validated
+Custom engine already contains its config and
 dependency-manifest digests, so a changed mutable source creates a different
 `ColorEngine` identity rather than mutating a cache entry. OCIO's opaque config
 and processor cache IDs remain inside runtime evidence and baked processor
-bundles. A warm hit
-is looked up before process-global config selection and performs no config
-switch, file I/O, or Processor construction.
+bundles. A warm owner hit is looked up before the shared registry and performs
+no lock, file I/O, or handle construction; a shared parent hit performs no
+config selection or file I/O. Session diagnostics distinguish owner hits,
+owner misses resolved by a shared graph, and graph admissions.
 
 The Session is deliberately non-`Send`: Preview, each Export job, and each
 derived-media worker construct and retire it on their owning execution thread.
@@ -432,14 +445,20 @@ the Session's diagnostics. Public convenience transforms use the uncached
 reference path and are suitable for tests or one-shot calls, not repeated
 production execution.
 
-GPU requests carry `ColorEngine` as part of their immutable cache identity.
-`OcioGpuShaderCache` therefore keeps warm plans for Standard and ACES
-simultaneously and cannot return one engine's shader for another engine merely
-because their endpoint names match. Shader extraction still occurs under the
-short config-operation lease, after which the renderer owns plain shader/LUT/
-uniform metadata and performs compilation and execution without the lease.
-Explicit cache clearing is reserved for renderer/device lifecycle invalidation,
-not ordinary engine switching.
+GPU requests carry the complete `ColorEngine`, including evaluated dynamic
+values, as part of their immutable request identity. Each
+`OcioGpuShaderCache` is an owner front cache backed by a bounded 256-entry
+process-wide registry of device-independent shader/LUT/binding/uniform plans.
+Preview and historical Export owners therefore share one exact plain artifact
+and one per-key cold extraction, while Standard and ACES can coexist and never
+alias merely because endpoint names match. The first static parent graph build
+may enter the config lease; descriptor extraction and all later compilation and
+execution do not. Concrete wgpu modules, textures, pipelines, mutable uniform
+buffers, frame tables, and failure state remain device/owner-scoped. Clearing
+an owner cache never invalidates another owner or the shared plain-artifact
+registry. Both shared registries expose hit, miss, wait, build, failure,
+eviction, occupancy, in-flight, and capacity evidence; owner caches separately
+report front-cache and shared-hit behavior.
 
 Project open or an explicit Custom `ensure_loaded` is different from the warm
 processor path: under the config-operation lease it clears stock OCIO's global
@@ -1757,13 +1776,14 @@ white, composites linearized UI there, and applies the final PQ/HLG encoding at
 the swapchain store. Display P3 follows the same target-primary linear rule with
 the sRGB transfer. ICC-calibrated output is not relabelled as one of these
 standard targets; it uses the separately typed opaque device-code carrier.
-## OCIO Cache Revision Contract
+## OCIO Engine Identity Contract
 
-Mondrian Standard and pinned builtin ACES packages are immutable and use cache
-revision zero; their complete package/source identity is already part of every
-processor and shader request. Validated Custom path and environment configs
-also carry their complete resolved digest identity; reloading changed bytes
-produces a new engine key. The monotonic OCIO selection generation is
-operational evidence, not semantic cache identity. CPU processor and renderer
-GPU shader caches therefore cannot alias changed mutable sources, while a warm
-owner-scoped lookup performs no generation lock or filesystem check.
+Mondrian Standard and pinned builtin ACES packages are immutable; their complete
+package/source identity is already part of every processor and shader request.
+Validated Custom path and environment configs likewise carry their complete
+resolved config and dependency digests, so reloading changed bytes produces a
+new engine key. No synthetic cache revision is appended. The monotonic OCIO
+selection generation remains operational evidence, never semantic equality.
+CPU owner handles, shared parent graphs, renderer owner caches, and shared plain
+GPU artifacts therefore cannot alias changed mutable sources, while warm
+lookups perform no generation lock or filesystem check.

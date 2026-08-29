@@ -32,12 +32,14 @@ use ocio_rs::{
     FixedFunctionStyle, GpuShaderDesc, GpuTextureChannel as OcioRsGpuTextureChannel,
     GpuTextureDimensions as OcioRsGpuTextureDimensions, GpuUniformType as OcioRsGpuUniformType,
     GpuUniformValue as OcioRsGpuUniformValue, GradingStyle, HueCurveType,
-    Interpolation as OcioRsInterpolation, RGBCurveType, RangeStyle, ReferenceSpaceType,
-    TransformDirection, ViewTransform, ViewTransformDirection,
+    Interpolation as OcioRsInterpolation, Processor, ProcessorCacheFlags, RGBCurveType, RangeStyle,
+    ReferenceSpaceType, TransformDirection, ViewTransform, ViewTransformDirection,
 };
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 // ── Global OCIO state ──────────────────────────────────────────────────────────
 
@@ -50,13 +52,13 @@ use std::path::{Path, PathBuf};
 /// # Concurrency Constraint
 ///
 /// OCIO exposes one process-global current config. Mondrian therefore holds
-/// [`OCIO_CONFIG_OPERATION`] across exact engine selection and processor/shader
-/// construction. The returned CPU processors and GPU shader bundles are baked
-/// engine-qualified objects and execute after that short lease is released.
-/// One Project owns one exact engine, while caches and concurrent immutable
-/// execution snapshots may still contain objects from different Projects or
-/// earlier engine generations. No caller may read `current_config()` or
-/// construct an OCIO object outside this Module.
+/// [`OCIO_CONFIG_OPERATION`] across exact engine selection, config queries, and
+/// the first immutable parent Processor graph construction. Owner CPU handles
+/// and GPU descriptors derive from that graph after the lease is released. One
+/// Project owns one exact engine, while bounded registries and concurrent
+/// immutable execution snapshots may still contain objects from different
+/// Projects or earlier engine generations. No caller may read
+/// `current_config()` or construct an OCIO object outside this Module.
 struct OcioGlobalState {
     /// Path or virtual path of the currently loaded config.
     path: Option<PathBuf>,
@@ -84,11 +86,11 @@ static OCIO_STATE: std::sync::Mutex<OcioGlobalState> = std::sync::Mutex::new(Oci
     generation: 0,
 });
 
-/// Serializes config selection with processor/shader construction.
+/// Serializes config selection with config queries and parent graph construction.
 ///
-/// The lease is intentionally released before CPU pixel application or GPU
-/// execution. OCIO processors are baked objects; only their construction must
-/// observe one exact process-global config.
+/// The lease is intentionally released before owner CPU-handle derivation, CPU
+/// pixel application, GPU descriptor extraction, or GPU execution. Only the
+/// immutable parent graph must observe one exact process-global config.
 static OCIO_CONFIG_OPERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_ocio_config_operation() -> Result<std::sync::MutexGuard<'static, ()>, String> {
@@ -109,6 +111,7 @@ impl OcioGlobalState {
         source: OcioConfigSource,
         config: &Config,
     ) -> Result<(), String> {
+        configure_ocio_processor_cache_policy(config)?;
         ocio_rs::try_set_current_config(config)
             .map_err(|err| format!("failed to install process-global OCIO config: {err}"))?;
         self.path = Some(path);
@@ -118,6 +121,19 @@ impl OcioGlobalState {
         self.generation = self.generation.wrapping_add(1);
         Ok(())
     }
+}
+
+fn configure_ocio_processor_cache_policy(config: &Config) -> Result<(), String> {
+    // OCIO defaults to sharing dynamic-property state between execution
+    // handles derived from the same Processor. Mondrian applies authored
+    // dynamic values independently in each Preview/Export owner, so retain
+    // graph caching while explicitly disabling dynamic-property sharing.
+    config
+        .try_set_processor_cache_flags(ProcessorCacheFlags::ENABLED.0 as i32)
+        .map_err(|err| format!("failed to set OCIO processor cache ownership policy: {err}"))?;
+    config
+        .try_clear_processor_cache()
+        .map_err(|err| format!("failed to clear OCIO processor cache after policy change: {err}"))
 }
 
 /// Return the current config generation. This is a monotonic counter that
@@ -136,15 +152,6 @@ pub fn ocio_config_generation() -> u64 {
 /// it's still the same config.
 pub fn ocio_config_changed_since(since_generation: u64) -> bool {
     ocio_config_generation() != since_generation
-}
-
-/// Validate/select the exact engine and return its cache revision.
-///
-/// `ColorEngine` is already a complete canonical cache identity, including all
-/// Custom OCIO digests. Process-global config switches must not invalidate a
-/// different Sequence's baked processor or shader, so the revision is stable.
-pub fn ocio_gpu_config_revision_for_engine(engine: &ColorEngine) -> Result<u64, String> {
-    with_ocio_config_for_engine(engine, |_config, _generation| Ok(0))
 }
 
 /// Return the current config source identity, if any.
@@ -3161,23 +3168,6 @@ fn apply_engine_dynamic_properties_to_gpu_desc(
 
 // ── CPU transform helpers ──────────────────────────────────────────────────────
 
-fn ocio_cpu_processor_from_config(
-    config: &Config,
-    src: OcioColorSpaceIdentity,
-    dst: OcioColorSpaceIdentity,
-) -> Result<CPUProcessor, String> {
-    let src_name = ocio_color_space_identity_name(src);
-    let dst_name = ocio_color_space_identity_name(dst);
-
-    let processor = config
-        .processor(src_name, dst_name)
-        .map_err(|e| format!("OCIO processor '{src_name}' → '{dst_name}': {e}"))?;
-
-    processor
-        .default_cpu_processor()
-        .map_err(|e| format!("OCIO CPU processor '{src_name}' → '{dst_name}': {e}"))
-}
-
 fn ocio_processor_from_config(
     config: &Config,
     src: OcioColorSpaceIdentity,
@@ -3209,32 +3199,11 @@ fn ocio_display_processor_from_config(
         .map_err(|e| format!("OCIO display processor '{src_name}' -> {display}/{view}: {e}"))
 }
 
-fn ocio_display_cpu_processor_from_config(
-    config: &Config,
-    src: OcioColorSpaceIdentity,
-    display: &str,
-    view: &str,
-) -> Result<CPUProcessor, String> {
-    let src_name = ocio_color_space_identity_name(src);
-
-    let processor = config
-        .processor_display(
-            src_name,
-            display,
-            view,
-            ocio_rs::TransformDirection::Forward,
-        )
-        .map_err(|e| format!("OCIO display processor '{src_name}' → {display}/{view}: {e}"))?;
-
-    processor
-        .default_cpu_processor()
-        .map_err(|e| format!("OCIO CPU display processor '{src_name}' → {display}/{view}: {e}"))
-}
-
 const DEFAULT_OCIO_CPU_PROCESSOR_CAPACITY: usize = 32;
+const DEFAULT_OCIO_STATIC_PROCESSOR_REGISTRY_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum OcioCpuProcessorRequest {
+enum OcioStaticProcessorRequest {
     ColorSpace {
         src: OcioColorSpaceIdentity,
         dst: OcioColorSpaceIdentity,
@@ -3249,8 +3218,192 @@ enum OcioCpuProcessorRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OcioCpuProcessorCacheKey {
     engine: ColorEngine,
-    revision: u64,
-    request: OcioCpuProcessorRequest,
+    request: OcioStaticProcessorRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OcioStaticProcessorKey {
+    engine: ColorEngine,
+    request: OcioStaticProcessorRequest,
+}
+
+type SharedOcioStaticProcessor = Arc<Mutex<Processor>>;
+type OcioStaticProcessorCell = Arc<OnceLock<Result<SharedOcioStaticProcessor, String>>>;
+
+/// Process-wide immutable OCIO processor-graph registry.
+///
+/// The registry is the only shared ownership layer above OCIO's process-global
+/// config. Entries are exact-engine-qualified and bounded. Per-key
+/// [`OnceLock`] cells provide single-flight construction without holding the
+/// registry lock or blocking unrelated keys while they wait for the config
+/// lease. The `Processor` itself is only borrowed behind its own mutex because
+/// the current `ocio-rs` bridge exposes `Send` but not `Sync` for that handle.
+struct OcioStaticProcessorRegistry {
+    entries: LruCache<OcioStaticProcessorKey, OcioStaticProcessorCell>,
+    in_flight: HashMap<OcioStaticProcessorKey, OcioStaticProcessorCell>,
+    hits: u64,
+    misses: u64,
+    waits: u64,
+    builds: u64,
+    failures: u64,
+    evictions: u64,
+}
+
+impl OcioStaticProcessorRegistry {
+    fn new() -> Self {
+        Self {
+            entries: LruCache::new(
+                NonZeroUsize::new(DEFAULT_OCIO_STATIC_PROCESSOR_REGISTRY_CAPACITY)
+                    .unwrap_or(NonZeroUsize::MIN),
+            ),
+            in_flight: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+        }
+    }
+}
+
+static OCIO_STATIC_PROCESSORS: LazyLock<Mutex<OcioStaticProcessorRegistry>> =
+    LazyLock::new(|| Mutex::new(OcioStaticProcessorRegistry::new()));
+
+/// Point-in-time evidence for the process-wide engine-qualified processor Module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioStaticProcessorRegistryDiagnostics {
+    /// Exact-key lookups served by an existing ready or in-flight cell.
+    pub hits: u64,
+    /// Exact keys admitted because no shared cell existed.
+    pub misses: u64,
+    /// Existing cells observed while their first build was still in flight.
+    pub waits: u64,
+    /// OCIO processor graphs built under the process-global config lease.
+    pub builds: u64,
+    /// Processor graph builds that failed closed.
+    pub failures: u64,
+    /// Entries removed by bounded LRU admission.
+    pub evictions: u64,
+    /// Exact engine/request graphs currently retained.
+    pub entries: usize,
+    /// Exact engine/request graph builds currently in flight.
+    pub in_flight: usize,
+    /// Maximum retained graph count.
+    pub capacity: usize,
+}
+
+/// Return reuse and pressure evidence for the shared static processor Module.
+pub fn ocio_static_processor_registry_diagnostics() -> OcioStaticProcessorRegistryDiagnostics {
+    let Ok(registry) = OCIO_STATIC_PROCESSORS.lock() else {
+        return OcioStaticProcessorRegistryDiagnostics {
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+            entries: 0,
+            in_flight: 0,
+            capacity: DEFAULT_OCIO_STATIC_PROCESSOR_REGISTRY_CAPACITY,
+        };
+    };
+    OcioStaticProcessorRegistryDiagnostics {
+        hits: registry.hits,
+        misses: registry.misses,
+        waits: registry.waits,
+        builds: registry.builds,
+        failures: registry.failures,
+        evictions: registry.evictions,
+        entries: registry.entries.len(),
+        in_flight: registry.in_flight.len(),
+        capacity: DEFAULT_OCIO_STATIC_PROCESSOR_REGISTRY_CAPACITY,
+    }
+}
+
+fn build_static_processor(
+    config: &Config,
+    request: &OcioStaticProcessorRequest,
+) -> Result<Processor, String> {
+    match request {
+        OcioStaticProcessorRequest::ColorSpace { src, dst } => {
+            ocio_processor_from_config(config, *src, *dst)
+        }
+        OcioStaticProcessorRequest::DisplayView { src, display, view } => {
+            ocio_display_processor_from_config(config, *src, display, view)
+        }
+    }
+}
+
+fn resolve_static_processor(
+    engine: &ColorEngine,
+    request: &OcioStaticProcessorRequest,
+) -> Result<(SharedOcioStaticProcessor, bool), String> {
+    let key = OcioStaticProcessorKey {
+        engine: engine.static_processor_identity(),
+        request: request.clone(),
+    };
+    let (cell, shared_hit) = {
+        let mut registry = OCIO_STATIC_PROCESSORS
+            .lock()
+            .map_err(|_| "OCIO static processor registry lock is poisoned".to_owned())?;
+        if let Some(cell) = registry.entries.get(&key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            (cell, true)
+        } else if let Some(cell) = registry.in_flight.get(&key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            registry.waits = registry.waits.saturating_add(1);
+            (cell, true)
+        } else {
+            registry.misses = registry.misses.saturating_add(1);
+            let cell = Arc::new(OnceLock::new());
+            registry.in_flight.insert(key.clone(), Arc::clone(&cell));
+            (cell, false)
+        }
+    };
+
+    let resolved = cell.get_or_init(|| {
+        let result = with_ocio_config_for_engine(engine, |config, _generation| {
+            build_static_processor(config, request).map(|processor| Arc::new(Mutex::new(processor)))
+        });
+        if let Ok(mut registry) = OCIO_STATIC_PROCESSORS.lock() {
+            registry.builds = registry.builds.saturating_add(1);
+            if result.is_err() {
+                registry.failures = registry.failures.saturating_add(1);
+            }
+            let matching_in_flight =
+                registry.in_flight.get(&key).is_some_and(|cached| Arc::ptr_eq(cached, &cell));
+            if matching_in_flight {
+                registry.in_flight.remove(&key);
+                if result.is_ok() {
+                    if registry.entries.len() == DEFAULT_OCIO_STATIC_PROCESSOR_REGISTRY_CAPACITY {
+                        registry.evictions = registry.evictions.saturating_add(1);
+                    }
+                    registry.entries.put(key.clone(), Arc::clone(&cell));
+                }
+            }
+        }
+        result
+    });
+
+    match resolved {
+        Ok(processor) => Ok((Arc::clone(processor), shared_hit)),
+        Err(reason) => Err(reason.clone()),
+    }
+}
+
+fn cpu_processor_from_static(
+    engine: &ColorEngine,
+    request: &OcioStaticProcessorRequest,
+) -> Result<(CPUProcessor, bool), String> {
+    let (processor, shared_hit) = resolve_static_processor(engine, request)?;
+    let processor = processor
+        .lock()
+        .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    let cpu = processor
+        .default_cpu_processor()
+        .map_err(|err| format!("OCIO CPU processor creation failed: {err}"))?;
+    Ok((cpu, shared_hit))
 }
 
 /// Point-in-time evidence for one explicitly owned CPU processor Session.
@@ -3266,33 +3419,26 @@ pub struct OcioCpuProcessorCacheDiagnostics {
     pub entries: usize,
     /// Maximum processor resource units retained; zero disables caching.
     pub capacity: usize,
+    /// Owner misses resolved from an already admitted shared static graph.
+    pub shared_static_hits: u64,
+    /// Owner misses that admitted a new shared static graph cell.
+    pub shared_static_misses: u64,
 }
 
-fn build_cpu_processor(
-    config: &Config,
-    request: &OcioCpuProcessorRequest,
-) -> Result<CPUProcessor, String> {
-    match request {
-        OcioCpuProcessorRequest::ColorSpace { src, dst } => {
-            ocio_cpu_processor_from_config(config, *src, *dst)
-        }
-        OcioCpuProcessorRequest::DisplayView { src, display, view } => {
-            ocio_display_cpu_processor_from_config(config, *src, display, view)
-        }
-    }
-}
-
-/// Owner-scoped cache of immutable OCIO CPU processors.
+/// Owner-scoped cache of OCIO CPU execution handles.
 ///
 /// One Preview, Export, Thumbnail, or other execution worker owns a Session and
-/// applies pressure changes on that same thread. The `Rc` marker deliberately
-/// prevents sharing the opaque OCIO processors across worker lifetimes.
+/// applies dynamic-property changes on that same thread. The `Rc` marker
+/// deliberately prevents sharing execution handles across worker lifetimes.
+/// Only their immutable parent processor graphs are process-shared.
 pub struct OcioCpuProcessorSession {
     cache: Option<LruCache<OcioCpuProcessorCacheKey, CPUProcessor>>,
     capacity: usize,
     hits: u64,
     misses: u64,
     evictions: u64,
+    shared_static_hits: u64,
+    shared_static_misses: u64,
     owner_thread: std::marker::PhantomData<std::rc::Rc<()>>,
 }
 
@@ -3305,7 +3451,8 @@ impl Default for OcioCpuProcessorSession {
 impl OcioCpuProcessorSession {
     /// Create a Session with a processor-resource-unit limit.
     ///
-    /// Zero selects the uncached reference path.
+    /// Zero disables owner-handle retention; the immutable parent graph may
+    /// still come from the shared engine artifact registry.
     pub fn new(capacity: usize) -> Self {
         Self {
             cache: NonZeroUsize::new(capacity).map(LruCache::new),
@@ -3313,6 +3460,8 @@ impl OcioCpuProcessorSession {
             hits: 0,
             misses: 0,
             evictions: 0,
+            shared_static_hits: 0,
+            shared_static_misses: 0,
             owner_thread: std::marker::PhantomData,
         }
     }
@@ -3331,7 +3480,7 @@ impl OcioCpuProcessorSession {
         }
         self.apply(
             engine,
-            OcioCpuProcessorRequest::ColorSpace { src, dst },
+            OcioStaticProcessorRequest::ColorSpace { src, dst },
             data,
         )
     }
@@ -3352,7 +3501,7 @@ impl OcioCpuProcessorSession {
         }
         self.apply(
             engine,
-            OcioCpuProcessorRequest::DisplayView {
+            OcioStaticProcessorRequest::DisplayView {
                 src,
                 display: display.to_owned(),
                 view: view.to_owned(),
@@ -3387,13 +3536,15 @@ impl OcioCpuProcessorSession {
             evictions: self.evictions,
             entries: self.cache.as_ref().map_or(0, LruCache::len),
             capacity: self.capacity,
+            shared_static_hits: self.shared_static_hits,
+            shared_static_misses: self.shared_static_misses,
         }
     }
 
     fn apply(
         &mut self,
         engine: &ColorEngine,
-        request: OcioCpuProcessorRequest,
+        request: OcioStaticProcessorRequest,
         data: &mut [f32],
     ) -> Result<(), String> {
         // Dynamic-property payloads mutate the owner-thread CPUProcessor and do
@@ -3402,7 +3553,6 @@ impl OcioCpuProcessorSession {
         // authored values immediately before every pixel invocation.
         let key = OcioCpuProcessorCacheKey {
             engine: engine.static_processor_identity(),
-            revision: 0,
             request: request.clone(),
         };
         if let Some(processor) = self.cache.as_mut().and_then(|cache| cache.get(&key)) {
@@ -3412,9 +3562,12 @@ impl OcioCpuProcessorSession {
             return Ok(());
         }
 
-        let processor = with_ocio_config_for_engine(engine, |config, _generation| {
-            build_cpu_processor(config, &request)
-        })?;
+        let (processor, shared_hit) = cpu_processor_from_static(engine, &request)?;
+        if shared_hit {
+            self.shared_static_hits = self.shared_static_hits.saturating_add(1);
+        } else {
+            self.shared_static_misses = self.shared_static_misses.saturating_add(1);
+        }
         self.misses = self.misses.saturating_add(1);
         let Some(cache) = &mut self.cache else {
             apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
@@ -3436,12 +3589,10 @@ impl OcioCpuProcessorSession {
 
 fn apply_uncached_cpu_processor(
     engine: &ColorEngine,
-    request: OcioCpuProcessorRequest,
+    request: OcioStaticProcessorRequest,
     data: &mut [f32],
 ) -> Result<(), String> {
-    let processor = with_ocio_config_for_engine(engine, |config, _generation| {
-        build_cpu_processor(config, &request)
-    })?;
+    let (processor, _shared_hit) = cpu_processor_from_static(engine, &request)?;
     apply_engine_dynamic_properties_to_cpu(engine, &processor)?;
     apply_cpu_processor_float(&processor, data);
     Ok(())
@@ -3508,7 +3659,7 @@ fn validate_engine_working_identities(
 
 // ── Public entry points ────────────────────────────────────────────────────────
 
-/// Apply an engine-qualified OCIO conversion through the uncached reference path.
+/// Apply an engine-qualified OCIO conversion without retaining an owner CPU handle.
 ///
 /// Realtime and repeated offline execution should own an
 /// [`OcioCpuProcessorSession`] and call it explicitly.
@@ -3524,12 +3675,12 @@ pub(crate) fn apply_ocio_identity_float(
     }
     apply_uncached_cpu_processor(
         engine,
-        OcioCpuProcessorRequest::ColorSpace { src, dst },
+        OcioStaticProcessorRequest::ColorSpace { src, dst },
         data,
     )
 }
 
-/// Apply an engine-qualified OCIO display/view transform through the uncached reference path.
+/// Apply an engine-qualified display/view transform without retaining an owner CPU handle.
 pub(crate) fn apply_ocio_display_identity_float(
     engine: &ColorEngine,
     data: &mut [f32],
@@ -3544,7 +3695,7 @@ pub(crate) fn apply_ocio_display_identity_float(
     }
     apply_uncached_cpu_processor(
         engine,
-        OcioCpuProcessorRequest::DisplayView {
+        OcioStaticProcessorRequest::DisplayView {
             src,
             display: display.to_owned(),
             view: view.to_owned(),
@@ -3563,25 +3714,30 @@ pub fn ocio_identity_processor_cache_id(
     dst: OcioColorSpaceIdentity,
 ) -> Result<String, String> {
     validate_engine_working_identities(engine, &[src, dst])?;
-    with_ocio_config_for_engine(engine, |config, _generation| {
-        ocio_processor_from_config(config, src, dst)?
-            .cache_id()
-            .filter(|cache_id| !cache_id.trim().is_empty())
-            .ok_or_else(|| {
-                format!(
-                    "OCIO processor '{}' -> '{}' returned an empty cache id",
-                    ocio_color_space_identity_name(src),
-                    ocio_color_space_identity_name(dst)
-                )
-            })
-    })
+    let request = OcioStaticProcessorRequest::ColorSpace { src, dst };
+    let (processor, _shared_hit) = resolve_static_processor(engine, &request)?;
+    processor
+        .lock()
+        .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?
+        .cache_id()
+        .filter(|cache_id| !cache_id.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "OCIO processor '{}' -> '{}' returned an empty cache id",
+                ocio_color_space_identity_name(src),
+                ocio_color_space_identity_name(dst)
+            )
+        })
 }
 
-/// Extract an engine-qualified GPU shader bundle under a short config lease.
+/// Extract an engine-qualified GPU shader bundle from a shared static graph.
 ///
 /// The returned bundle is renderer-facing metadata. It deliberately does not
 /// allocate wgpu resources; callers should cache compiled shaders and uploaded
 /// texture/uniform resources by `cache_id` plus their render-target contract.
+/// Only the first exact engine/request graph build enters the process-global
+/// config lease; later Preview, Export, and historical snapshot owners derive
+/// their payload-bearing GPU descriptor from the shared immutable graph.
 pub fn extract_ocio_identity_gpu_shader_bundle(
     engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
@@ -3589,19 +3745,21 @@ pub fn extract_ocio_identity_gpu_shader_bundle(
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
     validate_engine_working_identities(engine, &[src, dst])?;
-    with_ocio_config_for_engine(engine, |config, _generation| {
-        extract_ocio_identity_gpu_shader_bundle_from_config(config, engine, src, dst, language)
-    })
+    let request = OcioStaticProcessorRequest::ColorSpace { src, dst };
+    let (processor, _shared_hit) = resolve_static_processor(engine, &request)?;
+    let processor = processor
+        .lock()
+        .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    extract_ocio_identity_gpu_shader_bundle_from_processor(&processor, engine, src, dst, language)
 }
 
-fn extract_ocio_identity_gpu_shader_bundle_from_config(
-    config: &Config,
+fn extract_ocio_identity_gpu_shader_bundle_from_processor(
+    processor: &Processor,
     engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     dst: OcioColorSpaceIdentity,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
-    let processor = ocio_processor_from_config(config, src, dst)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
@@ -3631,7 +3789,7 @@ fn extract_ocio_identity_gpu_shader_bundle_from_config(
     ))
 }
 
-/// Extract an engine-qualified display/view GPU shader under a short config lease.
+/// Extract an engine-qualified display/view GPU shader from a shared static graph.
 pub fn extract_ocio_display_identity_gpu_shader_bundle(
     engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
@@ -3641,22 +3799,28 @@ pub fn extract_ocio_display_identity_gpu_shader_bundle(
 ) -> Result<OcioGpuShaderBundle, String> {
     validate_engine_display_view_selection(engine, display, view)?;
     validate_engine_working_identities(engine, &[src])?;
-    with_ocio_config_for_engine(engine, |config, _generation| {
-        extract_ocio_display_identity_gpu_shader_bundle_from_config(
-            config, engine, src, display, view, language,
-        )
-    })
+    let request = OcioStaticProcessorRequest::DisplayView {
+        src,
+        display: display.to_owned(),
+        view: view.to_owned(),
+    };
+    let (processor, _shared_hit) = resolve_static_processor(engine, &request)?;
+    let processor = processor
+        .lock()
+        .map_err(|_| "OCIO static processor handle lock is poisoned".to_owned())?;
+    extract_ocio_display_identity_gpu_shader_bundle_from_processor(
+        &processor, engine, src, display, view, language,
+    )
 }
 
-fn extract_ocio_display_identity_gpu_shader_bundle_from_config(
-    config: &Config,
+fn extract_ocio_display_identity_gpu_shader_bundle_from_processor(
+    processor: &Processor,
     engine: &ColorEngine,
     src: OcioColorSpaceIdentity,
     display: &str,
     view: &str,
     language: GpuLanguage,
 ) -> Result<OcioGpuShaderBundle, String> {
-    let processor = ocio_display_processor_from_config(config, src, display, view)?;
     let cache_id = processor.cache_id();
     let gpu = processor.default_gpu_processor().map_err(|e| {
         format!(
@@ -4659,6 +4823,164 @@ mod tests {
     }
 
     #[test]
+    fn separate_cpu_owners_reuse_one_static_processor_graph() {
+        let engine = ColorEngine::mondrian_standard();
+        let src = OcioColorSpaceIdentity::Color(ColorSpace::DjiDLogDGamut);
+        let dst = OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearP3D65);
+        let original = [0.18, 0.42, 0.73, 0.375];
+
+        let mut preview_owner = OcioCpuProcessorSession::new(2);
+        let mut preview_sample = original;
+        preview_owner
+            .convert_identity_float(&engine, &mut preview_sample, src, dst)
+            .expect("Preview owner processor");
+
+        let mut historical_export_owner = OcioCpuProcessorSession::new(2);
+        let mut export_sample = original;
+        historical_export_owner
+            .convert_identity_float(&engine, &mut export_sample, src, dst)
+            .expect("historical Export owner processor");
+
+        assert_eq!(export_sample, preview_sample);
+        let export_diagnostics = historical_export_owner.diagnostics();
+        assert_eq!(export_diagnostics.misses, 1);
+        assert_eq!(export_diagnostics.shared_static_hits, 1);
+        assert_eq!(export_diagnostics.shared_static_misses, 0);
+    }
+
+    #[test]
+    fn concurrent_static_processor_cold_requests_are_single_flight() {
+        let engine = ColorEngine::mondrian_standard();
+        let request = OcioStaticProcessorRequest::ColorSpace {
+            src: OcioColorSpaceIdentity::Color(ColorSpace::PanasonicVLogVGamut),
+            dst: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearP3D65),
+        };
+        let key = OcioStaticProcessorKey {
+            engine: engine.static_processor_identity(),
+            request: request.clone(),
+        };
+        {
+            let mut registry = OCIO_STATIC_PROCESSORS.lock().expect("processor registry");
+            assert!(
+                !registry.in_flight.contains_key(&key),
+                "test request unexpectedly already in flight"
+            );
+            registry.entries.pop(&key);
+        }
+
+        let barrier = Arc::new(std::sync::Barrier::new(9));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let barrier = Arc::clone(&barrier);
+            let engine = engine.clone();
+            let request = request.clone();
+            workers.push(std::thread::spawn(move || {
+                barrier.wait();
+                resolve_static_processor(&engine, &request)
+                    .map(|(processor, _shared_hit)| processor)
+            }));
+        }
+        barrier.wait();
+
+        let resolved = workers
+            .into_iter()
+            .map(|worker| worker.join().expect("processor worker"))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("single-flight processor graph");
+        let first = &resolved[0];
+        assert!(resolved.iter().all(|processor| Arc::ptr_eq(first, processor)));
+    }
+
+    #[test]
+    fn failed_static_processor_cells_are_not_retained() {
+        let engine = ColorEngine::mondrian_standard();
+        let request = OcioStaticProcessorRequest::DisplayView {
+            src: OcioColorSpaceIdentity::Working(WorkingColorSpace::LinearRec2020),
+            display: "missing-test-display".to_owned(),
+            view: "missing-test-view".to_owned(),
+        };
+        let key = OcioStaticProcessorKey {
+            engine: engine.static_processor_identity(),
+            request: request.clone(),
+        };
+
+        assert!(
+            resolve_static_processor(&engine, &request).is_err(),
+            "missing display/view must fail the first build"
+        );
+        {
+            let registry = OCIO_STATIC_PROCESSORS.lock().expect("processor registry");
+            assert!(!registry.entries.contains(&key));
+            assert!(!registry.in_flight.contains_key(&key));
+        }
+        assert!(
+            resolve_static_processor(&engine, &request).is_err(),
+            "failed cell must permit a fresh retry"
+        );
+    }
+
+    #[test]
+    fn processor_cache_policy_isolates_dynamic_cpu_handles() {
+        let config = Config::raw().expect("raw OCIO config");
+        configure_ocio_processor_cache_policy(&config).expect("Mondrian cache policy");
+        assert_eq!(
+            config.processor_cache_flags(),
+            ProcessorCacheFlags::ENABLED.0 as i32,
+            "dynamic-property sharing must stay disabled"
+        );
+
+        let transform =
+            ocio_rs::transform::ExposureContrastTransform::create().expect("exposure transform");
+        transform.set_style(ocio_rs::ExposureContrastStyle::Linear);
+        transform.set_contrast(1.0);
+        transform.set_gamma(1.0);
+        transform.make_exposure_dynamic();
+        let source_space = ocio_rs::ColorSpace::create().expect("source color space");
+        source_space.set_name("owner-isolation-source").expect("source name");
+        source_space.try_set_is_data(false).expect("source color-space semantics");
+        let dynamic_space = ocio_rs::ColorSpace::create().expect("dynamic color space");
+        dynamic_space.set_name("owner-isolation-dynamic").expect("dynamic name");
+        dynamic_space.try_set_is_data(false).expect("dynamic color-space semantics");
+        dynamic_space
+            .try_set_transform(&transform, ocio_rs::ColorSpaceDirection::FromReference)
+            .expect("dynamic reference transform");
+        config.try_add_color_space(&source_space).expect("source color space");
+        config.try_add_color_space(&dynamic_space).expect("dynamic color space");
+        let processor = config
+            .processor("owner-isolation-source", "owner-isolation-dynamic")
+            .expect("dynamic processor");
+        let preview = processor.default_cpu_processor().expect("Preview CPU handle");
+        let export = processor.default_cpu_processor().expect("Export CPU handle");
+        preview
+            .dynamic_property(DynamicPropertyType::Exposure)
+            .expect("Preview exposure")
+            .set_double_value(-1.0)
+            .expect("set Preview exposure");
+        export
+            .dynamic_property(DynamicPropertyType::Exposure)
+            .expect("Export exposure")
+            .set_double_value(1.0)
+            .expect("set Export exposure");
+
+        assert_eq!(
+            preview
+                .dynamic_property(DynamicPropertyType::Exposure)
+                .expect("Preview exposure")
+                .double_value()
+                .expect("Preview exposure value"),
+            -1.0
+        );
+        assert_eq!(
+            export
+                .dynamic_property(DynamicPropertyType::Exposure)
+                .expect("Export exposure")
+                .double_value()
+                .expect("Export exposure value"),
+            1.0
+        );
+    }
+
+    #[test]
     fn session_owned_immutable_processor_survives_switch_to_another_engine() {
         let mut session = OcioCpuProcessorSession::new(4);
         let standard = ColorEngine::mondrian_standard();
@@ -5482,22 +5804,6 @@ colorspaces:
         ensure_ocio_loaded_locked(&source).expect("second load");
         let gen2 = ocio_config_generation();
         assert_eq!(gen1, gen2, "repeated load should not change generation");
-    }
-
-    #[test]
-    fn immutable_gpu_config_revisions_are_generation_independent() {
-        assert_eq!(
-            ocio_gpu_config_revision_for_engine(&ColorEngine::mondrian_standard())
-                .expect("Mondrian revision"),
-            0
-        );
-        assert_eq!(
-            ocio_gpu_config_revision_for_engine(&ColorEngine::Aces {
-                preset: crate::types::AcesConfigPreset::StudioV4Aces2Ocio25,
-            })
-            .expect("ACES revision"),
-            0
-        );
     }
 
     #[test]

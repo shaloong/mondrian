@@ -7,19 +7,18 @@ use lru::LruCache;
 use mondrian_core::ColorSpace;
 use mondrian_core::{
     extract_ocio_display_identity_gpu_shader_bundle, extract_ocio_identity_gpu_shader_bundle,
-    ocio_gpu_config_revision_for_engine, ColorEngine, GpuLanguage, OcioColorSpaceIdentity,
-    OcioGpuShaderBundle, OcioGpuTextureChannel, OcioGpuTextureDimensions,
-    OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
+    ColorEngine, GpuLanguage, OcioColorSpaceIdentity, OcioGpuShaderBundle, OcioGpuTextureChannel,
+    OcioGpuTextureDimensions, OcioGpuTextureInterpolation, OcioGpuUniformType, OcioGpuUniformValue,
     MONDRIAN_OCIO_GPU_FUNCTION_NAME, MONDRIAN_OCIO_GPU_PIXEL_NAME,
     MONDRIAN_OCIO_GPU_RESOURCE_PREFIX,
 };
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 /// Full, domain-separated identity used to authorize OCIO GPU cache reuse.
 ///
@@ -5219,12 +5218,162 @@ pub enum OcioGpuWgpuBlocker {
     },
 }
 
-/// Bounded cache for OCIO GPU shader extraction results.
+const DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY: usize = 256;
+
+type OcioSharedShaderPlanCell = Arc<OnceLock<Result<Arc<OcioGpuShaderPlan>, String>>>;
+
+/// Process-wide registry of immutable, device-independent OCIO GPU artifacts.
+///
+/// Full requests, including dynamic property values, key the shared plan. This
+/// makes the shader source, copied LUTs, binding metadata, and current uniform
+/// payload safe to reuse between Preview and historical Export owners. wgpu
+/// objects and mutable uniform buffers remain outside this Module in their
+/// device/owner-scoped runtimes.
+struct OcioSharedShaderPlanRegistry {
+    entries: LruCache<OcioGpuCanonicalIdentity, OcioSharedShaderPlanCell>,
+    in_flight: HashMap<OcioGpuCanonicalIdentity, OcioSharedShaderPlanCell>,
+    hits: u64,
+    misses: u64,
+    waits: u64,
+    builds: u64,
+    failures: u64,
+    evictions: u64,
+}
+
+impl OcioSharedShaderPlanRegistry {
+    fn new() -> Self {
+        Self {
+            entries: LruCache::new(
+                NonZeroUsize::new(DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY)
+                    .unwrap_or(NonZeroUsize::MIN),
+            ),
+            in_flight: HashMap::new(),
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+        }
+    }
+}
+
+static OCIO_SHARED_SHADER_PLANS: LazyLock<Mutex<OcioSharedShaderPlanRegistry>> =
+    LazyLock::new(|| Mutex::new(OcioSharedShaderPlanRegistry::new()));
+
+/// Point-in-time evidence for the shared device-independent GPU artifact Module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcioSharedShaderPlanRegistryDiagnostics {
+    /// Exact full-request lookups served by an existing ready or in-flight cell.
+    pub hits: u64,
+    /// Exact full requests admitted because no shared cell existed.
+    pub misses: u64,
+    /// Existing cells observed while their first extraction was in flight.
+    pub waits: u64,
+    /// Device-independent OCIO plans extracted from shared parent graphs.
+    pub builds: u64,
+    /// Plan extractions that failed closed and were not retained.
+    pub failures: u64,
+    /// Ready plans removed by bounded LRU admission.
+    pub evictions: u64,
+    /// Ready device-independent plans currently retained.
+    pub entries: usize,
+    /// Exact full-request extractions currently in flight.
+    pub in_flight: usize,
+    /// Maximum ready plan count.
+    pub capacity: usize,
+}
+
+/// Return reuse and pressure evidence for shared plain OCIO GPU artifacts.
+pub fn ocio_shared_shader_plan_registry_diagnostics() -> OcioSharedShaderPlanRegistryDiagnostics {
+    let Ok(registry) = OCIO_SHARED_SHADER_PLANS.lock() else {
+        return OcioSharedShaderPlanRegistryDiagnostics {
+            hits: 0,
+            misses: 0,
+            waits: 0,
+            builds: 0,
+            failures: 0,
+            evictions: 0,
+            entries: 0,
+            in_flight: 0,
+            capacity: DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY,
+        };
+    };
+    OcioSharedShaderPlanRegistryDiagnostics {
+        hits: registry.hits,
+        misses: registry.misses,
+        waits: registry.waits,
+        builds: registry.builds,
+        failures: registry.failures,
+        evictions: registry.evictions,
+        entries: registry.entries.len(),
+        in_flight: registry.in_flight.len(),
+        capacity: DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY,
+    }
+}
+
+fn resolve_shared_shader_plan(
+    request: OcioGpuShaderRequest,
+    request_key: OcioGpuCanonicalIdentity,
+) -> Result<(Arc<OcioGpuShaderPlan>, bool), String> {
+    let (cell, shared_hit) = {
+        let mut registry = OCIO_SHARED_SHADER_PLANS
+            .lock()
+            .map_err(|_| "OCIO shared shader-plan registry lock is poisoned".to_owned())?;
+        if let Some(cell) = registry.entries.get(&request_key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            (cell, true)
+        } else if let Some(cell) = registry.in_flight.get(&request_key).cloned() {
+            registry.hits = registry.hits.saturating_add(1);
+            registry.waits = registry.waits.saturating_add(1);
+            (cell, true)
+        } else {
+            registry.misses = registry.misses.saturating_add(1);
+            let cell = Arc::new(OnceLock::new());
+            registry.in_flight.insert(request_key, Arc::clone(&cell));
+            (cell, false)
+        }
+    };
+
+    let resolved = cell.get_or_init(|| {
+        let result = extract_bundle(&request)
+            .map(|bundle| Arc::new(plan_from_bundle(request.clone(), Arc::new(bundle))));
+        if let Ok(mut registry) = OCIO_SHARED_SHADER_PLANS.lock() {
+            registry.builds = registry.builds.saturating_add(1);
+            if result.is_err() {
+                registry.failures = registry.failures.saturating_add(1);
+            }
+            let matching_in_flight = registry
+                .in_flight
+                .get(&request_key)
+                .is_some_and(|cached| Arc::ptr_eq(cached, &cell));
+            if matching_in_flight {
+                registry.in_flight.remove(&request_key);
+                if result.is_ok() {
+                    if registry.entries.len() == DEFAULT_OCIO_SHARED_SHADER_PLAN_CAPACITY {
+                        registry.evictions = registry.evictions.saturating_add(1);
+                    }
+                    registry.entries.put(request_key, Arc::clone(&cell));
+                }
+            }
+        }
+        result
+    });
+
+    resolved
+        .as_ref()
+        .map(|plan| (Arc::clone(plan), shared_hit))
+        .map_err(|reason| reason.clone())
+}
+
+/// Bounded owner cache backed by the shared immutable OCIO artifact Module.
 pub struct OcioGpuShaderCache {
     entries: LruCache<OcioGpuCanonicalIdentity, Arc<OcioGpuShaderPlan>>,
     hits: u64,
     misses: u64,
     extraction_failures: u64,
+    shared_hits: u64,
+    shared_misses: u64,
 }
 
 impl OcioGpuShaderCache {
@@ -5235,10 +5384,15 @@ impl OcioGpuShaderCache {
             hits: 0,
             misses: 0,
             extraction_failures: 0,
+            shared_hits: 0,
+            shared_misses: 0,
         }
     }
 
-    /// Clear all cached entries for renderer or GPU-device lifecycle invalidation.
+    /// Clear this owner's front cache for renderer lifecycle invalidation.
+    ///
+    /// Device-independent shared plans remain available to other owners; wgpu
+    /// backend objects have separate device-scoped lifecycle barriers.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -5248,26 +5402,26 @@ impl OcioGpuShaderCache {
         &mut self,
         request: OcioGpuShaderRequest,
     ) -> Result<Arc<OcioGpuShaderPlan>, OcioGpuShaderError> {
-        let config_revision = match ocio_gpu_config_revision_for_engine(request.engine()) {
-            Ok(revision) => revision,
-            Err(reason) => {
-                self.misses = self.misses.saturating_add(1);
-                self.extraction_failures = self.extraction_failures.saturating_add(1);
-                return Err(OcioGpuShaderError { request, reason });
-            }
-        };
-        let request_key = request_cache_identity(&request, config_revision);
+        // ColorEngine is the complete semantic identity. A warm owner lookup
+        // must not select OCIO's process-global config or include operational
+        // reload generation in the semantic key.
+        let request_key = request_cache_identity(&request);
         if let Some(hit) = self.entries.get(&request_key) {
             self.hits += 1;
             return Ok(Arc::clone(hit));
         }
 
-        self.misses += 1;
-        let bundle = extract_bundle(&request).map_err(|reason| {
-            self.extraction_failures += 1;
-            OcioGpuShaderError { request: request.clone(), reason }
-        })?;
-        let plan = Arc::new(plan_from_bundle(request, Arc::new(bundle)));
+        self.misses = self.misses.saturating_add(1);
+        let (plan, shared_hit) =
+            resolve_shared_shader_plan(request.clone(), request_key).map_err(|reason| {
+                self.extraction_failures += 1;
+                OcioGpuShaderError { request: request.clone(), reason }
+            })?;
+        if shared_hit {
+            self.shared_hits = self.shared_hits.saturating_add(1);
+        } else {
+            self.shared_misses = self.shared_misses.saturating_add(1);
+        }
         self.entries.put(request_key, Arc::clone(&plan));
         Ok(plan)
     }
@@ -5331,6 +5485,8 @@ impl OcioGpuShaderCache {
             hits: self.hits,
             misses: self.misses,
             extraction_failures: self.extraction_failures,
+            shared_hits: self.shared_hits,
+            shared_misses: self.shared_misses,
         }
     }
 }
@@ -5352,6 +5508,10 @@ pub struct OcioGpuShaderCacheDiagnostics {
     pub misses: u64,
     /// OCIO extraction failures.
     pub extraction_failures: u64,
+    /// Owner misses served by an existing shared immutable plan or in-flight cell.
+    pub shared_hits: u64,
+    /// Owner misses that admitted a new shared immutable plan build.
+    pub shared_misses: u64,
 }
 
 /// Error returned when OCIO cannot produce a GPU shader plan.
@@ -5740,11 +5900,8 @@ fn plan_from_bundle(
     }
 }
 
-fn request_cache_identity(
-    request: &OcioGpuShaderRequest,
-    config_revision: u64,
-) -> OcioGpuCanonicalIdentity {
-    OcioGpuCanonicalIdentity::for_hash(b"shader-request", &(request, config_revision))
+fn request_cache_identity(request: &OcioGpuShaderRequest) -> OcioGpuCanonicalIdentity {
+    OcioGpuCanonicalIdentity::for_hash(b"shader-request", request)
 }
 
 fn static_request_identity(request: &OcioGpuShaderRequest) -> OcioGpuCanonicalIdentity {
@@ -8256,8 +8413,8 @@ mod tests {
         let second = dynamic_custom_shader_plan(1.0, 1.0);
 
         assert_ne!(
-            request_cache_identity(&first.request, 0),
-            request_cache_identity(&second.request, 0),
+            request_cache_identity(&first.request),
+            request_cache_identity(&second.request),
             "shader extraction must observe new authored values"
         );
         assert_eq!(
@@ -9827,8 +9984,8 @@ mod tests {
             .expect_err("missing Custom config must fail instead of hitting Standard cache");
         assert_eq!(error.request, custom_request);
         assert_ne!(
-            request_cache_identity(&standard_request, 0),
-            request_cache_identity(&error.request, 0)
+            request_cache_identity(&standard_request),
+            request_cache_identity(&error.request)
         );
         let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 1);
@@ -9849,31 +10006,12 @@ mod tests {
         let current = request_for(mondrian_core::MondrianStandardPackageIdentity::V3);
 
         assert_ne!(
-            request_cache_identity(&legacy, 0),
-            request_cache_identity(&current, 0)
+            request_cache_identity(&legacy),
+            request_cache_identity(&current)
         );
         assert_ne!(
             hash_request_and_processor(&legacy, Some("same-processor-id")),
             hash_request_and_processor(&current, Some("same-processor-id"))
-        );
-    }
-
-    #[test]
-    fn shader_request_cache_key_invalidates_on_config_revision() {
-        let request = OcioGpuShaderRequest::ColorSpace {
-            engine: pinned_custom_engine(mondrian_core::OcioConfigSource::Environment),
-            src: ColorSpace::SonySLog3SGamut3Cine.into(),
-            dst: ColorSpace::Rec709.into(),
-            language: GpuLanguage::Glsl4_0,
-        };
-
-        assert_eq!(
-            request_cache_identity(&request, 7),
-            request_cache_identity(&request, 7)
-        );
-        assert_ne!(
-            request_cache_identity(&request, 7),
-            request_cache_identity(&request, 8)
         );
     }
 

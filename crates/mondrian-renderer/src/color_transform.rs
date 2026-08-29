@@ -488,10 +488,11 @@ impl RenderColorTransform {
 
 /// Owner-scoped OCIO CPU execution resources for one renderer worker or job.
 ///
-/// The opaque OCIO processors remain immutable after construction, but their
-/// residency belongs to the Preview, Export, Thumbnail, or other concrete
-/// execution owner. This Session is deliberately not `Send`; create and use it
-/// on the thread that owns the surrounding execution Session.
+/// The immutable parent processor graph may be process-shared. Each mutable CPU
+/// execution handle and its dynamic-property state belongs to the Preview,
+/// Export, Thumbnail, or other concrete execution owner. This Session is
+/// deliberately not `Send`; create and use it on the thread that owns the
+/// surrounding execution Session.
 pub struct RenderCpuColorExecutionSession {
     ocio_processors: OcioCpuProcessorSession,
 }
@@ -505,8 +506,8 @@ impl Default for RenderCpuColorExecutionSession {
 impl RenderCpuColorExecutionSession {
     /// Create a Session with a processor-resource-unit limit.
     ///
-    /// Zero disables processor retention and selects the uncached reference
-    /// path while preserving exactly the same transform semantics.
+    /// Zero disables owner CPU-handle retention while preserving exactly the
+    /// same transform semantics and shared immutable parent-graph reuse.
     pub fn new(processor_capacity: usize) -> Self {
         Self {
             ocio_processors: OcioCpuProcessorSession::new(processor_capacity),
