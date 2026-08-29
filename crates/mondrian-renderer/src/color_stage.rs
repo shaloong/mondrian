@@ -818,6 +818,21 @@ impl RenderGpuOutputBoundaryRuntime {
         self.frame_table.take(handle)
     }
 
+    /// Detach one exact GPU output into a move-only resident-encoder lease.
+    ///
+    /// The encoder Adapter must order any external queue read before dropping
+    /// the lease so a later pool acquisition cannot race the consumer.
+    pub fn take_resident_encoder_input(
+        &mut self,
+        handle: &GpuColorFrameHandle,
+    ) -> Result<crate::GpuResidentEncoderInputLease, GpuColorFrameResourceTableError> {
+        let resource = self.take_frame_resource(handle)?;
+        Ok(crate::GpuResidentEncoderInputLease::new(
+            resource,
+            Arc::clone(&self.resource_pool),
+        ))
+    }
+
     /// Mutably borrow the allocator that owns frame identities for this
     /// runtime's resource table. Native import plans must allocate from this
     /// same namespace before their returned resources enter the table.

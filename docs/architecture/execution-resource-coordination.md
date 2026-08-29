@@ -417,8 +417,15 @@ already started. The same profiles grant
 384 MiB/512 MiB/1 GiB/2 GiB and four resources to one final GPU output
 boundary. That pressure-stable grant covers the exact working input texture,
 encoded output texture, and padded readback buffer; the separate idle pool may
-still be trimmed. A plan that exceeds either active limit is rejected before
-GPU allocation and records an explicit `ActiveWorkingSetRejected` CPU-fallback
+still be trimmed. The policy additionally freezes eight resident-encoder
+surfaces and 512 MiB of conservative logical surface bytes for the qualified
+Windows HEVC route. Export rejects admission before execution unless the exact
+NV12/P010 pool fits both limits. Renderer detached input leases remain charged
+to their originating GPU output pool until the cross-queue completion wait has
+been enqueued; poisoned leases and destination surfaces remain owned by the
+resident Adapter until retirement rather than being returned under unknown
+native state. A plan that exceeds either active limit is rejected before GPU
+allocation and records an explicit `ActiveWorkingSetRejected` CPU-fallback
 reason rather than silently reducing delivery precision. The queue copies the current
 policy when a pending job becomes one `Running/Preparing` attempt, and that
 immutable value constructs the attempt's single `ExportVisualRenderSession`.

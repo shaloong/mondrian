@@ -1274,11 +1274,31 @@ local "works well enough" path. A successful export path must not assume that a
 scheduled GPU plan executed if the runtime returns no materialized readback handle or
 no recorded stage/runtime evidence.
 
-Exporting still reads back encoded pixels for encoder interoperability today, but
-that readback must remain explicit in the plan and report. A future encoder path
-may move readback behind an API that still reports parity or staged transfer
-intent. Until that exists, readback reasons and blockers stay part of the
-export color health contract.
+The generic encoder path still reads back encoded pixels and reports that
+residency boundary explicitly. A separately qualified Windows HEVC route may
+instead detach the root GPU output from the Renderer pool and pass it through
+`D3D12ResidentEncodeAdapter`. That Adapter records one D3D12 Video Processor
+conversion from RGBA8/RGBA32F to an FFmpeg-owned NV12/P010 surface on the exact
+Renderer device. The route is GPU-resident and performs zero host readbacks,
+rawvideo writes, or CPU-to-encoder uploads; it is not described as literal
+zero-copy because the RGB-to-YCbCr conversion remains a real GPU operation.
+
+The Adapter owns the cross-queue contract. The direct queue signals source
+readiness, the Video Process queue waits, transitions source and destination to
+VIDEO_PROCESS_READ/WRITE, executes conversion, restores the source to
+RENDER_TARGET and destination to COMMON, then signals both the FFmpeg surface
+fence and a completion fence. A direct-queue wait is enqueued before the
+detached source lease may return to the Renderer pool. Any error after native
+submission retains the source and destination as poisoned resources until
+Adapter retirement; they cannot be silently recycled under unknown state.
+
+Only the narrow exact HEVC contract is admitted. HLG, full-range PQ, authored
+static HDR metadata, active Legalizer/VBV constraints, unsupported codecs or
+pixel formats, and non-D3D12 platforms use the complete reported rawvideo path.
+Failure before the first resident frame submission may fall back to that path;
+failure after submission is terminal. Renderer and Media diagnostics count
+resident submissions while proving zero host-transfer operations, and the
+ordinary post-encode validation remains authoritative.
 
 ## Viewer Resource Reuse
 

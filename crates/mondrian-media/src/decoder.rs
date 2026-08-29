@@ -105,6 +105,18 @@ impl RendererHwAccelDeviceContext {
         self.owner.backend
     }
 
+    /// Retain the exact FFmpeg device root for another media-owned hardware Session.
+    ///
+    /// The returned reference is independently owned and must be released with
+    /// `av_buffer_unref`. It remains crate-private so platform clients cannot
+    /// manufacture an unqualified FFmpeg device interpretation.
+    pub(crate) fn retain_ffmpeg_device_ref(
+        &self,
+    ) -> Result<NonNull<ffmpeg::ffi::AVBufferRef>, RendererHwAccelDeviceContextCreateError> {
+        let retained = unsafe { ffmpeg::ffi::av_buffer_ref(self.owner.ptr.as_ptr()) };
+        NonNull::new(retained).ok_or(RendererHwAccelDeviceContextCreateError::AllocationFailed)
+    }
+
     /// Create an FFmpeg D3D12VA device root over the exact renderer device.
     ///
     /// FFmpeg takes ownership of one COM reference during initialization. The

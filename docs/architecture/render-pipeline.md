@@ -236,9 +236,10 @@ closure, heterogeneous route, unavailable device, or active-resource rejection
 selects the complete CPU route before GPU pixels start. Once the GPU Adapter
 records the first node, device/composite/color/output failure is terminal for
 that attempt; it cannot silently replay the frame on CPU. CPU decode/upload is
-still the explicit input residency boundary pending decoder-surface residency,
-and the encoder pipe remains the explicit output readback boundary pending a
-GPU-surface encoder contract.
+still an explicit input residency boundary when decoder-surface import is not
+qualified. At output, the generic encoder pipe remains an explicit readback
+boundary, while the qualified Windows HEVC route hands the detached root GPU
+texture to the same-device D3D12 resident-encode Adapter without host transfer.
 
 The CPU route enters one deep Renderer-owned CPU Visual Execution Module
 through `TimelineCompositeScratch`. Preview fallback and each Export visual
@@ -391,11 +392,25 @@ format. Qualified NVIDIA, Intel, and AMD adapters may select NVENC, QSV, or AMF;
 probe failure, cancellation-safe timeout, an unsupported vendor, or unavailable
 GPU context selects the explicit libx264/libx265 fallback before Timeline frame
 streaming begins. Authored static HDR metadata remains on libx265 until another
-backend has an exact metadata lowering. The current FFmpeg rawvideo pipe is a
-CPU boundary and therefore records one CPU-to-encoder upload per frame; hardware
-selection is acceleration evidence, never a zero-copy claim. The existing
-post-encode probe remains authoritative for codec/profile, signal, cadence, and
-GOP compliance regardless of the selected backend.
+backend has an exact metadata lowering. The generic FFmpeg rawvideo pipe is a
+CPU boundary and therefore records one CPU-to-encoder upload per frame; generic
+hardware encoder selection alone is acceleration evidence, never a zero-copy
+claim.
+
+A separate `ResidentD3D12Hevc` route is admitted only before frame execution for
+an exact closed-GOP HEVC Main/Main10, YUV420, flattened-alpha contract with
+Legalizer off, no authored static HDR metadata, and no VBV/maxrate/bufsize
+constraint. It accepts Rec.709 and limited-range Rec.2100 PQ; HLG and full-range
+PQ fail closed until their exact DXGI color-space lowering is qualified. The
+Renderer converts the GPU-resident root RGBA texture into an FFmpeg-owned
+NV12/P010 D3D12 surface, and Media submits that ready surface to in-process
+`hevc_d3d12va`. Export then stream-copies the validated video-only artifact into
+the final mux while rendering or encoding audio normally. Diagnostics prove
+zero host readbacks, rawvideo writes, and CPU-to-encoder uploads. If the resident
+session cannot start, Export may rerun the complete generic route; after the
+first resident submission, any failure is terminal and no mixed-residency file
+is produced. The existing post-encode probe remains authoritative for
+codec/profile, signal, cadence, and GOP compliance on every route.
 
 Image-sequence execution writes numbered frames below one Storage-owned sibling
 directory. After FFmpeg exits, Export independently decodes every frame,

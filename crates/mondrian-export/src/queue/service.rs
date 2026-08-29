@@ -88,6 +88,10 @@ pub struct ExportExecutionResourcePolicy {
     /// Unlike idle retention, this grant is frozen for the accepted Export
     /// attempt and must not shrink in response to online memory pressure.
     pub gpu_output_active: RenderGpuOutputExecutionResourceGrant,
+    /// Maximum FFmpeg-owned NV12/P010 encoder surfaces in one resident Session.
+    pub resident_encoder_surfaces: u32,
+    /// Hard logical byte grant for the complete resident encoder surface pool.
+    pub resident_encoder_surface_bytes: u64,
     /// Maximum retained Basic Title raster identities.
     pub title_cache_entries: usize,
     /// Aggregate Basic Title frame and glyph cache bytes.
@@ -126,6 +130,8 @@ impl Default for ExportExecutionResourcePolicy {
                 128,
             ),
             gpu_output_active: RenderGpuOutputExecutionResourceGrant::new(1024 * 1024 * 1024, 4),
+            resident_encoder_surfaces: 8,
+            resident_encoder_surface_bytes: 512 * 1024 * 1024,
             title_cache_entries: 16,
             title_cache_bytes: 64 * 1024 * 1024,
             title_font_bytes: 128 * 1024 * 1024,

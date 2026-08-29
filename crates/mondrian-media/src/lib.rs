@@ -23,6 +23,7 @@ mod packet_identity;
 pub mod preview;
 mod process_supervisor;
 pub mod proxy;
+mod resident_encode;
 pub mod waveform;
 
 pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
@@ -128,6 +129,11 @@ pub use proxy::{
     ProxyGenerationOutcome, ProxyGenerator, ProxyPublicationEvidence, ProxyPublicationFailure,
     ProxyPublicationFailureKind, ProxyPublicationPhase, ProxyResolution, ProxySourceFingerprint,
     ProxyStatus,
+};
+pub use resident_encode::{
+    D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,
+    D3D12ResidentHevcEncoderSessionDiagnostics, ResidentEncodeBitDepth, ResidentEncodeColorimetry,
+    ResidentEncodeError, ResidentHevcEncoderConfig,
 };
 pub use waveform::{
     WaveformAnalysisError, WaveformEnvelope, WaveformEnvelopeBuilder, MAX_WAVEFORM_WIDTH,

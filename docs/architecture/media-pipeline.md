@@ -2310,6 +2310,28 @@ Vulkan device's `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature. On Windows the same
 rule binds D3D12 resource import to the active DX12 device. CPU-transfer hardware
 decode still reports CPU RGBA residency on every platform.
 
+The Windows resident HEVC export boundary follows the same exact-device rule in
+the opposite direction. `ResidentHevcEncoderSession` owns the in-process
+FFmpeg `hevc_d3d12va` codec, muxer, D3D12 hardware-device reference, and bounded
+NV12/P010 hardware-frame pool. An acquired
+`D3D12ResidentEncodeInputFrame` is not submit-ready: only the Renderer production
+Adapter may turn it into `D3D12ResidentEncodeReadyFrame` after enqueueing the
+producer fence signal. Media waits on that fence through FFmpeg's hardware-frame
+contract and never maps the surface or stages raw pixels through host memory.
+The hand-written FFmpeg 7.1 D3D12 ABI declarations are target-gated and guarded
+by compile-time size and offset assertions.
+
+Packet submission and drain distinguish EAGAIN, EOF, and real errors; flush
+must reach EOF, and any send failure waits for the producer fence before the
+surface can be released. The session writes a video-only mux artifact because
+the final Export process may still need to combine normal audio. That final
+process uses video stream copy, not rawvideo input, so it is not an
+encoder-upload boundary. Resident route diagnostics count surfaces, packets,
+and producer-ready submissions while explicitly retaining zero readback,
+rawvideo, and CPU upload counters. The current in-process codec call cannot be
+forcibly isolated from a wedged vendor driver; bounded surface acquisition and
+queue-fence waits do not constitute process-level hang isolation.
+
 The preview decoder's experimental external-process path is named
 `PreviewDecodeBackend::ExternalFfmpegCpuRgba` and is enabled only by explicitly
 selecting that backend or setting `MONDRIAN_PREVIEW_EXTERNAL_FFMPEG_CPU_RGBA`.

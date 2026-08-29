@@ -739,6 +739,18 @@ pub struct GpuColorFrameWgpuResourcePoolDiagnostics {
     pub detached_presentation_accounting_overflows: u64,
     /// Whether the current detached-presentation demand exceeds the public budget model.
     pub detached_presentation_accounting_overflowed: bool,
+    /// Current textures detached into move-only resident-encoder leases.
+    pub detached_encoder_resources: u64,
+    /// Current logical bytes owned by resident-encoder leases.
+    pub detached_encoder_bytes: u64,
+    /// Highest simultaneous resident-encoder texture count.
+    pub detached_encoder_high_water_resources: u64,
+    /// Highest simultaneous resident-encoder logical byte ownership.
+    pub detached_encoder_high_water_bytes: u64,
+    /// Transitions into encoder demand that cannot be represented by the public `u64` model.
+    pub detached_encoder_accounting_overflows: u64,
+    /// Whether current detached-encoder demand exceeds the public budget model.
+    pub detached_encoder_accounting_overflowed: bool,
     /// Current number of idle retained resources.
     pub retained_resources: usize,
     /// Approximate bytes occupied by idle retained resources.
@@ -768,6 +780,12 @@ struct GpuColorFrameWgpuResourcePoolState {
     detached_presentation_high_water_bytes: u128,
     detached_presentation_accounting_overflows: u64,
     detached_presentation_accounting_irrecoverable: bool,
+    detached_encoder_resources: u128,
+    detached_encoder_bytes: u128,
+    detached_encoder_high_water_resources: u128,
+    detached_encoder_high_water_bytes: u128,
+    detached_encoder_accounting_overflows: u64,
+    detached_encoder_accounting_irrecoverable: bool,
 }
 
 impl Default for GpuColorFrameWgpuResourcePoolState {
@@ -790,6 +808,12 @@ impl Default for GpuColorFrameWgpuResourcePoolState {
             detached_presentation_high_water_bytes: 0,
             detached_presentation_accounting_overflows: 0,
             detached_presentation_accounting_irrecoverable: false,
+            detached_encoder_resources: 0,
+            detached_encoder_bytes: 0,
+            detached_encoder_high_water_resources: 0,
+            detached_encoder_high_water_bytes: 0,
+            detached_encoder_accounting_overflows: 0,
+            detached_encoder_accounting_irrecoverable: false,
         }
     }
 }
@@ -910,6 +934,32 @@ impl GpuColorFrameWgpuResourcePool {
         true
     }
 
+    /// Register one resident-encoder input and capture its pool return generation.
+    fn register_detached_encoder(&self, byte_len: u128) -> GpuColorFrameWgpuResourcePoolGeneration {
+        let mut state = self.state.lock();
+        register_detached_encoder_demand(&mut state, byte_len);
+        GpuColorFrameWgpuResourcePoolGeneration(state.generation)
+    }
+
+    /// Retire resident-encoder demand and return the resource to its producing pool epoch.
+    fn release_detached_encoder(
+        &self,
+        generation: GpuColorFrameWgpuResourcePoolGeneration,
+        byte_len: u128,
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+    ) -> bool {
+        let mut state = self.state.lock();
+        unregister_detached_encoder_demand(&mut state, byte_len);
+        if !state.accepts_generation_returns || generation.0 != state.generation {
+            state.stale_generation_releases = state.stale_generation_releases.saturating_add(1);
+            drop(state);
+            drop(resource);
+            return false;
+        }
+        release_gpu_color_frame_resource(&mut state, resource);
+        true
+    }
+
     /// Return exact active demand from every live detached presentation lease.
     ///
     /// `None` is a conservative overflow signal: Viewer admission must reject
@@ -967,6 +1017,16 @@ impl GpuColorFrameWgpuResourcePool {
             detached_presentation_accounting_overflowed: detached_presentation_demand_overflowed(
                 &state,
             ),
+            detached_encoder_resources: saturating_u128_to_u64(state.detached_encoder_resources),
+            detached_encoder_bytes: saturating_u128_to_u64(state.detached_encoder_bytes),
+            detached_encoder_high_water_resources: saturating_u128_to_u64(
+                state.detached_encoder_high_water_resources,
+            ),
+            detached_encoder_high_water_bytes: saturating_u128_to_u64(
+                state.detached_encoder_high_water_bytes,
+            ),
+            detached_encoder_accounting_overflows: state.detached_encoder_accounting_overflows,
+            detached_encoder_accounting_overflowed: detached_encoder_demand_overflowed(&state),
             retained_resources: state.idle.len(),
             retained_bytes: state.retained_bytes,
         }
@@ -1035,6 +1095,60 @@ fn detached_presentation_demand_overflowed(state: &GpuColorFrameWgpuResourcePool
     state.detached_presentation_accounting_irrecoverable
         || state.detached_presentation_resources > u128::from(u64::MAX)
         || state.detached_presentation_bytes > u128::from(u64::MAX)
+}
+
+fn register_detached_encoder_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    let was_overflowed = detached_encoder_demand_overflowed(state);
+    match (
+        state.detached_encoder_resources.checked_add(1),
+        state.detached_encoder_bytes.checked_add(byte_len),
+    ) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_encoder_resources = resources;
+            state.detached_encoder_bytes = bytes;
+            state.detached_encoder_high_water_resources =
+                state.detached_encoder_high_water_resources.max(resources);
+            state.detached_encoder_high_water_bytes =
+                state.detached_encoder_high_water_bytes.max(bytes);
+        }
+        _ => state.detached_encoder_accounting_irrecoverable = true,
+    }
+    if !was_overflowed && detached_encoder_demand_overflowed(state) {
+        state.detached_encoder_accounting_overflows =
+            state.detached_encoder_accounting_overflows.saturating_add(1);
+    }
+}
+
+fn unregister_detached_encoder_demand(
+    state: &mut GpuColorFrameWgpuResourcePoolState,
+    byte_len: u128,
+) {
+    if state.detached_encoder_accounting_irrecoverable {
+        return;
+    }
+    match (
+        state.detached_encoder_resources.checked_sub(1),
+        state.detached_encoder_bytes.checked_sub(byte_len),
+    ) {
+        (Some(resources), Some(bytes)) => {
+            state.detached_encoder_resources = resources;
+            state.detached_encoder_bytes = bytes;
+        }
+        _ => {
+            state.detached_encoder_accounting_irrecoverable = true;
+            state.detached_encoder_accounting_overflows =
+                state.detached_encoder_accounting_overflows.saturating_add(1);
+        }
+    }
+}
+
+fn detached_encoder_demand_overflowed(state: &GpuColorFrameWgpuResourcePoolState) -> bool {
+    state.detached_encoder_accounting_irrecoverable
+        || state.detached_encoder_resources > u128::from(u64::MAX)
+        || state.detached_encoder_bytes > u128::from(u64::MAX)
 }
 
 fn saturating_u128_to_u64(value: u128) -> u64 {
@@ -1179,6 +1293,73 @@ impl Drop for ViewerGpuPresentationOutputLease {
         let _ =
             self.pool
                 .release_detached_presentation(self.pool_generation, self.byte_len, resource);
+    }
+}
+
+/// Move-only renderer output retained until a resident encoder Adapter orders its GPU read.
+///
+/// This lease never exposes a CPU pixel boundary. The Adapter must order all
+/// external-queue reads before dropping it; dropping then returns the texture
+/// only to the exact device generation that produced it.
+pub struct GpuResidentEncoderInputLease {
+    resource: Option<GpuColorFrameResource<GpuColorFrameWgpuResource>>,
+    pool: Arc<GpuColorFrameWgpuResourcePool>,
+    pool_generation: GpuColorFrameWgpuResourcePoolGeneration,
+    byte_len: u128,
+}
+
+impl GpuResidentEncoderInputLease {
+    /// Bind one detached renderer output to its producing pool generation.
+    pub(crate) fn new(
+        resource: GpuColorFrameResource<GpuColorFrameWgpuResource>,
+        pool: Arc<GpuColorFrameWgpuResourcePool>,
+    ) -> Self {
+        let byte_len =
+            GpuColorFrameWgpuResourcePoolKey::from_resource(&resource).logical_byte_len();
+        let pool_generation = pool.register_detached_encoder(byte_len);
+        Self {
+            resource: Some(resource),
+            pool,
+            pool_generation,
+            byte_len,
+        }
+    }
+
+    /// Exact typed renderer contract carried by this resident input.
+    pub fn contract(&self) -> GpuColorFrameContract {
+        self.resource().handle().contract()
+    }
+
+    /// Borrow the source texture inside the renderer-owned platform Adapter.
+    pub(crate) fn texture(&self) -> &wgpu::Texture {
+        &self.resource().resource().texture
+    }
+
+    fn resource(&self) -> &GpuColorFrameResource<GpuColorFrameWgpuResource> {
+        self.resource
+            .as_ref()
+            .expect("resident encoder input resource is present before Drop")
+    }
+}
+
+impl std::fmt::Debug for GpuResidentEncoderInputLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GpuResidentEncoderInputLease")
+            .field("handle", self.resource().handle())
+            .field("pool_generation", &self.pool_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for GpuResidentEncoderInputLease {
+    fn drop(&mut self) {
+        let Some(resource) = self.resource.take() else {
+            return;
+        };
+        let _ = self
+            .pool
+            .release_detached_encoder(self.pool_generation, self.byte_len, resource);
     }
 }
 

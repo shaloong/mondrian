@@ -35,6 +35,7 @@ pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
 pub mod realtime_performance;
+mod resident_encode;
 pub mod shot_match;
 pub mod signal_monitor;
 pub mod source_frame_preparation;
@@ -87,8 +88,8 @@ pub use color_frame::{
     GpuNativeDecodedFrameImportSupportError, GpuNativeDecodedFrameSourceDescriptor,
     GpuNativeDecodedFrameSourceFormatError, GpuNativeDecodedFrameTextureFormat,
     GpuNativeDecodedFrameVideoSampling, GpuNativeRgbDecodePlan, GpuNativeRgbDecodePlanError,
-    GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource, SourceAlphaInterpretationError,
-    ViewerGpuPresentationOutputLease,
+    GpuResidentEncoderInputLease, GpuVideoChromaLocation, GpuVideoRange, LinearFloatSource,
+    SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
     import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
@@ -323,6 +324,11 @@ pub use realtime_performance::{
     REALTIME_PERFORMANCE_EXECUTION_POLICY_ENV, REALTIME_VISUAL_PERFORMANCE_PROFILE,
     REALTIME_VISUAL_PERFORMANCE_REPORT_SCHEMA_VERSION,
     SEALED_REALTIME_PERFORMANCE_EXECUTION_POLICY,
+};
+pub use resident_encode::{
+    D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
+    D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,
+    D3D12ResidentEncodeSubmissionError,
 };
 pub use shot_match::{
     analyze_shot_match_frame, solve_shot_match, ShotMatchAnalysisError, ShotMatchSolution,

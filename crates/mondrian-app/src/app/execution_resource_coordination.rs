@@ -1826,6 +1826,10 @@ fn export_resource_policy(
         gpu_output_idle_bytes: (gpu_output_idle_bytes / cache_divisor) as u64,
         gpu_visual_active: export_gpu_visual_active_grant(class),
         gpu_output_active: export_gpu_output_active_grant(class),
+        // The resident pool is a correctness grant frozen for the complete
+        // attempt, not optional idle residency that pressure may trim.
+        resident_encoder_surfaces: 8,
+        resident_encoder_surface_bytes: 512 * MIB as u64,
         title_cache_entries: (title_cache_entries / cache_divisor).max(1),
         title_cache_bytes: (title_cache_bytes / cache_divisor).max(1),
         // Font bytes are immutable snapshot dependencies, not evictable cache
@@ -2393,6 +2397,24 @@ mod tests {
                 professional.export.resource_policy.gpu_output_active.max_active_resources(),
             ),
             (4, 4, 4)
+        );
+        assert_eq!(minimum.export.resource_policy.resident_encoder_surfaces, 8);
+        assert_eq!(standard.export.resource_policy.resident_encoder_surfaces, 8);
+        assert_eq!(
+            professional.export.resource_policy.resident_encoder_surfaces,
+            8
+        );
+        assert_eq!(
+            minimum.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
+        );
+        assert_eq!(
+            standard.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
+        );
+        assert_eq!(
+            professional.export.resource_policy.resident_encoder_surface_bytes,
+            512 * MIB as u64
         );
     }
 
