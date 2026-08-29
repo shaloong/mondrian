@@ -12,6 +12,25 @@ The working compositor clears its accumulation target to transparent black.
 Opaque viewer or export backgrounds are explicit downstream presentation or
 delivery operations; they are never baked into the shared GPU Program frame.
 
+The compositor records through one checked **Composite Execution Plan**. The
+planner is a pure Renderer Module: it owns transformed Layer ROI, conservative
+per-Layer damage, unchanged-accumulator preservation, bounded tile draws, and
+pass-fusion evidence. The wgpu recorder is its Implementation and cannot derive
+a second spatial interpretation. Preview and Export use this same Seam.
+
+A bounded first Layer uses transparent clear plus scissored draws. A bounded
+later Layer copies the non-overlapping complement of its damage rectangle from
+the previous accumulator, loads that destination, and shades only damage. This
+is required because render-pass clear ignores scissor and a ping-pong target's
+untouched pixels are otherwise undefined. Full-canvas Layers retain the normal
+pass. Tiles are at most 4096 pixels per axis and remain draws within one render
+pass. A 4,096-tile hard limit fails before allocation. The plan reports actual
+shaded pixels, avoided full-frame shader pixels, preserved-copy work, tile
+draws, eliminated Layers, and fused point operations.
+Its damage is intra-frame Layer-versus-accumulator evidence only; temporal
+damage reuse remains unavailable until a caller can prove exact prior-output
+identity and lifetime.
+
 ## Target Principle
 
 Old model:

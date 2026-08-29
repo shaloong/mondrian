@@ -198,6 +198,83 @@ async fn data_texture_gpu_visual_path_preserves_numeric_channels_without_ocio() 
     }
 }
 
+#[tokio::test]
+async fn export_visual_path_uses_shared_spatial_composite_execution_plan() {
+    let Ok(context) = GpuContext::new().await else {
+        eprintln!("skipping GPU composite execution test: no adapter available");
+        return;
+    };
+    let identity = Arc::new(
+        lower_effect_graph_to_gpu_plan(
+            &identity_compiled_effect_graph().expect("identity Effect graph"),
+        )
+        .expect("identity GPU plan"),
+    );
+    let base = Arc::new(CpuColorFrame::working(WorkingRgbaF32Frame {
+        width: 4,
+        height: 4,
+        color_space: WorkingColorSpace::LinearRec709,
+        data: vec![[0.0, 0.0, 1.0, 1.0]; 16],
+    }));
+    let overlay = Arc::new(CpuColorFrame::working(WorkingRgbaF32Frame {
+        width: 2,
+        height: 2,
+        color_space: WorkingColorSpace::LinearRec709,
+        data: vec![[1.0, 0.0, 0.0, 1.0]; 4],
+    }));
+    let elements = [
+        GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+            source: GpuVisualFrameSource::Working(base),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: IDENTITY_AFFINE,
+            effect_plan: Arc::clone(&identity),
+            frame_seed: 0,
+        })),
+        GpuVisualFrameElement::Source(Box::new(GpuVisualSourceLayer {
+            source: GpuVisualFrameSource::Working(overlay),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+            effect_plan: identity,
+            frame_seed: 0,
+        })),
+    ];
+    let mut runtime = RenderGpuOutputBoundaryRuntime::new().expect("frame runtime");
+    let executor = GpuVisualFrameExecutor::new(&context.device).expect("visual executor");
+    let mut encoder = context.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("export-spatial-composite-plan"),
+    });
+
+    let record = executor
+        .record(
+            &mut runtime,
+            &context.device,
+            &context.queue,
+            &mut encoder,
+            GpuVisualFrameRequest {
+                width: 4,
+                height: 4,
+                working_color_space: WorkingColorSpace::LinearRec709,
+                color_engine: ColorEngine::mondrian_standard(),
+                elements: &elements,
+            },
+        )
+        .expect("record export visual frame");
+    context.queue.submit(std::iter::once(encoder.finish()));
+
+    assert_eq!(record.compositing_diagnostics.execution.render_passes, 2);
+    assert_eq!(record.compositing_diagnostics.execution.shaded_pixels, 20);
+    assert_eq!(
+        record.compositing_diagnostics.execution.avoided_shader_pixels,
+        12
+    );
+    assert_eq!(
+        record.compositing_diagnostics.execution.preserved_copy_pixels,
+        12
+    );
+}
+
 fn data_frame() -> CpuColorFrame {
     CpuColorFrame::working(WorkingRgbaF32Frame {
         width: 2,

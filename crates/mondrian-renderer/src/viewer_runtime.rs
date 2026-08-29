@@ -3226,6 +3226,8 @@ mod tests {
             assert_eq!(record.stage_diagnostics.readback_stages, 0);
             assert_eq!(record.compositing_diagnostics.gpu_passthrough_frames, 0);
             assert_eq!(record.compositing_diagnostics.gpu_native_composites, 1);
+            assert!(record.compositing_diagnostics.execution.render_passes >= 1);
+            assert!(record.compositing_diagnostics.execution.avoided_shader_pixels > 0);
             assert_eq!(runtime.program_scopes_diagnostics().frames_recorded, 0);
             assert_eq!(
                 record.output.descriptor().domain,

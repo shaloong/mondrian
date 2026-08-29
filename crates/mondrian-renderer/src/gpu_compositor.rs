@@ -8,6 +8,11 @@
 
 use crate::color_frame::GpuColorFrameBindGroupCacheKey;
 use crate::creative_lut_gpu::{GpuCreativeLutPreparedBinding, GpuCreativeLutRuntime};
+use crate::gpu_composite_execution::{
+    GpuCompositeExecutionDiagnostics, GpuCompositeExecutionPlanError, GpuCompositeExecutionPlanner,
+    GpuCompositeExecutionPolicy, GpuCompositeLayerExecution, GpuCompositeLayerFootprint,
+    GpuCompositeRect, GpuCompositeSourceCrop,
+};
 use crate::{
     ColorFrameDescriptor, ColorFrameDomain, ColorFrameEncoding, ColorFrameResidency, CpuColorFrame,
     GpuColorFrameAllocationPlan, GpuColorFrameBindGroupCacheKeyAllocationError,
@@ -1040,6 +1045,9 @@ pub struct GpuCompositingDiagnostics {
     pub gpu_composited_pixels: u64,
     /// Total pixels processed through CPU compositing.
     pub cpu_composited_pixels: u64,
+    /// Exact spatial execution evidence for GPU layer passes.
+    #[serde(default)]
+    pub execution: GpuCompositeExecutionDiagnostics,
     /// First blocker reason observed (for health reports).
     pub first_blocker: Option<GpuCompositingBlockerReason>,
 }
@@ -1063,6 +1071,7 @@ impl GpuCompositingDiagnostics {
             self.gpu_composited_pixels.saturating_add(other.gpu_composited_pixels);
         self.cpu_composited_pixels =
             self.cpu_composited_pixels.saturating_add(other.cpu_composited_pixels);
+        self.execution.accumulate(other.execution);
         if self.first_blocker.is_none() {
             self.first_blocker = other.first_blocker;
         }
@@ -1204,6 +1213,9 @@ pub struct GpuCompositorTextureBindingDiagnostics {
 /// Errors returned by native GPU working-space compositing.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GpuCompositeError {
+    /// Spatial execution planning rejected an invalid request.
+    #[error(transparent)]
+    ExecutionPlan(#[from] GpuCompositeExecutionPlanError),
     /// A creative LUT could not be materialized under the device/cache contract.
     #[error(transparent)]
     CreativeLut(#[from] crate::GpuCreativeLutError),
@@ -1652,6 +1664,17 @@ impl GpuFrameCompositor {
         }
         let width = request.width;
         let height = request.height;
+        let footprints = request
+            .layers
+            .iter()
+            .map(|layer| composite_layer_footprint(width, height, layer))
+            .collect::<Vec<_>>();
+        let execution = GpuCompositeExecutionPlanner::plan(
+            width,
+            height,
+            &footprints,
+            GpuCompositeExecutionPolicy::default(),
+        )?;
         let output_descriptor = ColorFrameDescriptor {
             width,
             height,
@@ -1685,10 +1708,9 @@ impl GpuFrameCompositor {
         let mut uploaded_cpu_layers = false;
         let mut data_texture_uploads = 0_u64;
         let mut src_is_a = true;
-        for (index, layer) in request.layers.iter().enumerate() {
-            if layer_has_zero_contribution(layer) {
-                continue;
-            }
+        for layer_execution in &execution.layers {
+            let index = layer_execution.input_index;
+            let layer = &request.layers[index];
             let (accum, dst) = if src_is_a {
                 (&target_a, &target_b)
             } else {
@@ -1768,7 +1790,15 @@ impl GpuFrameCompositor {
             };
             let inv_transform = invert_affine(layer.transform)
                 .expect("validate_request rejects unsupported transforms");
-            self.record_layer_pass(
+            if !layer_execution.initializes_accumulator {
+                record_preserved_regions(
+                    encoder,
+                    &accum.resource().texture,
+                    &dst.resource().texture,
+                    &layer_execution.preserved_regions,
+                );
+            }
+            self.record_layer_pass_scheduled(
                 device,
                 queue,
                 encoder,
@@ -1797,6 +1827,7 @@ impl GpuFrameCompositor {
                     effects: [GpuEffectUniform::zeroed(); MAX_FUSED_GPU_EFFECT_OPS],
                 },
                 layer.effect_plan,
+                layer_execution,
             )?;
             src_is_a = !src_is_a;
         }
@@ -1811,6 +1842,7 @@ impl GpuFrameCompositor {
         table.insert(output_resource).map_err(GpuCompositeError::ResourceTable)?;
         let mut diagnostics = GpuCompositingDiagnostics {
             gpu_composited_pixels: u64::from(width).saturating_mul(u64::from(height)),
+            execution: execution.diagnostics,
             ..GpuCompositingDiagnostics::default()
         };
         if uploaded_cpu_layers {
@@ -2566,8 +2598,45 @@ impl GpuFrameCompositor {
         accum_binding: GpuCompositeTextureBinding<'_>,
         dst_view: &wgpu::TextureView,
         layer_binding: GpuCompositeTextureBinding<'_>,
+        uniforms: GpuCompositeUniforms,
+        effect_plan: Option<&CompiledEffectGpuPlan>,
+    ) -> Result<(), GpuCompositeError> {
+        let width = uniforms.geometry[0].max(0.0) as u32;
+        let height = uniforms.geometry[1].max(0.0) as u32;
+        let full_canvas = GpuCompositeRect { x: 0, y: 0, width, height };
+        let execution = GpuCompositeLayerExecution {
+            input_index: 0,
+            damage: full_canvas,
+            preserved_regions: Vec::new(),
+            tiles: vec![full_canvas],
+            initializes_accumulator: true,
+            fused_point_operations: effect_plan.map_or(0, |plan| plan.operations().len() as u32),
+        };
+        self.record_layer_pass_scheduled(
+            device,
+            queue,
+            encoder,
+            accum_binding,
+            dst_view,
+            layer_binding,
+            uniforms,
+            effect_plan,
+            &execution,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_layer_pass_scheduled(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        accum_binding: GpuCompositeTextureBinding<'_>,
+        dst_view: &wgpu::TextureView,
+        layer_binding: GpuCompositeTextureBinding<'_>,
         mut uniforms: GpuCompositeUniforms,
         effect_plan: Option<&CompiledEffectGpuPlan>,
+        execution: &GpuCompositeLayerExecution,
     ) -> Result<(), GpuCompositeError> {
         let creative_lut_binding = self.creative_luts.prepare_plan(device, queue, effect_plan)?;
         uniforms.effect_count = effect_plan.map_or(0, |plan| plan.operations().len() as u32);
@@ -2663,7 +2732,13 @@ impl GpuFrameCompositor {
                 view: dst_view,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: if execution.initializes_accumulator
+                        || execution.preserved_regions.is_empty()
+                    {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
                 depth_slice: None,
@@ -2678,7 +2753,10 @@ impl GpuFrameCompositor {
         pass.set_bind_group(1, &accum_bind_group, &[]);
         pass.set_bind_group(2, &uniform_bind_group, &[uniform_offset as u32]);
         pass.set_bind_group(3, creative_lut_binding.bind_group(), &[]);
-        pass.draw(0..4, 0..1);
+        for tile in &execution.tiles {
+            pass.set_scissor_rect(tile.x, tile.y, tile.width, tile.height);
+            pass.draw(0..4, 0..1);
+        }
         Ok(())
     }
 
@@ -3343,12 +3421,110 @@ fn layer_has_zero_contribution(layer: &GpuCompositeLayer<'_>) -> bool {
         return true;
     }
 
+    if matches!(layer.source, GpuCompositeLayerSource::SolidColor(color) if color.a.clamp(0.0, 1.0) == 0.0)
+    {
+        return true;
+    }
     match layer.source {
         GpuCompositeLayerSource::CpuFrame(_)
         | GpuCompositeLayerSource::CpuDataTexture(_)
         | GpuCompositeLayerSource::GpuFrame(_)
         | GpuCompositeLayerSource::SolidColor(_) => affine_has_zero_area(layer.transform),
         GpuCompositeLayerSource::Adjustment => false,
+    }
+}
+
+fn composite_layer_footprint(
+    output_width: u32,
+    output_height: u32,
+    layer: &GpuCompositeLayer<'_>,
+) -> GpuCompositeLayerFootprint {
+    if layer_has_zero_contribution(layer) {
+        return GpuCompositeLayerFootprint::NoContribution;
+    }
+    let fused_point_operations = layer.effect_plan.map_or(0, |plan| plan.operations().len() as u32);
+    match layer.source {
+        GpuCompositeLayerSource::Adjustment => {
+            GpuCompositeLayerFootprint::FullCanvas { fused_point_operations }
+        }
+        GpuCompositeLayerSource::SolidColor(_) => GpuCompositeLayerFootprint::TransformedSource {
+            source_width: output_width,
+            source_height: output_height,
+            transform: layer.transform,
+            crop: composite_source_crop(layer.effect_plan),
+            fused_point_operations,
+        },
+        GpuCompositeLayerSource::CpuFrame(frame)
+        | GpuCompositeLayerSource::CpuDataTexture(frame) => {
+            let descriptor = frame.descriptor();
+            GpuCompositeLayerFootprint::TransformedSource {
+                source_width: descriptor.width,
+                source_height: descriptor.height,
+                transform: layer.transform,
+                crop: composite_source_crop(layer.effect_plan),
+                fused_point_operations,
+            }
+        }
+        GpuCompositeLayerSource::GpuFrame(handle) => {
+            let descriptor = handle.descriptor();
+            GpuCompositeLayerFootprint::TransformedSource {
+                source_width: descriptor.width,
+                source_height: descriptor.height,
+                transform: layer.transform,
+                crop: composite_source_crop(layer.effect_plan),
+                fused_point_operations,
+            }
+        }
+    }
+}
+
+fn composite_source_crop(effect_plan: Option<&CompiledEffectGpuPlan>) -> GpuCompositeSourceCrop {
+    effect_plan.map_or_else(GpuCompositeSourceCrop::default, |plan| {
+        plan.operations()
+            .iter()
+            .fold(
+                GpuCompositeSourceCrop::default(),
+                |crop, operation| match operation {
+                    EffectGpuPointOp::Crop { left, top, right, bottom } => {
+                        crop.intersect(GpuCompositeSourceCrop {
+                            left: *left,
+                            top: *top,
+                            right: *right,
+                            bottom: *bottom,
+                        })
+                    }
+                    _ => crop,
+                },
+            )
+    })
+}
+
+fn record_preserved_regions(
+    encoder: &mut wgpu::CommandEncoder,
+    source: &wgpu::Texture,
+    destination: &wgpu::Texture,
+    regions: &[GpuCompositeRect],
+) {
+    for region in regions {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: source,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: region.x, y: region.y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: destination,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: region.x, y: region.y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: region.width,
+                height: region.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 }
 
@@ -3517,12 +3693,23 @@ mod tests {
             gpu_passthrough_frames: 2,
             gpu_native_composites: 3,
             gpu_composited_pixels: 1000,
+            execution: GpuCompositeExecutionDiagnostics {
+                render_passes: 3,
+                shaded_pixels: 1000,
+                ..GpuCompositeExecutionDiagnostics::default()
+            },
             ..GpuCompositingDiagnostics::default()
         };
         let b = GpuCompositingDiagnostics {
             gpu_passthrough_frames: 1,
             cpu_fallback_composites: 1,
             cpu_composited_pixels: 500,
+            execution: GpuCompositeExecutionDiagnostics {
+                render_passes: 1,
+                shaded_pixels: 250,
+                avoided_shader_pixels: 250,
+                ..GpuCompositeExecutionDiagnostics::default()
+            },
             first_blocker: Some(GpuCompositingBlockerReason::EffectRequiresCpu),
             ..GpuCompositingDiagnostics::default()
         };
@@ -3532,10 +3719,41 @@ mod tests {
         assert_eq!(a.cpu_fallback_composites, 1);
         assert_eq!(a.gpu_composited_pixels, 1000);
         assert_eq!(a.cpu_composited_pixels, 500);
+        assert_eq!(a.execution.render_passes, 4);
+        assert_eq!(a.execution.shaded_pixels, 1250);
+        assert_eq!(a.execution.avoided_shader_pixels, 250);
         assert_eq!(
             a.first_blocker,
             Some(GpuCompositingBlockerReason::EffectRequiresCpu)
         );
+    }
+
+    #[test]
+    fn composite_execution_eliminates_exact_no_op_layers() {
+        let layers = [GpuCompositeLayer {
+            source: GpuCompositeLayerSource::SolidColor(Color { r: 4.0, g: -2.0, b: 1.0, a: 0.0 }),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            effect_plan: None,
+            frame_seed: 0,
+        }];
+        let footprints = layers
+            .iter()
+            .map(|layer| composite_layer_footprint(1920, 1080, layer))
+            .collect::<Vec<_>>();
+        let plan = GpuCompositeExecutionPlanner::plan(
+            1920,
+            1080,
+            &footprints,
+            GpuCompositeExecutionPolicy::default(),
+        )
+        .expect("plan");
+
+        assert!(plan.layers.is_empty());
+        assert_eq!(plan.diagnostics.eliminated_layers, 1);
+        assert_eq!(plan.diagnostics.render_passes, 0);
+        assert_eq!(plan.diagnostics.shaded_pixels, 0);
     }
 
     #[test]
@@ -4044,7 +4262,18 @@ mod tests {
             effect_plan: Some(&plan),
             frame_seed: 23,
         };
-        let actual = readback_test_composite(&context, &[media_layer]);
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &[media_layer],
+            4,
+            4,
+            WorkingColorSpace::LinearRec709,
+        );
+        assert_eq!(diagnostics.execution.fused_layer_passes, 1);
+        assert_eq!(
+            diagnostics.execution.fused_point_operations,
+            plan.operations().len() as u64
+        );
         assert_test_pixels_accurate(&expected, &actual);
 
         let adjustment_opacity = 0.55;
@@ -4506,6 +4735,70 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_overlay_preserves_accumulator_and_reports_actual_gpu_work() {
+        let Ok(context) = crate::GpuContext::new().await else {
+            eprintln!("skipping bounded-overlay GPU test: no GPU adapter available");
+            return;
+        };
+        let base = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 4,
+            height: 4,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![[0.0, 0.0, 1.0, 1.0]; 16],
+        });
+        let overlay = CpuColorFrame::working(WorkingRgbaF32Frame {
+            width: 2,
+            height: 2,
+            color_space: WorkingColorSpace::LinearRec709,
+            data: vec![[1.0, 0.0, 0.0, 1.0]; 4],
+        });
+        let layers = [
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&base),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+            GpuCompositeLayer {
+                source: GpuCompositeLayerSource::CpuFrame(&overlay),
+                opacity: 1.0,
+                blend_mode: BlendMode::Normal,
+                transform: [1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+                effect_plan: None,
+                frame_seed: 0,
+            },
+        ];
+
+        let (actual, diagnostics) = readback_test_composite_with_diagnostics(
+            &context,
+            &layers,
+            4,
+            4,
+            WorkingColorSpace::LinearRec709,
+        );
+        for y in 0..4 {
+            for x in 0..4 {
+                let expected = if (1..3).contains(&x) && (1..3).contains(&y) {
+                    [1.0, 0.0, 0.0, 1.0]
+                } else {
+                    [0.0, 0.0, 1.0, 1.0]
+                };
+                assert_eq!(actual[y * 4 + x], expected, "pixel ({x}, {y})");
+            }
+        }
+        assert_eq!(diagnostics.execution.render_passes, 2);
+        assert_eq!(diagnostics.execution.tile_draws, 2);
+        assert_eq!(diagnostics.execution.logical_full_frame_shader_pixels, 32);
+        assert_eq!(diagnostics.execution.shaded_pixels, 20);
+        assert_eq!(diagnostics.execution.avoided_shader_pixels, 12);
+        assert_eq!(diagnostics.execution.preserved_copy_pixels, 12);
+        assert_eq!(diagnostics.execution.preserved_copy_regions, 4);
+        assert_eq!(diagnostics.gpu_composited_pixels, 16);
     }
 
     #[tokio::test]
@@ -5036,6 +5329,23 @@ mod tests {
         height: u32,
         working_color_space: WorkingColorSpace,
     ) -> Vec<[f32; 4]> {
+        readback_test_composite_with_diagnostics(
+            context,
+            layers,
+            width,
+            height,
+            working_color_space,
+        )
+        .0
+    }
+
+    fn readback_test_composite_with_diagnostics(
+        context: &crate::GpuContext,
+        layers: &[GpuCompositeLayer<'_>],
+        width: u32,
+        height: u32,
+        working_color_space: WorkingColorSpace,
+    ) -> (Vec<[f32; 4]>, GpuCompositingDiagnostics) {
         let compositor = GpuFrameCompositor::new(&context.device).expect("GPU compositor");
         let mut ids = GpuColorFrameIdAllocator::new(1).expect("frame id allocator");
         let mut table = GpuColorFrameResourceTable::new();
@@ -5053,6 +5363,7 @@ mod tests {
                 GpuCompositeRequest { width, height, working_color_space, layers },
             )
             .expect("record GPU effect composite");
+        let diagnostics = record.diagnostics;
         let readback = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mondrian-test-gpu-point-effect-readback"),
             size: 256 * u64::from(height),
@@ -5088,7 +5399,7 @@ mod tests {
             );
         }
         readback.unmap();
-        actual
+        (actual, diagnostics)
     }
 
     fn map_test_readback(device: &wgpu::Device, buffer: &wgpu::Buffer) -> Vec<u8> {

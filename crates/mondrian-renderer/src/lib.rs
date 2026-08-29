@@ -18,6 +18,7 @@ pub mod context;
 mod cpu_yuv;
 mod creative_lut_gpu;
 pub mod display_calibration;
+pub mod gpu_composite_execution;
 pub mod gpu_compositor;
 pub mod gpu_output_working_set;
 pub mod gpu_qualification;
@@ -157,6 +158,12 @@ pub use display_calibration::{
     GpuDisplayCalibrationPreparedPass, GpuDisplayCalibrationRecordError,
     GpuDisplayCalibrationRuntime, GpuDisplayCalibrationRuntimeDiagnostics,
     GpuDisplayCalibrationRuntimeError,
+};
+pub use gpu_composite_execution::{
+    GpuCompositeExecutionDiagnostics, GpuCompositeExecutionPlan, GpuCompositeExecutionPlanError,
+    GpuCompositeExecutionPlanner, GpuCompositeExecutionPolicy, GpuCompositeLayerExecution,
+    GpuCompositeLayerFootprint, GpuCompositeRect, GpuCompositeSourceCrop,
+    DEFAULT_GPU_COMPOSITE_TILE_DIMENSION, MAX_GPU_COMPOSITE_TILES,
 };
 pub use gpu_compositor::{
     evaluate_gpu_compositing_capability, GpuCompositeError, GpuCompositeLayer,

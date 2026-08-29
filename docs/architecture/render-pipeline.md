@@ -239,9 +239,10 @@ Structural corruption (missing node/output, wrong binding parent, multiple
 parents, cycle, unreachable node, or absent root output) fails before a parent
 Adapter can consume incomplete pixels. The iterative schedule also removes a
 consumer call stack proportional to nesting depth and creates the explicit
-execution Seam consumed by GPU-nested execution while leaving pass fusion,
-ROI/tile/damage scheduling, and tighter physical lifetime reuse to their own
-renderer policy.
+execution Seam consumed by GPU-nested execution while leaving tighter physical
+lifetime reuse to its own renderer policy. GPU pass-fusion evidence and
+ROI/tile/damage scheduling are now owned by the checked Composite Execution Plan
+described below; it is not reconstructed by either closure consumer.
 
 Before lowering each distinct Sequence, the closure resolves exactly one
 `PreparedVisualProgramBinding` from the consumer-owned cache or frozen Export
@@ -1360,6 +1361,45 @@ decoder import and applies non-singular media affine transforms plus supported
 fused point effects in one working-space render pass. These operations must not
 materialize a CPU frame or schedule GPU readback; readback is reserved for an
 explicit presentation, debug, or encoder boundary.
+
+`GpuCompositeExecutionPlanner` is the backend-object-free planning Module for
+one ordered GPU working composite. Its Interface consumes the output extent and
+one exact or conservative footprint per Layer. The Implementation projects the
+source pixel domain through the authored affine transform, intersects every
+fused Crop operation, clamps the result to the canvas, and emits one
+conservative Layer-damage rectangle. Adjustment Layers remain full-canvas.
+Non-finite or otherwise unprovable author values are never allowed to shrink
+work; request validation rejects them before this Seam.
+
+Each plan owns the complete preservation rule. The first contributing Layer
+starts from transparent. For a later bounded Layer, up to four non-overlapping
+rectangles copy the unchanged complement from the previous accumulator, then a
+single render pass loads that destination and shades only the damage rectangle.
+A full-canvas Layer retains the ordinary full pass. This keeps straight-alpha
+BlendMode algebra bit-for-bit on the same shader while avoiding fragment/effect
+execution outside the conservative contribution region; it does not reinterpret
+OCIO or Effect math. `damage` here means only pixels that this Layer may change
+relative to its current accumulator. It is not a claim of cross-frame temporal
+damage reuse, because neither Preview nor Export currently supplies an
+authoritative previous-output identity at this Seam.
+
+Damage larger than 4096 pixels on either axis is split into deterministic,
+non-overlapping scissor tiles. All tiles share bindings and execute inside the
+same render pass, so 4K remains one draw and 8K is bounded without multiplying
+passes. A 4,096-tile hard limit rejects adversarial extents before constructing
+an unbounded schedule or allocating GPU resources. Tile coordinates remain
+full-canvas coordinates; shaders never receive tile-local geometry.
+Empty/off-canvas/zero-crop Layers are removed by the plan before upload or
+recording.
+
+`GpuCompositeExecutionDiagnostics` is execution evidence rather than graph
+inference. It reports eliminated Layers, render passes, tile draws, point
+operations and Layer passes fused with transform/blend, logical full-frame
+shader pixels, actual shaded pixels, avoided shader pixels, and preserved-copy
+pixels/regions. The older `gpu_composited_pixels` counter retains its
+output-canvas-pixel meaning for report compatibility. Viewer Preview and the
+Export `GpuVisualFrameExecutor` both call the same `GpuFrameCompositor`, consume
+the same plan, and aggregate the same record into product/performance JSONL.
 The point-grade subset includes ColorAdjust, creative LUT, working-space
 Bradford White Balance, Primaries, ASC CDL, RGB/YRGB and secondary Color Curves,
 HDR Grading, Vignette, deterministic Grain, and Crop. Effects owns validation and mathematical compilation; Renderer owns the
