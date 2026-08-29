@@ -1594,6 +1594,10 @@ impl PreviewDecodeSession {
             && self.backend == request.backend
             && self.hardware_decode_request == request.hardware_decode_request
             && self.hardware_decode_device_selector == request.hardware_decode_device_selector
+            && self
+                .hardware_device_context
+                .as_ref()
+                .is_none_or(HwAccelDeviceContext::is_current_generation)
             && self.source_color == request.source_color
     }
 

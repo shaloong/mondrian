@@ -13,6 +13,11 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ffmpeg;
 pub use mondrian_core::DecodedVideoRange;
 
+#[cfg(target_os = "windows")]
+use windows::core::Interface;
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Direct3D12::ID3D12Device;
+
 /// GPU hardware acceleration backend family.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Default,
@@ -73,6 +78,130 @@ impl HwAccelDeviceSelector {
 type HwAccelDeviceProbeKey = (HwAccelBackend, Option<HwAccelDeviceSelector>);
 const HW_DEVICE_FAILURE_BACKOFF_BASE: Duration = Duration::from_millis(250);
 const HW_DEVICE_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Immutable renderer-qualified FFmpeg hardware-device root.
+///
+/// Platform Adapters construct this value from the exact native device owned
+/// by the active renderer. Decoder worker families install it into their
+/// existing device-context pool; codec Sessions receive ordinary FFmpeg
+/// `AVBufferRef` leases and never acquire a renderer or OS graphics handle.
+#[derive(Clone)]
+pub struct RendererHwAccelDeviceContext {
+    owner: Arc<SharedHwAccelDeviceContext>,
+}
+
+impl std::fmt::Debug for RendererHwAccelDeviceContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RendererHwAccelDeviceContext")
+            .field("backend", &self.owner.backend)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RendererHwAccelDeviceContext {
+    /// Hardware backend represented by this exact renderer device root.
+    pub fn backend(&self) -> HwAccelBackend {
+        self.owner.backend
+    }
+
+    /// Create an FFmpeg D3D12VA device root over the exact renderer device.
+    ///
+    /// FFmpeg takes ownership of one COM reference during initialization. The
+    /// returned value is therefore safe to move to decoder workers after the
+    /// temporary renderer HAL borrow has ended.
+    #[cfg(target_os = "windows")]
+    pub fn from_d3d12_device(
+        device: ID3D12Device,
+    ) -> Result<Self, RendererHwAccelDeviceContextCreateError> {
+        let _ = ffmpeg::init();
+        let device_context = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_alloc(
+                ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D12VA,
+            )
+        };
+        let Some(device_context) = NonNull::new(device_context) else {
+            return Err(RendererHwAccelDeviceContextCreateError::AllocationFailed);
+        };
+        let result = initialize_ffmpeg_d3d12_device_context(device_context, device);
+        if let Err(error) = result {
+            let mut raw = device_context.as_ptr();
+            unsafe { ffmpeg::ffi::av_buffer_unref(&mut raw) };
+            return Err(error);
+        }
+        Ok(Self {
+            owner: Arc::new(SharedHwAccelDeviceContext {
+                backend: HwAccelBackend::D3D12VA,
+                ptr: device_context,
+            }),
+        })
+    }
+}
+
+/// Failure to bind an FFmpeg hardware-device root to the renderer device.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RendererHwAccelDeviceContextCreateError {
+    /// FFmpeg could not allocate the requested device context.
+    #[error("FFmpeg could not allocate a renderer-qualified hardware device context")]
+    AllocationFailed,
+    /// FFmpeg returned an incomplete generic device-context allocation.
+    #[error("FFmpeg returned an incomplete D3D12VA device-context allocation")]
+    InvalidAllocation,
+    /// FFmpeg rejected the supplied renderer device.
+    #[error("FFmpeg could not initialize the renderer-owned D3D12VA device context: {reason}")]
+    InitializationFailed {
+        /// Stable FFmpeg error text.
+        reason: String,
+    },
+}
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct AvD3D12VaDeviceContext {
+    device: *mut std::ffi::c_void,
+    video_device: *mut std::ffi::c_void,
+    lock: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    unlock: Option<unsafe extern "C" fn(*mut std::ffi::c_void)>,
+    lock_context: *mut std::ffi::c_void,
+}
+
+#[cfg(target_os = "windows")]
+fn initialize_ffmpeg_d3d12_device_context(
+    device_context: NonNull<ffmpeg::ffi::AVBufferRef>,
+    device: ID3D12Device,
+) -> Result<(), RendererHwAccelDeviceContextCreateError> {
+    // SAFETY: av_hwdevice_ctx_alloc returned an owned AVBufferRef whose data
+    // points to a writable AVHWDeviceContext until av_hwdevice_ctx_init.
+    let generic = unsafe {
+        NonNull::new((*device_context.as_ptr()).data.cast::<ffmpeg::ffi::AVHWDeviceContext>())
+    }
+    .ok_or(RendererHwAccelDeviceContextCreateError::InvalidAllocation)?;
+    // SAFETY: FFmpeg allocated the D3D12VA-specific payload for this exact
+    // device type. The local layout mirrors libavutil/hwcontext_d3d12va.h.
+    let native =
+        unsafe { NonNull::new((*generic.as_ptr()).hwctx.cast::<AvD3D12VaDeviceContext>()) }
+            .ok_or(RendererHwAccelDeviceContextCreateError::InvalidAllocation)?;
+
+    // Transfer one owned COM reference into FFmpeg. The D3D12VA context
+    // releases it unconditionally when the final AVBufferRef is destroyed.
+    let raw_device = device.into_raw();
+    unsafe {
+        (*native.as_ptr()).device = raw_device;
+        (*native.as_ptr()).video_device = std::ptr::null_mut();
+        (*native.as_ptr()).lock = None;
+        (*native.as_ptr()).unlock = None;
+        (*native.as_ptr()).lock_context = std::ptr::null_mut();
+    }
+    let result = unsafe { ffmpeg::ffi::av_hwdevice_ctx_init(device_context.as_ptr()) };
+    if result < 0 {
+        return Err(
+            RendererHwAccelDeviceContextCreateError::InitializationFailed {
+                reason: ffmpeg::Error::from(result).to_string(),
+            },
+        );
+    }
+    Ok(())
+}
 
 /// Idle-residency policy for one explicit hardware-device context pool.
 ///
@@ -320,6 +449,75 @@ impl HwDeviceContextPool {
         self.lock_state().failures.clear();
     }
 
+    /// Install the exact renderer-qualified device root for future decoder Sessions.
+    ///
+    /// Replacing a generation never revokes active Sessions: their independent
+    /// `Arc` leases retain the previous FFmpeg root until the last Session and
+    /// native output release it. Installing the same root is idempotent.
+    pub fn install_renderer_device_context(
+        &self,
+        selector: HwAccelDeviceSelector,
+        context: RendererHwAccelDeviceContext,
+    ) -> Result<bool, RendererHwAccelDeviceContextInstallError> {
+        let backend = context.backend();
+        if !selector.selects_backend(backend) {
+            return Err(RendererHwAccelDeviceContextInstallError::SelectorMismatch {
+                selector,
+                backend,
+            });
+        }
+        let key = (backend, Some(selector));
+        let mut state = self.lock_state();
+        if state
+            .entries
+            .get(&key)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.owner, &context.owner))
+        {
+            state.failures.remove(&key);
+            return Ok(false);
+        }
+        let generation = state
+            .allocate_generation()
+            .ok_or(RendererHwAccelDeviceContextInstallError::GenerationExhausted)?;
+        let recency = state.next_recency();
+        if state
+            .entries
+            .insert(
+                key,
+                HwDeviceContextPoolEntry {
+                    generation,
+                    last_used: recency,
+                    owner: context.owner,
+                },
+            )
+            .is_some()
+        {
+            state.retirements = state.retirements.saturating_add(1);
+        }
+        state.failures.remove(&key);
+        state.misses = state.misses.saturating_add(1);
+        Ok(true)
+    }
+
+    /// Retire the renderer-qualified root currently offered for one selector.
+    ///
+    /// Active codec Sessions and native outputs retain independent `Arc`
+    /// leases; this removes only future acquisition authority.
+    pub fn retire_renderer_device_context(&self, selector: HwAccelDeviceSelector) -> bool {
+        let backend = match selector {
+            HwAccelDeviceSelector::D3D12VaAdapterIndex(_) => HwAccelBackend::D3D12VA,
+            HwAccelDeviceSelector::D3D11VaAdapterIndex(_) => HwAccelBackend::D3D11VA,
+        };
+        let key = (backend, Some(selector));
+        let mut state = self.lock_state();
+        state.failures.remove(&key);
+        if state.entries.remove(&key).is_none() {
+            return false;
+        }
+        state.retirements = state.retirements.saturating_add(1);
+        true
+    }
+
     /// Return current generation and residency evidence.
     pub fn diagnostics(&self) -> HwDeviceContextPoolDiagnostics {
         self.lock_state().diagnostics()
@@ -544,6 +742,22 @@ impl HwDeviceContextPool {
             newly_created: true,
         })
     }
+}
+
+/// Failure to install a renderer-qualified root into a decoder worker family.
+#[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
+pub enum RendererHwAccelDeviceContextInstallError {
+    /// The selector names a different hardware backend.
+    #[error("hardware selector {selector:?} does not select renderer device backend {backend:?}")]
+    SelectorMismatch {
+        /// Supplied decoder device selector.
+        selector: HwAccelDeviceSelector,
+        /// Backend owned by the renderer-qualified context.
+        backend: HwAccelBackend,
+    },
+    /// Pool generation identity cannot advance safely.
+    #[error("hardware device-context generation space is exhausted")]
+    GenerationExhausted,
 }
 
 impl Default for HwDeviceContextPool {
@@ -1001,6 +1215,13 @@ impl HwAccelDeviceContext {
     /// Whether this acquisition created the current pool generation.
     pub(crate) fn newly_created(&self) -> bool {
         self.newly_created
+    }
+
+    /// Whether this lease still names the pool generation offered to new Sessions.
+    pub(crate) fn is_current_generation(&self) -> bool {
+        self.pool.lock_state().entries.get(&self.key).is_some_and(|entry| {
+            entry.generation == self.generation && Arc::ptr_eq(&entry.owner, &self.owner)
+        })
     }
 
     /// Retire this exact generation from future pool acquisitions.

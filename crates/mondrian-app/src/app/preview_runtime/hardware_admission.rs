@@ -3,6 +3,61 @@
 use super::*;
 
 impl<O: Clone> PreviewProductionRuntime<O> {
+    /// Atomically install a renderer-qualified decoder root and publish its admission.
+    ///
+    /// Same-device D3D12VA support is unusable until the exact FFmpeg device
+    /// root is present in the worker-family pool. Installation therefore
+    /// precedes the immutable admission observation; a caller can never expose
+    /// `PreferGpuResident` while workers still create an unrelated device.
+    pub(crate) fn set_renderer_hardware_decode_admission(
+        &self,
+        admission: PlaybackHardwareDecodeAdmission,
+        decoder_device_root: Option<mondrian_media::RendererHwAccelDeviceContext>,
+    ) -> Result<(), RendererHardwareDecodeAdmissionError> {
+        let previous_selector = self
+            .hardware_decode_admission
+            .get()
+            .observation()
+            .and_then(|previous| previous.hardware_decode_device_selector);
+        let has_decoder_device_root = decoder_device_root.is_some();
+        let installed_new_device_generation = match (
+            admission.hardware_decode_device_selector,
+            decoder_device_root,
+        ) {
+            (Some(selector), Some(root)) => self
+                .decode_worker_resources
+                .hardware_device_context_pool()
+                .install_renderer_device_context(selector, root)
+                .map_err(RendererHardwareDecodeAdmissionError::Install)?,
+            (Some(mondrian_media::HwAccelDeviceSelector::D3D12VaAdapterIndex(_)), None)
+                if admission.native_import_admission_ready
+                    && admission.renderer_import_mode
+                        == Some(mondrian_renderer::GpuNativeDecodedFrameImportMode::ZeroCopy) =>
+            {
+                return Err(RendererHardwareDecodeAdmissionError::MissingDeviceRoot);
+            }
+            _ => false,
+        };
+        let retired_previous_device_generation = previous_selector
+            .filter(|previous| {
+                !has_decoder_device_root
+                    || Some(*previous) != admission.hardware_decode_device_selector
+            })
+            .is_some_and(|previous| {
+                self.decode_worker_resources
+                    .hardware_device_context_pool()
+                    .retire_renderer_device_context(previous)
+            });
+        if installed_new_device_generation || retired_previous_device_generation {
+            // A renderer device replacement is not a locality-preserving
+            // Preview generation change. Old native frames cannot enter the
+            // new device's Frame Store even as cache-only completions.
+            self.retire_decoder_device_generation();
+        }
+        self.set_playback_hardware_decode_admission(admission);
+        Ok(())
+    }
+
     /// Set playback hardware-decode admission selected by the app runtime.
     ///
     /// The default is `Auto` until renderer-device readiness is reported. The
@@ -94,4 +149,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ) -> Option<HwAccelDeviceSelector> {
         self.hardware_decode_admission.get().device_selector()
     }
+}
+
+/// Failure to publish a renderer-bound hardware-decode generation.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RendererHardwareDecodeAdmissionError {
+    /// The renderer advertised same-device D3D12VA without its FFmpeg root.
+    #[error("same-device D3D12VA admission is missing the renderer-qualified FFmpeg device root")]
+    MissingDeviceRoot,
+    /// The worker-family device pool rejected the generation.
+    #[error(transparent)]
+    Install(#[from] mondrian_media::RendererHwAccelDeviceContextInstallError),
 }

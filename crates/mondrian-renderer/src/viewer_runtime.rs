@@ -279,6 +279,13 @@ impl ViewerGpuExecutionRuntime {
         self.native_video_import.support()
     }
 
+    /// Renderer-qualified decoder device root paired with native import support.
+    pub fn native_decode_device_root(
+        &self,
+    ) -> Option<mondrian_media::RendererHwAccelDeviceContext> {
+        self.native_video_import.decoder_device_root()
+    }
+
     /// Install the payload-free wake edge emitted when a compact CPU YUV
     /// transfer buffer becomes ready for candidate recording.
     pub fn install_cpu_yuv_upload_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
@@ -354,17 +361,17 @@ impl ViewerGpuExecutionRuntime {
         self.native_video_import.gpu_timing_diagnostics()
     }
 
-    /// Current bounded native-import contract-pool and bridge-entry residency.
+    /// Current bounded native-import contract and compatibility bridge residency.
     pub fn native_import_pool_residency(&self) -> (usize, usize) {
         self.native_video_import.pool_residency()
     }
 
-    /// Native decoder surfaces retained only until bridge-copy completion.
+    /// Native decoder surfaces retained until the renderer proves its final read complete.
     pub fn native_import_retained_source_count(&self) -> usize {
         self.native_video_import.retained_source_count()
     }
 
-    /// Non-blockingly retire decoder sources whose native bridge copy completed.
+    /// Non-blockingly retire decoder sources whose renderer use completed.
     pub fn retire_completed_native_import_sources(
         &mut self,
     ) -> Result<usize, GpuNativeDecodedFrameImportError> {

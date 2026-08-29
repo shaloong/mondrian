@@ -2406,15 +2406,20 @@ Sources without a proven NV12/P010 native hint do not attempt GPU-resident
 admission under the current renderer contract.
 On multi-adapter Windows systems, a native-import admission attaches the typed
 `D3D12VaAdapterIndex` selector derived from the renderer's physical DXGI
-adapter. Media includes it in decoder-session identity and passes its decimal
-index only to FFmpeg's D3D12VA `av_hwdevice_ctx_create` call; backend-specific
-selectors cannot silently select a different hardware API. D3D11VA remains
-available when no renderer-native selector is installed, primarily as a safe
-hardware-decode CPU-transfer fallback. Worker-family device roots and retry
-state are keyed by backend plus selector; no process-global device probe
-authorizes execution. The renderer still validates every decoded D3D12 resource's LUID, so
-selection prevents accidental cross-adapter creation without weakening the
-native resource boundary.
+adapter. The active DX12 Renderer creates an FFmpeg D3D12VA device root over
+its exact `ID3D12Device`; App installs that immutable root into the Preview
+worker-family device pool before publishing `PreferGpuResident`. Codec Sessions
+receive ordinary FFmpeg `AVBufferRef` leases, never Renderer or OS handles.
+The selector remains part of Session identity and prevents a backend-family
+mismatch, while D3D11VA remains a safe hardware-decode CPU-transfer fallback
+when no renderer-qualified root is installed. Worker-family roots and retry
+state are keyed by backend plus selector; replacing a root advances the pool
+generation without revoking active leases. Existing Sessions refuse reuse once
+their generation is no longer current. App simultaneously cancels all old
+decode bindings and removes decoder-resource Frame Store/evaluation entries,
+so a late result cannot re-enter the new device generation as cache-only data.
+The Renderer finally requires exact D3D12 device identity and adapter LUID for
+every decoded resource.
 GPU-resident decoder setup reserves thirty-two FFmpeg `extra_hw_frames` before
 `avcodec_open2` because native frames remain leased after the receive call.
 This is requested decoder-pool headroom, not a portable guarantee of how many
@@ -2423,10 +2428,11 @@ not application cache capacity; CPU-transfer
 decode leaves the setting at zero because it exports no hardware surfaces. The
 external-lease proof is deliberately conservative and bounded: eight queued
 App completions plus at most two worker-held publishers, eight Preview Frame
-Store resource units, four renderer bridge entries, and two selector/transient
-owners. These are ceilings, not expected steady-state occupancy; changing any
-ceiling requires revalidating the thirty-two-frame decoder reserve instead of
-silently adding another native-frame holder.
+Store resource units, four renderer-completion leases, and two
+selector/transient owners. The direct-import Renderer owns zero duplicate YUV
+bridge textures. These are ceilings, not expected steady-state occupancy;
+changing any ceiling requires revalidating the thirty-two-frame decoder reserve
+instead of silently adding another native-frame holder.
 GPU-resident requests bypass the session-local RGBA playback ring. Native
 decoder surfaces are not inserted into any media-owned CPU cache. During
 reverse traversal only, up to four decoder references may be held by the
@@ -2455,13 +2461,18 @@ The app viewer preview path preserves `NativeGpuFrame` as a native source
 payload and passes the complete frame, including its opaque handle token and
 residency/sampling facts, into GPU preview admission. App adapters must not
 flatten that payload into diagnostics and discard the token. On Windows DX12,
-admitted D3D12VA NV12/P010 resources remain GPU-resident through the renderer's
-same-API shared-texture bridge and OCIO input stage. On macOS, the Metal Adapter
+admitted D3D12VA NV12/P010 resources are allocated by the exact Renderer device,
+adopted directly by wgpu, and sampled without a bridge texture or pixel copy.
+The Renderer queue waits on FFmpeg's decode fence, performs explicit
+`COMMON -> shader resource -> COMMON` transitions, and retains the Media frame
+lease plus command allocators until its completion fence proves the final read.
+On macOS, the Metal Adapter
 validates the CVPixelBuffer FourCC/plane extent and retains each
-`CVMetalTexture` through the corresponding wgpu texture lifetime. On Linux, the
+`CVMetalTexture` and Media frame lease through GPU submission completion. On Linux, the
 Vulkan Adapter accepts only a typed one-layer NV12/P010 DRM PRIME descriptor
 with exactly two bounds-checked planes, duplicates each selected object FD for
-Vulkan ownership, and preserves offset/pitch/modifier; other DRM layouts fail
+Vulkan ownership, preserves offset/pitch/modifier, and retains the Media frame
+lease through GPU submission completion; other DRM layouts fail
 closed to the declared fallback instead of being reinterpreted. All three enter
 the same renderer-owned YUV sampling and source-to-working OCIO execution
 Module. Other native handle families remain renderer-readiness blockers; they
@@ -3047,8 +3058,11 @@ working frame. This is the bridge for guarded rollout of GPU input transforms.
 The app viewer uses it for supported media preview layers before GPU
 working-space compositing, falling back per-layer to CPU working-frame upload
 only when the GPU input stage cannot be recorded. CPU outcomes still require
-one host-to-device upload; native decoder surfaces use the separate low-copy
-import contract and never masquerade as one of these CPU source types.
+one host-to-device upload; native decoder surfaces use the separate zero-copy
+import contract and never masquerade as one of these CPU source types. Here
+zero-copy means no CPU transfer and no decoder-surface pixel copy before YUV
+sampling; YUV-to-RGB and OCIO still deliberately allocate Renderer-owned
+encoded and working textures.
 
 An exact probed `Yuv422p10le` source may instead resolve to the explicit
 `CompactCpuYuv` Preview representation when the downstream Viewer accepts GPU

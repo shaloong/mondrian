@@ -71,7 +71,12 @@ impl GoldenHeadlessPreview {
         gpu.install_completion_waker(runtime.work_watch().completion_waker());
         let hardware_admission =
             resolve_playback_hardware_decode_admission(&gpu.native_import_support());
-        runtime.set_playback_hardware_decode_admission(hardware_admission);
+        runtime
+            .set_renderer_hardware_decode_admission(
+                hardware_admission,
+                gpu.native_decode_device_root(),
+            )
+            .context("install Golden renderer-qualified decoder device")?;
         Ok(Self {
             runtime,
             gpu,

@@ -141,6 +141,28 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     fn retire_obsolete_transport_work(&self) {
+        let (pending_requests, queued_jobs) = self.retire_all_preview_work();
+        bump(&self.metrics.interactive_cancel_requests);
+        add_cell(
+            &self.metrics.interactive_cancel_scheduler_requests,
+            pending_requests,
+        );
+        add_cell(&self.metrics.interactive_cancel_queued_jobs, queued_jobs);
+        add_cell(&self.metrics.queue_canceled_jobs, queued_jobs);
+    }
+
+    /// Retire every decode/output binding owned by a superseded renderer
+    /// device root while preserving device-independent CPU frame residency.
+    pub(super) fn retire_decoder_device_generation(&self) {
+        self.future_media_window.borrow_mut().clear();
+        let _ = self.retire_all_preview_work();
+        self.clear_decoder_resource_preview_residency();
+        // Wake idle workers and force active workers through their Broker
+        // cancellation checkpoint before another Session can be reused.
+        self.jobs.interrupt_workers_for_lifecycle();
+    }
+
+    fn retire_all_preview_work(&self) -> (u64, u64) {
         self.decode_residency_waiting.set(None);
         self.media_aggregate_capacity_waiting.set(false);
         self.media_existing_work_waiters.borrow_mut().clear();
@@ -156,14 +178,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         self.cpu_fallback_in_flight.borrow_mut().take();
         self.cpu_fallback_failure.borrow_mut().take();
         let queued_jobs = queued_jobs as u64;
-        bump(&self.metrics.interactive_cancel_requests);
-        add_cell(
-            &self.metrics.interactive_cancel_scheduler_requests,
-            pending_requests,
-        );
-        add_cell(&self.metrics.interactive_cancel_queued_jobs, queued_jobs);
-        add_cell(&self.metrics.queue_canceled_jobs, queued_jobs);
         self.execution.borrow_mut().invalidate(|| generation);
+        (pending_requests, queued_jobs)
     }
 
     /// Shut down preview workers for application exit.

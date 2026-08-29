@@ -18,8 +18,6 @@ use mondrian_media::{
 use crate::execute_native_decoded_frame_import;
 #[cfg(target_os = "windows")]
 use crate::D3D12NativeVideoImportBackend;
-#[cfg(target_os = "windows")]
-use crate::GpuNativeDecodedFrameImportBackend;
 #[cfg(target_os = "macos")]
 use crate::MetalNativeVideoImportBackend;
 #[cfg(target_os = "linux")]
@@ -331,6 +329,19 @@ impl ViewerNativeVideoImportRuntime {
         self.support.clone()
     }
 
+    /// Exact renderer-qualified decoder device root for this device generation.
+    ///
+    /// Only the Windows same-device D3D12VA Adapter requires explicit
+    /// installation into the Media worker family. Other platform Adapters
+    /// import external decoder storage without sharing their renderer device.
+    pub fn decoder_device_root(&self) -> Option<mondrian_media::RendererHwAccelDeviceContext> {
+        #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return Some(backend.decoder_device_root());
+        }
+        None
+    }
+
     /// Begin one explicit Viewer-candidate attribution scope.
     pub fn begin_viewer_candidate(&mut self) -> Option<NativeVideoImportCandidateToken> {
         #[cfg(target_os = "windows")]
@@ -413,7 +424,7 @@ impl ViewerNativeVideoImportRuntime {
         )
     }
 
-    /// Bounded native-import contract-pool and bridge-entry residency.
+    /// Bounded native-import contract and compatibility bridge residency.
     pub fn pool_residency(&self) -> (usize, usize) {
         #[cfg(target_os = "windows")]
         if let Some(backend) = self.backend.as_ref() {
@@ -422,16 +433,24 @@ impl ViewerNativeVideoImportRuntime {
         (0, 0)
     }
 
-    /// Decoder surfaces still retained only for an outstanding native bridge copy.
+    /// Decoder surfaces retained until their final renderer read completes.
     pub fn retained_source_count(&self) -> usize {
         #[cfg(target_os = "windows")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.retained_source_count();
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(backend) = self.backend.as_ref() {
+            return backend.retained_source_count();
+        }
+        #[cfg(target_os = "linux")]
         if let Some(backend) = self.backend.as_ref() {
             return backend.retained_source_count();
         }
         0
     }
 
-    /// Non-blockingly retire native decoder sources after their bridge copy completes.
+    /// Non-blockingly retire native decoder sources after renderer completion.
     pub fn retire_completed_source_residency(
         &mut self,
     ) -> Result<usize, GpuNativeDecodedFrameImportError> {
@@ -638,13 +657,12 @@ fn unavailable_native_import_support(
             "wgpu Dx12 native video backend was not constructed on this platform".to_owned()
         }
         wgpu::Backend::Vulkan => {
-            "wgpu Vulkan renderer has no external-memory native video import bridge".to_owned()
+            "wgpu Vulkan renderer has no external-memory native video import path".to_owned()
         }
         wgpu::Backend::Metal => {
-            "wgpu Metal renderer has no CVPixelBuffer/IOSurface native video import bridge"
-                .to_owned()
+            "wgpu Metal renderer has no CVPixelBuffer/IOSurface native video import path".to_owned()
         }
-        wgpu::Backend::Gl => "wgpu GL renderer has no native video import bridge".to_owned(),
+        wgpu::Backend::Gl => "wgpu GL renderer has no native video import path".to_owned(),
         wgpu::Backend::BrowserWebGpu => {
             "browser WebGPU cannot import desktop native decoder surfaces".to_owned()
         }

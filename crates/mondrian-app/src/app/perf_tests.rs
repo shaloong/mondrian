@@ -7457,7 +7457,11 @@ fn configure_headless_gpu_decode_admission(
     gpu_adapter.install_completion_waker(preview_service.work_watch().completion_waker());
     let admission =
         resolve_playback_hardware_decode_admission(&gpu_adapter.native_import_support());
-    preview_service.set_playback_hardware_decode_admission(admission);
+    if let Err(error) = preview_service
+        .set_renderer_hardware_decode_admission(admission, gpu_adapter.native_decode_device_root())
+    {
+        panic!("headless renderer-qualified decoder device rejected: {error}");
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -102,6 +102,11 @@ impl VulkanNativeVideoImportBackend {
     pub fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
         self.inner.frame_cpu_timings()
     }
+
+    /// Decoder surfaces retained until the import submission completes.
+    pub fn retained_source_count(&self) -> usize {
+        self.inner.retained_source_count()
+    }
 }
 
 impl GpuNativeDecodedFrameImportBackend for VulkanNativeVideoImportBackend {

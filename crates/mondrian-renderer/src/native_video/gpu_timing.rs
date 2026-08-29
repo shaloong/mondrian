@@ -182,7 +182,7 @@ pub struct NativeVideoImportGpuTimingDiagnostics {
     pub inactive_reason: Option<String>,
     /// Native imports that returned a valid working-frame output.
     ///
-    /// A bridge failure after ambiguous GPU queue acceptance is intentionally
+    /// A native-import failure after ambiguous GPU queue acceptance is intentionally
     /// excluded because it formed no usable Viewer native-import output. This
     /// is output coverage, not an inventory of every possibly accepted GPU
     /// command buffer.
@@ -469,7 +469,7 @@ impl NativeVideoImportGpuTimingRuntime {
             &probe.disposition,
             NativeVideoImportGpuTimingProbeDisposition::Recording(_)
         ) {
-            // The bridge can report a raw release failure after the wgpu
+            // Native import can report a raw release failure after the wgpu
             // command buffer was accepted. Never recycle its query resources
             // when submission is ambiguous. It is not added to
             // `submitted_imports`: no usable native working-frame output was

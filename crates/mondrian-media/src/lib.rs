@@ -55,6 +55,8 @@ pub use decoder::{
     DecodedVideoSampling, DecodedVideoSurfaceFormat, HwAccelBackend, HwAccelCodecConfigMethods,
     HwAccelCodecConfigProbe, HwAccelDeviceContextProbe, HwAccelDeviceSelector, HwAccelPixelFormat,
     HwAccelProbe, HwDeviceContextPool, HwDeviceContextPoolDiagnostics, HwDeviceContextPoolPolicy,
+    RendererHwAccelDeviceContext, RendererHwAccelDeviceContextCreateError,
+    RendererHwAccelDeviceContextInstallError,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command};

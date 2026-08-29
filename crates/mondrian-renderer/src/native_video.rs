@@ -13,13 +13,14 @@ pub use gpu_timing::{
 
 /// CPU command-preparation attribution for native decoded-frame import.
 ///
-/// These measurements cover host-side validation, bridge coordination, and
-/// command recording. They are not GPU execution timings.
+/// These measurements cover host-side validation, native synchronization,
+/// adoption, and command recording. They are not GPU execution timings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct NativeVideoImportCpuTimings {
     /// Native payload validation and immutable contract construction.
     pub source_validation_us: u64,
-    /// Bridge-slot acquisition, decoder-surface copy publication, and GPU-side acquire setup.
+    /// Native-surface synchronization/adoption, including a bridge copy only
+    /// when the reported import mode explicitly requires one.
     pub bridge_acquire_us: u64,
     /// Cached YUV pass preparation, intermediate acquisition, and encoder creation.
     pub pipeline_prepare_us: u64,
@@ -29,16 +30,15 @@ pub struct NativeVideoImportCpuTimings {
     pub color_stage_us: u64,
     /// Typed resource-table extraction after command recording.
     pub resource_extract_us: u64,
-    /// Internal bridge command submission and native-resource release publication.
+    /// Native command submission and source-release publication.
     pub submit_us: u64,
     /// Entire successful import call.
     pub total_us: u64,
 }
 
 impl NativeVideoImportCpuTimings {
-    /// Accumulate per-stage attribution across the bridge sub-executions of
-    /// one import. Currently only the D3D12 backend splits an import into
-    /// separately measured bridge stages.
+    /// Accumulate per-stage attribution across native imports performed by
+    /// one Viewer candidate.
     #[cfg(target_os = "windows")]
     pub(crate) fn accumulate(&mut self, other: Self) {
         self.source_validation_us =
@@ -81,14 +81,11 @@ mod timing_tests {
 
 mod yuv_decode;
 
-/// Maximum codec-padding inflation admitted by the native-import bridge.
+/// Maximum codec-padding inflation admitted by native D3D12 import.
 ///
-/// The Viewer active-texture estimator reserves this multiple of the visible
-/// NV12/P010 surface bytes for one renderer-owned bridge texture. Native
-/// backend validation rejects a decoder allocation outside the same envelope
-/// before creating or growing a bridge entry, so the request-only estimate
-/// remains a hard upper bound without platform inspection in the pure
-/// estimator.
+/// Backend validation rejects a decoder allocation outside this visible-pixel
+/// envelope. The surface remains Media-owned and is not charged again as a
+/// renderer texture.
 pub const GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO: u64 = 2;
 
 pub use yuv_decode::{
@@ -97,9 +94,6 @@ pub use yuv_decode::{
     GpuNativeYuvPreparedPass, GpuYuvChromaPlaneLayout, GpuYuvChromaSubsampling,
     GpuYuvCodeAlignment,
 };
-
-#[cfg(target_os = "windows")]
-mod sync_timeline;
 
 #[cfg(target_os = "macos")]
 mod metal_backend;
@@ -110,9 +104,9 @@ mod windows_adapter;
 #[cfg(target_os = "windows")]
 mod windows_d3d12;
 #[cfg(target_os = "windows")]
-mod windows_d3d12_backend;
+mod windows_d3d12_texture;
 #[cfg(target_os = "windows")]
-mod windows_d3d12_bridge;
+mod windows_d3d12_zero_copy_backend;
 
 #[cfg(target_os = "macos")]
 pub use metal_backend::{MetalNativeVideoImportBackend, MetalNativeVideoImportBackendCreateError};
@@ -128,7 +122,7 @@ pub use windows_d3d12::{
     D3D12NativeDecodedFrameInspectionError,
 };
 #[cfg(target_os = "windows")]
-pub use windows_d3d12_backend::{
+pub use windows_d3d12_zero_copy_backend::{
     D3D12NativeVideoImportBackend, D3D12NativeVideoImportBackendCreateError,
     D3D12NativeVideoImportBackendOptions,
 };

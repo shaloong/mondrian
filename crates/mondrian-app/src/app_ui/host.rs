@@ -471,10 +471,29 @@ impl AppUiHost {
     /// Synchronize renderer native video import readiness into preview decode admission.
     pub(crate) fn set_native_decoded_frame_import_support(
         &self,
-        support: GpuNativeDecodedFrameImportSupport,
+        mut support: GpuNativeDecodedFrameImportSupport,
+        decoder_device_root: Option<mondrian_media::RendererHwAccelDeviceContext>,
     ) {
         let admission = resolve_playback_hardware_decode_admission(&support);
-        self.preview_service.set_playback_hardware_decode_admission(admission);
+        if let Err(error) = self
+            .preview_service
+            .set_renderer_hardware_decode_admission(admission, decoder_device_root)
+        {
+            tracing::error!(%error, "renderer hardware-decode generation was rejected");
+            support = GpuNativeDecodedFrameImportSupport::unavailable_with_reason(
+                support
+                    .renderer_backend_label
+                    .clone()
+                    .unwrap_or_else(|| "renderer native import".to_owned()),
+                error.to_string(),
+            );
+            let fallback = resolve_playback_hardware_decode_admission(&support);
+            if let Err(fallback_error) =
+                self.preview_service.set_renderer_hardware_decode_admission(fallback, None)
+            {
+                tracing::error!(%fallback_error, "fallback hardware-decode generation was rejected");
+            }
+        }
     }
 
     /// Request the UI-independent bounded CPU Viewer execution path after a
@@ -2470,6 +2489,7 @@ mod tests {
 
         host.set_native_decoded_frame_import_support(
             GpuNativeDecodedFrameImportSupport::unavailable(),
+            None,
         );
         assert_eq!(
             host.preview_service.playback_hardware_decode_request_for_test(),

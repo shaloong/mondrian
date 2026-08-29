@@ -12835,6 +12835,98 @@ fn preview_service_idle_release_preserves_failure_memory() {
 }
 
 #[test]
+fn decoder_device_generation_replacement_obsoletes_work_but_preserves_cpu_residency() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let key = test_media_key(1);
+    let generation = service.scheduler.begin_generation();
+    assert_eq!(
+        service.scheduler.request(
+            key.clone(),
+            generation,
+            MediaPreviewRequestPriority::Current,
+            PreviewDecodeAccessMode::ScrubCursor,
+        ),
+        MediaPreviewRequestStatus::Scheduled { evicted_prefetch: None, evicted_still: None }
+    );
+    assert_eq!(
+        service.jobs.enqueue(MediaPreviewJob {
+            key: key.clone(),
+            generation,
+            priority: MediaPreviewRequestPriority::Current,
+            access_mode: PreviewDecodeAccessMode::ScrubCursor,
+            adaptive_hints: PreviewDecodeAdaptiveHints::default(),
+            hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
+            hardware_decode_device_selector: None,
+            enqueued_at: Instant::now(),
+            deadline_at: None,
+            demand_identity: None,
+            execution_id: None,
+            residency_work: None,
+        }),
+        MediaPreviewJobEnqueueStatus::Enqueued { evicted_prefetch: None, evicted_still: None }
+    );
+    assert!(admit_test_media_frame(
+        &mut service.frame_store.borrow_mut(),
+        key.clone(),
+        test_media_frame(1),
+        MediaPreviewRequestPriority::Prefetch,
+    ));
+
+    service.retire_decoder_device_generation();
+
+    assert_eq!(service.scheduler.pending_len(), 0);
+    assert!(!service.scheduler.is_decode_current(
+        &key,
+        generation,
+        PreviewDecodeAccessMode::ScrubCursor
+    ));
+    let diagnostics = service.diagnostics();
+    assert_eq!(diagnostics.interactive_cancel_requests, 0);
+    assert_eq!(diagnostics.interactive_cancel_scheduler_requests, 0);
+    assert_eq!(diagnostics.interactive_cancel_queued_jobs, 0);
+    let frame_store = service.frame_store.borrow().diagnostics();
+    assert_eq!(frame_store.media_entries, 1);
+    assert!(frame_store.media_reserved_bytes > 0);
+    service.shutdown();
+}
+
+#[test]
+fn zero_copy_admission_is_not_published_without_renderer_device_root() {
+    let service = WindowPreviewAdapter::new_without_workers_for_test();
+    let error = service
+        .set_renderer_hardware_decode_admission(
+            PlaybackHardwareDecodeAdmission {
+                request: PreviewHardwareDecodeRequest::PreferGpuResident,
+                hardware_decode_device_selector: Some(
+                    mondrian_media::HwAccelDeviceSelector::D3D12VaAdapterIndex(0),
+                ),
+                renderer_native_import_ready: true,
+                renderer_import_mode: Some(
+                    mondrian_renderer::GpuNativeDecodedFrameImportMode::ZeroCopy,
+                ),
+                native_import_admission_ready: true,
+                admission_blocker: None,
+                renderer_supported_handle_kinds: 1,
+                renderer_supported_source_texture_formats: 2,
+                renderer_supports_nv12: true,
+                renderer_supports_p010: true,
+            },
+            None,
+        )
+        .expect_err("same-device admission requires the exact renderer root");
+
+    assert!(matches!(
+        error,
+        super::hardware_admission::RendererHardwareDecodeAdmissionError::MissingDeviceRoot
+    ));
+    assert_eq!(
+        service.playback_hardware_decode_request_for_test(),
+        PreviewHardwareDecodeRequest::Auto
+    );
+    service.shutdown();
+}
+
+#[test]
 fn preview_service_idle_release_fails_closed_while_intent_is_pending() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let key = test_media_key(1);

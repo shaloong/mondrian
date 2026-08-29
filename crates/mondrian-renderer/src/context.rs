@@ -78,13 +78,13 @@ pub fn ocio_lut_filtering_device_features(adapter_features: wgpu::Features) -> w
 }
 
 /// Request an adapter while preserving native-video import on platforms where
-/// the renderer has a backend-specific bridge.
+/// the renderer has a backend-specific native import path.
 ///
 /// The [`wgpu::Instance`] already reflects any `WGPU_BACKEND` restriction, so
 /// an explicit environment override remains authoritative. On Windows, when
 /// more than one backend represents the same physical GPU, a DX12 adapter with
 /// native NV12/P010 support is preferred over a Vulkan representation that
-/// cannot participate in the D3D11/DX12 shared-texture bridge. If enumeration
+/// cannot participate in the D3D12VA same-device path. If enumeration
 /// produces no admissible adapter, wgpu's normal request path remains the
 /// fallback.
 pub async fn request_adapter_with_native_video_preference(

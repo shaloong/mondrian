@@ -5442,6 +5442,7 @@ fn refresh_display_output_contract(
         }
         host.set_native_decoded_frame_import_support(
             session.viewer_gpu_execution.native_import_support(),
+            session.viewer_gpu_execution.native_decode_device_root(),
         );
     }
 
@@ -5551,7 +5552,10 @@ impl AppUiWindowSession {
             None => ViewerGpuDeviceGenerationMember::empty(),
         };
         let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
-        host.set_native_decoded_frame_import_support(viewer_gpu_execution.native_import_support());
+        host.set_native_decoded_frame_import_support(
+            viewer_gpu_execution.native_import_support(),
+            viewer_gpu_execution.native_decode_device_root(),
+        );
         host.clear_viewer_cpu_fallback();
 
         Ok(Self {

@@ -10,7 +10,7 @@
 use crate::{
     ColorFrameEncoding, GpuColorFrameTextureFormat, HeterogeneousGpuRecordingRequirements,
     ViewerGpuExecutionLayer, ViewerGpuExecutionRequest, ViewerGpuSourceLayer,
-    ViewerGpuTransitionInput, ViewerSourceRect, GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO,
+    ViewerGpuTransitionInput, ViewerSourceRect,
 };
 use mondrian_effects::EffectColorDomain;
 use mondrian_media::DecodedVideoSurfaceFormat;
@@ -634,11 +634,14 @@ fn estimate_source(
             if let Some(source) = native_source {
                 let width = source.native_frame.width;
                 let height = source.native_frame.height;
-                let native_bytes = native_surface_texture_bytes(
-                    width,
-                    height,
+                if !matches!(
                     source.native_frame.surface_format,
-                )?;
+                    DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::P010
+                ) {
+                    return Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
+                        reason: "native source has an unsupported decoded surface format",
+                    });
+                }
                 let encoded_rgb_bytes = checked_texture_bytes(
                     width,
                     height,
@@ -651,19 +654,16 @@ fn estimate_source(
                     16,
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
-                // The media Frame Store separately governs the already-created
-                // decoder surface. Renderer native-import validation limits
-                // the bridge allocation to this same visible-byte envelope,
-                // followed by visible RGBA16F and RGBA32F outputs.
-                let bytes = native_bytes
-                    .checked_mul(GPU_NATIVE_IMPORT_MAX_STORAGE_PIXEL_RATIO)
-                    .and_then(|bytes| bytes.checked_add(encoded_rgb_bytes))
-                    .and_then(|bytes| bytes.checked_add(working_bytes))
-                    .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
+                // The media Frame Store governs the adopted decoder surface.
+                // Direct import allocates only the encoded-RGB and working
+                // outputs; it owns no duplicate YUV bridge texture.
+                let bytes = encoded_rgb_bytes.checked_add(working_bytes).ok_or(
+                    ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow {
                         stage: ViewerGpuActiveWorkingSetStage::SourcePreparation,
-                    })?;
+                    },
+                )?;
                 estimate.source_preparation.checked_add(
-                    ViewerGpuActiveTextureDemand { textures: 3, bytes },
+                    ViewerGpuActiveTextureDemand { textures: 2, bytes },
                     ViewerGpuActiveWorkingSetStage::SourcePreparation,
                 )?;
                 observe_effect_extent(&mut effect_extent, width, height)?;
@@ -1042,41 +1042,6 @@ fn checked_texture_bytes(
         .checked_mul(u64::from(height))
         .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
         .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage })
-}
-
-fn native_surface_texture_bytes(
-    width: u32,
-    height: u32,
-    format: DecodedVideoSurfaceFormat,
-) -> Result<u64, ViewerGpuActiveWorkingSetEstimateError> {
-    let stage = ViewerGpuActiveWorkingSetStage::SourcePreparation;
-    let pixels = u64::from(width)
-        .checked_mul(u64::from(height))
-        .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage })?;
-    match format {
-        DecodedVideoSurfaceFormat::Nv12 | DecodedVideoSurfaceFormat::Yuv420p => pixels
-            .checked_mul(3)
-            .and_then(|bytes| bytes.checked_add(1))
-            .map(|bytes| bytes / 2)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::P010 | DecodedVideoSurfaceFormat::Yuv420p10le => pixels
-            .checked_mul(3)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Yuv422p => pixels
-            .checked_mul(2)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Yuv422p10le => pixels
-            .checked_mul(4)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Rgba8 | DecodedVideoSurfaceFormat::Bgra8 => pixels
-            .checked_mul(4)
-            .ok_or(ViewerGpuActiveWorkingSetEstimateError::ArithmeticOverflow { stage }),
-        DecodedVideoSurfaceFormat::Unknown | DecodedVideoSurfaceFormat::Other => {
-            Err(ViewerGpuActiveWorkingSetEstimateError::InvalidRequest {
-                reason: "native source has an unsupported decoded surface format",
-            })
-        }
-    }
 }
 
 #[cfg(test)]

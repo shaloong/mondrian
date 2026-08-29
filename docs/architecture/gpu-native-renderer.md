@@ -56,8 +56,8 @@ an unbounded active frame. `ViewerGpuExecutionRuntime` separately holds a
 `ViewerGpuExecutionResourceGrant` with a pressure-sensitive idle pool and a
 pressure-stable active texture byte/count limit. Before recording,
 `estimate_viewer_gpu_active_working_set()` lowers the complete Viewer request
-into checked per-stage demand. It includes source upload; the renderer-owned
-native bridge, encoded-RGB, and working outputs; heterogeneous GPU plan peak
+into checked per-stage demand. It includes source upload; native-import
+encoded-RGB and working outputs; heterogeneous GPU plan peak
 residency; Effect-domain intermediates; Cross Dissolve branches;
 Adjustment/composite accumulators; the exact spatial pyramid; Program
 Output/scopes; monitor output; and display-calibration output plus its RGBA32F
@@ -126,13 +126,12 @@ concrete backend reports readiness and support for that handle/format, the plan
 allocates a renderer-owned linear `Working` frame handle; the imported decoder
 surface remains a backend object consumed by the native sampling/input transform
 pass.
-The request-only native estimate reserves up to twice the visible NV12/P010
-texel bytes for codec-aligned bridge storage. D3D12 descriptor validation
-rejects a decoder storage extent above that same 2:1 pixel envelope before a
-bridge pool can grow. This paired estimate/validation rule makes padding
-bounded without teaching the pure Viewer estimator to inspect platform
-handles. The already-created decoder surface is governed by media residency,
-not counted again as a renderer-owned texture.
+The request-only native estimate charges only the renderer-owned encoded-RGB
+and working outputs. The already-created decoder surface is governed by Media
+Frame Store residency and is not counted again as a renderer texture; direct
+import owns no duplicate YUV bridge allocation. D3D12 descriptor validation
+still rejects codec-aligned storage above a 2:1 visible-pixel envelope so a
+malformed or unexpectedly padded surface cannot escape bounded admission.
 Native YCbCr conversion and OCIO input conversion remain two explicit renderer
 passes with one color contract. `GpuNativeYuvDecoder` samples the native luma
 and chroma plane views into a renderer-owned `Rgba16Float` source frame whose
@@ -218,10 +217,10 @@ one playback admission and one stable readiness report; Window and Headless
 Adapters only project the result into their telemetry. This avoids giving media
 a renderer dependency or making a Widget module the owner of execution
 admission. CPU-decoded frames remain `CpuDecodedMedia`. Every ready support
-contract declares `GpuNativeDecodedFrameImportMode`: Metal/Vulkan direct
-external-texture backends may report `ZeroCopy`, while the current D3D12VA
-shared-texture bridge reports `GpuBridgeCopy` and App readiness is
-`ReadyLowCopy`. A missing mode fails closed; backend construction or a native
+contract declares `GpuNativeDecodedFrameImportMode`: D3D12VA, Metal, and Vulkan
+direct-texture backends report `ZeroCopy`. A future Adapter that requires one
+GPU pixel copy must explicitly report `GpuBridgeCopy`/`ReadyLowCopy`; the
+production Windows path does not. A missing mode fails closed; backend construction or a native
 handle alone can never imply zero-copy. D3D11VA remains a media
 hardware-decode CPU-transfer
 fallback; the renderer does not advertise the rejected D3D11-to-D3D12
@@ -238,8 +237,9 @@ formats, but a candidate is not renderer readiness. Windows candidates must be
 ordered D3D12VA, D3D11VA, then legacy DXVA2; Linux candidates must be ordered
 VA-API, then legacy VDPAU. Runtime FFmpeg/codec/device failure may fall through
 to the next backend. Windows support becomes ready only after
-`D3D12NativeVideoImportBackend` binds the active adapter/device/queue;
-unimplemented platform backends remain unavailable.
+`D3D12NativeVideoImportBackend` binds the active adapter/device/queue and
+publishes its renderer-qualified FFmpeg device root; unimplemented platform
+backends remain unavailable.
 Renderer and product-window device creation request the adapter-supported subset
 of wgpu `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010` through the shared
 `native_video_texture_device_features` contract. P010 is admitted only when
@@ -248,11 +248,11 @@ chroma plane views are `R16Unorm` and `Rg16Unorm`. Enabling those features is
 only a texture-format prerequisite: it does not prove that a decoder resource can be
 shared, synchronized, adopted by the active wgpu device, sampled, or transformed.
 Readiness therefore remains fail-closed until backend construction validates
-the complete platform import bridge. Diagnostics distinguish missing device
+the complete platform import path. Diagnostics distinguish missing device
 format features, non-DX12 adapters, and backend construction failures.
 Adapter selection enumerates the backends enabled on the wgpu instance. On
 Windows it prefers a DX12 adapter exposing native NV12/P010 formats, so the
-D3D12VA bridge is not accidentally disabled by selecting a Vulkan
+D3D12VA direct path is not accidentally disabled by selecting a Vulkan
 representation of the same GPU. An explicit `WGPU_BACKEND` restriction remains
 authoritative because excluded backends are absent from instance enumeration;
 if enumeration yields no usable adapter, selection falls back to wgpu's normal
@@ -265,62 +265,51 @@ equality with the active wgpu DX12 adapter.
 Codec-aligned storage dimensions may exceed the visible frame; smaller storage
 is invalid. App, Core, and generic Platform code must not duplicate or weaken
 these Renderer resource invariants.
-Backend construction also resolves the active DX12 adapter LUID to the same
-DXGI enumeration index consumed by FFmpeg's D3D12VA device creator. The
-backend-specific `D3D12VaAdapterIndex` selector travels through renderer support, app playback
-admission, and media session creation. It keeps decode surfaces on the renderer's physical adapter
-on hybrid-GPU systems; the per-frame LUID check remains the final fail-closed
-guard against stale, ignored, or incorrectly enumerated device selection.
-Validated D3D12VA sources can enter a reusable same-API low-copy bridge entry.
-Each entry owns a renderer-created shareable NV12/P010 texture, a shared D3D12
-timeline fence, reusable direct command allocators/lists on both devices, and
-one wgpu multi-plane texture with explicit luma/chroma views. A decoder-device
-queue waits on FFmpeg's per-frame decode fence entirely on the GPU, transitions
-the source and shared destination, copies the resource, returns both to
-`COMMON`, and signals `copy_ready`. The renderer queue waits on `copy_ready`,
-transitions `COMMON -> RESOURCE`, and only then exposes the plane views. The
-renderer submit is followed by `RESOURCE -> COMMON` and `renderer_complete`.
-The decoder source keeps a distinct short residency lease until a non-blocking
-`copy_ready` fence query proves completion. If `GetCompletedValue` returns
-D3D's `u64::MAX` device-removed sentinel, that sentinel is a second explicit
-physical terminal: the bridge clears only the source guarded by that removed
-device and preserves typed
-`GpuNativeDecodedFrameImportError::NativeDeviceRemoved` evidence through the
-backend/runtime. It is not flattened to `BackendRejected`. No other query,
-string error, wgpu loss, timeout, or teardown request releases that source.
-Fence values are strictly
-monotonic, command allocators are reset only after completion, busy entries fail
-without a CPU wait, and any partially submitted failure permanently poisons the
-entry. The complete import backend pools entries by source device, storage,
-color, and sampling contract; it grows the pool for bounded in-flight work,
-returns busy at the configured limit, and never reuses poisoned entries.
-Pool exhaustion is exposed as typed `GpuNativeDecodedFrameImportError::Backpressure`,
-not flattened into a terminal backend rejection. The shared Viewer runtime
-propagates that retryable state as `ViewerGpuExecutionError::Backpressure` so
-presentation adapters can keep the last completed output visible and let the
-scheduler retry or discard the obsolete candidate. Capability mismatches,
-protocol violations, and device errors remain terminal structured failures;
-backpressure must never trigger a surprise CPU transfer or an unbounded pool.
-Retirement callers may accept only successful copy-fence progress or the typed
-native-device-removed terminal as source-release proof; ordinary backend errors
-remain fail-closed. This native proof is independent of the Viewer wgpu
-generation terminal and its work-done callback.
-Decoder device identities are also bounded: the backend retains at most eight
-source-contract pools and evicts the least-recently-used pool only after every
-bridge fence in it has completed. This prevents playback/interactive session
-churn from retaining one D3D12 decoder context, shared texture, and NT handle set per
-historical decoder. If every contract pool is still in flight, admission returns
-typed backpressure instead of waiting or allocating a ninth pool. Headless GPU
-evidence records peak contract-pool and bridge-entry residency so long-run gates
-can distinguish bounded reuse from handle accumulation.
-The bridge never relies on a CPU fence wait, `Flush`, implicit sRGB, or an
-undocumented resource-state assumption. Production-path real-media gates must
-prove decoded D3D12VA/P010 residency, native import execution, GPU timestamp
-coverage, absence of readback/fallback, and bounded pool reuse; one-off machine
-diagnostic tests are removed after that evidence is collected.
+Backend construction resolves the active DX12 adapter LUID to the DXGI index
+used as typed admission identity, then constructs an FFmpeg D3D12VA device root
+over the exact wgpu `ID3D12Device`. App installs that root into the worker-family
+pool before it publishes native-decode admission. The pool replacement is
+generation-safe: active FFmpeg `AVBufferRef` leases remain valid, but old
+Sessions fail current-generation compatibility and App cancels old Broker
+bindings plus decoder-resource cache residency. A late old-device result is
+therefore stale rather than cache-only.
+
+Every admitted D3D12 surface must report the same raw device pointer and adapter
+LUID as the Renderer. The single Renderer queue waits on FFmpeg's per-frame
+decode fence without a CPU wait, records `COMMON -> WGPU shader resource`,
+adopts the original multi-plane `ID3D12Resource` into wgpu, runs YUV sampling
+and OCIO, then records `WGPU shader resource -> COMMON`. It signals one strictly
+monotonic renderer-completion fence after the release transition. The Media
+frame lease and both transition command allocators/lists remain retained until
+a nonblocking fence query proves the final renderer read. There is no shared
+handle, renderer-created YUV texture, NT handle, decoder-device queue, or pixel
+copy in this path.
+
+At most four source leases may be in renderer flight. Exhaustion returns typed
+`GpuNativeDecodedFrameImportError::Backpressure`; presentation keeps the last
+completed output and may retry or discard the obsolete candidate without a
+surprise CPU transfer. If queue execution or completion signaling becomes
+ambiguous, the source and command objects are poisoned and retained for the
+backend lifetime rather than being released unsafely. A device-removed
+completion-fence sentinel remains a typed physical terminal. Compatibility
+diagnostics retain the old `(contract pools, bridge entries)` schema, but the
+Windows implementation reports `(1, 0)`; retained-source count is the actual
+in-flight lifetime evidence.
+
+Metal and Vulkan use the same shared direct-plane Module. Their platform
+Adapters wrap CVPixelBuffer/IOSurface or DMA-BUF planes, while the shared Module
+retains the complete Media frame handle through `on_submitted_work_done`; wgpu
+texture drop alone is not treated as proof of the final GPU read.
+
+Production-path real-media gates must prove native D3D12VA/P010 residency,
+zero bridge-copy/readback/upload counts, native import execution, GPU timestamp
+coverage, bounded retained-source reuse, and final zero retained sources. The
+device-root integration gate separately proves real DX12 runtime construction,
+FFmpeg adoption, idempotent install, replacement generation, `ZeroCopy`, and
+zero bridge residency; it does not substitute for the real-media cadence gate.
 
 Native-import GPU attribution is independent from the semantically fixed
-Viewer suffix timer because the bridge submits its YUV/input-color prefix
+Viewer suffix timer because native import submits its YUV/input-color prefix
 before the caller-owned Viewer command buffer. Timestamp capability and
 activation are separate: the default
 `NativeVideoImportGpuTimingPolicy::Disabled` allocates nothing even on a
@@ -338,8 +327,8 @@ process-global. The two reported deltas are
 `input_color_marker_bracket_us`; they must never be inferred from CPU recording
 time or the later Viewer suffix.
 Because the start counter is written in the wgpu import command buffer, these
-deltas intentionally exclude decoder execution, the decoder-device copy,
-queue-wait latency, and the raw acquire transition that orders that command
+deltas intentionally exclude decoder execution, decode-fence wait latency, and
+the raw acquire transition that orders that command
 buffer. Each bracket can still contain implicit barriers, scheduler gaps, and
 backend command placement/reordering within its marker boundaries; neither
 field claims pure shader time. The optional fence-ready fact helps classify
@@ -351,7 +340,7 @@ diagnostics separate `capability_supported`, `activated`, and
 `inactive_reason`, then report `samples`/`pending`/`missing`/`dropped`. Those
 accounting categories are disjoint and sum to valid-output imports.
 Here `submitted_imports` means imports that returned a valid renderer working
-frame. A bridge failure after ambiguous queue acceptance is excluded even
+frame. A native-import failure after ambiguous queue acceptance is excluded even
 though the GPU may have accepted its command buffer; timing diagnostics are
 usable-output coverage, not an inventory of all possible GPU work.
 Ring exhaustion drops only telemetry, and disabled policy, unsupported
@@ -423,7 +412,9 @@ swapchain UI renderer. On Windows it constructs the concrete renderer
 backend from the active adapter/device/queue and publishes that backend's support
 contract; construction failure remains unavailable with its exact reason. The
 runtime survives surface-format/UI-renderer rebuilds so display changes do not
-discard decoder bridge pools. It allocates native import frame ids from the same
+discard the device-bound import runtime. A Renderer device rebuild publishes a
+new decoder-device generation and retires old native decode/cache authority. It
+allocates native import frame ids from the same
 `RenderGpuOutputBoundaryRuntime` namespace that will receive the returned
 working resources, preventing resource-table id collisions.
 Renderer readiness must remain in

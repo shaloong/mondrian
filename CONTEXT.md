@@ -338,13 +338,17 @@ _Avoid_: Redraw-local output priority, Widget types in `app::preview_runtime`, U
 The device-scoped owner of native video import, working-linear compositing, spatial processing, display output, calibration, and current external-texture presentation resources for Viewer execution.
 _Avoid_: Window-owned GPU grab bag, separate headless rendering semantics
 
+**Renderer-Qualified Decoder Device Root**:
+The immutable FFmpeg hardware-device root constructed over the exact native device owned by one Renderer generation. App installs it into the Preview worker-family pool before publishing GPU-resident decode admission; codec Sessions receive only FFmpeg reference-counted leases. Replacement advances pool and Preview generations, rejects reuse of old Sessions, cancels old decode bindings, and removes old decoder-resource cache entries without revoking in-flight native leases.
+_Avoid_: Adapter index as exact device proof, separately-created decoder graphics device, Renderer handle in a decode request, old-device result admitted as cache-only, revoking a native lease before GPU completion
+
 **Viewer GPU Output Health**:
 The UI-independent policy that maps one typed presentation-attempt outcome plus renderer stage facts into the canonical Waiting, Blocked, Failed, Rejected, Degraded, or Ready status and cumulative counts. Window telemetry, Headless gates, performance smoke, and the budget CLI consume this single classifier and report schema.
 _Avoid_: Window-local Ready rules, duplicated health enums, treating texture registration without presentation/native-boundary proof as Ready
 
 **Viewer GPU Output Residency**:
-The UI-independent projection of declared Preview layers or completed renderer execution into typed decode, input-transform, working-residency, zero/low-copy, upload/readback, native bridge-copy count, and native-import evidence. Planned and executed residency are distinct; one immutable, device-scoped Renderer import-support snapshot—including an explicit `ZeroCopy` or `GpuBridgeCopy` transfer mode—is shared with hardware-decode admission for the lifetime of a Renderer/Window Session. Media proves the exact decoded surface family and sampling facts; only the Renderer instance that owns the active Adapter/Device may prove import support.
-_Avoid_: Planned zero-copy success, OS-name or device-less capability probes as execution evidence, independently probing a second graphics device, per-frame capability re-probe, mixing capability generations inside one frame record
+The UI-independent projection of declared Preview layers or completed renderer execution into typed decode, input-transform, working-residency, zero/low-copy, upload/readback, native bridge-copy count, and native-import evidence. Planned and executed residency are distinct; one immutable, device-scoped Renderer import-support snapshot—including an explicit `ZeroCopy` or `GpuBridgeCopy` transfer mode—is shared with hardware-decode admission for the lifetime of a Renderer/Window Session. Media proves the exact decoded surface family and sampling facts; only the Renderer instance that owns the active Adapter/Device may prove import support. Zero-copy proves no CPU transfer and no decoder-surface pixel copy; it does not erase the deliberate YUV-to-RGB or OCIO working-texture stages. Every direct Adapter retains the Media surface lease until a GPU completion terminal proves the final read.
+_Avoid_: Planned zero-copy success, OS-name or device-less capability probes as execution evidence, independently probing a second graphics device, per-frame capability re-probe, mixing capability generations inside one frame record, dropping the Media lease at queue submission
 
 **Audio Playback**:
 The realtime path that owns output-device lifecycle, PCM preroll and consumption, render generations, underrun recovery, and consumed-media-position evidence for a Playback Session.

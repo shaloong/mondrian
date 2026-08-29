@@ -5,6 +5,7 @@
 //! wrapping. This Module owns the single YUV-to-encoded-RGB and source-to-
 //! working color execution path, so Metal and Vulkan cannot fork color math.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -60,6 +61,7 @@ pub(crate) struct DirectNativeVideoImportBackend<A> {
     yuv_decoder: GpuNativeYuvDecoder,
     color_runtime: RenderGpuOutputBoundaryRuntime,
     frame_cpu_timings: NativeVideoImportCpuTimings,
+    retained_sources: Arc<AtomicUsize>,
 }
 
 impl<A> DirectNativeVideoImportBackend<A>
@@ -85,6 +87,7 @@ where
             yuv_decoder: GpuNativeYuvDecoder::new(device),
             color_runtime,
             frame_cpu_timings: NativeVideoImportCpuTimings::default(),
+            retained_sources: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -94,6 +97,10 @@ where
 
     pub(crate) fn frame_cpu_timings(&self) -> NativeVideoImportCpuTimings {
         self.frame_cpu_timings
+    }
+
+    pub(crate) fn retained_source_count(&self) -> usize {
+        self.retained_sources.load(Ordering::Acquire)
     }
 
     fn import_frame(
@@ -203,7 +210,21 @@ where
         let resource_extract_us = elapsed_us(resource_extract_started);
 
         let submit_started = Instant::now();
+        let retained_source = native_frame.handle.clone();
+        self.retained_sources
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .map_err(|_| {
+                backend_rejected("direct native-source residency counter exhausted".to_owned())
+            })?;
         self.queue.submit(std::iter::once(encoder.finish()));
+        let retained_sources = Arc::clone(&self.retained_sources);
+        self.queue.on_submitted_work_done(move || {
+            drop(retained_source);
+            let previous = retained_sources.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "direct native-source residency underflow");
+        });
         let submit_us = elapsed_us(submit_started);
         self.frame_cpu_timings = NativeVideoImportCpuTimings {
             source_validation_us,

@@ -784,6 +784,13 @@ impl HeadlessViewerGpuAdapter {
         self.runtime.native_import_support()
     }
 
+    /// Renderer-qualified decoder root paired with this device generation.
+    pub(crate) fn native_decode_device_root(
+        &self,
+    ) -> Option<mondrian_media::RendererHwAccelDeviceContext> {
+        self.runtime.native_decode_device_root()
+    }
+
     /// Apply the same immutable Preview grant used by the Window Viewer owner.
     pub(crate) fn apply_resource_decision(
         &mut self,

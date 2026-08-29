@@ -92,7 +92,7 @@ pub enum D3D12NativeDecodedFrameInspectionError {
         /// Allocated texture height.
         storage_height: u32,
     },
-    /// Codec padding exceeded the renderer-owned bridge allocation envelope.
+    /// Codec padding exceeded the bounded native-surface storage envelope.
     #[error(
         "D3D12 decoder texture {storage_width}x{storage_height} exceeds the native-import storage envelope for visible frame {visible_width}x{visible_height}"
     )]
@@ -191,7 +191,6 @@ pub(super) struct ValidatedD3D12NativeDecodedFrame {
     pub texture: ID3D12Resource,
     pub decode_fence: ID3D12Fence,
     pub device: ID3D12Device,
-    pub dxgi_format: DXGI_FORMAT,
 }
 
 /// Inspect and validate one FFmpeg D3D12VA decoded frame against the active renderer adapter.
@@ -261,7 +260,6 @@ pub(super) fn validated_d3d12_native_decoded_frame_for_luid(
         texture: texture.clone(),
         decode_fence: decode_fence.clone(),
         device: source_device,
-        dxgi_format: expected.raw,
     })
 }
 
@@ -502,7 +500,7 @@ mod tests {
                     .expect("NV12 must be supported"),
                 outside,
             )
-            .expect_err("storage outside the estimated bridge envelope must fail"),
+            .expect_err("storage outside the native-surface envelope must fail"),
             D3D12NativeDecodedFrameInspectionError::StorageExtentExceedsImportEnvelope {
                 visible_width: 640,
                 visible_height: 360,
