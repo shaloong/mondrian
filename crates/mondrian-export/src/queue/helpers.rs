@@ -397,23 +397,26 @@ pub(crate) fn validate_timeline_dynamic_hdr_delivery(
     timeline: &TimelineExportSnapshot,
     source_issues: VideoColorDiagnosticIssueAggregate,
 ) -> Result<(), String> {
-    let write_static_hdr = timeline
-        .sequence
-        .settings
-        .delivery
-        .static_hdr_metadata_policy
-        .writes_authored_metadata();
-    if write_static_hdr
-        && (source_issues.diagnostics_with_dynamic_hdr10_plus > 0
-            || source_issues.diagnostics_with_dolby_vision_config > 0)
-    {
-        return Err(format!(
-            "当前 HDR metadata 后端只写入项目级 ST 2086/MaxCLL/MaxFALL；引用素材包含 HDR10+ 动态 metadata（{} 个）或 Dolby Vision 配置（{} 个），渲染后不能安全透传，请使用经过验证的动态 HDR 重新制作流程",
-            source_issues.diagnostics_with_dynamic_hdr10_plus,
-            source_issues.diagnostics_with_dolby_vision_config
-        ));
+    match timeline.sequence.dynamic_hdr.delivery_intent() {
+        mondrian_timeline::DynamicHdrDeliveryIntent::Omit => Ok(()),
+        mondrian_timeline::DynamicHdrDeliveryIntent::PreserveSourceExact { family } => {
+            let present = match family {
+                mondrian_core::DynamicHdrMetadataFamily::St2094_40Application4 => {
+                    source_issues.diagnostics_with_dynamic_hdr10_plus > 0
+                }
+                mondrian_core::DynamicHdrMetadataFamily::DolbyVision => {
+                    source_issues.diagnostics_with_dolby_vision_config > 0
+                }
+            };
+            present.then_some(()).ok_or_else(|| {
+                format!(
+                    "Dynamic HDR exact preservation requested {}, but the frozen source diagnostics do not detect that metadata family",
+                    family.diagnostic_label()
+                )
+            })
+        }
+        mondrian_timeline::DynamicHdrDeliveryIntent::Remake { .. } => Ok(()),
     }
-    Ok(())
 }
 
 pub(crate) const fn prores_profile_variant(profile: crate::preset::ProResProfile) -> &'static str {

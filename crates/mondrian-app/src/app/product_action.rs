@@ -28,8 +28,8 @@ use mondrian_timeline::{
     clip::Clip,
     sequence::{Sequence, SequenceSettings},
     AudioAutomationEditRequest, AudioChannelStripEditRequest, AudioComponentEditRequest,
-    AudioProcessorRackEditRequest, AudioRoutingEditRequest, EffectRelativePlacement, GradeScope,
-    RangeEditKind, TrackRelativePlacement,
+    AudioProcessorRackEditRequest, AudioRoutingEditRequest, DynamicHdrAuthorEdit,
+    EffectRelativePlacement, GradeScope, RangeEditKind, TrackRelativePlacement,
 };
 use serde::{Deserialize, Serialize};
 
@@ -179,6 +179,11 @@ pub const GRADE_ACTIVATE_VERSION: &str = "activate_version";
 pub const GRADE_REPLACE_ACTIVE_GRAPH: &str = "replace_active_graph";
 pub const GRADE_ADD_EFFECT: &str = "add_effect";
 
+/// External custom-action namespace for Sequence Dynamic HDR authoring.
+pub const DYNAMIC_HDR_NAMESPACE: &str = "ui.dynamic_hdr";
+/// External action name for one atomic Dynamic HDR author edit.
+pub const DYNAMIC_HDR_APPLY_EDIT: &str = "apply_edit";
+
 /// External custom-action namespace for the Project color Gallery.
 pub const GALLERY_NAMESPACE: &str = "ui.gallery";
 pub const GALLERY_CAPTURE_STILL: &str = "capture_still";
@@ -265,6 +270,8 @@ pub enum ProductAction {
     VisualEffect(VisualEffectProductAction),
     /// An operation owned by Sequence grading hierarchy authoring.
     Grade(GradeProductAction),
+    /// An operation owned by the Sequence Dynamic HDR Program Interface.
+    DynamicHdr(DynamicHdrAuthorEdit),
     /// An operation owned by the Project Gallery and Viewer comparison session.
     Gallery(GalleryProductAction),
     /// An operation owned by Clip-local visual Mask authoring or selection.
@@ -546,6 +553,7 @@ fn product_dispatch_domain(namespace: &str) -> Option<&'static str> {
         EXPORT_NAMESPACE => Some("export_action"),
         VISUAL_EFFECT_NAMESPACE => Some("visual_effect_action"),
         GRADE_NAMESPACE => Some("grade_action"),
+        DYNAMIC_HDR_NAMESPACE => Some("dynamic_hdr_action"),
         GALLERY_NAMESPACE => Some("gallery_action"),
         VISUAL_MASK_NAMESPACE => Some("visual_mask_action"),
         _ => None,
@@ -894,6 +902,12 @@ impl ProductAction {
                 GRADE_ADD_EFFECT => Ok(Some(Self::Grade(GradeProductAction::AddEffect(
                     decode_payload(namespace, name, payload)?,
                 )))),
+                _ => Ok(None),
+            },
+            DYNAMIC_HDR_NAMESPACE => match name.as_str() {
+                DYNAMIC_HDR_APPLY_EDIT => Ok(Some(Self::DynamicHdr(decode_payload(
+                    namespace, name, payload,
+                )?))),
                 _ => Ok(None),
             },
             GALLERY_NAMESPACE => match name.as_str() {
@@ -1338,6 +1352,11 @@ impl ProductAction {
                 GRADE_NAMESPACE,
                 GRADE_ADD_EFFECT,
                 serde_json::json!(payload),
+            ),
+            Self::DynamicHdr(edit) => (
+                DYNAMIC_HDR_NAMESPACE,
+                DYNAMIC_HDR_APPLY_EDIT,
+                serde_json::json!(edit),
             ),
             Self::Gallery(GalleryProductAction::CaptureStill(payload)) => (
                 GALLERY_NAMESPACE,
@@ -2335,9 +2354,21 @@ impl<'a> ProductActionAvailability<'a> {
             ProductAction::Export(action) => self.allows_export(action),
             ProductAction::VisualEffect(action) => self.allows_visual_effect(action),
             ProductAction::Grade(action) => self.allows_grade(action),
+            ProductAction::DynamicHdr(edit) => self.allows_dynamic_hdr(edit),
             ProductAction::Gallery(action) => self.allows_gallery(action),
             ProductAction::VisualMask(action) => self.allows_visual_mask(action),
         }
+    }
+
+    fn allows_dynamic_hdr(&self, edit: &DynamicHdrAuthorEdit) -> bool {
+        let Some(sequence) = self.state.active_sequence() else {
+            return false;
+        };
+        let mut candidate = sequence.dynamic_hdr.clone();
+        matches!(
+            candidate.apply(edit.clone(), sequence.settings.frame_rate),
+            Ok(true)
+        )
     }
 
     fn allows_asset(&self, action: &AssetProductAction) -> bool {

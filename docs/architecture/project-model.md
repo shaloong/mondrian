@@ -633,7 +633,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v26 is the sole accepted Alpha author schema. It persists the
+Document schema v27 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
@@ -642,8 +642,13 @@ with stable shape-key identities and explicit interpolation, complete Basic
 Title properties, a Clip-local visual author origin, closed Sequence `color`
 and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
 variant persists exact origin, signed scale, and covering/strict-predecessor
-sampling boundary while deriving its terminal boundary from duration. Schema v26 also
-persists each media Clip's optional bounded editorial-source identity (reel,
+sampling boundary while deriving its terminal boundary from duration. Schema
+v27 additionally persists explicit Sequence-owned Dynamic HDR state (`Omit`
+plus an empty Program catalog by default), bounded format-specific analyzed
+Program/Shot payloads, immutable analysis provenance, and strong Remake
+references. The 26-to-27 migration inserts that explicit empty state;
+deserialization does not use a hidden serde default. Schema v27 also persists
+each media Clip's optional bounded editorial-source identity (reel,
 exact SMPTE source reference, and foreign item key) inside
 `MediaInterpretation`; it never promotes those interchange facts into Asset or
 placement identity. Unknown fields and older or future document versions fail

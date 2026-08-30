@@ -2012,3 +2012,14 @@ hang cannot masquerade as a successful shutdown. The watchdog is armed
 only after the guarded unsaved-work decision and immediately before bounded
 preview/project cleanup begins, so it cannot bypass save/discard/cancel
 semantics but still bounds a cleanup call blocked in a third-party runtime.
+
+The Export workspace projects the selected Sequence's Dynamic HDR Program
+state without duplicating it into the export preset or a shell-local settings
+draft. Its intent dropdown emits only the typed `ui.dynamic_hdr.apply_edit`
+Product Action and is writable only for the active Sequence. It exposes Omit,
+exact whole-file preservation by detectable metadata family, and Remake for an
+existing analyzed Program. Readiness text names ST 2094-40 Application #4
+without implying HDR10+ certification and states that Remake requires a
+qualified/licensed Adapter plus independent validation and human QC. The App
+commits every action through the normal Authoring Session, so availability is a
+read-only early projection and dispatch revalidates the complete Sequence.

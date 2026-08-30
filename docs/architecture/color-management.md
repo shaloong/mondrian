@@ -1115,12 +1115,18 @@ AV1 and ProRes requests with static metadata writing fail validation until they
 have independently implemented and verified bitstream/container backends.
 ST 2086/CLLI are descriptive HEVC HDR SEI and are not artificially restricted to
 PQ; HLG delivery may carry them when the authored delivery contract requires
-it. Source HDR10+ and Dolby Vision data is not copied across a rendered edit:
-the export health report emits `dynamic_hdr_metadata_sources` and
-`dynamic_hdr_metadata_not_preserved`, and a `WriteAuthored` request fails before
-encoder launch when referenced sources contain either
-dynamic format. Dynamic delivery requires a separately validated re-authoring
-workflow because source frame/scene metadata no longer describes edited pixels.
+it. Dynamic HDR delivery is Sequence-owned and explicit. `Omit` authorizes a
+rendered downgrade without dynamic metadata. `PreserveSourceExact` identifies a
+detectable metadata family and is admitted only for complete source-file
+identity: the source artifact is copied byte-for-byte, source/output SHA-256
+must match, and the output is independently re-probed. It is neither Smart
+Render nor remux and never falls back to rendered output. `Remake` projects one
+analyzed final-Program definition onto the exact export range and fails closed
+until an adopter-qualified/licensed generation, independent-validation, and
+human HDR/SDR QC Adapter is installed. ST 2094-40 Application #4 detection is
+not by itself an HDR10+ brand-certification claim; Dolby CM version, bitstream
+profile/level, metadata levels, licensing, and delivery qualification remain
+distinct evidence.
 
 Successful encoder exit is not proof of a correct deliverable. Timeline export
 derives `ExpectedVideoSignalConstraints` from the same
@@ -1259,9 +1265,13 @@ only after decoding, so already identified HDR video receives one bounded
 first-frame metadata decode during the background media probe; SDR imports do
 not. Stream and frame facts are de-duplicated by semantic kind. ICC payloads are
 parsed into a profile name plus an explicit
-`IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame HDR10+ and stream
-Dolby Vision configuration remain presence/diagnostic records until dedicated
-parsers are introduced.
+`IccColorSpaceMapping::{Mapped, Unmapped}` result. First-frame ST 2094-40
+Application #4 and stream Dolby Vision configuration remain family-presence
+diagnostics. They can authorize only exact whole-file preservation of that
+family; they do not invent Application/CM versions, bitstream profiles,
+certification, or editable shot payloads. Format-specific analyzed shot
+metadata enters author state only through a qualified analysis Adapter with
+immutable provenance and canonical payload hashes.
 Sequence/export static HDR authoring stores these typed core payloads directly.
 `StaticHdrMetadataPolicy::{Omit, WriteAuthored}` is explicit and never denotes
 source passthrough. `WriteAuthored` fails closed when either ST 2086

@@ -56,7 +56,61 @@ pub(crate) fn qualify_smart_render(
     selected_range: TimelineTimeRange,
     total_frames: u64,
 ) -> Result<SmartRenderPlan, SmartRenderBlocker> {
-    if config.smart_render != ExportSmartRenderPolicy::Automatic {
+    qualify_full_source_identity(
+        config,
+        timeline,
+        delivery,
+        selected_range,
+        total_frames,
+        FullSourceIdentityPolicy {
+            require_automatic_smart_render: true,
+            allow_source_hdr_metadata: false,
+        },
+    )
+}
+
+/// Qualify the exact full-source picture identity required by byte-identical
+/// Dynamic HDR file preservation.
+///
+/// Unlike Automatic Smart Render, this explicit policy may inspect a source
+/// that contains HDR metadata and never authorizes fallback rendering.
+pub(crate) fn qualify_exact_source_file_preservation(
+    config: &ExportConfig,
+    timeline: &TimelineExportSnapshot,
+    delivery: &ResolvedExportDeliveryContract,
+    selected_range: TimelineTimeRange,
+    total_frames: u64,
+) -> Result<SmartRenderPlan, SmartRenderBlocker> {
+    qualify_full_source_identity(
+        config,
+        timeline,
+        delivery,
+        selected_range,
+        total_frames,
+        FullSourceIdentityPolicy {
+            require_automatic_smart_render: false,
+            allow_source_hdr_metadata: true,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FullSourceIdentityPolicy {
+    require_automatic_smart_render: bool,
+    allow_source_hdr_metadata: bool,
+}
+
+fn qualify_full_source_identity(
+    config: &ExportConfig,
+    timeline: &TimelineExportSnapshot,
+    delivery: &ResolvedExportDeliveryContract,
+    selected_range: TimelineTimeRange,
+    total_frames: u64,
+    policy: FullSourceIdentityPolicy,
+) -> Result<SmartRenderPlan, SmartRenderBlocker> {
+    if policy.require_automatic_smart_render
+        && config.smart_render != ExportSmartRenderPolicy::Automatic
+    {
         return Err(SmartRenderBlocker::PolicyDisabled);
     }
     if delivery.legalizer.is_active() {
@@ -136,7 +190,7 @@ pub(crate) fn qualify_smart_render(
     {
         return Err(SmartRenderBlocker::ColorTransformRequired);
     }
-    if !stream.hdr_metadata.is_empty()
+    if (!policy.allow_source_hdr_metadata && !stream.hdr_metadata.is_empty())
         || timeline
             .sequence
             .settings

@@ -126,3 +126,27 @@ DCP-o-matic. These ignored tests are deployment gates because their tools are
 licensed runtime artifacts rather than Rust test dependencies; ordinary unit
 tests retain deterministic negative coverage for graph, timing, digest, path,
 and XML attacks.
+
+## Dynamic HDR delivery qualification
+
+Dynamic HDR is a separate delivery Module from the fixed IMF/AS-11/DCP rows.
+Its immutable queue contract resolves one of three Sequence-authored paths:
+
+- `Omit` renders ordinary output and deliberately publishes no dynamic
+  metadata;
+- `PreserveSourceExact` requires a video-only complete-source identity, no
+  authored static-metadata rewrite, no Legalizer, and copies the whole file
+  byte-for-byte. Source/output SHA-256 equality and output metadata re-probe are
+  mandatory evidence. Any failure blocks publication and cannot select render;
+- `Remake` requires progressive Rec.2100 PQ Legal HEVC Main10 10-bit 4:2:0 plus
+  authored ST 2086/MaxCLL/MaxFALL for the first qualified row, and also requires
+  a licensed/adopter-qualified generator, independent validator, and human
+  HDR/SDR QC evidence. No such runtime Adapter is currently installed, so this
+  path fails closed before execution.
+
+ST 2094-40 Application #4 syntax is named as such in product state and evidence;
+Mondrian does not turn detection into an HDR10+ certification claim. Dolby
+Vision CM version, metadata levels, bitstream profile/level, licensed tooling,
+and delivery profile are retained as distinct qualifications. Open syntax tools
+or FFmpeg/x265 parameter availability alone do not establish either branded
+workflow.

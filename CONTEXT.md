@@ -1098,6 +1098,7 @@ _Avoid_: loading external plugin code in the Mondrian process, process-per-block
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.
 - Each persisted archive, document, and SQLite library has an independent version and **Project Migration** chain.
 - A **Project Migration** operates on an in-memory value or runtime copy; opening never rewrites the source archive.
+- A **Dynamic HDR Program** is Sequence-owned final-Program author state, never a Clip property or export-preset payload. It contains bounded, exact-time, format-specific analyzed Shots plus immutable Adapter/schema, visual-author-fingerprint, and canonical-payload provenance. `Omit`, byte-identical whole-source-file `PreserveSourceExact`, and qualified `Remake` are distinct delivery intents; preservation is not remux or Smart Render and can never fall back to rendered pixels. Remake requires a licensed/adopter-qualified generator, independent technical validation, and human HDR/SDR QC. ST 2094-40 Application #4 detection is not an HDR10+ certification claim, and Dolby CM version, metadata levels, bitstream profile/level, licensing, and delivery qualification remain distinct evidence.
 
 ## Example dialogue
 

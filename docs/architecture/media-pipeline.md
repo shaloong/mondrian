@@ -373,6 +373,12 @@ stream summary but never creates duplicates. SDR and audio-only imports do not
 open this metadata decoder. Failure to obtain the optional first-frame evidence
 is logged without making otherwise decodable media offline.
 
+Dynamic metadata here remains bounded family-presence evidence. It can gate an
+exact whole-source-file preservation request but cannot prove editable shot
+payloads, HDR10+ brand qualification, Dolby CM/profile/level identity, or
+regeneration authority. Those facts belong to the Sequence Dynamic HDR Program
+and a qualified analysis/delivery Adapter, not the media probe.
+
 Probe absence is explicit. Invalid/zero FFmpeg frame-rate rationals are stored
 as unproven rather than silently replaced with 25 fps. Unsupported or unknown
 pixel formats retain an unproven marker rather than becoming YUV420P/8-bit.

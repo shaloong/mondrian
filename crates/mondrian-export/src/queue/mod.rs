@@ -1025,6 +1025,36 @@ pub struct ExportJobDiagnostics {
     pub audio: Option<AudioLoudnessReport>,
     /// Independently verified encoded-essence reuse, when Smart Render won.
     pub smart_render: Option<ExportSmartRenderEvidence>,
+    /// Byte-identical original Dynamic HDR file preservation evidence.
+    pub dynamic_hdr_preservation: Option<ExportDynamicHdrPreservationEvidence>,
+}
+
+/// Dynamic metadata family proved on one byte-identical preserved source file.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ExportDynamicHdrKind {
+    /// Public SMPTE ST 2094-40 Application #4 syntax; not a brand-certification claim.
+    St2094_40Application4,
+    /// Dolby Vision metadata; licensing/qualification remains separately required.
+    DolbyVision,
+}
+
+/// Bounded evidence that an original Dynamic HDR source file was preserved exactly.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExportDynamicHdrPreservationEvidence {
+    /// Sole source Asset whose complete file was copied.
+    pub source_asset_id: AssetId,
+    /// Dynamic metadata family proved before and after the copy.
+    pub kind: ExportDynamicHdrKind,
+    /// Exact source artifact byte length.
+    pub source_bytes: u64,
+    /// SHA-256 of the frozen source artifact.
+    pub source_sha256: [u8; 32],
+    /// SHA-256 of the staged output artifact.
+    pub output_sha256: [u8; 32],
+    /// Whether source and output digests matched exactly.
+    pub byte_identity_verified: bool,
+    /// Whether the copied output was independently probed for the requested family.
+    pub output_metadata_reprobed: bool,
 }
 
 /// Bounded proof that Smart Render reused the exact admitted source video.
@@ -3753,6 +3783,18 @@ fn execute_timeline_export(
         if range.total_frames == 0 {
             return JobExecutionResult::Failed("时间线导出范围为空".to_string());
         }
+        let selected_time_range = match range.time_range() {
+            Ok(range) => range,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        let dynamic_hdr_delivery = match crate::dynamic_hdr::resolve_dynamic_hdr_delivery(
+            timeline,
+            &delivery,
+            selected_time_range,
+        ) {
+            Ok(delivery) => delivery,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
 
         let Some(prepared_visual) =
             timeline.prepared_execution().map(|execution| execution.visual())
@@ -3912,6 +3954,28 @@ fn execute_timeline_export(
                 );
             }
         };
+        match crate::dynamic_hdr::execute_dynamic_hdr_delivery(
+            &dynamic_hdr_delivery,
+            &job.config,
+            timeline,
+            &delivery,
+            selected_time_range,
+            range.total_frames,
+            output_path,
+            cancel,
+        ) {
+            Ok(Some(evidence)) => {
+                report_diagnostics(ExportJobDiagnostics {
+                    audio: audio_analysis,
+                    dynamic_hdr_preservation: Some(evidence),
+                    ..ExportJobDiagnostics::default()
+                });
+                *validation_contract_out = Some(validation_contract);
+                return JobExecutionResult::ReversibleWorkCompleted;
+            }
+            Ok(None) => {}
+            Err(error) => return JobExecutionResult::Failed(error),
+        }
         match try_execute_smart_render(
             job,
             timeline,
@@ -13484,7 +13548,7 @@ mod tests {
     }
 
     #[test]
-    fn export_color_validation_rejects_dynamic_hdr_passthrough_claim() {
+    fn export_color_validation_requires_explicit_dynamic_hdr_delivery_intent() {
         let mut timeline = timeline_input_with_output_color(ColorSpace::Rec2100Pq);
         timeline.sequence.settings.delivery.bit_depth = DeliveryBitDepth::Ten;
         timeline.sequence.settings.delivery.static_hdr_metadata_policy =
@@ -13521,11 +13585,40 @@ mod tests {
         let mut config = dummy_config("hdr-dynamic-passthrough.mp4");
         config.preset = crate::preset::ExportPreset::hevc_main10_aac();
 
+        resolve_timeline_export_delivery(&config, &timeline)
+            .expect("Omit explicitly authorizes rendered output without dynamic metadata");
+
+        timeline
+            .sequence
+            .dynamic_hdr
+            .apply(
+                mondrian_timeline::DynamicHdrAuthorEdit::SetDeliveryIntent {
+                    intent: mondrian_timeline::DynamicHdrDeliveryIntent::PreserveSourceExact {
+                        family: mondrian_core::DynamicHdrMetadataFamily::St2094_40Application4,
+                    },
+                },
+                timeline.sequence.settings.frame_rate,
+            )
+            .expect("select exact preservation");
+        resolve_timeline_export_delivery(&config, &timeline)
+            .expect("detected ST 2094-40 family admits the explicit preservation intent");
+
+        timeline
+            .sequence
+            .dynamic_hdr
+            .apply(
+                mondrian_timeline::DynamicHdrAuthorEdit::SetDeliveryIntent {
+                    intent: mondrian_timeline::DynamicHdrDeliveryIntent::PreserveSourceExact {
+                        family: mondrian_core::DynamicHdrMetadataFamily::DolbyVision,
+                    },
+                },
+                timeline.sequence.settings.frame_rate,
+            )
+            .expect("select mismatched preservation family");
         let error = resolve_timeline_export_delivery(&config, &timeline)
-            .expect_err("rendered export must not claim dynamic HDR passthrough");
-        assert!(error.contains("HDR10+ 动态 metadata（1 个）"));
-        assert!(error.contains("不能安全透传"));
-        assert!(error.contains("动态 HDR 重新制作流程"));
+            .expect_err("preservation family must be proven by frozen diagnostics");
+        assert!(error.contains("Dolby Vision metadata"));
+        assert!(error.contains("do not detect that metadata family"));
     }
 
     #[test]

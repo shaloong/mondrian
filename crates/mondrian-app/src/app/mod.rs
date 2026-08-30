@@ -104,6 +104,7 @@ mod audio_rendering;
 mod basic_titles;
 mod clip_clipboard;
 mod clip_retime;
+mod dynamic_hdr_authoring;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;

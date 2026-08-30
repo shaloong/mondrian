@@ -1,5 +1,5 @@
 {
-  "schema_version": 26,
+  "schema_version": 27,
   "project_id": "97f12455-ec34-4b5d-a696-3da93cd914d7",
   "document_revision": 1,
   "meta": {
@@ -309,6 +309,12 @@
             "clips": []
           }
         ],
+        "dynamic_hdr": {
+          "delivery_intent": {
+            "intent": "omit"
+          },
+          "programs": []
+        },
         "audio_tracks": [
           {
             "id": "ef4ed27f-1a1f-4337-b08a-0ec3844168ec",

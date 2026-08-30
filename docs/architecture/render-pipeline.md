@@ -2572,12 +2572,15 @@ post-encode contract probes only the first decoded video frame when
 `StaticHdrMetadataPolicy::WriteAuthored` was selected, because FFmpeg exposes libx265 ST 2086 and
 MaxCLL/MaxFALL SEI as frame side data rather than stream fields. It compares the
 encoded values at the x265 chromaticity/luminance quantization scales and fails
-closed on missing, malformed, or changed metadata. Exports that do not request
-`Omit` deliveries incur no frame-side-data probe. Source HDR10+ and Dolby
-Vision metadata is never claimed as passthrough across rendered pixels: health
-reports warn on referenced dynamic-HDR sources, and enabling the current
-`WriteAuthored` request fails before encoding until a validated dynamic
-metadata authoring backend exists. The exact Project engine determines whether
+closed on missing, malformed, or changed metadata. `Omit` performs no dynamic
+metadata rewrite. Source dynamic metadata is never claimed as passthrough
+across rendered pixels. Exact preservation bypasses picture execution only
+after the Prepared Visual identity proves one complete unmodified source file,
+then verifies whole-file SHA-256 equality and re-probes the staged output;
+failure cannot fall back to ordinary render. Remake consumes the same frozen
+Prepared Visual Program fingerprint as picture execution and currently blocks
+before tool or encoder launch because no adopter-qualified/licensed generation
+and independent-validation Adapter is installed. The exact Project engine determines whether
 a Standard output-target contract applies. For Standard HLG/PQ, MaxCLL cannot exceed the View's fixed
 1000-nit content peak. ST 2086 mastering-display peak remains independent
 because it describes the authoring monitor, not the brightest content pixel; a

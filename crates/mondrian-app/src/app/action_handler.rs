@@ -1088,6 +1088,7 @@ impl AppState {
                 self.dispatch_visual_effect_product_action(action)
             }
             ProductAction::Grade(action) => self.dispatch_grade_product_action(action),
+            ProductAction::DynamicHdr(edit) => self.dispatch_dynamic_hdr_product_action(edit),
             ProductAction::Gallery(action) => self.dispatch_gallery_product_action(action),
             ProductAction::VisualMask(action) => self.dispatch_visual_mask_product_action(action),
         }

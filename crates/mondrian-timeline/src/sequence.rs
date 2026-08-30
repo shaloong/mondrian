@@ -1359,6 +1359,8 @@ pub struct Sequence {
     /// Optional full-composite grade evaluated once after track compositing.
     #[serde(default)]
     pub timeline_grade: Option<mondrian_core::GradeDefinitionId>,
+    /// Final Program Output dynamic-metadata authoring and delivery intent.
+    pub dynamic_hdr: crate::dynamic_hdr::DynamicHdrAuthorState,
     pub audio_tracks: AuthoringList<Track>,
     /// Sequence semantic catalog for audio classification and output projection.
     pub audio_roles: AuthoringList<crate::audio::AudioRole>,
@@ -1385,6 +1387,7 @@ impl AuthoringFootprint for Sequence {
             grade_definitions,
             grade_groups,
             timeline_grade: _,
+            dynamic_hdr,
             audio_tracks,
             audio_roles,
             audio_program,
@@ -1399,6 +1402,7 @@ impl AuthoringFootprint for Sequence {
         collector.collect(video_transitions)?;
         collector.collect(grade_definitions)?;
         collector.collect(grade_groups)?;
+        collector.collect(dynamic_hdr)?;
         collector.collect(audio_tracks)?;
         collector.collect(audio_roles)?;
         collector.collect(audio_program)
@@ -1535,6 +1539,7 @@ impl Sequence {
         }
         self.settings.validate_with_color_environment(color_environment)?;
         self.validate_grade_hierarchy()?;
+        self.dynamic_hdr.validate(self.settings.frame_rate)?;
         for (tracks, expected_type, role) in [
             (&self.video_tracks, TrackType::Video, "video"),
             (&self.audio_tracks, TrackType::Audio, "audio"),
@@ -1594,6 +1599,7 @@ impl Sequence {
             grade_definitions,
             grade_groups,
             timeline_grade,
+            dynamic_hdr,
             audio_tracks,
             audio_roles,
             audio_program,
@@ -1612,6 +1618,7 @@ impl Sequence {
             grade_definitions: other_grade_definitions,
             grade_groups: other_grade_groups,
             timeline_grade: other_timeline_grade,
+            dynamic_hdr: other_dynamic_hdr,
             audio_tracks: other_audio_tracks,
             audio_roles: other_audio_roles,
             audio_program: other_audio_program,
@@ -1629,6 +1636,7 @@ impl Sequence {
             && grade_definitions == other_grade_definitions
             && grade_groups == other_grade_groups
             && timeline_grade == other_timeline_grade
+            && dynamic_hdr == other_dynamic_hdr
             && audio_tracks == other_audio_tracks
             && audio_roles == other_audio_roles
             && audio_program == other_audio_program
@@ -1660,6 +1668,7 @@ impl Sequence {
             grade_definitions: AuthoringList::new(),
             grade_groups: AuthoringList::new(),
             timeline_grade: None,
+            dynamic_hdr: crate::dynamic_hdr::DynamicHdrAuthorState::default(),
             audio_tracks,
             audio_roles: AuthoringList::new(),
             audio_program,
@@ -2301,6 +2310,7 @@ impl Sequence {
         self.fork_audio_identities_for_sequence_duplicate();
         self.fork_clip_link_groups_for_sequence_duplicate();
         self.fork_grade_hierarchy_for_sequence_duplicate();
+        self.dynamic_hdr.fork_author_identities();
     }
 
     /// Remove meaningless singleton link groups after structural edits.

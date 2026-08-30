@@ -76,6 +76,8 @@ define_id!(GradeDefinitionId, "共享调色定义 ID");
 define_id!(GradeVersionId, "调色版本 ID");
 define_id!(GradeGroupId, "调色组 ID");
 define_id!(GalleryStillId, "调色 Gallery Still ID");
+define_id!(DynamicHdrProgramId, "动态 HDR Program ID");
+define_id!(DynamicHdrShotId, "动态 HDR Shot ID");
 
 /// Monotonic authoring revision of one stable Sequence identity.
 ///

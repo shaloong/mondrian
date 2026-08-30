@@ -1461,3 +1461,24 @@ Gaps, overlaps, generated/nested content, Transition endpoints, animation,
 retime, or processing produce no candidate. Export therefore consumes a deep
 prepared-Timeline fact instead of rescanning Tracks and Clips or maintaining a
 second list of passthrough rules.
+
+## Dynamic HDR Program Module
+
+`Sequence::dynamic_hdr` is the only authoring authority for final-Program
+dynamic metadata. It is independent of `SequenceSettings`, Tracks, and Clips:
+metadata describes the composited Program Output after group/clip/timeline
+grading, transitions, nesting, and effects. The closed author state contains an
+explicit delivery intent plus at most 8 analyzed Programs, each with at most
+4,096 exact frame-grid-aligned, contiguous shots. ST 2094-40 Application #4 and
+Dolby Vision use distinct payload models; a generic key/value metadata bag is
+not accepted.
+
+Each Program binds Adapter identity/version/schema, the complete Prepared
+Visual author fingerprint analyzed, and the canonical metadata SHA-256. Any
+picture edit makes projection stale. `Remake` is a strong Program reference;
+removing its target fails atomically. Range projection intersects and rebases
+exact half-open shot ranges, and Sequence duplication rekeys Program and Shot
+IDs while retaining analysis provenance. Product edits enter the normal
+Authoring Session, validate the detached complete state, advance one revision,
+and produce one Undo receipt. Machine-local executable paths, licenses, adopter
+status, and entitlement secrets are never persisted in Timeline author state.

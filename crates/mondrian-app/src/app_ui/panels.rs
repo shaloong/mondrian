@@ -26,9 +26,9 @@ use mondrian_core::types::{
     EffectId, JobId, KeyframeId, MaskId, Rational, SequenceId, TrackId, VideoTransitionId,
 };
 use mondrian_core::{
-    AudioChannelLayout, Color, FramePosition, FrameRounding, ParameterUnit, SampleAspectRatio,
-    SignalLegalizer, TimeScale, TimelineDisplayContract, TimelineDisplayFormat, TimelineTime,
-    TimelineTimeRange, WorkingColorSpace,
+    AudioChannelLayout, Color, DynamicHdrMetadataFamily, FramePosition, FrameRounding,
+    ParameterUnit, SampleAspectRatio, SignalLegalizer, TimeScale, TimelineDisplayContract,
+    TimelineDisplayFormat, TimelineTime, TimelineTimeRange, WorkingColorSpace,
 };
 use mondrian_editor_state::state::{PanelKind, WorkspacePreset};
 use mondrian_editor_state::Action;
@@ -63,7 +63,8 @@ use mondrian_timeline::sequence::{
 use mondrian_timeline::track::Track;
 use mondrian_timeline::VideoTransitionType;
 use mondrian_timeline::{
-    AudioComponentMutation, EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
+    AudioComponentMutation, DynamicHdrAuthorEdit, DynamicHdrDeliveryIntent,
+    EffectRelativePlacement, MaskRelativePlacement, TrackRelativePlacement,
 };
 use mondrian_ui_core::types::SplitDirection;
 use mondrian_ui_core::Widget;
@@ -2291,12 +2292,36 @@ pub struct ExportPanelModel {
     pub preset_customized: bool,
     pub sequences: Vec<ExportSequenceOptionModel>,
     pub selected_sequence_id: Option<SequenceId>,
+    /// Sequence-owned Dynamic HDR author intent and admitted product commands.
+    pub dynamic_hdr: ExportDynamicHdrModel,
     pub range: TimelineExportRange,
     pub output_path: String,
     pub delivery_error: Option<String>,
     pub status: Option<(String, bool)>,
     pub jobs: Vec<ExportJobModel>,
     pub can_clear_terminal_history: bool,
+}
+
+/// Dynamic HDR delivery state shown by the Export workspace.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportDynamicHdrModel {
+    /// Current persistent delivery intent.
+    pub intent_label: String,
+    /// Honest readiness statement; never a branded-certification claim.
+    pub readiness: String,
+    /// Number of analyzed final-Program definitions retained by the Sequence.
+    pub program_count: usize,
+    /// Alternative author intents admitted for the active Sequence.
+    pub intent_actions: Vec<ExportDynamicHdrIntentActionModel>,
+}
+
+/// One admitted Dynamic HDR delivery-intent command.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExportDynamicHdrIntentActionModel {
+    /// Product-visible alternative intent label.
+    pub label: String,
+    /// External typed Product Action emitted by the dropdown.
+    pub action: Action,
 }
 
 #[derive(Debug, Clone)]
@@ -2471,6 +2496,17 @@ impl ExportPanelModel {
             .or(state.default_sequence_id())
             .filter(|id| sequences.iter().any(|sequence| sequence.id == *id))
             .or_else(|| sequences.first().map(|sequence| sequence.id));
+        let selected_sequence_snapshot = selected_sequence_id
+            .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id));
+        let dynamic_hdr = selected_sequence_snapshot.map_or_else(
+            || ExportDynamicHdrModel {
+                intent_label: "没有序列".to_owned(),
+                readiness: "选择一个序列以配置 Dynamic HDR 交付".to_owned(),
+                program_count: 0,
+                intent_actions: Vec::new(),
+            },
+            |sequence| export_dynamic_hdr_model(state, sequence),
+        );
         let delivery_error = selected_sequence_id
             .and_then(|id| sequence_snapshots.iter().find(|sequence| sequence.id == id))
             .and_then(|sequence| {
@@ -2509,6 +2545,7 @@ impl ExportPanelModel {
             preset_customized,
             sequences,
             selected_sequence_id,
+            dynamic_hdr,
             range: state.export_draft.range,
             output_path: state.export_draft.output_path.clone(),
             delivery_error,
@@ -2578,6 +2615,93 @@ impl ExportPanelModel {
         self.selected_sequence_id
             .and_then(|id| self.sequences.iter().find(|sequence| sequence.id == id))
             .or_else(|| self.sequences.first())
+    }
+}
+
+fn export_dynamic_hdr_model(state: &AppState, sequence: &Sequence) -> ExportDynamicHdrModel {
+    let intent_label = match sequence.dynamic_hdr.delivery_intent() {
+        DynamicHdrDeliveryIntent::Omit => "省略 Dynamic HDR".to_owned(),
+        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => {
+            format!("逐字节保留 {}", family.diagnostic_label())
+        }
+        DynamicHdrDeliveryIntent::Remake { program_id } => sequence
+            .dynamic_hdr
+            .program(*program_id)
+            .map(|program| format!("重制：{}", program.name))
+            .unwrap_or_else(|| "重制：缺失 Program".to_owned()),
+    };
+    let active = state.active_sequence_id() == Some(sequence.id);
+    let readiness = match sequence.dynamic_hdr.delivery_intent() {
+        DynamicHdrDeliveryIntent::Omit => {
+            "已明确省略动态元数据；静态 HDR 仍由序列交付策略独立控制".to_owned()
+        }
+        DynamicHdrDeliveryIntent::PreserveSourceExact { family } => format!(
+            "仅允许完整源文件逐字节复制并复探测 {}；剪辑、重封装或渲染均不回退",
+            family.diagnostic_label()
+        ),
+        DynamicHdrDeliveryIntent::Remake { program_id } => sequence
+            .dynamic_hdr
+            .program(*program_id)
+            .map(|program| {
+                format!(
+                    "{} / {} 个 shot；需合格且已授权的生成、独立验证和人工 HDR/SDR QC Adapter",
+                    program.standard.diagnostic_label(),
+                    program.shots.len()
+                )
+            })
+            .unwrap_or_else(|| "引用的 Dynamic HDR Program 已缺失，交付将阻断".to_owned()),
+    };
+    let mut alternatives = vec![
+        (
+            "省略 Dynamic HDR".to_owned(),
+            DynamicHdrDeliveryIntent::Omit,
+        ),
+        (
+            "逐字节保留 ST 2094-40 App #4".to_owned(),
+            DynamicHdrDeliveryIntent::PreserveSourceExact {
+                family: DynamicHdrMetadataFamily::St2094_40Application4,
+            },
+        ),
+        (
+            "逐字节保留 Dolby Vision 元数据".to_owned(),
+            DynamicHdrDeliveryIntent::PreserveSourceExact {
+                family: DynamicHdrMetadataFamily::DolbyVision,
+            },
+        ),
+    ];
+    alternatives.extend(sequence.dynamic_hdr.programs().iter().map(|program| {
+        (
+            format!("重制：{}", program.name),
+            DynamicHdrDeliveryIntent::Remake { program_id: program.id },
+        )
+    }));
+    let intent_actions = if active {
+        alternatives
+            .into_iter()
+            .filter_map(|(label, intent)| {
+                let action =
+                    ProductAction::DynamicHdr(DynamicHdrAuthorEdit::SetDeliveryIntent { intent });
+                state.product_action_availability().allows(&action).then(|| {
+                    ExportDynamicHdrIntentActionModel {
+                        label,
+                        action: action.into_external_action(),
+                    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let readiness = if active {
+        readiness
+    } else {
+        format!("{readiness}；先打开此序列才能修改交付意图")
+    };
+    ExportDynamicHdrModel {
+        intent_label,
+        readiness,
+        program_count: sequence.dynamic_hdr.programs().len(),
+        intent_actions,
     }
 }
 
@@ -5388,6 +5512,17 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         ],
     )
     .enabled(model.can_select_range());
+    let dynamic_hdr_dropdown = Dropdown::new(
+        model.dynamic_hdr.intent_label.clone(),
+        model
+            .dynamic_hdr
+            .intent_actions
+            .iter()
+            .map(|item| MenuItem::new(item.label.clone(), item.action.clone()))
+            .collect(),
+    )
+    .with_max_visible_items(8)
+    .enabled(!model.dynamic_hdr.intent_actions.is_empty());
 
     let selected_preset = model.selected_preset();
     let output_extension = selected_preset.map(export_preset_extension).unwrap_or("mp4").to_owned();
@@ -5777,6 +5912,27 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .with_section(signal_section)
         .with_section(encoding_section)
         .with_section(audio_section)
+        .with_section(
+            PropertySection::new("Dynamic HDR 交付")
+                .with_row(PropertyRow::new("意图", Box::new(dynamic_hdr_dropdown)))
+                .with_row(PropertyRow::new(
+                    "Program",
+                    Box::new(
+                        Label::new(format!(
+                            "{} 个已分析 Program",
+                            model.dynamic_hdr.program_count
+                        ))
+                        .muted(),
+                    ),
+                ))
+                .with_row(
+                    PropertyRow::new(
+                        "资格状态",
+                        Box::new(Label::new(model.dynamic_hdr.readiness.clone()).muted().wrapped()),
+                    )
+                    .with_height(58.0),
+                ),
+        )
         .with_section(
             PropertySection::new("输入")
                 .with_row(PropertyRow::new("序列", Box::new(sequence_dropdown)))
