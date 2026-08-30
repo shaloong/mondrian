@@ -1,7 +1,8 @@
 use mondrian_renderer::{
-    import_external_color_reference, ColorFrameAlpha, ColorReferenceDecoder,
-    ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceOrigin,
-    ColorReferencePayloadFormat, ColorReferencePixels, ColorReferenceValidationError,
+    import_external_color_reference, import_external_color_reference_with_limits, ColorFrameAlpha,
+    ColorReferenceDecoder, ColorReferenceDescriptor, ColorReferenceEncoding,
+    ColorReferenceImportLimits, ColorReferenceOrigin, ColorReferencePayloadFormat,
+    ColorReferencePixels, ColorReferenceValidationError,
 };
 
 #[path = "support/color_reference_image.rs"]
@@ -227,5 +228,38 @@ fn descriptor_rejects_placeholder_identity_and_invalid_hdr_luminance_contract() 
             }
         ),
         Err(ColorReferenceValidationError::InvalidLuminanceContract { .. })
+    ));
+}
+
+#[test]
+fn bounded_import_rejects_payload_and_raster_before_decoder_execution() {
+    struct PanicDecoder;
+    impl ColorReferenceDecoder for PanicDecoder {
+        fn decode(
+            &self,
+            _encoded: &[u8],
+            _descriptor: &ColorReferenceDescriptor,
+        ) -> Result<ColorReferencePixels, String> {
+            panic!("decoder must not run after admission rejection")
+        }
+    }
+
+    assert!(matches!(
+        import_external_color_reference_with_limits(
+            descriptor(),
+            b"abc",
+            &PanicDecoder,
+            ColorReferenceImportLimits::new(2, 1),
+        ),
+        Err(ColorReferenceValidationError::EncodedPayloadTooLarge { .. })
+    ));
+    assert!(matches!(
+        import_external_color_reference_with_limits(
+            descriptor(),
+            b"abc",
+            &PanicDecoder,
+            ColorReferenceImportLimits::new(3, 0),
+        ),
+        Err(ColorReferenceValidationError::PixelLimitExceeded { .. })
     ));
 }

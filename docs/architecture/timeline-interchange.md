@@ -104,6 +104,10 @@ evidence that a platform has a qualified pyaaf2 build.
 Native fixture round trips, failure cases, and App transaction tests qualify
 the declared Mondrian subsets. Actual Resolve, Premiere, Pro Tools, and other
 application round trips, reference-frame comparison, version matrices, and
-vendor-specific extension qualification belong to COL-045. Until that evidence
-exists, reports must not claim generic application compatibility beyond the
-declared profiles above.
+vendor-specific extension qualification require separate evidence. The
+Renderer-owned Cross-Application Color Qualification can qualify exact
+file-output frames from Blender, Resolve, and Premiere, but it does not prove
+that OTIO/AAF/XML/EDL structures or vendor extensions round-trip. Conversely,
+interchange conformance cannot substitute for pixel qualification. Until each
+evidence class exists, reports must not claim generic application compatibility
+beyond the declared profiles above.

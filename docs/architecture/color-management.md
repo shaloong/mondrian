@@ -1814,3 +1814,31 @@ selection generation remains operational evidence, never semantic equality.
 CPU owner handles, shared parent graphs, renderer owner caches, and shared plain
 GPU artifacts therefore cannot alias changed mutable sources, while warm
 lookups perform no generation lock or filesystem check.
+
+## Cross-Application Reference Qualification
+
+Renderer's `cross_application_qualification` Module deepens the existing
+`color_reference` import and `color_accuracy` Interfaces; App and validation
+scripts do not own a second color interpretation. A strict schema-v1 profile
+compiles into one canonical plan that fixes the analytic stimulus digest,
+exact producer versions/builds, per-case producer closure, raster, Alpha,
+rational frame coordinate, encoding, metric, tolerance, and byte/pixel/case
+limits. The admitted first slice is scene-linear Rec.2020 numeric comparison,
+sRGB CIEDE2000, and BT.2100 PQ Delta E ITP. Display P3, HLG, and CIELAB cases
+fail during profile compilation until their distinct comparison semantics are
+implemented; they never borrow a superficially similar metric.
+
+Every artifact is imported through pre-decode byte/pixel admission and retains
+the exact executable/install, native Project, actual settings, acquisition
+Adapter, decoded metadata, operator-attestation, and payload hashes. Producer
+origin, version, build, stimulus, payload, raster, encoding, luminance, Alpha,
+and frame coordinate are checked together before comparison. A complete case
+produces all pairwise rows; report order and digest are stable regardless of
+artifact declaration order. Any numeric failure produces `failed`; absent
+required application evidence produces `incomplete`, never a diagnostic pass.
+
+The Module establishes cross-application file-output parity only. Vendor-native
+creative tone mappers are versioned baselines rather than common mathematical
+oracles. Absolute color accuracy remains owned by the Independent Colorimetric
+Oracle Corpus, while Viewer/OS color management, HDR surfaces, reference
+monitors, GPU/driver matrices, and SDI remain separate hardware qualification.

@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "id": "cross-application-color-v1",
+  "execution_policy": "sealed-required",
+  "runtime_profile_schema_version": 1,
+  "stimulus": {
+    "path": "tests/validation/cross-application-color-stimulus-v1.json",
+    "sha256": "0d426c06264ad0d463cd96bc4ef7529f1eeff967904c62de8f68584c4a760d8a"
+  },
+  "required_producers": [
+    "mondrian",
+    "blender",
+    "davinci_resolve",
+    "adobe_premiere_pro"
+  ],
+  "local_restricted_evidence_required": true,
+  "exact_versions_and_builds_required": true,
+  "clean_source_required": true,
+  "single_run_identity_required": true,
+  "bounded_decode_required": true,
+  "pairwise_matrix_required": true,
+  "public_specification_oracle_is_separate": true,
+  "runner": {
+    "integration_test": "cross_application_qualification",
+    "exact_test": "sealed_cross_application_corpus_qualification",
+    "timeout_seconds": 1800,
+    "serial_cargo_jobs": 1,
+    "report_schema_version": 1
+  },
+  "acceptance": {
+    "qualified_status_required": true,
+    "missing_artifacts_forbidden": true,
+    "skipped_execution_forbidden": true,
+    "profile_hash_required": true,
+    "report_hash_required": true,
+    "source_sha_required": true,
+    "machine_report_hash_required": true
+  }
+}

@@ -45,6 +45,41 @@ fail-closed before any tolerance comparison. `public_specification` and
 export be added later without claiming that Mondrian-generated goldens already
 establish subjective parity.
 
+Cross-application color qualification uses two committed contracts:
+
+- `tests/validation/cross-application-color-stimulus-v1.json` fixes analytic
+  patches, raster/orientation, rational cadence, frame identity, Alpha, and the
+  admitted linear/sRGB/PQ lanes.
+- `tests/validation/cross-application-color-qualification.json` fixes the
+  sealed supervisor policy and pins the exact stimulus bytes.
+
+The exact application versions/builds and their hashes belong to a reviewed
+runtime profile, not a rolling checked-in placeholder. Restricted `.blend`,
+Resolve Project/DRP, `.prproj`, presets, settings dumps, attestations, and
+output payloads stay under the prepared runner's ignored
+`tests/fixtures/large/cross-application/` corpus. A schema-v1 evidence manifest
+binds them to one run. Generate final evidence only from a clean exact source:
+
+```powershell
+pwsh -File scripts/validation/invoke-cross-application-color-qualification.ps1 `
+  -RuntimeProfilePath <qualified-profile.json> `
+  -EvidenceManifestPath <evidence-manifest.json> `
+  -MachineReportPath <machine-report.json> `
+  -ExpectedSourceSha <40-character-git-sha> `
+  -OutputDirectory <new-output-directory>
+```
+
+The supervisor runs only
+`sealed_cross_application_corpus_qualification`, with one Cargo job and a
+bounded deadline. The integration Adapter independently decodes PNG/OpenEXR/
+JSON Float payloads, verifies actual encoded byte counts, applies the compiled
+limits before decode, and writes the report even when the matrix is incomplete
+or a comparison fails. Only `qualified` with no missing artifacts is sealable.
+Harness tests and self-generated payloads prove protocol behavior but are not
+Blender/Resolve/Premiere qualification evidence.
+See [Cross-Application Color Capture](cross-application-color-capture.md) for
+the application-specific acquisition and claim-boundary procedure.
+
 The committed `mondrian-standard-quality-v1` numeric corpus is a separate
 objective stimulus contract pinned to the Standard package digest. It covers 22
 quality categories and drives the production CPU OCIO sRGB, Rec.709, Display

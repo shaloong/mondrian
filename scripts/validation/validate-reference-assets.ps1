@@ -44,6 +44,8 @@ $commercialEnginePath = Join-Path $contractRootAbsolute "windows-commercial-engi
 $gpuColorProfilePath = Join-Path $contractRootAbsolute "gpu-color-qualification.json"
 $viewerDisplayProfilePath = Join-Path $contractRootAbsolute "viewer-display-qualification.json"
 $realtimeMatrixPath = Join-Path $contractRootAbsolute "realtime-performance-matrix.json"
+$crossApplicationProfilePath = Join-Path $contractRootAbsolute "cross-application-color-qualification.json"
+$crossApplicationStimulusPath = Join-Path $contractRootAbsolute "cross-application-color-stimulus-v1.json"
 $contractPaths = @(
     $manifestPath,
     $goldenPath,
@@ -54,6 +56,8 @@ $contractPaths = @(
     $gpuColorProfilePath,
     $viewerDisplayProfilePath
     $realtimeMatrixPath
+    $crossApplicationProfilePath
+    $crossApplicationStimulusPath
 )
 
 foreach ($path in $contractPaths) {
@@ -72,6 +76,8 @@ $commercialEngine = Get-Content -LiteralPath $commercialEnginePath -Raw | Conver
 $gpuColorProfile = Get-Content -LiteralPath $gpuColorProfilePath -Raw | ConvertFrom-Json
 $viewerDisplayProfile = Get-Content -LiteralPath $viewerDisplayProfilePath -Raw | ConvertFrom-Json
 $realtimeMatrix = Get-Content -LiteralPath $realtimeMatrixPath -Raw | ConvertFrom-Json
+$crossApplicationProfile = Get-Content -LiteralPath $crossApplicationProfilePath -Raw | ConvertFrom-Json
+$crossApplicationStimulus = Get-Content -LiteralPath $crossApplicationStimulusPath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
@@ -85,6 +91,27 @@ $realtimeGateIds = @($realtimeMatrix.gates | ForEach-Object { [string]$_.id })
 $realtimeDimensionIds = @($realtimeMatrix.required_dimensions | ForEach-Object { [string]$_ })
 if ($realtimeMatrix.schema_version -ne 1) { Add-Issue "error" "realtime-matrix.schema-unsupported" "Unsupported realtime performance matrix schema: $($realtimeMatrix.schema_version)" }
 if ($realtimeMatrix.execution_policy -ne "sealed-required") { Add-Issue "error" "realtime-matrix.policy" "Realtime performance qualification must use sealed-required execution" }
+$crossApplicationProducers = @($crossApplicationProfile.required_producers | ForEach-Object { [string]$_ })
+if ($crossApplicationProfile.schema_version -ne 1 -or $crossApplicationStimulus.schema_version -ne 1) {
+    Add-Issue "error" "cross-application.schema-unsupported" "Cross-application policy and stimulus must both use schema 1"
+}
+if ($crossApplicationProfile.execution_policy -ne "sealed-required") {
+    Add-Issue "error" "cross-application.policy" "Cross-application qualification must use sealed-required execution"
+}
+if (@(Compare-Object @("adobe_premiere_pro", "blender", "davinci_resolve", "mondrian") ($crossApplicationProducers | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "cross-application.producers" "Cross-application qualification must require the exact commercial producer set"
+}
+$declaredStimulusPath = Resolve-ContainedPath $repositoryRoot ([string]$crossApplicationProfile.stimulus.path) "Cross-application stimulus"
+$declaredStimulusHash = (Get-FileHash -LiteralPath $declaredStimulusPath -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($declaredStimulusPath -ne [IO.Path]::GetFullPath($crossApplicationStimulusPath) -or
+    $declaredStimulusHash -ne [string]$crossApplicationProfile.stimulus.sha256) {
+    Add-Issue "error" "cross-application.stimulus" "Cross-application policy does not bind the exact checked-in stimulus bytes"
+}
+foreach ($field in @("qualified_status_required", "missing_artifacts_forbidden", "skipped_execution_forbidden", "profile_hash_required", "report_hash_required", "source_sha_required", "machine_report_hash_required")) {
+    if (-not (Has-Property $crossApplicationProfile.acceptance $field) -or $crossApplicationProfile.acceptance.$field -ne $true) {
+        Add-Issue "error" "cross-application.acceptance" "Cross-application qualification must require '$field'"
+    }
+}
 if ($realtimeMatrix.machine_profile -ne $machineProfile.id) { Add-Issue "error" "realtime-matrix.machine-profile-mismatch" "Realtime performance matrix references a different machine profile" }
 if (@(Compare-Object @("long-authoring", "playback-reference", "real-4k60-dual-layer", "renderer-visual") ($realtimeGateIds | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "realtime-matrix.gates" "Realtime performance matrix must define the exact four sealed gates"

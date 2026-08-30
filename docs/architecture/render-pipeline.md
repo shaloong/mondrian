@@ -3242,3 +3242,22 @@ Scopes, warnings, and presentation background cannot enter this route. The
 current Implementation is the CPU Float32 correctness path; a future resident
 GPU/device path must reuse this same Interface and color identity. See
 [Reference Output](reference-output.md).
+
+## Cross-Application Qualification Path
+
+The Renderer owns the only metric-dispatch and matrix-verdict Implementation.
+The sealed validation Adapter consumes a strict runtime profile plus one
+local-restricted evidence manifest, imports each artifact with explicit
+pre-decode resource limits, and evaluates one non-spliceable clean-source run.
+The report binds profile/stimulus/source/machine identity, the complete
+acquisition evidence, every pairwise distribution, missing matrix cells, and a
+self-verifying digest. The PowerShell supervisor serializes Cargo execution,
+enforces one exact ignored gate with a deadline, rejects skips and missing
+reports, and seals input/output/log hashes without recalculating color results.
+
+External capture is deliberately an Adapter outside realtime rendering:
+Blender may run headless against a pinned OCIO config, Resolve requires its
+installed scripting host and signed Project/preset, and Premiere remains a
+UI-hosted capture with operator verification for color settings not exposed by
+its automation Interface. No vendor application is launched by the ordinary
+Renderer or App process.

@@ -19,6 +19,7 @@ pub mod context;
 mod cpu_visual_execution;
 mod cpu_yuv;
 mod creative_lut_gpu;
+pub mod cross_application_qualification;
 pub mod display_calibration;
 pub mod gpu_composite_execution;
 pub mod gpu_compositor;
@@ -96,8 +97,9 @@ pub use color_frame::{
     SourceAlphaInterpretationError, ViewerGpuPresentationOutputLease,
 };
 pub use color_reference::{
-    import_external_color_reference, ColorReferenceDecoder, ColorReferenceDescriptor,
-    ColorReferenceEncoding, ColorReferenceFrame, ColorReferenceOrigin, ColorReferencePayloadFormat,
+    import_external_color_reference, import_external_color_reference_with_limits,
+    ColorReferenceDecoder, ColorReferenceDescriptor, ColorReferenceEncoding, ColorReferenceFrame,
+    ColorReferenceImportLimits, ColorReferenceOrigin, ColorReferencePayloadFormat,
     ColorReferencePixels, ColorReferenceValidationError,
 };
 #[allow(unused_imports)]
@@ -162,6 +164,17 @@ pub use context::{
 };
 pub use creative_lut_gpu::{
     GpuCreativeLutCacheConfig, GpuCreativeLutCacheDiagnostics, GpuCreativeLutError,
+};
+pub use cross_application_qualification::{
+    CrossApplicationAccuracyBudget, CrossApplicationArtifactEvidence, CrossApplicationCaseReport,
+    CrossApplicationComparisonStatistics, CrossApplicationFrameCoordinate,
+    CrossApplicationMissingArtifact, CrossApplicationPairComparison,
+    CrossApplicationPixelOrientation, CrossApplicationProducer,
+    CrossApplicationProducerRequirement, CrossApplicationQualificationArtifact,
+    CrossApplicationQualificationCase, CrossApplicationQualificationError,
+    CrossApplicationQualificationLimits, CrossApplicationQualificationProfile,
+    CrossApplicationQualificationReport, CrossApplicationQualificationRun,
+    CrossApplicationQualificationStatus, PreparedCrossApplicationQualification,
 };
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,

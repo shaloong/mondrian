@@ -8,11 +8,12 @@ use mondrian_core::{
     bt2100_display_linear_rgb_to_itp, bt2100_pq_to_display_linear_rgb, delta_e_2000_d50,
     delta_e_itp, srgb_to_cie_lab_d50, ColorScienceError,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Numeric error limits for one group of scene-linear channels.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinearAccuracyBudget {
     /// Largest allowed absolute error for any finite sample.
     pub max_absolute_error: f64,
@@ -57,7 +58,8 @@ impl LinearAccuracyBudget {
 }
 
 /// Independent scene-linear accuracy limits for color and coverage channels.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LinearRgbaAccuracyBudget {
     /// Limits applied to the combined RGB sample distribution.
     pub rgb: LinearAccuracyBudget,
@@ -387,7 +389,8 @@ pub fn compare_linear_rgba(
 }
 
 /// Perceptual CIEDE2000 limits for an SDR sRGB display boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SrgbDisplayAccuracyBudget {
     /// Largest allowed CIEDE2000 difference for any pixel.
     pub max_delta_e_2000: f64,
@@ -578,7 +581,8 @@ pub fn compare_srgb_display_rgba8(
 }
 
 /// Perceptual and coverage limits for a display-referred BT.2100 PQ boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PqHdrDisplayAccuracyBudget {
     /// Largest allowed BT.2124 ΔEITP for any pixel.
     pub max_delta_e_itp: f64,
