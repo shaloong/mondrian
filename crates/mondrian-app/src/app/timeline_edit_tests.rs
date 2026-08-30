@@ -285,6 +285,7 @@ fn set_clip_media_interpretation_is_undoable() {
         pixel_aspect_ratio_override: Some(PixelAspectRatio::HdAnamorphic1080),
         field_order_override: Some(FieldOrder::Progressive),
         alpha: AlphaInterpretation::Premultiplied,
+        editorial_source: None,
     };
     state
         .set_clip_media_interpretation(selection, interpretation.clone())
