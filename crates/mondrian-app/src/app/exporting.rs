@@ -28,6 +28,9 @@ pub struct TimelineExportRequest {
     pub output_path: PathBuf,
     /// Final namespace policy frozen at admission.
     pub output_policy: ExportOutputPolicy,
+    /// Optional broadcaster-specific QC profile frozen with the request.
+    #[serde(default)]
+    pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
 }
 
 /// UI-stable draft state for timeline export panels.
@@ -242,6 +245,7 @@ impl AppState {
             output_path: request.output_path,
             output_policy: request.output_policy,
             smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
+            broadcast_qc: request.broadcast_qc,
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
@@ -854,6 +858,7 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
                 output_policy: ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             })
             .expect_err("empty output path should be rejected");
 
@@ -951,6 +956,7 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("E:/renders/out.mp4"),
                 output_policy: ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             })
             .expect_err("stale explicit sequence id should be rejected");
 

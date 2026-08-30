@@ -15,6 +15,7 @@ mondrian-app
   -> mondrian-playback
   -> mondrian-render-cache
   -> mondrian-audio
+  -> mondrian-broadcast
   -> mondrian-reference-output
   -> mondrian-ui-* crates
   -> mondrian-assets / mondrian-timeline / mondrian-interchange / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
@@ -100,8 +101,14 @@ foundation:
   Program Runtime, prepared contribution/route PDC, and media source interfaces.
   Real plugin hosts, parameter-event delivery, layout negotiation, and richer
   processors deepen this crate; format-only placeholder crates are not created.
+- `mondrian-broadcast`: versioned broadcaster QC profiles, bounded streaming
+  picture-analysis evidence, canonical ST 291 Type 2 packets, and registered
+  ATC/AFD/CDP transport constructors. It owns neither Timeline caption
+  authoring nor vendor/file carriage; see
+  [Broadcast QC And Ancillary Data](broadcast-qc-and-ancillary.md).
 - `mondrian-reference-output`: platform-neutral exact professional-output
-  signal, v210/RGB12 and embedded-s24 payload contracts, bounded scheduled
+  signal, v210/RGB12, embedded-s24, and atomic ancillary payload contracts,
+  bounded scheduled
   playout, lifecycle evidence, and delayed DeckLink/AJA vendor Adapter seams.
   It never owns Program Output color interpretation or Viewer/Export policy;
   see [Reference Output](reference-output.md).

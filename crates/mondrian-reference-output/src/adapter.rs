@@ -153,6 +153,8 @@ pub enum ReferenceOutputAdapterEvent {
         frame_index: u64,
         /// Provider hardware time, absent for simulated output.
         hardware_time: Option<u64>,
+        /// Digest of the actual packet inventory read back by the provider.
+        ancillary_readback_sha256: Option<[u8; 32]>,
     },
     /// Device reported a late frame.
     FrameLate { frame_index: u64 },
@@ -176,7 +178,7 @@ pub trait ReferenceOutputAdapterSession: Send {
     fn request(&self) -> &ReferenceOutputOpenRequest;
     /// Provider device generation captured at open.
     fn device_generation(&self) -> u64;
-    /// Schedule one atomic video/audio bundle.
+    /// Schedule one atomic video/audio/ancillary bundle.
     fn schedule(
         &mut self,
         bundle: ReferenceOutputBundle,
@@ -528,6 +530,9 @@ impl ReferenceOutputAdapterSession for SimulatedSession {
         if bundle.video.signal() != &self.request.signal {
             return Err(ReferenceOutputAdapterError::PayloadSignalMismatch);
         }
+        if !self.request.ancillary_policy.is_required() && !bundle.ancillary.packets().is_empty() {
+            return Err(ReferenceOutputAdapterError::AncillaryNotEnabled);
+        }
         self.scheduled.push_back(bundle);
         Ok(())
     }
@@ -553,13 +558,18 @@ impl ReferenceOutputAdapterSession for SimulatedSession {
         if !self.running || self.stopped {
             return Ok(None);
         }
-        Ok(self
-            .scheduled
-            .pop_front()
-            .map(|bundle| ReferenceOutputAdapterEvent::FrameCompleted {
+        Ok(self.scheduled.pop_front().map(|bundle| {
+            let ancillary_readback_sha256 = self
+                .request
+                .ancillary_policy
+                .requires_readback()
+                .then(|| bundle.ancillary.sha256());
+            ReferenceOutputAdapterEvent::FrameCompleted {
                 frame_index: bundle.frame_index(),
                 hardware_time: None,
-            }))
+                ancillary_readback_sha256,
+            }
+        }))
     }
 
     fn stop(&mut self) -> Result<(), ReferenceOutputAdapterError> {
@@ -626,6 +636,9 @@ pub enum ReferenceOutputAdapterError {
     /// Bundle was packed against another signal.
     #[error("reference output payload signal differs from the open Session")]
     PayloadSignalMismatch,
+    /// Non-empty ANC was submitted to a Session opened without ANC.
+    #[error("reference output ancillary packets were not enabled for this Session")]
+    AncillaryNotEnabled,
     /// Exact mode request is invalid.
     #[error(transparent)]
     Mode(#[from] crate::ReferenceOutputModeError),
@@ -663,6 +676,7 @@ mod tests {
                 audio_layout: AudioChannelLayout::Stereo,
             },
             reference_policy: ReferenceOutputReferencePolicy::FreeRunAllowed,
+            ancillary_policy: crate::ReferenceOutputAncillaryPolicy::Disabled,
             preroll_frames: 3,
             max_scheduled_frames: 5,
         }
@@ -676,6 +690,8 @@ mod tests {
             supports_hdr_signal: false,
             supports_static_hdr_metadata: false,
             supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
         };
         let adapter = SimulatedReferenceOutputAdapter::new(vec![mode]).expect("adapter");
         assert_eq!(

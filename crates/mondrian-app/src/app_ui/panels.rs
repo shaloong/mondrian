@@ -2345,6 +2345,8 @@ pub struct ExportJobModel {
     pub title: String,
     pub status: String,
     pub color_diagnostics: Option<String>,
+    /// Frozen broadcaster-profile report summary, when QC was requested.
+    pub broadcast_qc: Option<String>,
     pub progress_percent: u8,
     pub can_cancel: bool,
     pub is_completed: bool,
@@ -2531,6 +2533,7 @@ impl ExportPanelModel {
                 title: export_job_title(job.output_path.as_path()),
                 status: export_job_status_label(&job.status, job.progress),
                 color_diagnostics: export_job_color_diagnostics_label(job.diagnostics.color),
+                broadcast_qc: export_job_broadcast_qc_label(job.diagnostics.broadcast_qc.as_ref()),
                 progress_percent: (job.progress.fraction.clamp(0.0, 1.0) * 100.0).round() as u8,
                 can_cancel: job.status.can_cancel(),
                 is_completed: job.status.is_terminal(),
@@ -2608,6 +2611,7 @@ impl ExportPanelModel {
             range: self.range,
             output_path: output_path.into(),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            broadcast_qc: None,
         })
     }
 
@@ -5971,6 +5975,11 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
             Label::new(color_diagnostics.clone()).muted().wrapped().with_padding(0.0, 0.0),
         )));
     }
+    if let Some(broadcast_qc) = &job.broadcast_qc {
+        summary_children.push(FlexChild::fixed(Box::new(
+            Label::new(broadcast_qc.clone()).muted().wrapped().with_padding(0.0, 0.0),
+        )));
+    }
     let summary = FlexContainer::column(summary_children).with_gap(4.0);
 
     let content: Box<dyn Widget> = if job.can_cancel {
@@ -5989,12 +5998,32 @@ fn export_job_row(job: &ExportJobModel) -> PropertyRow {
     };
 
     let base_height = if job.can_cancel { 48.0 } else { 42.0 };
-    let height = if job.color_diagnostics.is_some() {
-        base_height + 18.0
-    } else {
-        base_height
-    };
+    let detail_rows =
+        usize::from(job.color_diagnostics.is_some()) + usize::from(job.broadcast_qc.is_some());
+    let height = base_height + detail_rows as f32 * 18.0;
     PropertyRow::new("任务", content).with_height(height)
+}
+
+fn export_job_broadcast_qc_label(
+    report: Option<&mondrian_broadcast::BroadcastQcReport>,
+) -> Option<String> {
+    let report = report?;
+    let coverage = match (report.first_frame, report.last_frame) {
+        (Some(first), Some(last)) => format!("{first}..={last}"),
+        _ => "none".to_owned(),
+    };
+    Some(format!(
+        "广播 QC: {}@{} / {:?} / {} 帧 ({coverage}) / findings {} retained {} overflow {} / obligations {} / {}",
+        report.profile_id,
+        report.profile_edition,
+        report.verdict,
+        report.analyzed_frames,
+        report.finding_count,
+        report.findings.len(),
+        report.overflow_count,
+        report.obligations.len(),
+        if report.complete { "complete" } else { "incomplete" }
+    ))
 }
 
 fn export_job_color_diagnostics_label(diagnostics: ExportJobColorDiagnostics) -> Option<String> {

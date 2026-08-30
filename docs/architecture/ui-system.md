@@ -1273,6 +1273,15 @@ only diagnostics; they cannot dirty the editor tree or trigger Preview work.
 The jobs token advances whenever the public `ExportJobSnapshot` collection
 changes, including bounded progress and job diagnostics.
 
+An Export enqueue Product Action may carry one complete versioned
+`BroadcastQcProfile`; App freezes it into the same immutable job rather than
+keeping a UI-only threshold bag. Terminal rows project the report's profile
+edition, verdict, analyzed range, total/retained/overflow findings, completion,
+and external-obligation count. App does not interpret or recompute QC. The
+local panel deliberately has no generic broadcaster-default toggle: an approved
+profile must arrive through deployment/profile management, while the external
+Product Action already provides the typed product Seam.
+
 The export panel obtains delivery readiness from
 `mondrian_export::resolve_export_delivery`, the same pure Interface enforced by
 queue admission. It does not maintain a codec/color compatibility table.

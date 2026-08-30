@@ -1,5 +1,5 @@
 [package]
-name = "mondrian-reference-output"
+name = "mondrian-broadcast"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -9,10 +9,9 @@ rust-version.workspace = true
 
 [dependencies]
 mondrian-core = { workspace = true }
-mondrian-broadcast = { workspace = true }
 serde = { workspace = true }
-thiserror = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

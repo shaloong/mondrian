@@ -127,6 +127,23 @@ licensed runtime artifacts rather than Rust test dependencies; ordinary unit
 tests retain deterministic negative coverage for graph, timing, digest, path,
 and XML attacks.
 
+## Broadcast QC publication gate
+
+An optional immutable `BroadcastQcProfile` is frozen with the ordinary Export
+snapshot. Export observes each real post-Legalizer, output-quantized delivery
+picture before handing it to the encoder and streams it through the shared
+Broadcast Module. `Fail` or `Incomplete` is terminal before durable publication;
+`Warn` publishes with the versioned report in job diagnostics. A requested scan
+disables Smart Render, byte-preserving Dynamic HDR, and GPU-resident encoding
+routes that cannot expose the exact observation tap.
+
+This gate proves the in-process delivery-picture sequence, not the final
+encoded/muxed artifact. Profiles may retain an explicit independent artifact
+revalidation obligation, just as regulatory flash analysis remains an external
+obligation. AS-11 ST 436 carriage and caption semantics are not inferred from
+the existing AS-11 picture/audio package. See
+[Broadcast QC And Ancillary Data](broadcast-qc-and-ancillary.md).
+
 ## Dynamic HDR delivery qualification
 
 Dynamic HDR is a separate delivery Module from the fixed IMF/AS-11/DCP rows.

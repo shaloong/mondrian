@@ -349,6 +349,7 @@ pub(super) fn execute_export_job(
         range,
         output_path: output_path.clone(),
         output_policy: ExportOutputPolicy::CreateNew,
+        broadcast_qc: None,
     }))?;
     let created = state
         .export_jobs_snapshot()

@@ -48,6 +48,12 @@ pub struct ReferenceOutputDiagnostics {
     pub flushed_frames: u64,
     /// Exact embedded-audio sample frames accepted with video.
     pub scheduled_audio_frames: u64,
+    /// Canonical ancillary packets accepted atomically with video/audio.
+    pub scheduled_ancillary_packets: u64,
+    /// Complete ST 291 words accepted, including ADF/checksum overhead.
+    pub scheduled_ancillary_words: u64,
+    /// Completed frames whose actual ANC inventory digest matched the schedule.
+    pub verified_ancillary_readbacks: u64,
     /// Highest simultaneous scheduled queue depth.
     pub scheduled_high_water: u32,
     /// Latest continuous external reference status.
@@ -69,6 +75,9 @@ impl Default for ReferenceOutputDiagnostics {
             dropped_frames: 0,
             flushed_frames: 0,
             scheduled_audio_frames: 0,
+            scheduled_ancillary_packets: 0,
+            scheduled_ancillary_words: 0,
+            verified_ancillary_readbacks: 0,
             scheduled_high_water: 0,
             reference_locked: None,
             last_error: None,
@@ -81,9 +90,15 @@ pub struct ReferenceOutputModule<A> {
     adapter: A,
     session: Option<Box<dyn ReferenceOutputAdapterSession>>,
     request: Option<ReferenceOutputOpenRequest>,
-    scheduled: VecDeque<u64>,
+    scheduled: VecDeque<ScheduledBundleEvidence>,
     next_frame_index: u64,
     diagnostics: ReferenceOutputDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ScheduledBundleEvidence {
+    frame_index: u64,
+    ancillary_sha256: [u8; 32],
 }
 
 impl<A> ReferenceOutputModule<A>
@@ -173,9 +188,25 @@ where
                 actual: bundle.frame_index(),
             });
         }
+        if !request.ancillary_policy.is_required() && !bundle.ancillary.packets().is_empty() {
+            return Err(ReferenceOutputError::AncillaryNotEnabled);
+        }
         let audio_frames = bundle.audio.sample_frames() as u64;
+        let ancillary_packets = bundle.ancillary.packets().len() as u64;
+        let ancillary_sha256 = bundle.ancillary.sha256();
+        let ancillary_words = bundle
+            .ancillary
+            .packets()
+            .iter()
+            .try_fold(0u64, |total, packet| {
+                total.checked_add(packet.packet.encoded_word_count() as u64)
+            })
+            .ok_or(ReferenceOutputError::AncillaryWordCountOverflow)?;
         self.session.as_mut().ok_or(ReferenceOutputError::NotOpen)?.schedule(bundle)?;
-        self.scheduled.push_back(self.next_frame_index);
+        self.scheduled.push_back(ScheduledBundleEvidence {
+            frame_index: self.next_frame_index,
+            ancillary_sha256,
+        });
         self.next_frame_index = self
             .next_frame_index
             .checked_add(1)
@@ -186,6 +217,16 @@ where
             .scheduled_audio_frames
             .checked_add(audio_frames)
             .ok_or(ReferenceOutputError::AudioFrameCountOverflow)?;
+        self.diagnostics.scheduled_ancillary_packets = self
+            .diagnostics
+            .scheduled_ancillary_packets
+            .checked_add(ancillary_packets)
+            .ok_or(ReferenceOutputError::AncillaryPacketCountOverflow)?;
+        self.diagnostics.scheduled_ancillary_words = self
+            .diagnostics
+            .scheduled_ancillary_words
+            .checked_add(ancillary_words)
+            .ok_or(ReferenceOutputError::AncillaryWordCountOverflow)?;
         self.diagnostics.scheduled_high_water =
             self.diagnostics.scheduled_high_water.max(self.scheduled.len() as u32);
         Ok(())
@@ -256,8 +297,37 @@ where
         event: ReferenceOutputAdapterEvent,
     ) -> Result<(), ReferenceOutputError> {
         match event {
-            ReferenceOutputAdapterEvent::FrameCompleted { frame_index, .. } => {
-                self.consume_scheduled(frame_index)?;
+            ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index,
+                ancillary_readback_sha256,
+                ..
+            } => {
+                let expected = self.consume_scheduled(frame_index)?;
+                if self
+                    .request
+                    .as_ref()
+                    .is_some_and(|request| request.ancillary_policy.requires_readback())
+                {
+                    let Some(actual) = ancillary_readback_sha256 else {
+                        self.record_failed_detail(format!(
+                            "provider omitted required ancillary readback for frame {frame_index}"
+                        ));
+                        return Err(ReferenceOutputError::AncillaryReadbackMissing { frame_index });
+                    };
+                    if actual != expected.ancillary_sha256 {
+                        self.record_failed_detail(format!(
+                            "provider ancillary readback differed for frame {frame_index}"
+                        ));
+                        return Err(ReferenceOutputError::AncillaryReadbackMismatch {
+                            frame_index,
+                        });
+                    }
+                    self.diagnostics.verified_ancillary_readbacks = self
+                        .diagnostics
+                        .verified_ancillary_readbacks
+                        .checked_add(1)
+                        .ok_or(ReferenceOutputError::AncillaryReadbackCountOverflow)?;
+                }
                 self.diagnostics.completed_frames += 1;
             }
             ReferenceOutputAdapterEvent::FrameLate { frame_index } => {
@@ -293,18 +363,25 @@ where
         Ok(())
     }
 
-    fn consume_scheduled(&mut self, actual: u64) -> Result<(), ReferenceOutputError> {
+    fn consume_scheduled(
+        &mut self,
+        actual: u64,
+    ) -> Result<ScheduledBundleEvidence, ReferenceOutputError> {
         let expected = self
             .scheduled
             .pop_front()
             .ok_or(ReferenceOutputError::UnexpectedCompletion { actual })?;
-        if actual != expected {
+        if actual != expected.frame_index {
             self.record_failed_detail(format!(
-                "out-of-order provider completion: expected {expected}, got {actual}"
+                "out-of-order provider completion: expected {}, got {actual}",
+                expected.frame_index
             ));
-            return Err(ReferenceOutputError::OutOfOrderCompletion { expected, actual });
+            return Err(ReferenceOutputError::OutOfOrderCompletion {
+                expected: expected.frame_index,
+                actual,
+            });
         }
-        Ok(())
+        Ok(expected)
     }
 
     fn block_active(&mut self, detail: &str) -> Result<(), ReferenceOutputError> {
@@ -372,6 +449,24 @@ pub enum ReferenceOutputError {
     /// Audio accounting overflowed.
     #[error("reference output audio frame accounting overflow")]
     AudioFrameCountOverflow,
+    /// A non-empty ANC inventory was supplied to a Session opened without ANC.
+    #[error("reference output ancillary packets were not enabled for this Session")]
+    AncillaryNotEnabled,
+    /// ANC packet accounting overflowed.
+    #[error("reference output ancillary packet accounting overflow")]
+    AncillaryPacketCountOverflow,
+    /// ANC word accounting overflowed.
+    #[error("reference output ancillary word accounting overflow")]
+    AncillaryWordCountOverflow,
+    /// Required provider readback was absent for a completed frame.
+    #[error("reference output provider omitted ancillary readback for frame {frame_index}")]
+    AncillaryReadbackMissing { frame_index: u64 },
+    /// Provider readback did not match the scheduled packet inventory.
+    #[error("reference output provider ancillary readback mismatch for frame {frame_index}")]
+    AncillaryReadbackMismatch { frame_index: u64 },
+    /// Verified readback accounting overflowed.
+    #[error("reference output ancillary readback accounting overflow")]
+    AncillaryReadbackCountOverflow,
     /// Provider completed a frame that was never scheduled.
     #[error("reference output provider completed unscheduled frame {actual}")]
     UnexpectedCompletion { actual: u64 },
@@ -387,6 +482,10 @@ mod tests {
         pack_encoded_rgb_to_v210, ReferenceAudioFrame, ReferenceOutputMode,
         ReferenceOutputPixelFormat, ReferenceOutputRange, ReferenceOutputScan,
         ReferenceOutputSignal, ReferenceVideoFrame, SimulatedReferenceOutputAdapter,
+    };
+    use mondrian_broadcast::{
+        ActiveFormatDescription, AncillaryField, AncillaryOrigin, AncillaryPacket,
+        AncillaryPlacement, AncillarySpace, AncillaryValidationLevel,
     };
     use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
 
@@ -404,6 +503,7 @@ mod tests {
                 audio_layout: AudioChannelLayout::Stereo,
             },
             reference_policy,
+            ancillary_policy: crate::ReferenceOutputAncillaryPolicy::Disabled,
             preroll_frames: 2,
             max_scheduled_frames: 3,
         }
@@ -425,7 +525,11 @@ mod tests {
         let audio =
             ReferenceAudioFrame::new(&request.signal, frame_index, vec![0; sample_frames * 2])
                 .expect("audio");
-        ReferenceOutputBundle { video, audio }
+        ReferenceOutputBundle {
+            video,
+            audio,
+            ancillary: crate::AncillaryFrame::empty(frame_index),
+        }
     }
 
     fn module(
@@ -440,6 +544,8 @@ mod tests {
             supports_hdr_signal: false,
             supports_static_hdr_metadata: false,
             supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
         };
         let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
             .expect("adapter")
@@ -517,5 +623,69 @@ mod tests {
             error,
             ReferenceOutputError::NonContiguousFrame { expected: 7, actual: 8 }
         ));
+    }
+
+    #[test]
+    fn ancillary_inventory_is_scheduled_atomically_and_accounted() {
+        let mut request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        request.ancillary_policy = crate::ReferenceOutputAncillaryPolicy::RequiredWithReadback;
+        request.preroll_frames = 1;
+        let (mut module, device) = module(&request, []);
+        module.open(&device, request.clone(), 0).expect("open ANC Session");
+        let placement =
+            AncillaryPlacement::new(AncillarySpace::Vanc, AncillaryField::Progressive, 9, 0)
+                .expect("placement");
+        let packet = ActiveFormatDescription::new(8, true, None)
+            .expect("AFD")
+            .packet()
+            .expect("ST 291 packet");
+        let expected_words = packet.encoded_word_count() as u64;
+        let ancillary = crate::AncillaryFrame::new(
+            0,
+            vec![AncillaryPacket {
+                placement,
+                packet,
+                origin: AncillaryOrigin::Derived,
+                validation: AncillaryValidationLevel::Semantic,
+            }],
+        )
+        .expect("ANC frame");
+        let mut first = bundle(&request, 0);
+        first.ancillary = ancillary;
+        module.schedule(first).expect("atomic ANC bundle");
+        module.start().expect("start ANC Session");
+        assert_eq!(module.poll(1).expect("ANC completion"), 1);
+        assert_eq!(module.diagnostics().scheduled_frames, 1);
+        assert_eq!(module.diagnostics().completed_frames, 1);
+        assert_eq!(module.diagnostics().scheduled_ancillary_packets, 1);
+        assert_eq!(
+            module.diagnostics().scheduled_ancillary_words,
+            expected_words
+        );
+        assert_eq!(module.diagnostics().verified_ancillary_readbacks, 1);
+    }
+
+    #[test]
+    fn required_ancillary_readback_fails_closed_when_provider_omits_digest() {
+        let mut request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        request.ancillary_policy = crate::ReferenceOutputAncillaryPolicy::RequiredWithReadback;
+        request.preroll_frames = 1;
+        let (mut module, device) = module(
+            &request,
+            [ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index: 0,
+                hardware_time: Some(123),
+                ancillary_readback_sha256: None,
+            }],
+        );
+        module.open(&device, request.clone(), 0).expect("open ANC Session");
+        module.schedule(bundle(&request, 0)).expect("schedule frame");
+        module.start().expect("start Session");
+        assert!(matches!(
+            module.poll(1),
+            Err(ReferenceOutputError::AncillaryReadbackMissing { frame_index: 0 })
+        ));
+        assert_eq!(module.diagnostics().state, ReferenceOutputState::Failed);
+        assert_eq!(module.diagnostics().completed_frames, 0);
     }
 }

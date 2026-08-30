@@ -1015,7 +1015,7 @@ fn execute_export_gpu_output_boundary_resident_with_backend(
 }
 
 /// Diagnostics accumulated for one export job.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ExportJobDiagnostics {
     /// Color-management diagnostics observed while rendering this job.
     pub color: ExportJobColorDiagnostics,
@@ -1027,6 +1027,8 @@ pub struct ExportJobDiagnostics {
     pub smart_render: Option<ExportSmartRenderEvidence>,
     /// Byte-identical original Dynamic HDR file preservation evidence.
     pub dynamic_hdr_preservation: Option<ExportDynamicHdrPreservationEvidence>,
+    /// Broadcaster-profile Program Output observation, when requested.
+    pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcReport>,
 }
 
 /// Dynamic metadata family proved on one byte-identical preserved source file.
@@ -1205,6 +1207,8 @@ pub enum ExportResidentEncodeBlocker {
     CodingStructure,
     /// Frozen resident-surface grant cannot admit the codec pool.
     ResourceGrant,
+    /// Requested QC needs a decoded delivery-picture observation before publication.
+    BroadcastQcObservationRequired,
     /// Platform, driver, exact-device conversion, or encoder Session was unavailable.
     BackendUnavailable,
 }
@@ -2519,6 +2523,7 @@ fn execute_professional_delivery_export(
         &job.config.timeline,
         range,
         &delivery,
+        job.config.broadcast_qc.as_ref(),
         cancel,
         execution_gate,
         report,
@@ -2952,6 +2957,7 @@ fn render_professional_picture_essence(
     timeline: &TimelineExportSnapshot,
     range: TimelineRenderRange,
     delivery: &ResolvedExportDeliveryContract,
+    broadcast_qc_profile: Option<&mondrian_broadcast::BroadcastQcProfile>,
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
@@ -3062,6 +3068,7 @@ fn render_professional_picture_essence(
     let mut child = SupervisedChild::spawn(&mut command, policy).map_err(|error| {
         process_supervision_failure("start professional picture encoder", error)
     })?;
+    let observations = ExportRenderObservations { broadcast_qc_profile, initial_diagnostics };
     let render_outcome = if profile == ProfessionalDeliveryProfile::SmpteDcp2kFlat24 {
         let frame_contract = export_frame_contract(delivery);
         render_timeline_frames_with_sink(
@@ -3076,7 +3083,7 @@ fn render_professional_picture_essence(
             report,
             report_diagnostics,
             visual_session,
-            initial_diagnostics,
+            observations,
             &mut |_index, canvas| {
                 let rgba = frame_contract
                     .to_rgba_f32(canvas)
@@ -3102,7 +3109,7 @@ fn render_professional_picture_essence(
             report,
             report_diagnostics,
             visual_session,
-            initial_diagnostics,
+            observations,
         )
     };
     if !matches!(render_outcome, JobExecutionResult::ReversibleWorkCompleted) {
@@ -3965,6 +3972,12 @@ fn execute_timeline_export(
             cancel,
         ) {
             Ok(Some(evidence)) => {
+                if job.config.broadcast_qc.is_some() {
+                    return JobExecutionResult::Failed(
+                        "broadcast QC requires decoded delivery-picture observation; byte-preserved Dynamic HDR export cannot bypass analysis"
+                            .to_owned(),
+                    );
+                }
                 report_diagnostics(ExportJobDiagnostics {
                     audio: audio_analysis,
                     dynamic_hdr_preservation: Some(evidence),
@@ -4004,12 +4017,17 @@ fn execute_timeline_export(
             .visual_diagnostics
             .resident_encode_admission_attempts
             .saturating_add(1);
-        match qualify_resident_hevc_export(
-            timeline,
-            &delivery,
-            job.config.preset.alpha_mode,
-            resource_policy,
-        ) {
+        let resident_qualification = if job.config.broadcast_qc.is_some() {
+            Err(ExportResidentEncodeBlocker::BroadcastQcObservationRequired)
+        } else {
+            qualify_resident_hevc_export(
+                timeline,
+                &delivery,
+                job.config.preset.alpha_mode,
+                resource_policy,
+            )
+        };
+        match resident_qualification {
             Ok(plan) => {
                 #[cfg(target_os = "windows")]
                 match execute_resident_hevc_export(
@@ -4120,9 +4138,12 @@ fn execute_timeline_export(
                 report,
                 report_diagnostics,
                 &mut visual_session,
-                ExportRenderInitialDiagnostics {
-                    asset_issue_summary: media_diagnostics.issue_summary,
-                    audio_analysis,
+                ExportRenderObservations {
+                    broadcast_qc_profile: job.config.broadcast_qc.as_ref(),
+                    initial_diagnostics: ExportRenderInitialDiagnostics {
+                        asset_issue_summary: media_diagnostics.issue_summary,
+                        audio_analysis,
+                    },
                 },
             );
             if matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
@@ -4281,9 +4302,12 @@ fn execute_timeline_export(
             report,
             report_diagnostics,
             &mut visual_session,
-            ExportRenderInitialDiagnostics {
-                asset_issue_summary: media_diagnostics.issue_summary,
-                audio_analysis,
+            ExportRenderObservations {
+                broadcast_qc_profile: job.config.broadcast_qc.as_ref(),
+                initial_diagnostics: ExportRenderInitialDiagnostics {
+                    asset_issue_summary: media_diagnostics.issue_summary,
+                    audio_analysis,
+                },
             },
         ) {
             JobExecutionResult::ReversibleWorkCompleted => {}
@@ -4507,7 +4531,7 @@ fn execute_resident_hevc_export(
         visual_session.visual_diagnostics.resident_encode_video_process_submissions =
             adapter.diagnostics().video_process_submissions;
         diagnostics.visual = visual_session.visual_diagnostics();
-        report_diagnostics(diagnostics);
+        report_diagnostics(diagnostics.clone());
         let ratio = submitted as f32 / total as f32;
         report(ExportProgress::rendering(
             (0.18 + 0.72 * ratio).clamp(0.18, 0.92),
@@ -4624,7 +4648,7 @@ fn execute_resident_hevc_export(
                     .resident_encode_video_stream_copy_muxes
                     .saturating_add(1);
             diagnostics.visual = visual_session.visual_diagnostics();
-            report_diagnostics(diagnostics);
+            report_diagnostics(diagnostics.clone());
             ResidentExportAttemptOutcome::Completed
         }
         Ok(output) => {
@@ -4658,6 +4682,9 @@ fn try_execute_smart_render(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
 ) -> Result<Option<ExportSmartRenderEvidence>, JobExecutionResult> {
+    if job.config.broadcast_qc.is_some() {
+        return Ok(None);
+    }
     if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
         tracing::debug!("Smart Render is not qualified for field-woven output");
         return Ok(None);
@@ -5426,7 +5453,7 @@ fn write_timeline_frames(
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
-    initial_diagnostics: ExportRenderInitialDiagnostics,
+    observations: ExportRenderObservations<'_>,
 ) -> JobExecutionResult {
     render_timeline_frames_with_sink(
         timeline,
@@ -5440,7 +5467,7 @@ fn write_timeline_frames(
         report,
         report_diagnostics,
         visual_session,
-        initial_diagnostics,
+        observations,
         &mut |_index, canvas| {
             let owned = std::mem::take(canvas);
             match child.write_owned(owned, cancel) {
@@ -5469,7 +5496,7 @@ fn write_native_image_sequence_frames(
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
-    initial_diagnostics: ExportRenderInitialDiagnostics,
+    observations: ExportRenderObservations<'_>,
 ) -> JobExecutionResult {
     let frame_contract = export_frame_contract(delivery);
     render_timeline_frames_with_sink(
@@ -5484,7 +5511,7 @@ fn write_native_image_sequence_frames(
         report,
         report_diagnostics,
         visual_session,
-        initial_diagnostics,
+        observations,
         &mut |index, canvas| {
             let path = directory.join(frame_file_name(index, format));
             write_native_tiff_float_frame(&path, width, height, alpha_mode, frame_contract, canvas)
@@ -5497,6 +5524,12 @@ fn write_native_image_sequence_frames(
 struct ExportRenderInitialDiagnostics {
     asset_issue_summary: VideoColorDiagnosticIssueAggregate,
     audio_analysis: Option<AudioLoudnessReport>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExportRenderObservations<'a> {
+    broadcast_qc_profile: Option<&'a mondrian_broadcast::BroadcastQcProfile>,
+    initial_diagnostics: ExportRenderInitialDiagnostics,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -5629,7 +5662,7 @@ fn render_timeline_frames_with_sink(
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
-    initial_diagnostics: ExportRenderInitialDiagnostics,
+    observations: ExportRenderObservations<'_>,
     write_frame: &mut ExportFrameSink<'_>,
 ) -> JobExecutionResult {
     let frame_contract = export_frame_contract(delivery);
@@ -5648,11 +5681,25 @@ fn render_timeline_frames_with_sink(
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
         .color
-        .record_asset_issue_summary(initial_diagnostics.asset_issue_summary);
-    diagnostics.audio = initial_diagnostics.audio_analysis;
+        .record_asset_issue_summary(observations.initial_diagnostics.asset_issue_summary);
+    diagnostics.audio = observations.initial_diagnostics.audio_analysis;
+    let mut broadcast_qc = match prepare_export_broadcast_qc(
+        observations.broadcast_qc_profile,
+        width,
+        height,
+        delivery.color_target.color_space,
+    ) {
+        Ok(session) => session,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
 
     for index in 0..total {
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
+            finish_incomplete_export_broadcast_qc(
+                &mut broadcast_qc,
+                &mut diagnostics,
+                report_diagnostics,
+            );
             return JobExecutionResult::Cancelled;
         }
 
@@ -5754,16 +5801,55 @@ fn render_timeline_frames_with_sink(
             frame_composite_diagnostics,
         );
         diagnostics.visual = visual_session.visual_diagnostics();
-        report_diagnostics(diagnostics);
+        report_diagnostics(diagnostics.clone());
         match render_result {
             Ok(()) => {}
             Err(_) if cancel.is_canceled() => {
+                finish_incomplete_export_broadcast_qc(
+                    &mut broadcast_qc,
+                    &mut diagnostics,
+                    report_diagnostics,
+                );
                 return JobExecutionResult::Cancelled;
             }
             Err(err) => {
+                finish_incomplete_export_broadcast_qc(
+                    &mut broadcast_qc,
+                    &mut diagnostics,
+                    report_diagnostics,
+                );
                 return JobExecutionResult::Failed(format!(
                     "渲染时间线图像失败（output_frame={}）: {}",
                     index, err
+                ));
+            }
+        }
+
+        if let Some(session) = broadcast_qc.as_mut() {
+            let rgba = match frame_contract.to_rgba_f32(&canvas) {
+                Ok(rgba) => rgba,
+                Err(error) => {
+                    finish_incomplete_export_broadcast_qc(
+                        &mut broadcast_qc,
+                        &mut diagnostics,
+                        report_diagnostics,
+                    );
+                    return JobExecutionResult::Failed(format!(
+                        "broadcast QC delivery-picture readback failed: {error}"
+                    ));
+                }
+            };
+            if let Err(error) = session.push(mondrian_broadcast::BroadcastQcFrame {
+                frame_index: index,
+                rgba: bytemuck::cast_slice(&rgba),
+            }) {
+                finish_incomplete_export_broadcast_qc(
+                    &mut broadcast_qc,
+                    &mut diagnostics,
+                    report_diagnostics,
+                );
+                return JobExecutionResult::Failed(format!(
+                    "broadcast QC frame analysis failed: {error}"
                 ));
             }
         }
@@ -5775,6 +5861,11 @@ fn render_timeline_frames_with_sink(
             return JobExecutionResult::Failed(error);
         }
         if let Err(outcome) = write_frame(index, &mut canvas) {
+            finish_incomplete_export_broadcast_qc(
+                &mut broadcast_qc,
+                &mut diagnostics,
+                report_diagnostics,
+            );
             return outcome;
         }
 
@@ -5784,7 +5875,88 @@ fn render_timeline_frames_with_sink(
         report(ExportProgress::rendering(progress, rendered, total));
     }
 
+    if let Some(session) = broadcast_qc.take() {
+        let report = match session.finish(true) {
+            Ok(report) => report,
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "broadcast QC report finalization failed: {error}"
+                ));
+            }
+        };
+        let verdict = report.verdict;
+        diagnostics.broadcast_qc = Some(report);
+        report_diagnostics(diagnostics.clone());
+        if matches!(
+            verdict,
+            mondrian_broadcast::BroadcastQcVerdict::Fail
+                | mondrian_broadcast::BroadcastQcVerdict::Incomplete
+        ) {
+            return JobExecutionResult::Failed(format!(
+                "broadcast QC publication gate rejected profile {} with verdict {verdict:?}",
+                diagnostics
+                    .broadcast_qc
+                    .as_ref()
+                    .map(|report| report.profile_id.as_str())
+                    .unwrap_or("<missing>")
+            ));
+        }
+    }
+
     JobExecutionResult::ReversibleWorkCompleted
+}
+
+fn prepare_export_broadcast_qc(
+    profile: Option<&mondrian_broadcast::BroadcastQcProfile>,
+    width: u32,
+    height: u32,
+    color_space: ColorSpace,
+) -> Result<Option<mondrian_broadcast::BroadcastQcSession>, String> {
+    let Some(profile) = profile else {
+        return Ok(None);
+    };
+    if profile.observation_tap
+        != mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer
+    {
+        return Err(
+            "Export currently admits broadcast QC only at the post-Legalizer delivery-picture tap"
+                .to_owned(),
+        );
+    }
+    if profile.active_picture.raster_width != width
+        || profile.active_picture.raster_height != height
+    {
+        return Err(format!(
+            "broadcast QC profile raster {}x{} differs from delivery {}x{}",
+            profile.active_picture.raster_width,
+            profile.active_picture.raster_height,
+            width,
+            height
+        ));
+    }
+    if profile.signal_color_space != color_space {
+        return Err(format!(
+            "broadcast QC profile color {:?} differs from delivery {:?}",
+            profile.signal_color_space, color_space
+        ));
+    }
+    mondrian_broadcast::BroadcastQcSession::new(profile.clone())
+        .map(Some)
+        .map_err(|error| format!("broadcast QC profile is invalid: {error}"))
+}
+
+fn finish_incomplete_export_broadcast_qc(
+    session: &mut Option<mondrian_broadcast::BroadcastQcSession>,
+    diagnostics: &mut ExportJobDiagnostics,
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+) {
+    let Some(session) = session.take() else {
+        return;
+    };
+    if let Ok(report) = session.finish(false) {
+        diagnostics.broadcast_qc = Some(report);
+        report_diagnostics(diagnostics.clone());
+    }
 }
 
 /// Build the export output boundary from the resolved color context.
@@ -10267,7 +10439,7 @@ mod tests {
                 return JobExecutionResult::Cancelled;
             }
             report(ExportProgress::rendering(0.5, 1, 1));
-            report_diagnostics(self.diagnostics);
+            report_diagnostics(self.diagnostics.clone());
             if execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
                 JobExecutionResult::Published(DurableExportPublication::synthetic(
                     &job.config.output_path,
@@ -10332,6 +10504,7 @@ mod tests {
             output_path: PathBuf::from(output_name),
             output_policy: ExportOutputPolicy::CreateNew,
             smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
+            broadcast_qc: None,
         }
     }
 
@@ -10518,6 +10691,98 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_export_freezes_and_reports_broadcast_qc_before_publication() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping broadcast QC export integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary broadcast QC parent");
+        let output = directory.path().join("broadcast-qc.mp4");
+        let mut config = dummy_config(&output.to_string_lossy());
+        config.preset.resolution = Some(crate::preset::Resolution { width: 256, height: 256 });
+        let profile = mondrian_broadcast::BroadcastQcProfile {
+            id: "test-broadcaster".to_owned(),
+            edition: "2026-01".to_owned(),
+            source_sha256: [9; 32],
+            signal_color_space: ColorSpace::Rec709,
+            observation_tap:
+                mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: mondrian_broadcast::QcActivePicture::full(256, 256),
+            rules: vec![mondrian_broadcast::BroadcastQcRule::Black {
+                rule_id: "black-program".to_owned(),
+                maximum_encoded_luma: 0.01,
+                minimum_coverage_ppm: 1_000_000,
+                minimum_frames: 1,
+                severity: mondrian_broadcast::BroadcastQcSeverity::Warn,
+            }],
+            maximum_retained_findings: 8,
+            require_regulatory_flash_analysis: false,
+            require_encoded_artifact_revalidation: false,
+        };
+        config.broadcast_qc = Some(profile.clone());
+        refresh_test_execution_snapshot(&mut config.timeline, true);
+        let job = RenderJob::new(config);
+        let mut latest_diagnostics = None;
+        let result = FfmpegExportExecutor.execute(
+            &job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |diagnostics| latest_diagnostics = Some(diagnostics),
+        );
+
+        assert!(
+            matches!(result, JobExecutionResult::Published(_)),
+            "{result:?}"
+        );
+        let report = latest_diagnostics
+            .and_then(|diagnostics| diagnostics.broadcast_qc)
+            .expect("broadcast QC report");
+        assert!(report.complete);
+        assert_eq!(report.profile_id, "test-broadcaster");
+        assert_eq!(report.verdict, mondrian_broadcast::BroadcastQcVerdict::Warn);
+        assert!(report.findings.iter().any(|finding| {
+            finding.kind == mondrian_broadcast::BroadcastQcFindingKind::BlackSegment
+        }));
+
+        let blocked_output = directory.path().join("broadcast-qc-blocked.mp4");
+        let mut blocked_config = dummy_config(&blocked_output.to_string_lossy());
+        blocked_config.preset.resolution =
+            Some(crate::preset::Resolution { width: 256, height: 256 });
+        let mut blocking_profile = profile;
+        if let mondrian_broadcast::BroadcastQcRule::Black { severity, .. } =
+            &mut blocking_profile.rules[0]
+        {
+            *severity = mondrian_broadcast::BroadcastQcSeverity::Fail;
+        }
+        blocked_config.broadcast_qc = Some(blocking_profile);
+        refresh_test_execution_snapshot(&mut blocked_config.timeline, true);
+        let blocked_job = RenderJob::new(blocked_config);
+        let mut blocked_diagnostics = None;
+        let blocked = FfmpegExportExecutor.execute(
+            &blocked_job,
+            &ExecutionCancellationToken::new(),
+            &open_execution_gate(),
+            &mut |_| {},
+            &mut |diagnostics| blocked_diagnostics = Some(diagnostics),
+        );
+        assert!(
+            matches!(blocked, JobExecutionResult::Failed(_)),
+            "{blocked:?}"
+        );
+        assert!(
+            !blocked_output.exists(),
+            "fatal QC must not publish the deliverable"
+        );
+        assert_eq!(
+            blocked_diagnostics
+                .and_then(|diagnostics| diagnostics.broadcast_qc)
+                .map(|report| report.verdict),
+            Some(mondrian_broadcast::BroadcastQcVerdict::Fail)
+        );
+    }
+
+    #[test]
     fn ffmpeg_executor_publishes_each_professional_mezzanine_family() {
         if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
             eprintln!("skipping professional mezzanine integration test: FFmpeg unavailable");
@@ -10688,6 +10953,7 @@ mod tests {
             output_path: output.clone(),
             output_policy: ExportOutputPolicy::CreateNew,
             smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
+            broadcast_qc: None,
         });
         let mut latest_diagnostics = None;
         let result = FfmpegExportExecutor.execute(
@@ -12107,7 +12373,9 @@ mod tests {
                 ..TimelineCompositeDiagnostics::default()
             },
         );
-        let queue = RenderQueue::new_with_executor(Arc::new(DiagnosticExecutor { diagnostics }));
+        let queue = RenderQueue::new_with_executor(Arc::new(DiagnosticExecutor {
+            diagnostics: diagnostics.clone(),
+        }));
 
         let job_id = queue
             .enqueue(RenderJob::new(dummy_config("diagnostics.mp4")))

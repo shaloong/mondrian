@@ -425,6 +425,15 @@ audio by construction. It uses the same immutable Timeline snapshot, visual
 preflight, frame sampling, working compositor, and output color boundary as a
 media file; only the encoder transport and artifact validator differ.
 
+When a frozen broadcaster profile requests QC, Export converts the exact final
+delivery frame contract back to encoded Float32 RGBA after Program Output,
+Legalizer, and output quantization, then passes that borrowed raster to the
+Broadcast Module before the encoder write. This observation adds no second
+Timeline, color, or compositor interpretation. The current Interface admits
+only `DeliveryPictureAfterLegalizer`; a pre-Legalizer profile fails before
+rendering until that distinct tap is exposed. Smart Render and resident encode
+are ineligible because neither exposes the required host-visible sequence.
+
 For H.264 and HEVC media files, `hardware_encoding` owns encoder admission and
 argument lowering. FFmpeg registry presence is not capability evidence: the
 candidate must match the active Export renderer Adapter vendor and complete a

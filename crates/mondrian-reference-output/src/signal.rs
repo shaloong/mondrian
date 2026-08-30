@@ -188,6 +188,31 @@ pub enum ReferenceOutputReferencePolicy {
     RequireExternalLock,
 }
 
+/// Ancillary-data capability required for one open Session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceOutputAncillaryPolicy {
+    /// The Session must reject non-empty ancillary inventories.
+    #[default]
+    Disabled,
+    /// Provider must prove atomic ancillary scheduling with video/audio.
+    Required,
+    /// Provider must additionally prove packet readback/capture evidence.
+    RequiredWithReadback,
+}
+
+impl ReferenceOutputAncillaryPolicy {
+    /// Whether ancillary scheduling capability is required at open.
+    pub const fn is_required(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
+
+    /// Whether the provider must expose independent packet readback evidence.
+    pub const fn requires_readback(self) -> bool {
+        matches!(self, Self::RequiredWithReadback)
+    }
+}
+
 /// Exact mode advertised by one physical or simulated device.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -200,6 +225,10 @@ pub struct ReferenceOutputMode {
     pub supports_static_hdr_metadata: bool,
     /// Provider can continuously report external reference lock.
     pub supports_reference_status: bool,
+    /// Provider can schedule a canonical ANC inventory atomically with picture/audio.
+    pub supports_ancillary: bool,
+    /// Provider can read back or capture the actual scheduled packet inventory.
+    pub supports_ancillary_readback: bool,
 }
 
 impl ReferenceOutputMode {
@@ -229,6 +258,12 @@ impl ReferenceOutputMode {
         {
             return Err(ReferenceOutputModeError::ReferenceStatusUnsupported);
         }
+        if request.ancillary_policy.is_required() && !self.supports_ancillary {
+            return Err(ReferenceOutputModeError::AncillaryUnsupported);
+        }
+        if request.ancillary_policy.requires_readback() && !self.supports_ancillary_readback {
+            return Err(ReferenceOutputModeError::AncillaryReadbackUnsupported);
+        }
         Ok(())
     }
 }
@@ -241,6 +276,9 @@ pub struct ReferenceOutputOpenRequest {
     pub signal: ReferenceOutputSignal,
     /// External reference-lock policy.
     pub reference_policy: ReferenceOutputReferencePolicy,
+    /// Required ANC scheduling/readback evidence.
+    #[serde(default)]
+    pub ancillary_policy: ReferenceOutputAncillaryPolicy,
     /// Minimum video-frame preroll before playback starts.
     pub preroll_frames: u32,
     /// Bounded outstanding scheduled-frame limit.
@@ -287,6 +325,12 @@ pub enum ReferenceOutputModeError {
     /// External lock cannot be observed continuously.
     #[error("reference output device cannot report reference lock")]
     ReferenceStatusUnsupported,
+    /// Atomic video/audio/ANC scheduling is unavailable.
+    #[error("reference output device cannot schedule ancillary packets")]
+    AncillaryUnsupported,
+    /// Actual packet inventory cannot be independently read back or captured.
+    #[error("reference output device cannot prove ancillary packet readback")]
+    AncillaryReadbackUnsupported,
     /// Scheduled output requires preroll.
     #[error("reference output preroll must be greater than zero")]
     ZeroPreroll,

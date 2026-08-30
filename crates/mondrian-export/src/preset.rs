@@ -1129,6 +1129,10 @@ pub struct ExportConfig {
     /// Conservative encoded-essence reuse policy frozen with this job.
     #[serde(default)]
     pub smart_render: ExportSmartRenderPolicy,
+    /// Optional frozen broadcaster-specific Program Output QC profile.
+    /// Findings are evaluated before irreversible publication.
+    #[serde(default)]
+    pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
 }
 
 /// Whether Export may reuse independently validated source video essence.

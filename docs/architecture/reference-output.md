@@ -12,7 +12,7 @@ Prepared Visual full-raster working composite     Audio Program (48 kHz)
                     |                                      |
                     +------------------+-------------------+
                                        v
-                 v210 10-bit 4:2:2 or RGB 12-bit + s24 PCM
+           v210 10-bit 4:2:2 or RGB 12-bit + s24 PCM + ANC frame
                                        |
                                        v
                   bounded Reference Output scheduler Module
@@ -27,7 +27,8 @@ Prepared Visual full-raster working composite     Audio Program (48 kHz)
 ## Ownership and clean-feed semantics
 
 `mondrian-reference-output` is the deep execution Module. Its public Interface
-owns exact signal admission, packed video and embedded-audio payloads, bounded
+owns exact signal admission, packed video, embedded-audio, and ancillary
+payloads, bounded
 scheduled playback, provider events, lifecycle diagnostics, and the Adapter
 Seam. It has no Timeline, Renderer, App, UI, wgpu, FFmpeg, COM, or C++
 dependency. Vendor handles, callback threads, profile ownership, and ABI details
@@ -71,7 +72,19 @@ Audio windows use exact rational frame boundaries. At 30000/1001 fps the first
 five 48 kHz intervals contain `1601, 1602, 1601, 1602, 1602` sample frames;
 per-frame rounding is never used. One atomic bundle owns the video frame and
 the corresponding audio interval. Frame gaps, duplicates, signal mismatch,
-queue overflow, and out-of-order completion fail closed.
+queue overflow, and out-of-order completion fail closed. The same atomic bundle
+also carries one canonical `mondrian-broadcast::AncillaryFrame`; a packet can
+never be scheduled independently from its exact video/audio frame identity.
+
+Mode admission declares `Disabled`, `Required`, or `RequiredWithReadback`
+ancillary policy. A nonempty inventory is rejected when ancillary is disabled.
+Required readback needs provider evidence distinct from scheduling support.
+Every completed frame then carries the provider's actual ancillary-inventory
+digest; the Module compares it with the scheduled digest and fails the Session
+on omission or mismatch. Simulated matching remains non-hardware evidence.
+ST 291 packet construction, parity/checksum, ATC, AFD, and CDP transport remain
+owned by the Broadcast Module; this Module owns only exact scheduling and
+provider evidence.
 
 HDR transfer/colorimetry requires an explicit `ReferenceHdrSignal` even when
 no static fields are authored. Mode evidence distinguishes HDR signalling
@@ -110,7 +123,8 @@ broadcast qualification.
 
 The queue is bounded to 64 complete bundles and reports scheduled high-water,
 completed/late/dropped/flushed counts, exact audio-frame accounting, provider
-versions, device generation, and reference status. The current Renderer seam
+versions, device generation, reference status, ancillary packet count, and
+ancillary word/readback-verification counts. The current Renderer seam
 has a correct CPU Float32 Program Output and packing path. It deliberately does
 not claim a GPU-to-device resident path; future work should deepen the same
 Module with reusable pinned buffers or device-resident transfers rather than
@@ -120,7 +134,8 @@ Software tests prove exact mode admission, carrier packing, cadence, ordering,
 reference-loss behavior, runtime-unavailable behavior, clean-feed color
 identity, App author binding, and preference persistence. Commercial hardware
 qualification additionally requires licensed vendor bridges, supported
-DeckLink/AJA hardware and drivers, SDI capture/monitor loopback, external
+DeckLink/AJA hardware and drivers, SDI capture/monitor loopback including ANC
+line/field readback, external
 reference equipment, platform/driver matrices, and long-duration soak. Those
 facts belong to COL-042 HITL plus COL-043, COL-046, and COL-047; software
 simulation cannot close them.

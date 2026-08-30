@@ -56,6 +56,25 @@ impl ReferenceOutputProgram {
         audio_f32: &[f32],
         session: &mut RenderCpuColorExecutionSession,
     ) -> Result<ReferenceOutputBundle, ReferenceOutputProgramError> {
+        self.execute_cpu_with_ancillary(
+            working_frame,
+            frame_index,
+            audio_f32,
+            mondrian_reference_output::AncillaryFrame::empty(frame_index),
+            session,
+        )
+    }
+
+    /// Lower one clean-feed frame with a canonical ANC inventory prepared by
+    /// the Broadcast Compliance Module at the same absolute frame coordinate.
+    pub fn execute_cpu_with_ancillary(
+        &self,
+        working_frame: &CpuColorFrame,
+        frame_index: u64,
+        audio_f32: &[f32],
+        ancillary: mondrian_reference_output::AncillaryFrame,
+        session: &mut RenderCpuColorExecutionSession,
+    ) -> Result<ReferenceOutputBundle, ReferenceOutputProgramError> {
         let descriptor = working_frame.descriptor();
         if descriptor.width != self.signal.width || descriptor.height != self.signal.height {
             return Err(ReferenceOutputProgramError::RasterMismatch {
@@ -93,7 +112,9 @@ impl ReferenceOutputProgram {
             ReferenceVideoFrame::from_program_output(&self.signal, frame_index, row_bytes, bytes)?;
         let audio =
             ReferenceAudioFrame::new(&self.signal, frame_index, pack_f32_audio_to_s24(audio_f32)?)?;
-        Ok(ReferenceOutputBundle { video, audio })
+        let bundle = ReferenceOutputBundle { video, audio, ancillary };
+        bundle.validate()?;
+        Ok(bundle)
     }
 }
 

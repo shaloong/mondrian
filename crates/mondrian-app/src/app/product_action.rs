@@ -3600,6 +3600,23 @@ mod tests {
                     range: TimelineExportRange::EntireSequence,
                     output_path: PathBuf::from("delivery.mp4"),
                     output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                    broadcast_qc: Some(mondrian_broadcast::BroadcastQcProfile {
+                        id: "external-broadcast-profile".to_owned(),
+                        edition: "2026-01".to_owned(),
+                        source_sha256: [3; 32],
+                        signal_color_space: mondrian_core::ColorSpace::Rec709,
+                        observation_tap: mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+                        active_picture: mondrian_broadcast::QcActivePicture::full(1920, 1080),
+                        rules: vec![mondrian_broadcast::BroadcastQcRule::SignalExcursion {
+                            rule_id: "delivery-signal".to_owned(),
+                            tolerance_per_mille: 50,
+                            maximum_coverage_ppm: 10_000,
+                            severity: mondrian_broadcast::BroadcastQcSeverity::Fail,
+                        }],
+                        maximum_retained_findings: 1_024,
+                        require_regulatory_flash_analysis: true,
+                        require_encoded_artifact_revalidation: true,
+                    }),
                 },
             ))),
             ProductAction::Export(ExportProductAction::Cancel(job_id)),
@@ -4474,6 +4491,7 @@ mod tests {
             range: TimelineExportRange::EntireSequence,
             output_path: PathBuf::from("delivery.mp4"),
             output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            broadcast_qc: None,
         };
         let valid_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
             valid_request.clone(),
@@ -4493,6 +4511,7 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("delivery.imf"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             },
         )));
         assert!(state.product_action_availability().allows(&imf_enqueue));
@@ -4506,6 +4525,7 @@ mod tests {
                 range: TimelineExportRange::EntireSequence,
                 output_path: PathBuf::from("delivery.dcp"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             },
         )));
         assert!(!state.product_action_availability().allows(&dcp_enqueue));

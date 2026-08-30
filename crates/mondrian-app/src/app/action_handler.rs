@@ -2375,6 +2375,7 @@ mod tests {
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: PathBuf::new(),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             }))
             .expect_err("empty output path should fail");
 

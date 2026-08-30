@@ -7,10 +7,11 @@ use mondrian_app::app_ui::preferences_store::{
 };
 use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
 use mondrian_reference_output::{
-    ReferenceAudioFrame, ReferenceOutputBundle, ReferenceOutputDeviceId, ReferenceOutputMode,
-    ReferenceOutputOpenRequest, ReferenceOutputPixelFormat, ReferenceOutputProvider,
-    ReferenceOutputRange, ReferenceOutputReferencePolicy, ReferenceOutputRoutingPreferences,
-    ReferenceOutputScan, ReferenceOutputSignal, ReferenceOutputState, ReferenceVideoFrame,
+    ReferenceAudioFrame, ReferenceOutputAncillaryPolicy, ReferenceOutputBundle,
+    ReferenceOutputDeviceId, ReferenceOutputMode, ReferenceOutputOpenRequest,
+    ReferenceOutputPixelFormat, ReferenceOutputProvider, ReferenceOutputRange,
+    ReferenceOutputReferencePolicy, ReferenceOutputRoutingPreferences, ReferenceOutputScan,
+    ReferenceOutputSignal, ReferenceOutputState, ReferenceVideoFrame,
     SimulatedReferenceOutputAdapter,
 };
 
@@ -71,7 +72,11 @@ fn bundle(signal: &ReferenceOutputSignal, frame_index: u64) -> ReferenceOutputBu
         vec![0; audio_frames * signal.audio_layout.channel_count()],
     )
     .expect("valid embedded audio extent");
-    ReferenceOutputBundle { video, audio }
+    ReferenceOutputBundle {
+        video,
+        audio,
+        ancillary: mondrian_reference_output::AncillaryFrame::empty(frame_index),
+    }
 }
 
 #[test]
@@ -94,6 +99,8 @@ fn reference_output_is_machine_local_and_stale_author_state_stops_playout() {
         supports_hdr_signal: false,
         supports_static_hdr_metadata: false,
         supports_reference_status: true,
+        supports_ancillary: true,
+        supports_ancillary_readback: true,
     };
     state
         .install_reference_output_adapter(Box::new(
@@ -116,6 +123,7 @@ fn reference_output_is_machine_local_and_stale_author_state_stops_playout() {
             ReferenceOutputOpenRequest {
                 signal: signal.clone(),
                 reference_policy: ReferenceOutputReferencePolicy::FreeRunAllowed,
+                ancillary_policy: ReferenceOutputAncillaryPolicy::Disabled,
                 preroll_frames: 2,
                 max_scheduled_frames: 3,
             },

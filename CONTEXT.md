@@ -165,14 +165,23 @@ _Avoid_: Second creative output View authority, monitor policy in Sequence setti
 
 **Reference Output Module**:
 The machine-local deep execution Module that pairs one canonical full-raster
-Program Output with exact 48 kHz Audio Program intervals, admits one closed
+Program Output with exact 48 kHz Audio Program intervals and one canonical
+Ancillary Frame, admits one closed
 physical signal, and owns bounded scheduled playout through a DeckLink/AJA
 Adapter Seam. It binds device authority to exact Sequence revision and Project
 author generation. Viewer scaling, comparison, monitor/ICC, Scopes, warnings,
 Monitor Path PCM, Export publication, device routing preferences, and vendor
 ABI handles are outside the clean-feed semantic payload. A simulated Adapter
 can prove Module behavior only and permanently carries non-hardware evidence.
-_Avoid_: Viewer window as SDI output, Project-owned device ID, implicit device conversion, per-frame rounded audio, fake device when SDK is absent, simulated output presented as hardware qualification
+_Avoid_: Viewer window as SDI output, Project-owned device ID, implicit device conversion, per-frame rounded audio, independently scheduled ANC, fake device when SDK is absent, simulated output presented as hardware qualification
+
+**Broadcast QC Profile**:
+The immutable versioned contract consumed by the Broadcast QC Module: source-document hash, encoded-signal identity, exact pre/post-Legalizer observation tap, active picture, ordered thresholds/severities, bounded evidence capacity, and explicit external obligations. Export scans contiguous real delivery pictures before encoder consumption and blocks publication on `Fail` or `Incomplete`; a finished-file re-decode, approved PSE/BT.1702 result, and broadcaster qualification remain separate evidence.
+_Avoid_: Generic hard-coded broadcaster thresholds, flash candidates presented as certification, FFmpeg probe presented as content re-scan, Smart Render bypassing requested QC
+
+**Ancillary Frame**:
+One frame-addressed, canonical, collision-safe, bounded inventory of ST 291 Type 2 packets. The Broadcast Module alone owns ADF/parity/checksum and registered ATC/AFD/CDP transport lowering; Reference Output atomically schedules the inventory with the exact picture and Audio Program interval. Caption text authoring, CEA semantics, ST 436 carriage, and physical line/field readback remain explicit unqualified Adapters.
+_Avoid_: Display timecode as ATC authority, Basic Title inferred as captions, raw caller words treated as validated packets, ANC scheduled outside the video/audio bundle
 
 **Professional Scopes Controls**:
 The versioned machine-local Viewer preference selecting Luma or RGB Parade, encoded IRE or transfer-decoded absolute-nits aggregation, exact Program Output or pre-ICC Monitor Output tap, skin-tone line, 75% color targets, and overview/grid/single-scope layout. Waveform mode, scale, and tap form the GPU analysis identity; guides and layout are presentation-only. A hidden Scopes panel performs no aggregation, and none of these controls enter `.mdp` author state or render-cache identity.

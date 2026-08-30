@@ -2307,6 +2307,7 @@ dependencies = [
  "libc",
  "mondrian-assets",
  "mondrian-audio",
+ "mondrian-broadcast",
  "mondrian-core",
  "mondrian-editor-state",
  "mondrian-effects",
@@ -2387,6 +2388,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mondrian-broadcast"
+version = "0.2.0"
+dependencies = [
+ "mondrian-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mondrian-core"
 version = "0.2.0"
 dependencies = [
@@ -2455,6 +2467,7 @@ dependencies = [
  "half",
  "image",
  "mondrian-audio",
+ "mondrian-broadcast",
  "mondrian-core",
  "mondrian-effects",
  "mondrian-media",
@@ -2573,6 +2586,7 @@ dependencies = [
 name = "mondrian-reference-output"
 version = "0.2.0"
 dependencies = [
+ "mondrian-broadcast",
  "mondrian-core",
  "serde",
  "serde_json",

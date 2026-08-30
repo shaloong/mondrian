@@ -669,6 +669,7 @@ mod tests {
                 range: mondrian_export::preset::TimelineExportRange::EntireSequence,
                 output_path: std::path::PathBuf::from("delivery.mp4"),
                 output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+                broadcast_qc: None,
             }),
             &state,
         ));

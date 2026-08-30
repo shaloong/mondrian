@@ -10,6 +10,8 @@ mod frame;
 mod module;
 mod signal;
 
+pub use mondrian_broadcast::AncillaryFrame;
+
 pub use adapter::{
     ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
     ReferenceOutputAdapterSession, ReferenceOutputDeviceDescriptor, ReferenceOutputDeviceId,
@@ -27,8 +29,9 @@ pub use module::{
     ReferenceOutputDiagnostics, ReferenceOutputError, ReferenceOutputModule, ReferenceOutputState,
 };
 pub use signal::{
-    ReferenceAudioCadence, ReferenceAudioCadenceError, ReferenceHdrSignal, ReferenceOutputMode,
-    ReferenceOutputModeError, ReferenceOutputOpenRequest, ReferenceOutputPixelFormat,
-    ReferenceOutputRange, ReferenceOutputReferencePolicy, ReferenceOutputScan,
-    ReferenceOutputSignal, ReferenceOutputSignalError,
+    ReferenceAudioCadence, ReferenceAudioCadenceError, ReferenceHdrSignal,
+    ReferenceOutputAncillaryPolicy, ReferenceOutputMode, ReferenceOutputModeError,
+    ReferenceOutputOpenRequest, ReferenceOutputPixelFormat, ReferenceOutputRange,
+    ReferenceOutputReferencePolicy, ReferenceOutputScan, ReferenceOutputSignal,
+    ReferenceOutputSignalError,
 };

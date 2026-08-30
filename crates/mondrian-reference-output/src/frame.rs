@@ -1,3 +1,4 @@
+use mondrian_broadcast::AncillaryFrame;
 use mondrian_core::{AudioChannelLayout, ColorMatrixCoefficients};
 use sha2::{Digest, Sha256};
 
@@ -150,6 +151,8 @@ pub struct ReferenceOutputBundle {
     pub video: ReferenceVideoFrame,
     /// Embedded 48 kHz audio payload.
     pub audio: ReferenceAudioFrame,
+    /// Canonical ancillary inventory atomically associated with this frame.
+    pub ancillary: AncillaryFrame,
 }
 
 impl ReferenceOutputBundle {
@@ -163,6 +166,12 @@ impl ReferenceOutputBundle {
         }
         if self.video.signal != self.audio.signal {
             return Err(ReferenceOutputPayloadError::BundleSignalMismatch);
+        }
+        if self.video.frame_index != self.ancillary.frame_index() {
+            return Err(ReferenceOutputPayloadError::AncillaryTimeMismatch {
+                video: self.video.frame_index,
+                ancillary: self.ancillary.frame_index(),
+            });
         }
         Ok(())
     }
@@ -393,6 +402,11 @@ pub enum ReferenceOutputPayloadError {
     /// Video and audio must share one frame coordinate.
     #[error("reference output bundle video frame {video} differs from audio frame {audio}")]
     BundleTimeMismatch { video: u64, audio: u64 },
+    /// Video and ancillary inventory must share one frame coordinate.
+    #[error(
+        "reference output bundle video frame {video} differs from ancillary frame {ancillary}"
+    )]
+    AncillaryTimeMismatch { video: u64, ancillary: u64 },
     /// Video and audio were prepared against different device signals.
     #[error("reference output bundle video and audio signals differ")]
     BundleSignalMismatch,
