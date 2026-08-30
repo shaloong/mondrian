@@ -41,17 +41,32 @@ image-sequence authoring and tiled/GPU debayer belong to later work.
 ## Picture scan and stored geometry
 
 Media probing publishes one typed `PictureStreamMetadata` contract containing
-exact sample aspect ratio, scan order, and the cardinal orientation classified
+exact sample aspect ratio, display scan order, exact FFmpeg field transport
+(`tt`/`bb`/`tb`/`bt`), and the cardinal orientation classified
 from FFmpeg display-matrix side data (with legacy rotate metadata only as a
 fallback). Arbitrary matrices remain `Unsupported`; Preview and Export must
 resolve these facts through `ResolvedPictureGeometry` before execution. The
-decoder also rejects an interlaced `AVFrame`, so incorrect or incomplete probe
-metadata cannot let field-coded pixels bypass the progressive-only contract.
+display-first mapping is `tt|bt -> TFF` and `bb|tb -> BFF`; coded-first and
+display-first evidence are never conflated.
+
+`PreviewSourceFieldProcessing` is part of the physical decode key and Session
+reuse predicate. Progressive input passes through. Qualified interlaced input
+uses one Session-owned linked-FFmpeg BWDIF graph in `send_field` mode and emits
+full-height progressive frames at exact field timestamps before scaling, color
+conversion, Effects, or compositing. Automatic mode observes decoded AVFrame
+flags; mixed progressive/interlaced content or changing dominance fails closed.
+Seek, cancellation recovery, decoder flush, and Session replacement discard the
+temporal filter graph. Unknown scan requires CPU-addressable decode evidence and
+is never silently treated as progressive. Residual interlaced frames after the
+field-processing boundary are rejected by materialization.
 
 Proxy FFmpeg commands disable automatic rotation and normalize the generated
 proxy's physical SAR to 1:1 before scaling. The original source metadata remains
 the sole interpretation authority applied later by Preview/Export. A proxy may
 change sampled extent, but never source orientation or display geometry.
+Interlaced or unknown-scan sources currently bypass proxy selection and proxy
+generation because the proxy artifact contract does not yet carry field-rate
+deinterlace identity.
 
 ## Realtime audio output evidence
 

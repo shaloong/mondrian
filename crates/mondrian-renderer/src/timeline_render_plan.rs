@@ -92,14 +92,14 @@ impl TimelineRenderSettings {
     }
 }
 
-/// A request to evaluate one sequence frame into a render plan.
+/// A request to evaluate one exact visual sample into a render plan.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TimelineEvaluationRequest {
-    /// Exact Sequence-local frame position.
+    /// Exact Sequence-local progressive-frame or half-frame field position.
     ///
-    /// Evaluation rejects a negative frame or a time base that is not exactly
-    /// the source Sequence's Evaluation Grid. The renderer never clamps this
-    /// value or silently substitutes the source grid.
+    /// Evaluation rejects a negative position or a time base other than the
+    /// source Sequence Evaluation Grid or its exact doubled field grid. The
+    /// renderer never rounds a field instant back to an authored frame.
     pub position: FramePosition,
     /// Caller intent.
     pub intent: TimelineRenderIntent,
@@ -552,14 +552,30 @@ fn evaluate_timeline_render_plan_with_effects(
     effects: &mut dyn ClipEffectResolver,
 ) -> Result<TimelineRenderPlan> {
     let expected_time_base = source.source_time_base();
-    if request.position.time_base != expected_time_base {
+    let field_time_base = Rational::new(
+        expected_time_base.num,
+        expected_time_base
+            .den
+            .checked_mul(2)
+            .ok_or_else(|| MondrianError::WorkflowStepFailed {
+                step_id: "evaluate_timeline_render_plan".to_owned(),
+                reason: format!(
+                    "Sequence {} field evaluation grid overflowed",
+                    source.source_sequence_id()
+                ),
+            })?,
+    );
+    if request.position.time_base != expected_time_base
+        && request.position.time_base != field_time_base
+    {
         return Err(MondrianError::WorkflowStepFailed {
             step_id: "evaluate_timeline_render_plan".to_owned(),
             reason: format!(
-                "evaluation position grid {} does not match Sequence {} grid {}",
+                "evaluation position grid {} does not match Sequence {} frame grid {} or field grid {}",
                 request.position.time_base,
                 source.source_sequence_id(),
-                expected_time_base
+                expected_time_base,
+                field_time_base,
             ),
         });
     }

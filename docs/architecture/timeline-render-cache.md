@@ -31,6 +31,13 @@ source revision, source sample, picture geometry, alpha interpretation, input
 color/RAW development, working space, Effect graph, transform, or raster
 quality names a different identity.
 
+Interlaced execution does not cache a woven delivery picture. Each field is an
+ordinary complete working-linear progressive sample whose exact doubled-grid
+`FramePosition`, source field-processing contract, dominance, and picture scan
+participate in the resolved identity. Prepared visual author fingerprint v4
+includes Sequence field order. The later field prefilter/weave and encoded scan
+tags are delivery work and remain outside this pre-Program-Output Store.
+
 `mondrian-render-cache` accepts only that opaque resolved identity plus the
 physical artifact envelope: exact output extent, lossless RGBA32F format, and
 straight-coverage alpha. There is no public partial builder or raw-digest

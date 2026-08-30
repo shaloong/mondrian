@@ -611,7 +611,7 @@ impl<'a> PreviewTimelineGraph<'a> {
     fn evaluate(
         self,
         program: &Arc<mondrian_renderer::PreparedVisualProgram>,
-        frame: i64,
+        position: FramePosition,
         target_resolution: Resolution,
         normalized_preview_resolution_scale: f32,
     ) -> Result<PreparedVisualFrameEvaluation<()>, PreviewUnavailability> {
@@ -623,7 +623,7 @@ impl<'a> PreviewTimelineGraph<'a> {
                 program.as_ref(),
                 TimelineFrameExecutionRequest::new(
                     TimelineEvaluationRequest::preview(
-                        FramePosition::new(frame, program.evaluation_time_base()),
+                        position,
                         normalized_preview_resolution_scale,
                     ),
                     self.generation,
@@ -639,7 +639,7 @@ impl<'a> PreviewTimelineGraph<'a> {
                     format!(
                         "Sequence {} frame {} execution preparation failed closed: {error}",
                         program.sequence_id(),
-                        frame.max(0)
+                        position.frame.max(0)
                     ),
                 )
             })?;
@@ -1269,7 +1269,7 @@ fn prepare_preview_frame_closure(
         PreparedVisualFrameClosureRequest {
             root_sequence,
             sequences,
-            root_frame: frame,
+            root_position: FramePosition::new(frame, root_sequence.time_base()),
             root_resolution,
             root_color_context,
             child_canvas_policy,

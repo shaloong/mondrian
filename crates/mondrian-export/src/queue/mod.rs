@@ -3635,6 +3635,50 @@ impl TimelineRenderRange {
                 .map_err(|error| error.to_string()),
         }
     }
+
+    fn interlaced_evaluation_position(
+        self,
+        output_index: u64,
+        second_field: bool,
+    ) -> Result<FramePosition, String> {
+        if self.sequence_frame_rate != Rational::new(self.fps_num, self.fps_den) {
+            return Err(format!(
+                "interlaced Program Output requires export cadence {}:{} to match Sequence cadence {}",
+                self.fps_num, self.fps_den, self.sequence_frame_rate
+            ));
+        }
+        let output_index = i64::try_from(output_index)
+            .map_err(|_| "export frame index exceeds signed time capacity".to_owned())?;
+        let field_index = output_index
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(i64::from(second_field)))
+            .ok_or_else(|| "export field index exceeds signed time capacity".to_owned())?;
+        let field_rate = Rational::new(
+            self.sequence_frame_rate
+                .num
+                .checked_mul(2)
+                .ok_or_else(|| "Sequence field cadence overflowed".to_owned())?,
+            self.sequence_frame_rate.den,
+        );
+        let offset = TimelineTime::from_frame_position(FramePosition::new(
+            field_index,
+            Rational::new(field_rate.den, field_rate.num),
+        ))
+        .map_err(|error| error.to_string())?;
+        let sample_time =
+            self.source_start.checked_add(offset).map_err(|error| error.to_string())?;
+        let position = sample_time
+            .to_frame_position(field_rate, FrameRounding::Floor)
+            .map_err(|error| error.to_string())?;
+        if TimelineTime::from_frame_position(position).map_err(|error| error.to_string())?
+            != sample_time
+        {
+            return Err(format!(
+                "interlaced export sample time {sample_time} is not exactly representable on the Sequence field grid"
+            ));
+        }
+        Ok(position)
+    }
 }
 
 enum TimelineAudioInput {
@@ -3787,10 +3831,13 @@ fn execute_timeline_export(
         if let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact
             && crate::mezzanine::professional_mezzanine_contract(video).is_some()
         {
-            // DNxHR and raw MOV/MXF streams may omit stream-level field_order;
-            // finished-output validation proves progressive scan from the
-            // independently decoded first frame instead.
-            expected_video_signal.field_order = None;
+            // Qualified progressive DNxHR and raw MOV/MXF streams may omit a
+            // stream-level field_order; decoded-frame evidence proves that row.
+            // Interlaced v210 must retain both the explicit `tt` tag and the
+            // decoded-frame dominance contract.
+            if delivery.field_order == mondrian_core::timeline_data::FieldOrder::Progressive {
+                expected_video_signal.field_order = None;
+            }
             if !crate::mezzanine::requires_stream_range_tag(video) {
                 expected_video_signal.color_range = None;
             }
@@ -3826,7 +3873,13 @@ fn execute_timeline_export(
                         fps_den: Some(range.fps_den),
                         signal: Some(expected_video_signal),
                         coding: Some(delivery.video_coding),
-                        require_progressive_frame: true,
+                        require_progressive_frame: delivery.field_order
+                            == mondrian_core::timeline_data::FieldOrder::Progressive,
+                        require_interlaced_top_field_first: match delivery.field_order {
+                            mondrian_core::timeline_data::FieldOrder::Progressive => None,
+                            mondrian_core::timeline_data::FieldOrder::UpperFirst => Some(true),
+                            mondrian_core::timeline_data::FieldOrder::LowerFirst => Some(false),
+                        },
                     }),
                     audio: expected_audio
                         .map(ExpectedStream::Required)
@@ -4541,6 +4594,10 @@ fn try_execute_smart_render(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
 ) -> Result<Option<ExportSmartRenderEvidence>, JobExecutionResult> {
+    if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+        tracing::debug!("Smart Render is not qualified for field-woven output");
+        return Ok(None);
+    }
     let selected_range = range.time_range().map_err(JobExecutionResult::Failed)?;
     let plan = match crate::smart_render::qualify_smart_render(
         &job.config,
@@ -5214,41 +5271,68 @@ fn preflight_timeline_visual_range_once(
         if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
             return Err(JobExecutionResult::Cancelled);
         }
-        let timeline_frame = range.evaluation_frame(index).map_err(JobExecutionResult::Failed)?;
-        let closure = prepare_export_visual_frame_closure(
-            timeline,
-            visual_session,
-            cancel,
-            &timeline.sequence,
-            timeline_frame,
-            root_resolution,
-            root_color_context.clone(),
-        )
-        .map_err(|reason| {
-            if cancel.is_canceled() {
-                JobExecutionResult::Cancelled
-            } else {
-                JobExecutionResult::Failed(format!(
-                    "export visual closure preflight failed at root frame {timeline_frame}: {reason}"
-                ))
-            }
-        })?;
-        let materialization_bytes = closure
-            .conservative_cpu_materialization_active_bytes()
-            .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
-        visual_session
-            .composite_scratch
-            .admit_cpu_active_working_set(
-                materialization_bytes,
-                TimelineCpuCompositePrecision::Float32,
+        let progressive_position = || {
+            range
+                .evaluation_frame(index)
+                .map(|frame| FramePosition::new(frame, timeline.sequence.time_base()))
+        };
+        let positions = if timeline.sequence.settings.field_order
+            == mondrian_core::timeline_data::FieldOrder::Progressive
+        {
+            [
+                Some(progressive_position().map_err(JobExecutionResult::Failed)?),
+                None,
+            ]
+        } else {
+            [
+                Some(
+                    range
+                        .interlaced_evaluation_position(index, false)
+                        .map_err(JobExecutionResult::Failed)?,
+                ),
+                Some(
+                    range
+                        .interlaced_evaluation_position(index, true)
+                        .map_err(JobExecutionResult::Failed)?,
+                ),
+            ]
+        };
+        for position in positions.into_iter().flatten() {
+            let closure = prepare_export_visual_frame_closure(
+                timeline,
+                visual_session,
+                cancel,
+                &timeline.sequence,
+                position,
+                root_resolution,
+                root_color_context.clone(),
             )
-            .map_err(|error| {
-                JobExecutionResult::Failed(format!(
-                    "export visual closure exceeds its CPU working-set grant at root frame {timeline_frame}: {error}"
-                ))
+            .map_err(|reason| {
+                if cancel.is_canceled() {
+                    JobExecutionResult::Cancelled
+                } else {
+                    JobExecutionResult::Failed(format!(
+                        "export visual closure preflight failed at root sample {position:?}: {reason}"
+                    ))
+                }
             })?;
-        if cancel.is_canceled() {
-            return Err(JobExecutionResult::Cancelled);
+            let materialization_bytes = closure
+                .conservative_cpu_materialization_active_bytes()
+                .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+            visual_session
+                .composite_scratch
+                .admit_cpu_active_working_set(
+                    materialization_bytes,
+                    TimelineCpuCompositePrecision::Float32,
+                )
+                .map_err(|error| {
+                    JobExecutionResult::Failed(format!(
+                        "export visual closure exceeds its CPU working-set grant at root sample {position:?}: {error}"
+                    ))
+                })?;
+            if cancel.is_canceled() {
+                return Err(JobExecutionResult::Cancelled);
+            }
         }
     }
     Ok(())
@@ -5376,6 +5460,9 @@ fn qualify_resident_hevc_export(
     alpha_mode: ExportAlphaMode,
     policy: service::ExportExecutionResourcePolicy,
 ) -> Result<ResidentHevcExportPlan, ExportResidentEncodeBlocker> {
+    if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+        return Err(ExportResidentEncodeBlocker::Signal);
+    }
     let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact else {
         return Err(ExportResidentEncodeBlocker::UnsupportedCodec);
     };
@@ -5488,6 +5575,12 @@ fn render_timeline_frames_with_sink(
     };
     let total = range.total_frames.max(1);
     let mut canvas = vec![0u8; frame_contract.canvas_len(width, height)];
+    let mut first_field_canvas = Vec::new();
+    let mut second_field_canvas = Vec::new();
+    let picture_sampling = mondrian_renderer::picture_sampling::ProgramPictureSampling::new(
+        timeline.sequence.time_base(),
+        delivery.field_order,
+    );
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
         .color
@@ -5499,29 +5592,98 @@ fn render_timeline_frames_with_sink(
             return JobExecutionResult::Cancelled;
         }
 
-        let timeline_frame = match range.evaluation_frame(index) {
-            Ok(frame) => frame,
-            Err(error) => return JobExecutionResult::Failed(error),
-        };
         let mut frame_color_counts = InputColorResolutionSourceCounts::default();
         let mut frame_stage_diagnostics = RenderColorStageDiagnostics::default();
         let mut frame_composite_diagnostics = TimelineCompositeDiagnostics::default();
-        let render_result = render_timeline_frame_into_with_session_cancellable(
-            timeline,
-            timeline_frame,
-            width,
-            height,
-            alpha_mode,
-            root_color_context.clone(),
-            ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
-            &mut canvas,
-            Some(&mut frame_color_counts),
-            Some(&mut frame_stage_diagnostics),
-            Some(&mut frame_composite_diagnostics),
-            Some(&mut diagnostics.color),
-            visual_session,
-            cancel,
-        );
+        let samples = match picture_sampling.samples(index) {
+            Ok(samples) => samples,
+            Err(error) => return JobExecutionResult::Failed(error.to_string()),
+        };
+        let render_result = match samples {
+            mondrian_renderer::picture_sampling::ProgramPictureSamples::Progressive(_) => {
+                let timeline_frame = match range.evaluation_frame(index) {
+                    Ok(frame) => frame,
+                    Err(error) => return JobExecutionResult::Failed(error),
+                };
+                render_timeline_frame_into_with_session_cancellable(
+                    timeline,
+                    timeline_frame,
+                    width,
+                    height,
+                    alpha_mode,
+                    root_color_context.clone(),
+                    ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
+                    &mut canvas,
+                    Some(&mut frame_color_counts),
+                    Some(&mut frame_stage_diagnostics),
+                    Some(&mut frame_composite_diagnostics),
+                    Some(&mut diagnostics.color),
+                    visual_session,
+                    cancel,
+                )
+            }
+            mondrian_renderer::picture_sampling::ProgramPictureSamples::Interlaced {
+                first,
+                second,
+            } => {
+                let first = match range.interlaced_evaluation_position(index, false) {
+                    Ok(position) => first.with_position(position),
+                    Err(error) => return JobExecutionResult::Failed(error),
+                };
+                let second = match range.interlaced_evaluation_position(index, true) {
+                    Ok(position) => second.with_position(position),
+                    Err(error) => return JobExecutionResult::Failed(error),
+                };
+                let render_first = render_timeline_sample_into_with_session_cancellable(
+                    timeline,
+                    first.position(),
+                    width,
+                    height,
+                    alpha_mode,
+                    root_color_context.clone(),
+                    ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
+                    &mut first_field_canvas,
+                    Some(&mut frame_color_counts),
+                    Some(&mut frame_stage_diagnostics),
+                    Some(&mut frame_composite_diagnostics),
+                    Some(&mut diagnostics.color),
+                    visual_session,
+                    cancel,
+                );
+                render_first
+                    .and_then(|()| {
+                        render_timeline_sample_into_with_session_cancellable(
+                            timeline,
+                            second.position(),
+                            width,
+                            height,
+                            alpha_mode,
+                            root_color_context.clone(),
+                            ExportDeliveryPixelContract::new(frame_contract, delivery.legalizer),
+                            &mut second_field_canvas,
+                            Some(&mut frame_color_counts),
+                            Some(&mut frame_stage_diagnostics),
+                            Some(&mut frame_composite_diagnostics),
+                            Some(&mut diagnostics.color),
+                            visual_session,
+                            cancel,
+                        )
+                    })
+                    .and_then(|()| {
+                        crate::interlaced_delivery::assemble_interlaced_program_frame(
+                            frame_contract,
+                            width,
+                            height,
+                            first,
+                            &first_field_canvas,
+                            second,
+                            &second_field_canvas,
+                            &mut canvas,
+                        )
+                        .map_err(|error| error.to_string())
+                    })
+            }
+        };
         diagnostics.color.record_frame_diagnostics(
             frame_color_counts,
             frame_stage_diagnostics,
@@ -5536,8 +5698,8 @@ fn render_timeline_frames_with_sink(
             }
             Err(err) => {
                 return JobExecutionResult::Failed(format!(
-                    "渲染时间线帧失败（frame={}）: {}",
-                    timeline_frame, err
+                    "渲染时间线图像失败（output_frame={}）: {}",
+                    index, err
                 ));
             }
         }
@@ -5682,6 +5844,41 @@ fn render_timeline_frame_into_with_session_cancellable(
     visual_session: &mut ExportVisualRenderSession,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<(), String> {
+    render_timeline_sample_into_with_session_cancellable(
+        timeline,
+        FramePosition::new(timeline_frame, timeline.sequence.time_base()),
+        width,
+        height,
+        alpha_mode,
+        color_context,
+        delivery_pixels,
+        canvas,
+        input_color_counts,
+        stage_diagnostics,
+        composite_diagnostics,
+        export_diagnostics,
+        visual_session,
+        cancellation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_timeline_sample_into_with_session_cancellable(
+    timeline: &TimelineExportSnapshot,
+    timeline_position: FramePosition,
+    width: u32,
+    height: u32,
+    alpha_mode: ExportAlphaMode,
+    color_context: ProgramColorContext,
+    delivery_pixels: ExportDeliveryPixelContract,
+    canvas: &mut Vec<u8>,
+    input_color_counts: Option<&mut InputColorResolutionSourceCounts>,
+    stage_diagnostics: Option<&mut RenderColorStageDiagnostics>,
+    composite_diagnostics: Option<&mut TimelineCompositeDiagnostics>,
+    export_diagnostics: Option<&mut ExportJobColorDiagnostics>,
+    visual_session: &mut ExportVisualRenderSession,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<(), String> {
     let required_len = delivery_pixels.frame.canvas_len(width, height);
     if canvas.len() != required_len {
         canvas.resize(required_len, 0);
@@ -5700,11 +5897,11 @@ fn render_timeline_frame_into_with_session_cancellable(
         cancellation,
     };
 
-    render_sequence_frame_into(
+    render_sequence_sample_into(
         timeline,
         &mut render_context,
         &timeline.sequence,
-        timeline_frame,
+        timeline_position,
         Resolution { width, height },
         color_context,
         SequenceRenderTarget::Deliverable(canvas),
@@ -6166,7 +6363,7 @@ pub fn export_input_color_resolution_counts_for_frame(
         &mut visual_session,
         &cancellation,
         &timeline.sequence,
-        timeline_frame,
+        FramePosition::new(timeline_frame, timeline.sequence.time_base()),
         timeline.sequence.settings.resolution,
         color_context,
     )?;
@@ -6505,7 +6702,7 @@ fn prepare_export_visual_frame_closure(
     visual_session: &mut ExportVisualRenderSession,
     cancellation: &ExecutionCancellationToken,
     root_sequence: &mondrian_timeline::sequence::Sequence,
-    root_frame: i64,
+    root_position: FramePosition,
     root_resolution: Resolution,
     root_color_context: ProgramColorContext,
 ) -> Result<PreparedExportVisualClosure, String> {
@@ -6514,13 +6711,13 @@ fn prepare_export_visual_frame_closure(
         PreparedVisualFrameClosureRequest {
             root_sequence,
             sequences: &timeline.sequences,
-            root_frame,
+            root_position,
             root_resolution,
             root_color_context,
             child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
         },
         |sequence| visual_session.borrow_mut().prepare_program(sequence),
-        |program, frame, resolution, _color_context, _normalized_preview_resolution_scale| {
+        |program, position, resolution, _color_context, _normalized_preview_resolution_scale| {
             if cancellation.is_canceled() {
                 return Err("export visual execution canceled".to_owned());
             }
@@ -6532,10 +6729,7 @@ fn prepare_export_visual_frame_closure(
                 .prepare_timeline_frame_execution(
                     program.as_ref(),
                     TimelineFrameExecutionRequest::new(
-                        TimelineEvaluationRequest::export(FramePosition::new(
-                            frame,
-                            program.evaluation_time_base(),
-                        )),
+                        TimelineEvaluationRequest::export(position),
                         effect_execution_generation,
                         EffectExecutionContinuity::Discontinuous,
                         extent,
@@ -6592,12 +6786,32 @@ fn render_sequence_frame_into(
     color_context: ProgramColorContext,
     target: SequenceRenderTarget<'_>,
 ) -> Result<(), String> {
+    render_sequence_sample_into(
+        timeline,
+        context,
+        sequence,
+        FramePosition::new(timeline_frame, sequence.time_base()),
+        resolution,
+        color_context,
+        target,
+    )
+}
+
+fn render_sequence_sample_into(
+    timeline: &TimelineExportSnapshot,
+    context: &mut ExportFrameRenderContext<'_>,
+    sequence: &mondrian_timeline::sequence::Sequence,
+    timeline_position: FramePosition,
+    resolution: Resolution,
+    color_context: ProgramColorContext,
+    target: SequenceRenderTarget<'_>,
+) -> Result<(), String> {
     let closure = prepare_export_visual_frame_closure(
         timeline,
         context.visual_session,
         context.cancellation,
         sequence,
-        timeline_frame,
+        timeline_position,
         resolution,
         color_context,
     )?;
@@ -8856,6 +9070,9 @@ fn decode_video_layer_scaled(
         source_sample,
         PreviewDecodeAccessMode::RandomAccessStillFrame,
         source_color,
+    )
+    .with_field_processing(
+        mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan()),
     )
     .with_max_size(
         Some(decode_resolution.width),
@@ -14716,6 +14933,41 @@ mod tests {
                     == "scale=iw:ih:in_range=full:out_range=limited:out_color_matrix=bt2020,setsar=1/1"
         }));
         assert!(args.windows(2).any(|pair| pair == ["-field_order", "progressive"]));
+    }
+
+    #[test]
+    fn interlaced_signal_args_and_validation_share_tff_contract() {
+        let settings = SequenceSettings {
+            frame_rate: Rational::FPS_25,
+            field_order: mondrian_core::timeline_data::FieldOrder::UpperFirst,
+            ..SequenceSettings::default()
+        };
+        let mut delivery = test_delivery_contract(
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+            "yuv422p10le",
+        );
+        delivery.field_order = mondrian_core::timeline_data::FieldOrder::UpperFirst;
+        delivery.artifact = ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mov,
+            video: VideoCodecConfig::ProRes { profile: crate::preset::ProResProfile::Hq },
+            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+        };
+
+        let mut cmd = Command::new("ffmpeg");
+        apply_export_video_signal_args(&mut cmd, &settings, &delivery);
+        let args = cmd.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        assert!(args.windows(2).any(|pair| pair == ["-field_order", "tt"]));
+        assert!(args.windows(2).any(|pair| pair == ["-top", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["-flags", "+ildct+ilme"]));
+        assert!(args.windows(2).any(|pair| {
+            pair[0] == "-vf" && pair[1].contains("out_color_matrix=bt709:interl=1")
+        }));
+
+        let expected = expected_export_video_signal(&settings, &delivery)
+            .expect("qualified TFF signal expectation");
+        assert_eq!(expected.field_order.as_deref(), Some("tt"));
     }
 
     #[test]

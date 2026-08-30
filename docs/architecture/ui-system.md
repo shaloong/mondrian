@@ -26,6 +26,15 @@ queue phase. Enqueue availability resolves the complete preset against the
 selected Sequence, while the queue repeats authoritative admission and
 profile-specific external tool qualification.
 
+Sequence Settings exposes only Progressive and the qualified Upper First
+interlaced Program Output. Timeline validation owns the 1080i25/29.97 raster and
+cadence matrix, so widgets cannot manufacture UHD, BFF, or arbitrary interlaced
+rows. Export availability resolves the complete preset and shows the same
+MOV/Rec.709 Legal/10-bit 4:2:2/ProRes-or-v210 restriction enforced again by the
+queue. Preview media resolution disables proxy/native-surface optimization for
+interlaced or unknown scan and binds field processing into the decode key; UI
+state owns no second scan interpretation.
+
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
 Timeline interchange composition remains outside panel code. The App inspects

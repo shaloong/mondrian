@@ -248,10 +248,30 @@ pub(crate) fn resolve_preview_media_source(
         source_color = source_color.with_yuv_matrix_fallback(DecodedVideoMatrix::Bt709);
     }
     let source_has_alpha = proven_sampling.has_alpha;
+    let source_resolution = Resolution {
+        width: primary_video.width,
+        height: primary_video.height,
+    };
+    let picture_geometry = match ResolvedPictureGeometry::resolve_with_overrides(
+        source_resolution,
+        primary_video.picture,
+        request.picture_overrides,
+    ) {
+        Ok(geometry) => geometry,
+        Err(error) => {
+            return unavailable(
+                &request,
+                PreviewMediaSourceUnavailableReason::PictureInterpretationUnsupported {
+                    reason: error.to_string(),
+                },
+            );
+        }
+    };
     let resolved_path = match resolve_preview_media_decode_path(
         request.prefer_proxy
             && !source_color.is_data_texture()
-            && primary_video.camera_raw.is_none(),
+            && primary_video.camera_raw.is_none()
+            && picture_geometry.scan() == mondrian_core::PictureScan::Progressive,
         source_has_alpha,
         source_path,
         primary_video,
@@ -274,26 +294,12 @@ pub(crate) fn resolve_preview_media_source(
         source_fingerprint,
     } = resolved_path;
 
-    let source_resolution = Resolution {
-        width: primary_video.width,
-        height: primary_video.height,
-    };
-    let picture_geometry = match ResolvedPictureGeometry::resolve_with_overrides(
-        source_resolution,
-        primary_video.picture,
-        request.picture_overrides,
-    ) {
-        Ok(geometry) => geometry,
-        Err(error) => {
-            return unavailable(
-                &request,
-                PreviewMediaSourceUnavailableReason::PictureInterpretationUnsupported {
-                    reason: error.to_string(),
-                },
-            );
-        }
-    };
-    let payload_requirement = if request.cpu_working_required || source_color.is_data_texture() {
+    let field_processing =
+        mondrian_media::PreviewSourceFieldProcessing::from_picture_scan(picture_geometry.scan());
+    let payload_requirement = if request.cpu_working_required
+        || source_color.is_data_texture()
+        || field_processing.requires_cpu_decode()
+    {
         PreviewDecodePayloadRequirement::CpuAddressable
     } else {
         PreviewDecodePayloadRequirement::NativeAllowed
@@ -337,7 +343,8 @@ pub(crate) fn resolve_preview_media_source(
             request.source_sample,
             representation,
             source_color,
-        ),
+        )
+        .and_then(|key| key.with_field_processing(field_processing)),
     };
     let decode = match decode_result {
         Ok(decode) => decode,

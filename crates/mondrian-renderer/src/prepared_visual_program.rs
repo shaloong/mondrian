@@ -204,7 +204,7 @@ pub fn prepared_visual_author_fingerprint(
         reason: error.to_string(),
     })?;
     let mut hasher = Sha256::new();
-    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v3");
+    hasher.update(b"mondrian.prepared-visual-author-fingerprint.v4");
     hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical);
     Ok(hasher.finalize().into())

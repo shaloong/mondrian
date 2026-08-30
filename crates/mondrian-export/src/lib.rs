@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod frame_contract;
 mod hardware_encoding;
 mod image_sequence;
+mod interlaced_delivery;
 pub mod mezzanine;
 pub mod preset;
 pub mod professional_delivery;

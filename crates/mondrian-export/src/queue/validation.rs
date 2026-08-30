@@ -44,7 +44,7 @@ pub fn export_visual_frame_validation(
         &mut visual_session,
         &cancellation,
         &timeline.sequence,
-        timeline_frame,
+        FramePosition::new(timeline_frame, timeline.sequence.time_base()),
         resolution,
         color_context,
     )?;

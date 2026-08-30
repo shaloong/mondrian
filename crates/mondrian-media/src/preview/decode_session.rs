@@ -650,6 +650,7 @@ struct PreviewDecodeSession {
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
+    field_processing: super::PreviewSourceFieldProcessing,
     codec_id: ffmpeg::codec::Id,
     packet_source: PreviewPacketSource,
     // Declared after `packet_source` so a direct AVFormatContext releases its callback use
@@ -672,6 +673,8 @@ struct PreviewDecodeSession {
     /// Bounded decoded GOP tail used only for exact reverse traversal.
     reverse_decode_window: DecodedSurfaceWindow<RetainedDecodedCandidate>,
     playback_ring: PreviewPlaybackRing,
+    /// Session-owned progressive/pass-through or BWDIF field processor.
+    field_processor: super::field_processing::PreviewFieldProcessingSession,
     decoder: ffmpeg::decoder::Video,
     scaler: Option<ffmpeg::software::scaling::Context>,
     scaler_format_contract: Option<(
@@ -714,6 +717,7 @@ impl Drop for PreviewDecodeSession {
         self.playback_decode_window.clear();
         self.reverse_decode_window.clear();
         self.playback_ring.clear();
+        self.field_processor.reset();
     }
 }
 
@@ -1310,6 +1314,7 @@ struct PreviewDecodeSessionOpenRequest<'a> {
     hardware_decode_request: PreviewHardwareDecodeRequest,
     hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     source_color: PreviewSourceColorContract,
+    field_processing: super::PreviewSourceFieldProcessing,
     decoder_thread_limit: Option<usize>,
 }
 
@@ -1359,8 +1364,18 @@ impl PreviewDecodeSession {
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            field_processing,
             decoder_thread_limit,
         } = request;
+        if field_processing.requires_cpu_decode()
+            && hardware_decode_request.requires_gpu_residency()
+        {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "required GPU-resident decode is incompatible with the qualified CPU BWDIF field-processing Adapter"
+                    .to_owned(),
+            });
+        }
         let PreviewPacketSourceOpen {
             source,
             parameters,
@@ -1407,8 +1422,8 @@ impl PreviewDecodeSession {
         let mut hardware_decode_context_state = None;
         let mut hardware_device_context = None;
         interrupt_state.set_execution_stage(PreviewDecodeExecutionStage::SessionSetup);
-        let hardware_decoder = if hardware_decode_plan
-            .should_configure_hardware_decoder(access_mode)
+        let hardware_decoder = if !field_processing.requires_cpu_decode()
+            && hardware_decode_plan.should_configure_hardware_decoder(access_mode)
             && backend != PreviewDecodeBackend::Software
         {
             loop {
@@ -1535,6 +1550,7 @@ impl PreviewDecodeSession {
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            field_processing,
             codec_id,
             packet_source: source,
             interrupt_state,
@@ -1573,6 +1589,11 @@ impl PreviewDecodeSession {
                 PREVIEW_PLAYBACK_SESSION_RING_CAPACITY,
                 PREVIEW_PLAYBACK_SESSION_RING_BYTE_BUDGET,
             ),
+            field_processor: super::field_processing::PreviewFieldProcessingSession::new(
+                field_processing,
+                stream_tb,
+                path,
+            ),
             seek_index,
         })
     }
@@ -1599,6 +1620,7 @@ impl PreviewDecodeSession {
                 .as_ref()
                 .is_none_or(HwAccelDeviceContext::is_current_generation)
             && self.source_color == request.source_color
+            && self.field_processing == request.field_processing
     }
 
     /// Rebind output materialization without retiring the source decoder.
@@ -1636,6 +1658,7 @@ impl PreviewDecodeSession {
         self.scaler_color_contract = None;
         self.reverse_decode_window.clear();
         self.playback_ring.clear();
+        self.field_processor.reset();
     }
 
     fn native_output_released(&self) -> bool {
@@ -2024,18 +2047,48 @@ impl PreviewDecodeSession {
         access_mode: PreviewDecodeAccessMode,
         playback_direction: PreviewPlaybackDirection,
     ) -> Result<()> {
-        candidates.observe(frame_pts, frame, self.path.as_path(), &mut self.last_pts)?;
+        let processed = self.field_processor.push(frame_pts, frame)?;
+        for frame in processed {
+            self.observe_progressive_candidate(
+                candidates,
+                &frame,
+                access_mode,
+                playback_direction,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn observe_progressive_candidate(
+        &mut self,
+        candidates: &mut RetainedDecodedCandidateWindow,
+        frame: &ffmpeg::util::frame::video::Video,
+        access_mode: PreviewDecodeAccessMode,
+        playback_direction: PreviewPlaybackDirection,
+    ) -> Result<()> {
+        let processed_pts = frame.pts().ok_or_else(|| MondrianError::DecodeFailed {
+            asset_id: self.path.display().to_string(),
+            reason: "field processor emitted a frame without presentation time".to_owned(),
+        })?;
+        candidates.observe(
+            processed_pts,
+            frame,
+            self.path.as_path(),
+            &mut self.last_pts,
+        )?;
         if access_mode == PreviewDecodeAccessMode::PlaybackCursor
             && playback_direction == PreviewPlaybackDirection::Forward
         {
-            let retained = RetainedDecodedCandidate::retain(frame_pts, frame, self.path.as_path())?;
+            let retained =
+                RetainedDecodedCandidate::retain(processed_pts, frame, self.path.as_path())?;
             let reserved_bytes = retained.reserved_bytes();
-            self.playback_decode_window.insert(frame_pts, reserved_bytes, retained);
+            self.playback_decode_window.insert(processed_pts, reserved_bytes, retained);
         }
         if playback_direction == PreviewPlaybackDirection::Reverse {
-            let retained = RetainedDecodedCandidate::retain(frame_pts, frame, self.path.as_path())?;
+            let retained =
+                RetainedDecodedCandidate::retain(processed_pts, frame, self.path.as_path())?;
             let reserved_bytes = retained.reserved_bytes();
-            self.reverse_decode_window.insert(frame_pts, reserved_bytes, retained);
+            self.reverse_decode_window.insert(processed_pts, reserved_bytes, retained);
         }
         Ok(())
     }
@@ -2156,6 +2209,7 @@ impl PreviewDecodeSession {
         self.next_decoded_frame = None;
         self.playback_decode_window.clear();
         self.reverse_decode_window.clear();
+        self.field_processor.reset();
         Ok(PreviewSeekToTarget::Complete(PreviewSeekResolution {
             used_index: used_anchor_pts.is_some(),
             anchor_pts: used_anchor_pts,
@@ -2515,6 +2569,15 @@ impl PreviewDecodeSession {
                 }
             }
 
+            for frame in self.field_processor.flush()? {
+                self.observe_progressive_candidate(
+                    &mut candidates,
+                    &frame,
+                    policy.access_mode,
+                    playback_direction,
+                )?;
+            }
+
             self.reached_eof = true;
         }
 
@@ -2640,6 +2703,7 @@ fn decode_preview_frame_outcome_in_sessions(
         hardware_decode_request,
         hardware_decode_device_selector,
         source_color,
+        field_processing,
         camera_raw,
     } = request;
     let started_at = Instant::now();
@@ -2736,6 +2800,7 @@ fn decode_preview_frame_outcome_in_sessions(
             hardware_decode_request,
             hardware_decode_device_selector,
             source_color,
+            field_processing,
             decoder_thread_limit,
         };
         let mut session_open_us = 0;

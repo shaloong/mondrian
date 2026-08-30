@@ -152,6 +152,29 @@ fn video_asset_with_physical_stream_and_interpretation(
     bit_depth: u8,
     has_alpha: bool,
 ) -> AssetRecord {
+    video_asset_with_picture(
+        path,
+        color_interpretation,
+        stream_index,
+        pixel_format,
+        pixel_format_proven,
+        bit_depth,
+        has_alpha,
+        Default::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn video_asset_with_picture(
+    path: PathBuf,
+    color_interpretation: DetectedColorInterpretation,
+    stream_index: u32,
+    pixel_format: PixelFormat,
+    pixel_format_proven: bool,
+    bit_depth: u8,
+    has_alpha: bool,
+    picture: mondrian_core::PictureStreamMetadata,
+) -> AssetRecord {
     let color_metadata = color_interpretation.evidence.iter().find_map(|evidence| {
         let VideoColorInterpretationEvidence::ExactCicpTags { primaries, transfer, matrix, .. } =
             evidence
@@ -177,7 +200,7 @@ fn video_asset_with_physical_stream_and_interpretation(
             codec_profile: VideoCodecProfile::HevcMain10,
             width: 3840,
             height: 2160,
-            picture: Default::default(),
+            picture,
             frame_rate: Rational::new(25, 1),
             frame_rate_proven: true,
             pixel_format,
@@ -203,6 +226,84 @@ fn video_asset_with_physical_stream_and_interpretation(
         .expect("valid media candidate");
     let asset_id = library.commit_media_probe(candidate, None).expect("commit fixture media");
     library.get_asset(asset_id).expect("read fixture Asset").expect("fixture Asset")
+}
+
+#[test]
+fn interlaced_source_bypasses_proxy_and_native_surface_routes() {
+    let root = unique_root("mondrian-preview-interlaced-source");
+    let source = root.join("source.mov");
+    std::fs::create_dir_all(&root).expect("test root");
+    std::fs::write(&source, b"source").expect("source");
+    let config = proxy_config(root.join("proxy"));
+    let generator = ProxyGenerator::new(config.clone());
+    let detected = DetectedColorInterpretation {
+        candidate_color_space: Some(ColorSpace::Rec709),
+        confidence: VideoColorInterpretationConfidence::High,
+        source: VideoColorSpaceSource::Metadata,
+        method: VideoColorDetectionMethod::CicpTags,
+        evidence: Vec::new(),
+        warnings: Vec::new(),
+        user_overridable: true,
+    };
+    let asset = video_asset_with_picture(
+        source.clone(),
+        detected,
+        0,
+        PixelFormat::P010,
+        true,
+        10,
+        false,
+        mondrian_core::PictureStreamMetadata {
+            sample_aspect_ratio: Some(mondrian_core::SampleAspectRatio::SQUARE),
+            field_order: Some(mondrian_core::timeline_data::FieldOrder::UpperFirst),
+            field_transport_order: Some(mondrian_core::PictureFieldTransportOrder::TopTop),
+            orientation: mondrian_core::PictureOrientation::Identity,
+        },
+    );
+    let proxy_path = generator.proxy_path(&source, proxy_color(8)).expect("proxy path");
+    std::fs::create_dir_all(proxy_path.parent().expect("proxy parent")).expect("proxy root");
+    std::fs::write(&proxy_path, b"proxy").expect("proxy");
+    install_proxy_manifest(&generator, &source, &proxy_path);
+    let context = color_context();
+    let PreviewMediaSourceOutcome::Ready(resolved) =
+        resolve_preview_media_source(PreviewMediaSourceRequest {
+            asset: &asset,
+            color_space_override: Some(ColorSpace::Rec709),
+            alpha_interpretation: AlphaInterpretation::Straight,
+            picture_overrides: Default::default(),
+            source_sample: mondrian_core::SourceSampleTarget::covering(TimelineTime::ZERO),
+            input_color: &context,
+            prefer_proxy: true,
+            request_missing_proxy_generation: true,
+            proxy_config: &config,
+            proxy_color: Some(proxy_color(8)),
+            hardware_admission: gpu_admission(),
+            cpu_working_required: false,
+            representation_quality: mondrian_media::PreviewRepresentationQuality::Full,
+        })
+    else {
+        panic!("qualified interlaced source")
+    };
+    assert_eq!(
+        resolved.path_resolution,
+        PreviewMediaDecodePathResolution::Source
+    );
+    assert_eq!(
+        resolved.key.decode.source().path(),
+        source.canonicalize().expect("source")
+    );
+    assert_eq!(
+        resolved.key.decode.representation(),
+        mondrian_media::PreviewDecodeRepresentation::NativeCpu
+    );
+    assert_eq!(
+        resolved.key.decode.field_processing(),
+        mondrian_media::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+            dominance: mondrian_core::PictureFieldDominance::TopFirst,
+        }
+    );
+    assert!(resolved.proxy_generation.is_none());
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 fn color_context() -> MediaInputColorContext {

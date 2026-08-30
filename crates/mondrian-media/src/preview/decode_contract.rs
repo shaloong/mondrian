@@ -587,6 +587,7 @@ pub struct PreviewDecodeKey {
     source_sample: SourceSampleTarget,
     representation: PreviewDecodeRepresentation,
     source_color: PreviewSourceColorContract,
+    field_processing: super::PreviewSourceFieldProcessing,
     camera_raw: Option<CameraRawDecodeIntent>,
 }
 
@@ -617,6 +618,7 @@ impl PreviewDecodeKey {
             source_sample,
             representation,
             source_color,
+            field_processing: super::PreviewSourceFieldProcessing::Automatic,
             camera_raw: None,
         })
     }
@@ -661,6 +663,27 @@ impl PreviewDecodeKey {
     /// App-resolved source color/range facts used by media conversion.
     pub const fn source_color(&self) -> PreviewSourceColorContract {
         self.source_color
+    }
+
+    /// Exact source scan/deinterlace identity.
+    pub const fn field_processing(&self) -> super::PreviewSourceFieldProcessing {
+        self.field_processing
+    }
+
+    /// Bind a resolved source scan/deinterlace identity into this key.
+    ///
+    /// A native-surface representation cannot currently satisfy software BWDIF;
+    /// callers must choose a CPU-addressable representation or receive a stable
+    /// contract error.
+    pub fn with_field_processing(
+        mut self,
+        field_processing: super::PreviewSourceFieldProcessing,
+    ) -> Result<Self, PreviewDecodeContractError> {
+        if field_processing.requires_cpu_decode() && self.representation.is_native_surface() {
+            return Err(PreviewDecodeContractError::DeinterlaceRequiresCpuAddressablePayload);
+        }
+        self.field_processing = field_processing;
+        Ok(self)
     }
 
     /// Camera RAW development identity, when the probe admitted one.
@@ -737,6 +760,9 @@ pub enum PreviewDecodeContractError {
     /// Camera RAW output is always CPU-addressable scene-linear float in this slice.
     #[error("camera RAW Preview decode requires CPU float output")]
     CameraRawRequiresCpuFloat,
+    /// The only qualified deinterlacer is currently the CPU BWDIF Adapter.
+    #[error("motion-adaptive deinterlace requires a CPU-addressable Preview payload")]
+    DeinterlaceRequiresCpuAddressablePayload,
     /// Camera RAW Adapter output has one explicit source identity.
     #[error("camera RAW Preview decode requires LinearRec709 source identity, got {actual:?}")]
     CameraRawRequiresLinearRec709 {
@@ -1392,7 +1418,7 @@ mod tests {
         let source = PreviewDecodeSource::from_probed_stream(
             absolute_test_path("media/reduced.mov"),
             exact_fingerprint(33),
-            &video_stream(0, PixelFormat::Yuv420p, true),
+            &video_stream(0, PixelFormat::Nv12, true),
         )
         .expect("valid source");
         assert_eq!(
@@ -1485,6 +1511,57 @@ mod tests {
         assert_eq!(
             half_key.representation().extent_for_source(source_extent).width,
             1920
+        );
+    }
+
+    #[test]
+    fn field_processing_is_part_of_decode_identity_and_blocks_native_surfaces() {
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/interlaced.mov"),
+            exact_fingerprint(135),
+            &video_stream(0, PixelFormat::Nv12, true),
+        )
+        .expect("valid source");
+        let base = PreviewDecodeKey::new(
+            source.clone(),
+            SourceSampleTarget::covering(TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeCpu,
+            source_color(),
+        )
+        .expect("base key");
+        let tff = base
+            .clone()
+            .with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::TopFirst,
+                },
+            )
+            .expect("CPU field processing");
+        let bff = base
+            .clone()
+            .with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::BottomFirst,
+                },
+            )
+            .expect("CPU field processing");
+        assert_ne!(base, tff);
+        assert_ne!(tff, bff);
+
+        let native = PreviewDecodeKey::new(
+            source,
+            SourceSampleTarget::covering(TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeSurface,
+            source_color(),
+        )
+        .expect("native key");
+        assert_eq!(
+            native.with_field_processing(
+                super::super::PreviewSourceFieldProcessing::MotionAdaptiveFieldRate {
+                    dominance: mondrian_core::PictureFieldDominance::TopFirst,
+                }
+            ),
+            Err(PreviewDecodeContractError::DeinterlaceRequiresCpuAddressablePayload)
         );
     }
 

@@ -530,15 +530,35 @@ _Avoid_: Persisted authoring time base, UI snap setting
 The deterministic affine conversion from source and output authoring extents to
 the concrete sampled extents used by one Preview or Export execution. Authored
 Clip transforms never change when decode quality or delivery resolution changes.
-One resolved picture contract applies encoded sample aspect ratio and cardinal
-display orientation before the Clip transform, rejects unsupported matrices and
-non-progressive scan before pixel execution, and keeps Sequence sample aspect
-ratio at the Viewer/delivery boundary. Proxy generation preserves the original
-stored orientation and resets only the proxy's physical SAR, so source and proxy
-share the same interpretation.
+One resolved picture contract applies encoded sample aspect ratio, typed scan
+identity, and cardinal display orientation before the Clip transform, rejects
+unsupported matrices, and keeps Sequence sample aspect ratio at the
+Viewer/delivery boundary. Interlaced/unknown sources bypass progressive-only
+proxy artifacts. Proxy generation otherwise preserves the original stored
+orientation and resets only the proxy's physical SAR, so source and proxy share
+the same interpretation.
 _Avoid_: Applying authoring-space scale directly to a downsampled source,
 delivery-size-dependent author state, decoding one cache entry at multiple
 unstated extents
+
+**Media Field Processing Session**:
+The source-Session-owned, decode-keyed conversion from stable decoded scan
+evidence into canonical full-height progressive field-time frames. It preserves
+exact `tt`/`bb`/`tb`/`bt` transport evidence, uses motion-adaptive field-rate
+processing for qualified TFF/BFF input, resets temporal state on seek/cancel,
+and rejects mixed scan, changing dominance, residual interlace, or a required
+GPU-native payload.
+_Avoid_: Coded-first/display-first conflation, per-frame filter graph, metadata-
+only deinterlace, proxy silently erasing scan identity
+
+**Program Picture Sampling**:
+The Renderer-owned projection of one encoded Program picture into either one
+progressive exact evaluation or two display-ordered full-raster field-time
+evaluations with explicit extraction parity. Effects, Transitions, nesting,
+temporal demand, seeds, and caches consume those ordinary exact samples; only
+the Export Interlaced Delivery Module vertically prefilters and weaves them.
+_Avoid_: Woven frame entering Effects, same timestamp for both fields, encoder
+field flag treated as pixel semantics, float master interlace
 
 **Parameter Schema**:
 One versioned definition-stable contract for a parameter's `ParameterId`, value type, definition default, automation capability, unit, numeric or enum constraints, admitted Hold/Linear/Bezier execution semantics, localization message identity, and cache impact. Editor presets such as Auto Bezier and Ease author Bezier handles and are not separate execution semantics. Processor execution capabilities remain on the Processor/Effect Definition and compiled graph.

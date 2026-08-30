@@ -38,6 +38,7 @@ mod demux_source;
 mod demux_worker;
 mod execution_progress;
 mod external_decode;
+mod field_processing;
 mod frame_contract;
 mod frame_materialization;
 pub(crate) use frame_materialization::resize_float_rgba;
@@ -323,6 +324,50 @@ pub enum PreviewPlaybackDirection {
     Reverse,
 }
 
+/// Source-field processing frozen into one physical decode identity.
+///
+/// Interlaced pictures are converted to progressive full-height samples at
+/// field cadence before resize, color conversion, Effects, or composition.
+/// `Automatic` is deliberately not equivalent to progressive: the decoder must
+/// inspect frame evidence and either select a proved path or fail closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "mode")]
+pub enum PreviewSourceFieldProcessing {
+    /// Stream metadata was inconclusive; decoded-frame evidence owns admission.
+    #[default]
+    Automatic,
+    /// The source is proved progressive and needs no field processing.
+    Progressive,
+    /// FFmpeg BWDIF v1 produces one progressive full-height sample per field.
+    MotionAdaptiveFieldRate {
+        /// Display-time field dominance supplied by probe or author override.
+        dominance: mondrian_core::PictureFieldDominance,
+    },
+}
+
+impl PreviewSourceFieldProcessing {
+    /// Resolve the decode identity from the Core picture-scan contract.
+    pub const fn from_picture_scan(scan: mondrian_core::PictureScan) -> Self {
+        match scan {
+            mondrian_core::PictureScan::Unknown => Self::Automatic,
+            mondrian_core::PictureScan::Progressive => Self::Progressive,
+            mondrian_core::PictureScan::Interlaced { dominance } => {
+                Self::MotionAdaptiveFieldRate { dominance }
+            }
+        }
+    }
+
+    /// Whether this contract explicitly requires the BWDIF Adapter.
+    pub const fn requires_deinterlace(self) -> bool {
+        matches!(self, Self::MotionAdaptiveFieldRate { .. })
+    }
+
+    /// Whether decoded-frame inspection or BWDIF requires the qualified CPU path.
+    pub const fn requires_cpu_decode(self) -> bool {
+        !matches!(self, Self::Progressive)
+    }
+}
+
 /// Caller preference for preview hardware decode / native frame residency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PreviewHardwareDecodeRequest {
@@ -500,6 +545,8 @@ pub struct PreviewDecodeRequest<'a> {
     pub hardware_decode_device_selector: Option<HwAccelDeviceSelector>,
     /// Resolved source color and range contract required by CPU YUV conversion.
     pub source_color: PreviewSourceColorContract,
+    /// Exact source scan/deinterlace policy; part of cache and Session identity.
+    pub field_processing: PreviewSourceFieldProcessing,
     /// Probe-admitted Camera RAW development identity.
     pub camera_raw: Option<CameraRawDecodeIntent>,
 }
@@ -620,6 +667,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color: key.source_color(),
+            field_processing: key.field_processing(),
             camera_raw: key.camera_raw(),
         }
     }
@@ -644,8 +692,18 @@ impl<'a> PreviewDecodeRequest<'a> {
             hardware_decode_request: PreviewHardwareDecodeRequest::Auto,
             hardware_decode_device_selector: None,
             source_color,
+            field_processing: PreviewSourceFieldProcessing::Automatic,
             camera_raw: None,
         }
+    }
+
+    /// Bind a resolved source scan/deinterlace contract.
+    pub const fn with_field_processing(
+        mut self,
+        field_processing: PreviewSourceFieldProcessing,
+    ) -> Self {
+        self.field_processing = field_processing;
+        self
     }
 
     /// Select one exact physical video stream instead of FFmpeg's best-stream heuristic.

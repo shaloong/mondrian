@@ -13,9 +13,9 @@ use mondrian_core::types::*;
 pub use mondrian_core::{
     is_picture_file_extension, resolve_video_color_metadata_declarations, AudioCodec,
     AudioStreamInfo, ChannelLayout, DecodedVideoRange, DetectedColorInterpretation, MediaInfo,
-    MediaProbeSnapshot, PictureOrientation, PictureStreamMetadata, PixelFormat, ProResVariant,
-    ProvenVideoSampling, SampleAspectRatio, VideoCodec, VideoCodecProfile,
-    VideoColorDetectionMethod, VideoColorInterpretationConfidence,
+    MediaProbeSnapshot, PictureFieldTransportOrder, PictureOrientation, PictureStreamMetadata,
+    PixelFormat, ProResVariant, ProvenVideoSampling, SampleAspectRatio, VideoCodec,
+    VideoCodecProfile, VideoColorDetectionMethod, VideoColorInterpretationConfidence,
     VideoColorInterpretationEvidence, VideoColorInterpretationWarning, VideoColorMetadata,
     VideoColorMetadataDeclaration, VideoColorMetadataDeclarationResolution, VideoColorMetadataHint,
     VideoColorMetadataHintAuthority, VideoColorMetadataHintScope, VideoColorSpaceSource,
@@ -1439,7 +1439,11 @@ fn picture_stream_metadata(
         .ok()
         .zip(u32::try_from(raw.sample_aspect_ratio.den).ok())
         .and_then(|(numerator, denominator)| SampleAspectRatio::new(numerator, denominator));
-    let field_order = picture_field_order(raw.field_order);
+    let field_transport_order = picture_field_transport_order(raw.field_order);
+    let field_order = match raw.field_order {
+        ffmpeg::ffi::AVFieldOrder::AV_FIELD_PROGRESSIVE => Some(FieldOrder::Progressive),
+        _ => field_transport_order.map(PictureFieldTransportOrder::display_field_order),
+    };
     let orientation = stream
         .side_data()
         .find(|side_data| side_data.kind() == ffmpeg::codec::packet::side_data::Type::DisplayMatrix)
@@ -1447,16 +1451,24 @@ fn picture_stream_metadata(
         .unwrap_or_else(|| {
             picture_orientation_from_legacy_metadata(stream.metadata().get("rotate"))
         });
-    PictureStreamMetadata { sample_aspect_ratio, field_order, orientation }
+    PictureStreamMetadata {
+        sample_aspect_ratio,
+        field_order,
+        field_transport_order,
+        orientation,
+    }
 }
 
-fn picture_field_order(value: ffmpeg::ffi::AVFieldOrder) -> Option<FieldOrder> {
+fn picture_field_transport_order(
+    value: ffmpeg::ffi::AVFieldOrder,
+) -> Option<PictureFieldTransportOrder> {
     use ffmpeg::ffi::AVFieldOrder::*;
     match value {
-        AV_FIELD_PROGRESSIVE => Some(FieldOrder::Progressive),
-        AV_FIELD_TT | AV_FIELD_TB => Some(FieldOrder::UpperFirst),
-        AV_FIELD_BB | AV_FIELD_BT => Some(FieldOrder::LowerFirst),
-        AV_FIELD_UNKNOWN => None,
+        AV_FIELD_TT => Some(PictureFieldTransportOrder::TopTop),
+        AV_FIELD_BB => Some(PictureFieldTransportOrder::BottomBottom),
+        AV_FIELD_TB => Some(PictureFieldTransportOrder::TopBottom),
+        AV_FIELD_BT => Some(PictureFieldTransportOrder::BottomTop),
+        AV_FIELD_UNKNOWN | AV_FIELD_PROGRESSIVE => None,
     }
 }
 
@@ -2231,28 +2243,33 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_field_orders_map_to_progressive_or_first_field_semantics() {
+    fn ffmpeg_field_orders_preserve_coded_and_display_order() {
         use ffmpeg::ffi::AVFieldOrder::*;
-        assert_eq!(picture_field_order(AV_FIELD_UNKNOWN), None);
+        assert_eq!(picture_field_transport_order(AV_FIELD_UNKNOWN), None);
+        assert_eq!(picture_field_transport_order(AV_FIELD_PROGRESSIVE), None);
         assert_eq!(
-            picture_field_order(AV_FIELD_PROGRESSIVE),
-            Some(FieldOrder::Progressive)
+            picture_field_transport_order(AV_FIELD_TT),
+            Some(PictureFieldTransportOrder::TopTop)
         );
         assert_eq!(
-            picture_field_order(AV_FIELD_TT),
-            Some(FieldOrder::UpperFirst)
+            picture_field_transport_order(AV_FIELD_TB),
+            Some(PictureFieldTransportOrder::TopBottom)
         );
         assert_eq!(
-            picture_field_order(AV_FIELD_TB),
-            Some(FieldOrder::UpperFirst)
+            picture_field_transport_order(AV_FIELD_BB),
+            Some(PictureFieldTransportOrder::BottomBottom)
         );
         assert_eq!(
-            picture_field_order(AV_FIELD_BB),
-            Some(FieldOrder::LowerFirst)
+            picture_field_transport_order(AV_FIELD_BT),
+            Some(PictureFieldTransportOrder::BottomTop)
         );
         assert_eq!(
-            picture_field_order(AV_FIELD_BT),
-            Some(FieldOrder::LowerFirst)
+            PictureFieldTransportOrder::TopBottom.display_field_order(),
+            FieldOrder::LowerFirst
+        );
+        assert_eq!(
+            PictureFieldTransportOrder::BottomTop.display_field_order(),
+            FieldOrder::UpperFirst
         );
     }
 

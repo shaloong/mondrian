@@ -786,6 +786,15 @@ allowed.
 
 ## Ordering
 
+Effects remain progressive full-raster processors for both progressive and
+interlaced Program Output. Renderer field sampling evaluates the same immutable
+compiled graph independently at each exact field instant; an Effect cannot see
+a woven picture or infer dominance from alternating lines. This preserves one
+Preview/Export graph semantics while allowing animation, temporal demand, and
+cache keys to distinguish the two samples. Effects that cannot satisfy the
+ordinary exact-time contract remain blockers rather than receiving an
+interlace-specific approximation.
+
 Effect stack order affects graph output. Reorder intent carries the moving
 `EffectId` and a `Before(EffectId)` or `After(EffectId)` anchor. Snapshot indexes
 never cross the Action Seam: stale, missing, and self-referential identities

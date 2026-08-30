@@ -18,6 +18,15 @@ rendering. DCP consumes display-linear Rec.709 from the shared Renderer and the
 Adapter alone applies the ST 428-1 transfer and matrix into MSB-aligned XYZ12;
 no DCP conversion is hidden in Timeline or the Viewer.
 
+This progressive restriction remains intentional for the current IMF, AS-11,
+and DCP catalog; generic interlaced media-file delivery does not widen those
+package rows. The separate qualified interlaced matrix is MOV-only: 1920x1080,
+25 or 30000/1001 encoded pictures per second, TFF, square-pixel Rec.709 Legal,
+10-bit 4:2:2, no alpha, and ProRes 422 LT/422/HQ or uncompressed v210 software
+encoding. HEVC/AV1/H.264, DNxHR, AVC-Intra, image/float masters, resident GPU
+encoding, Smart Render, BFF output, PsF, telecine, and mixed dominance remain
+fail-closed.
+
 ## Execution and validation
 
 The author `ExportPreset` is frozen in the ordinary `TimelineExportSnapshot`.

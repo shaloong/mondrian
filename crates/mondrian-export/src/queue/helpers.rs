@@ -119,7 +119,14 @@ impl ExportVideoSignalContract {
                 .map(|matrix| matrix.tag_name().to_owned())
                 .or_else(|| self.professional_rgb_tags.then(|| "gbr".to_owned())),
             sample_aspect_ratio: Some(delivery.sample_aspect_ratio),
-            field_order: Some("progressive".to_owned()),
+            field_order: Some(
+                match delivery.field_order {
+                    mondrian_core::timeline_data::FieldOrder::Progressive => "progressive",
+                    mondrian_core::timeline_data::FieldOrder::UpperFirst => "tt",
+                    mondrian_core::timeline_data::FieldOrder::LowerFirst => "bb",
+                }
+                .to_owned(),
+            ),
             require_color_tags_absent: tags.is_none(),
             static_hdr_metadata: crate::validator::ExpectedStaticHdrMetadata::Absent,
         }
@@ -171,9 +178,16 @@ pub(crate) fn apply_export_video_signal_args(
     let contract = ExportVideoSignalContract::resolve(settings, delivery);
     let mut filters = Vec::new();
     if let (Some(range), Some(matrix)) = (contract.scale_range, contract.yuv_matrix) {
+        let interlaced_scale =
+            if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+                ":interl=1"
+            } else {
+                ""
+            };
         filters.push(format!(
-            "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}",
-            matrix.scale_name()
+            "scale=iw:ih:in_range=full:out_range={range}:out_color_matrix={}{}",
+            matrix.scale_name(),
+            interlaced_scale,
         ));
     }
     filters.push(format!(
@@ -181,7 +195,24 @@ pub(crate) fn apply_export_video_signal_args(
         delivery.sample_aspect_ratio.numerator(),
         delivery.sample_aspect_ratio.denominator()
     ));
-    cmd.arg("-vf").arg(filters.join(",")).arg("-field_order").arg("progressive");
+    let field_order = match delivery.field_order {
+        mondrian_core::timeline_data::FieldOrder::Progressive => "progressive",
+        mondrian_core::timeline_data::FieldOrder::UpperFirst => "tt",
+        mondrian_core::timeline_data::FieldOrder::LowerFirst => "bb",
+    };
+    cmd.arg("-vf").arg(filters.join(",")).arg("-field_order").arg(field_order);
+    if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
+        cmd.arg("-top").arg("1");
+        if matches!(
+            &delivery.artifact,
+            ResolvedExportArtifactEncoding::MediaFile {
+                video: VideoCodecConfig::ProRes { .. },
+                ..
+            }
+        ) {
+            cmd.arg("-flags").arg("+ildct+ilme");
+        }
+    }
     cmd.arg("-pix_fmt").arg(contract.pixel_format);
     if let Some(range) = contract.codec_range {
         cmd.arg("-color_range").arg(range);

@@ -271,6 +271,10 @@ candidate.
 - UI visual values must come from theme tokens, not hardcoded colors/spacing/radii.
 - Command/menu/shortcut/plugin entry points should flow through a command registry, not private per-menu business logic.
 - Preview and export should share render semantics. Different scheduling or caching is allowed; different interpretation is not.
+- Interlaced Program Output is two exact progressive field-time evaluations,
+  never one woven Effect/compositor input. Media owns deinterlacing; Renderer
+  owns exact field sampling; Export owns prefilter/weave and finished-signal
+  evidence. Codec flags do not constitute support by themselves.
 - Realtime transport has exactly one Clock Master and is owned by the
   [Playback Engine](playback-engine.md); Viewer, decode, render, and audio
   adapters report observations rather than mutating transport.

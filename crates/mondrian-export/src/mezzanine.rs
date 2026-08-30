@@ -641,6 +641,7 @@ mod tests {
                         signal: None,
                         coding: Some(ResolvedVideoCodingStructure::IntraOnly),
                         require_progressive_frame: true,
+                        require_interlaced_top_field_first: None,
                     }),
                     audio: ExpectedStream::Forbidden,
                     expected_duration_secs: None,

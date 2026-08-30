@@ -128,9 +128,43 @@ pub struct PictureStreamMetadata {
     /// Stream-declared scan order; absence means unspecified.
     #[serde(default)]
     pub field_order: Option<FieldOrder>,
+    /// Exact coded/display transport order when the probe can distinguish it.
+    ///
+    /// Legacy persisted metadata may carry only `field_order`; new probes retain
+    /// this stronger evidence so Smart Render and validators never alias TT with
+    /// BT or BB with TB.
+    #[serde(default)]
+    pub field_transport_order: Option<PictureFieldTransportOrder>,
     /// Source display orientation derived from the stream display matrix.
     #[serde(default)]
     pub orientation: PictureOrientation,
+}
+
+/// Exact two-letter field transport identity used by FFmpeg containers/codecs.
+///
+/// The first component is the first field in coded order and the second is the
+/// first field in display order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureFieldTransportOrder {
+    /// Top coded first, top displayed first (TT).
+    TopTop,
+    /// Bottom coded first, bottom displayed first (BB).
+    BottomBottom,
+    /// Top coded first, bottom displayed first (TB).
+    TopBottom,
+    /// Bottom coded first, top displayed first (BT).
+    BottomTop,
+}
+
+impl PictureFieldTransportOrder {
+    /// Display-time field order without discarding the original transport identity.
+    pub const fn display_field_order(self) -> FieldOrder {
+        match self {
+            Self::TopTop | Self::BottomTop => FieldOrder::UpperFirst,
+            Self::BottomBottom | Self::TopBottom => FieldOrder::LowerFirst,
+        }
+    }
 }
 
 /// Placement-local picture interpretation overrides authored on one media Clip.
@@ -143,21 +177,97 @@ pub struct PictureInterpretationOverrides {
     pub field_order: Option<FieldOrder>,
 }
 
-/// One fully resolved progressive picture geometry used by execution.
+/// Display-time dominance for an interlaced picture stream.
+///
+/// This is intentionally independent of coded field order. FFmpeg's TT/BB/TB/BT
+/// transport values can disagree about coded and displayed order; source probes
+/// must preserve that transport evidence separately and lower only the display
+/// component into this execution contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PictureFieldDominance {
+    /// The top/upper field is presented first.
+    TopFirst,
+    /// The bottom/lower field is presented first.
+    BottomFirst,
+}
+
+/// Resolved source scan identity before pixel materialization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PictureScan {
+    /// Neither authoring nor stream metadata proved a scan identity.
+    ///
+    /// The Media Adapter must inspect decoded-frame evidence and may not silently
+    /// promote this state to progressive.
+    #[default]
+    Unknown,
+    /// Each coded picture is one complete temporal sample.
+    Progressive,
+    /// Each coded picture carries two temporally distinct fields.
+    Interlaced {
+        /// First field in display time.
+        dominance: PictureFieldDominance,
+    },
+}
+
+impl PictureScan {
+    /// Lower a persisted author/stream field-order value into exact scan semantics.
+    pub const fn from_field_order(value: FieldOrder) -> Self {
+        match value {
+            FieldOrder::Progressive => Self::Progressive,
+            FieldOrder::UpperFirst => {
+                Self::Interlaced { dominance: PictureFieldDominance::TopFirst }
+            }
+            FieldOrder::LowerFirst => {
+                Self::Interlaced { dominance: PictureFieldDominance::BottomFirst }
+            }
+        }
+    }
+
+    /// Project a proved scan identity back to the persisted author vocabulary.
+    pub const fn field_order(self) -> Option<FieldOrder> {
+        match self {
+            Self::Unknown => None,
+            Self::Progressive => Some(FieldOrder::Progressive),
+            Self::Interlaced { dominance: PictureFieldDominance::TopFirst } => {
+                Some(FieldOrder::UpperFirst)
+            }
+            Self::Interlaced { dominance: PictureFieldDominance::BottomFirst } => {
+                Some(FieldOrder::LowerFirst)
+            }
+        }
+    }
+
+    /// Whether the source requires a field-processing Adapter before ordinary
+    /// progressive-frame pixel execution.
+    pub const fn requires_deinterlace(self) -> bool {
+        matches!(self, Self::Interlaced { .. })
+    }
+}
+
+/// One fully resolved picture interpretation used by execution.
+///
+/// Scan identity remains attached to geometry because both are resolved from
+/// the same probe plus placement-local override. Pixel processors still
+/// receive progressive full-raster samples; an interlaced value here requires
+/// a field-processing Adapter before those samples cross the Media boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolvedPictureGeometry {
     encoded_resolution: Resolution,
     sample_aspect_ratio: SampleAspectRatio,
     orientation: PictureOrientation,
+    scan: PictureScan,
 }
 
 impl ResolvedPictureGeometry {
     /// Resolve probe facts plus placement-local author overrides.
     ///
     /// Unknown PAR falls back to square pixels, matching ordinary media
-    /// interpretation. Non-progressive scan and unsupported display matrices
-    /// fail closed because the current pixel pipeline cannot execute them
-    /// without changing temporal or spatial semantics.
+    /// interpretation. Scan identity is retained rather than rejected here:
+    /// layout consumers need valid geometry independent of whether a pixel
+    /// Adapter can execute the required deinterlace contract. Unsupported
+    /// display matrices still fail closed.
     pub fn resolve(
         encoded_resolution: Resolution,
         metadata: PictureStreamMetadata,
@@ -173,13 +283,15 @@ impl ResolvedPictureGeometry {
                 .ok_or(PictureInterpretationError::UnknownPixelAspectRatio)?,
             None => metadata.sample_aspect_ratio.unwrap_or(SampleAspectRatio::SQUARE),
         };
-        let field_order =
-            field_order_override.or(metadata.field_order).unwrap_or(FieldOrder::Progressive);
-        if field_order != FieldOrder::Progressive {
-            return Err(PictureInterpretationError::InterlacedUnsupported(
-                field_order,
-            ));
-        }
+        let scan = field_order_override
+            .or_else(|| {
+                metadata
+                    .field_transport_order
+                    .map(PictureFieldTransportOrder::display_field_order)
+            })
+            .or(metadata.field_order)
+            .map(PictureScan::from_field_order)
+            .unwrap_or(PictureScan::Unknown);
         if metadata.orientation == PictureOrientation::Unsupported {
             return Err(PictureInterpretationError::UnsupportedOrientation);
         }
@@ -187,6 +299,7 @@ impl ResolvedPictureGeometry {
             encoded_resolution,
             sample_aspect_ratio,
             orientation: metadata.orientation,
+            scan,
         })
     }
 
@@ -208,7 +321,10 @@ impl ResolvedPictureGeometry {
     pub fn square(encoded_resolution: Resolution) -> Result<Self, PictureInterpretationError> {
         Self::resolve(
             encoded_resolution,
-            PictureStreamMetadata::default(),
+            PictureStreamMetadata {
+                field_order: Some(FieldOrder::Progressive),
+                ..PictureStreamMetadata::default()
+            },
             None,
             None,
         )
@@ -227,6 +343,11 @@ impl ResolvedPictureGeometry {
     /// Effective cardinal source orientation.
     pub const fn orientation(self) -> PictureOrientation {
         self.orientation
+    }
+
+    /// Effective scan identity after author override and stream evidence.
+    pub const fn scan(self) -> PictureScan {
+        self.scan
     }
 
     /// Continuous display-authoring extent after SAR and source orientation.
@@ -269,9 +390,6 @@ pub enum PictureInterpretationError {
     /// `Unknown` is diagnostic state and cannot be an explicit author override.
     #[error("explicit pixel aspect ratio cannot be Unknown")]
     UnknownPixelAspectRatio,
-    /// Interlaced sources require a real deinterlacing execution path.
-    #[error("{0:?} scan is unsupported until a deinterlacing execution path is admitted")]
-    InterlacedUnsupported(FieldOrder),
     /// Arbitrary source display matrices cannot be approximated safely.
     #[error("source display matrix is not a supported cardinal orientation")]
     UnsupportedOrientation,
@@ -325,6 +443,7 @@ mod tests {
             PictureStreamMetadata {
                 sample_aspect_ratio: SampleAspectRatio::new(40, 33),
                 field_order: Some(FieldOrder::Progressive),
+                field_transport_order: None,
                 orientation: PictureOrientation::RotateClockwise90,
             },
             None,
@@ -342,21 +461,32 @@ mod tests {
     }
 
     #[test]
-    fn interlaced_and_unknown_override_contracts_fail_closed() {
+    fn interlaced_scan_is_retained_while_unknown_par_fails_closed() {
         let resolution = Resolution::FHD;
+        let geometry = ResolvedPictureGeometry::resolve(
+            resolution,
+            PictureStreamMetadata {
+                field_order: Some(FieldOrder::UpperFirst),
+                ..PictureStreamMetadata::default()
+            },
+            None,
+            None,
+        )
+        .expect("interlaced scan has valid display geometry");
+        assert_eq!(
+            geometry.scan(),
+            PictureScan::Interlaced { dominance: PictureFieldDominance::TopFirst }
+        );
         assert_eq!(
             ResolvedPictureGeometry::resolve(
                 resolution,
-                PictureStreamMetadata {
-                    field_order: Some(FieldOrder::UpperFirst),
-                    ..PictureStreamMetadata::default()
-                },
+                PictureStreamMetadata::default(),
                 None,
                 None,
-            ),
-            Err(PictureInterpretationError::InterlacedUnsupported(
-                FieldOrder::UpperFirst
-            ))
+            )
+            .expect("unknown scan still has display geometry")
+            .scan(),
+            PictureScan::Unknown
         );
         assert_eq!(
             ResolvedPictureGeometry::resolve(

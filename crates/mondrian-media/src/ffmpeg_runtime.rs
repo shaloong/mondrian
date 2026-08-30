@@ -50,7 +50,8 @@ const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
     "tiff",
 ];
 
-const REQUIRED_COMMAND_FILTERS: &[&str] = &["scale", "setparams", "pan", "anullsrc"];
+const REQUIRED_COMMAND_FILTERS: &[&str] =
+    &["scale", "setparams", "bwdif", "settb", "pan", "anullsrc"];
 const REQUIRED_COMMAND_MUXERS: &[&str] =
     &["mp4", "mov", "matroska", "webm", "mxf", "gif", "image2"];
 

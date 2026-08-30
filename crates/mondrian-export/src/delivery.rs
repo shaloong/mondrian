@@ -14,7 +14,8 @@ use crate::preset::{
     AudioCodecConfig, AudioStemFormat, Av1Profile, Container, ExportAlphaMode,
     ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget, ExportFrameSampling,
     ExportPreset, HevcProfile, ImageSequenceFormat, ProResProfile, ProfessionalDeliveryMetadata,
-    ProfessionalDeliveryProfile, Resolution, VideoCodecConfig, VideoRateControl,
+    ProfessionalDeliveryProfile, Resolution, UncompressedVideoFormat, VideoCodecConfig,
+    VideoRateControl,
 };
 use crate::professional_delivery::resolve_professional_delivery;
 use mondrian_core::{
@@ -134,7 +135,7 @@ pub struct ResolvedExportDeliveryContract {
     pub video_coding: crate::video_encoding::ResolvedVideoCodingStructure,
     /// Exact encoded sample aspect ratio inherited from Sequence Program Output.
     pub sample_aspect_ratio: mondrian_core::SampleAspectRatio,
-    /// Exact encoded scan order. Current delivery admission is progressive-only.
+    /// Exact encoded scan order admitted by the delivery qualification matrix.
     pub field_order: mondrian_core::timeline_data::FieldOrder,
     /// Exact encoded sample depth.
     pub bit_depth: DeliveryBitDepth,
@@ -304,6 +305,18 @@ pub fn resolve_export_delivery(
         bit_depth,
         video_range,
     )?;
+    validate_interlaced_delivery(
+        preset,
+        settings,
+        &artifact,
+        resolution,
+        frame_rate,
+        sample_aspect_ratio,
+        bit_depth,
+        video_range,
+        chroma_sampling,
+        color_target.color_space,
+    )?;
     if let ExportArtifactEncoding::ProfessionalDelivery(output) = &preset.artifact {
         resolve_professional_delivery(
             output,
@@ -338,6 +351,64 @@ pub fn resolve_export_delivery(
         color_target,
         legalizer: preset.legalizer,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_interlaced_delivery(
+    preset: &ExportPreset,
+    settings: &SequenceSettings,
+    artifact: &ResolvedExportArtifactEncoding,
+    resolution: Resolution,
+    frame_rate: mondrian_core::Rational,
+    sample_aspect_ratio: mondrian_core::SampleAspectRatio,
+    bit_depth: DeliveryBitDepth,
+    video_range: VideoRange,
+    chroma_sampling: ExportChromaSampling,
+    color_space: ColorSpace,
+) -> Result<(), ExportDeliveryError> {
+    use mondrian_core::timeline_data::FieldOrder;
+
+    if settings.field_order == FieldOrder::Progressive {
+        return Ok(());
+    }
+
+    let qualified_cadence = matches!(
+        frame_rate,
+        mondrian_core::Rational::FPS_25 | mondrian_core::Rational::FPS_2997
+    ) && frame_rate == settings.frame_rate;
+    let qualified_signal = resolution.width == 1_920
+        && resolution.height == 1_080
+        && qualified_cadence
+        && settings.field_order == FieldOrder::UpperFirst
+        && sample_aspect_ratio.numerator() == sample_aspect_ratio.denominator()
+        && bit_depth == DeliveryBitDepth::Ten
+        && video_range == VideoRange::Legal
+        && chroma_sampling == ExportChromaSampling::Yuv422
+        && color_space == ColorSpace::Rec709
+        && preset.frame_sampling == ExportFrameSampling::FrameHold
+        && preset.alpha_mode == ExportAlphaMode::FlattenBlack
+        && !settings.delivery.static_hdr_metadata_policy.writes_authored_metadata();
+    let qualified_artifact = matches!(
+        artifact,
+        ResolvedExportArtifactEncoding::MediaFile {
+            container: Container::Mov,
+            video: VideoCodecConfig::ProRes {
+                profile: ProResProfile::Lt | ProResProfile::Standard | ProResProfile::Hq,
+            } | VideoCodecConfig::Uncompressed {
+                format: UncompressedVideoFormat::Yuv422Ten,
+            },
+            ..
+        }
+    );
+
+    if qualified_signal && qualified_artifact {
+        Ok(())
+    } else {
+        Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleVideoSignal,
+            "交错输出当前仅资格化 1920x1080、25 或 30000/1001 fps、TFF、方形像素、Rec.709 Legal、10-bit 4:2:2、Frame Hold、无 alpha 的 MOV ProRes 422 LT/422/HQ 或 v210 软件交付",
+        ))
+    }
 }
 
 fn resolve_export_color_target(
@@ -971,6 +1042,100 @@ mod tests {
         AvcIntraClass, EncodedMediaOutput, ExportParameter, ExportVideoSignal, H264Profile,
         VideoRateControl,
     };
+
+    fn qualified_interlaced_prores_preset(profile: ProResProfile) -> ExportPreset {
+        let mut preset = ExportPreset::h264_aac_sdr_1080p();
+        let media = preset.media_file_mut().expect("media preset");
+        media.container = Container::Mov;
+        media.video = VideoCodecConfig::ProRes { profile };
+        media.video_coding = crate::video_encoding::VideoCodingStructure::IntraOnly;
+        preset.video_signal = ExportVideoSignal {
+            bit_depth: ExportParameter::Explicit(DeliveryBitDepth::Ten),
+            range: ExportParameter::Explicit(VideoRange::Legal),
+            chroma_sampling: ExportChromaSampling::Yuv422,
+        };
+        preset
+    }
+
+    fn qualified_interlaced_settings() -> SequenceSettings {
+        SequenceSettings {
+            frame_rate: mondrian_core::Rational::FPS_25,
+            field_order: mondrian_core::timeline_data::FieldOrder::UpperFirst,
+            ..SequenceSettings::default()
+        }
+    }
+
+    #[test]
+    fn qualified_1080i25_422_rows_are_admitted() {
+        let settings = qualified_interlaced_settings();
+        for profile in [
+            ProResProfile::Lt,
+            ProResProfile::Standard,
+            ProResProfile::Hq,
+        ] {
+            let contract = resolve_export_delivery(
+                &qualified_interlaced_prores_preset(profile),
+                &settings,
+                &ProjectColorEnvironment::default(),
+            )
+            .unwrap_or_else(|error| panic!("qualified {profile:?} row failed: {error}"));
+            assert_eq!(
+                contract.field_order,
+                mondrian_core::timeline_data::FieldOrder::UpperFirst
+            );
+            assert_eq!(contract.pixel_format, "yuv422p10le");
+        }
+
+        let mut v210 = qualified_interlaced_prores_preset(ProResProfile::Hq);
+        v210.media_file_mut().expect("media preset").video =
+            VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Ten };
+        let contract =
+            resolve_export_delivery(&v210, &settings, &ProjectColorEnvironment::default())
+                .expect("qualified v210 row");
+        assert_eq!(contract.pixel_format, "yuv422p10le");
+    }
+
+    #[test]
+    fn interlaced_delivery_rejects_unqualified_codec_and_artifact_families() {
+        let settings = qualified_interlaced_settings();
+        for preset in [
+            ExportPreset::h264_aac_sdr_1080p(),
+            ExportPreset::hevc_main10_aac(),
+            ExportPreset::png16_sequence(),
+            ExportPreset::prores_4444_alpha(),
+        ] {
+            let error =
+                resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
+                    .expect_err("unqualified interlaced output must fail closed");
+            assert!(matches!(
+                error.code,
+                ExportDeliveryIssueCode::IncompatibleVideoSignal
+                    | ExportDeliveryIssueCode::UnsupportedAlpha
+            ));
+        }
+    }
+
+    #[test]
+    fn interlaced_delivery_rejects_bottom_first_and_progressive_cadence_conversion() {
+        let preset = qualified_interlaced_prores_preset(ProResProfile::Hq);
+        let mut settings = qualified_interlaced_settings();
+        settings.field_order = mondrian_core::timeline_data::FieldOrder::LowerFirst;
+        assert!(
+            resolve_export_delivery(&preset, &settings, &ProjectColorEnvironment::default())
+                .is_err()
+        );
+
+        settings.field_order = mondrian_core::timeline_data::FieldOrder::UpperFirst;
+        let mut cadence_conversion = preset;
+        cadence_conversion.frame_rate =
+            ExportParameter::Explicit(mondrian_core::Rational::FPS_2997);
+        assert!(resolve_export_delivery(
+            &cadence_conversion,
+            &settings,
+            &ProjectColorEnvironment::default()
+        )
+        .is_err());
+    }
 
     #[test]
     fn h264_sdr_preset_resolves_without_using_ten_bit_sequence_default() {

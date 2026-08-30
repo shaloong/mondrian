@@ -29,6 +29,7 @@ mod heterogeneous_cpu;
 pub mod heterogeneous_gpu;
 pub mod native_video;
 pub mod ocio_gpu;
+pub mod picture_sampling;
 pub mod prepared_visual_execution;
 pub mod prepared_visual_frame_closure;
 pub mod prepared_visual_program;

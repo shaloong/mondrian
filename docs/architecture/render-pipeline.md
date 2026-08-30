@@ -134,13 +134,23 @@ stale composite even when Clip placement is unchanged.
 Timeline evaluation consumes exact Timeline Time in a declared Sequence domain
 and an explicit video Evaluation Grid. `TimelineEvaluationRequest` carries one
 `FramePosition`; its frame and time base cannot be separated or supplied
-through parallel fields. Evaluation requires that position's time base to
-exactly equal the prepared/source Sequence grid and requires a nonnegative
-frame. A mismatch fails closed before placement selection: the renderer never
-normalizes an equivalent-looking ratio, substitutes the source grid, or clamps
-a negative request to frame zero.
+through parallel fields. Evaluation accepts the Sequence picture grid or its
+exact doubled field grid and requires a nonnegative coordinate. Any other grid
+fails closed before placement selection: the renderer never normalizes an
+equivalent-looking ratio, substitutes the source grid, or clamps a negative
+request to frame zero.
 Subframe shutter/temporal samples use the same Timeline Time representation and
 do not introduce a renderer-private tick scale.
+
+`ProgramPictureSampling` is the sole Program scan scheduler. Progressive output
+requests one full-raster sample. Interlaced output requests two independent
+full-raster progressive evaluations at exact display-field instants and carries
+the row parity extracted from each. Animation, Transitions, nested Sequences,
+temporal Effect demand, random seeds, and cache identity therefore observe two
+real times; no woven frame enters an Effect or compositor. The Export-owned
+Interlaced Delivery Module applies a field-safe vertical `[1,2,1]/4` prefilter
+to each sample and atomically weaves TFF even/odd rows. Float masters cannot
+enter this quantized delivery boundary.
 
 Flattening retains two independent exact coordinates for each active Clip:
 `clip_time` for all Clip-owned visual processing and `source_sample` for

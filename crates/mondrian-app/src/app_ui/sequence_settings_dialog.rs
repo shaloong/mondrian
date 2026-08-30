@@ -240,7 +240,10 @@ const PIXEL_ASPECT_RATIO_OPTIONS: [PixelAspectRatio; 9] = [
     PixelAspectRatio::Unknown,
 ];
 
-const FIELD_ORDER_OPTIONS: [FieldOrder; 1] = [FieldOrder::Progressive];
+// Program Output qualification currently covers progressive plus 1080i25/
+// 1080i29.97 TFF. The settings validator remains the authority when raster or
+// cadence does not match that matrix.
+const FIELD_ORDER_OPTIONS: [FieldOrder; 2] = [FieldOrder::Progressive, FieldOrder::UpperFirst];
 
 const TIMELINE_DISPLAY_FORMAT_OPTIONS: [TimelineDisplayFormat; 3] = [
     TimelineDisplayFormat::Timecode(SmpteCountingMode::NonDropFrame),

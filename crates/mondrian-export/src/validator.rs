@@ -81,6 +81,8 @@ pub struct ExpectedVideoConstraints {
     pub coding: Option<crate::video_encoding::ResolvedVideoCodingStructure>,
     /// Require the independently decoded first frame to prove progressive scan.
     pub require_progressive_frame: bool,
+    /// Require an interlaced first frame with the exact decoded field dominance.
+    pub require_interlaced_top_field_first: Option<bool>,
 }
 
 /// Codec/profile identities supported by the production export Adapter.
@@ -378,6 +380,7 @@ struct FfprobeFrame {
     #[serde(default)]
     side_data_list: Vec<FfprobeFrameSideData>,
     interlaced_frame: Option<u8>,
+    top_field_first: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -524,9 +527,8 @@ pub fn validate_export_output_cancellable(
         validate_finished_video_coding(output_path, &report, expected_video, coding, cancellation)?;
     }
 
-    // Every deliverable with a video stream must prove its first frame is
-    // decodable, not only HDR variants. Previously an SDR export with a
-    // corrupt interior GOP could pass QC without ever decoding a frame.
+    // Every deliverable with a video stream must prove a bounded opening
+    // window is decodable and carries a stable scan contract.
     let has_video = report
         .streams
         .iter()
@@ -536,18 +538,22 @@ pub fn validate_export_output_cancellable(
         ExpectedStream::Forbidden => None,
     }
     .map(|signal| &signal.static_hdr_metadata);
-    let first_frame = if has_video {
-        Some(ffprobe_first_video_frame(output_path, cancellation)?)
+    let frame_window = if has_video {
+        ffprobe_video_frame_window(output_path, cancellation)?
     } else {
-        None
+        Vec::new()
     };
-    if let ExpectedStream::Required(expected_video) = &expectations.video
-        && expected_video.require_progressive_frame
-        && first_frame.as_ref().and_then(|frame| frame.interlaced_frame) != Some(0)
-    {
-        return Err("导出成品首帧未证明 progressive scan".to_owned());
+    let first_frame = frame_window.first();
+    if let ExpectedStream::Required(expected_video) = &expectations.video {
+        if frame_window.is_empty() {
+            validate_frame_scan(None, expected_video)?;
+        }
+        for (index, frame) in frame_window.iter().enumerate() {
+            validate_frame_scan(Some(frame), expected_video)
+                .map_err(|error| format!("导出成品解码窗口第 {} 帧: {error}", index + 1))?;
+        }
     }
-    let side_data = first_frame.as_ref().map(|frame| frame.side_data_list.as_slice());
+    let side_data = first_frame.map(|frame| frame.side_data_list.as_slice());
     match (expected_static_hdr, side_data) {
         (None | Some(ExpectedStaticHdrMetadata::Unspecified), _) => {}
         (Some(ExpectedStaticHdrMetadata::Absent), Some(side_data)) => {
@@ -563,6 +569,34 @@ pub fn validate_export_output_cancellable(
     Ok(build_output_probe(&report, side_data))
 }
 
+fn validate_frame_scan(
+    frame: Option<&FfprobeFrame>,
+    expected: &ExpectedVideoConstraints,
+) -> Result<(), String> {
+    if expected.require_progressive_frame
+        && frame.and_then(|frame| frame.interlaced_frame) != Some(0)
+    {
+        return Err("导出成品首帧未证明 progressive scan".to_owned());
+    }
+    let Some(expected_top_field_first) = expected.require_interlaced_top_field_first else {
+        return Ok(());
+    };
+    if frame.and_then(|frame| frame.interlaced_frame) != Some(1) {
+        return Err("导出成品首帧未证明 interlaced scan".to_owned());
+    }
+    let actual_top_field_first =
+        frame.and_then(|frame| frame.top_field_first).map(|value| value != 0);
+    if actual_top_field_first != Some(expected_top_field_first) {
+        return Err(format!(
+            "导出成品首帧场优先级不匹配：期望 top_field_first={expected_top_field_first}，实际 {}",
+            actual_top_field_first
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "<missing>".to_owned())
+        ));
+    }
+    Ok(())
+}
+
 /// Probe an export into stable typed evidence without applying a delivery
 /// expectation. Video outputs must expose a decodable first frame so HDR
 /// metadata presence cannot silently remain unknown.
@@ -573,11 +607,13 @@ pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
         .streams
         .iter()
         .any(|stream| stream.codec_type.as_deref() == Some("video"));
-    let first_frame =
-        has_video.then(|| ffprobe_first_video_frame(path, &cancellation)).transpose()?;
+    let frame_window = has_video
+        .then(|| ffprobe_video_frame_window(path, &cancellation))
+        .transpose()?
+        .unwrap_or_default();
     Ok(build_output_probe(
         &report,
-        first_frame.as_ref().map(|frame| frame.side_data_list.as_slice()),
+        frame_window.first().map(|frame| frame.side_data_list.as_slice()),
     ))
 }
 
@@ -620,10 +656,10 @@ fn ffprobe_report(
         .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
 }
 
-fn ffprobe_first_video_frame(
+fn ffprobe_video_frame_window(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<FfprobeFrame, String> {
+) -> Result<Vec<FfprobeFrame>, String> {
     let mut command = mondrian_media::ffprobe_command();
     command
         .arg("-v")
@@ -631,10 +667,10 @@ fn ffprobe_first_video_frame(
         .arg("-select_streams")
         .arg("v:0")
         .arg("-read_intervals")
-        .arg("%+#1")
+        .arg("%+#8")
         .arg("-show_frames")
         .arg("-show_entries")
-        .arg("frame=side_data_list,interlaced_frame")
+        .arg("frame=side_data_list,interlaced_frame,top_field_first")
         .arg("-print_format")
         .arg("json")
         .arg(path);
@@ -642,7 +678,7 @@ fn ffprobe_first_video_frame(
         &mut command,
         FFPROBE_FRAME_STDOUT_LIMIT,
         cancellation,
-        "first-frame HDR metadata",
+        "opening-frame signal evidence",
     )?;
 
     if !output.status.success() {
@@ -655,12 +691,12 @@ fn ffprobe_first_video_frame(
     }
 
     let report = serde_json::from_slice::<FfprobeFrameReport>(&output.stdout)
-        .map_err(|err| format!("解析 ffprobe 首帧 HDR metadata 失败: {err}"))?;
-    report
-        .frames
-        .into_iter()
-        .next()
-        .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
+        .map_err(|err| format!("解析 ffprobe 开场帧信号证据失败: {err}"))?;
+    if report.frames.is_empty() {
+        Err("ffprobe 未能解码导出视频的开场帧窗口".to_string())
+    } else {
+        Ok(report.frames)
+    }
 }
 
 fn validate_finished_video_coding(
@@ -1626,6 +1662,33 @@ fn parse_secs_f64(raw: &str) -> Option<f64> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn decoded_frame_scan_validation_is_dominance_aware() {
+        let expected = ExpectedVideoConstraints {
+            require_interlaced_top_field_first: Some(true),
+            ..ExpectedVideoConstraints::default()
+        };
+        let tff = FfprobeFrame {
+            interlaced_frame: Some(1),
+            top_field_first: Some(1),
+            ..FfprobeFrame::default()
+        };
+        validate_frame_scan(Some(&tff), &expected).expect("TFF evidence");
+
+        let bff = FfprobeFrame { top_field_first: Some(0), ..tff.clone() };
+        assert!(validate_frame_scan(Some(&bff), &expected)
+            .expect_err("wrong dominance")
+            .contains("top_field_first"));
+        let progressive = FfprobeFrame {
+            interlaced_frame: Some(0),
+            top_field_first: Some(0),
+            ..FfprobeFrame::default()
+        };
+        assert!(validate_frame_scan(Some(&progressive), &expected)
+            .expect_err("progressive frame cannot prove interlace")
+            .contains("interlaced scan"));
+    }
+
     fn base_report() -> FfprobeReport {
         FfprobeReport {
             streams: vec![
@@ -1693,6 +1756,7 @@ mod tests {
                 signal: None,
                 coding: None,
                 require_progressive_frame: false,
+                require_interlaced_top_field_first: None,
             }),
             audio: base_audio_expectation(),
             expected_duration_secs: Some(10.0),

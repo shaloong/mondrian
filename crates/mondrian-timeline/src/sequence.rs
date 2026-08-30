@@ -1022,11 +1022,20 @@ impl SequenceSettings {
                 reason: "序列像素宽高比不能是 Unknown；请选择一个可执行的精确比例".to_owned(),
             });
         }
-        if self.field_order != FieldOrder::Progressive {
+        if self.field_order != FieldOrder::Progressive
+            && (self.field_order != FieldOrder::UpperFirst
+                || self.resolution != Resolution::FHD
+                || ![Rational::FPS_25, Rational::FPS_2997].contains(&self.frame_rate))
+        {
             return Err(mondrian_core::MondrianError::WorkflowStepFailed {
                 step_id: "sequence_settings_validate".to_owned(),
-                reason: "当前版本只允许逐行 Sequence；隔行交付需要真实的场采样与编码路径"
-                    .to_owned(),
+                reason: format!(
+                    "未资格化的隔行 Program Output：仅支持 1920x1080 @ 25/30000:1001 fps 上场优先，当前为 {}x{} @ {} {:?}",
+                    self.resolution.width,
+                    self.resolution.height,
+                    self.frame_rate,
+                    self.field_order
+                ),
             });
         }
         if !Self::AUDIO_SAMPLE_RATES.contains(&self.audio_sample_rate) {
@@ -2698,18 +2707,9 @@ fn validate_clip_local_author_contract(
                 ),
             });
         }
-        if interpretation
-            .field_order_override
-            .is_some_and(|order| order != FieldOrder::Progressive)
-        {
-            return Err(mondrian_core::MondrianError::WorkflowStepFailed {
-                step_id: "validate_sequence_author_contract".to_owned(),
-                reason: format!(
-                    "Clip {} requests interlaced interpretation without an admitted deinterlacing path",
-                    clip.id
-                ),
-            });
-        }
+        // Interlaced Clip overrides are executable author intent. The Media
+        // Field Processing Module resolves them to an explicit BWDIF parity and
+        // fails closed if decoded-frame evidence is mixed or contradictory.
     }
     clip.transform.to_property_bag().validate().map_err(|error| {
         mondrian_core::MondrianError::WorkflowStepFailed {
@@ -4394,13 +4394,31 @@ mod tests {
     }
 
     #[test]
-    fn sequence_settings_reject_inert_scan_and_unknown_geometry_contracts() {
+    fn sequence_settings_admit_only_qualified_interlaced_output_rows() {
         let interlaced = SequenceSettings {
             field_order: FieldOrder::UpperFirst,
             ..Default::default()
         };
-        let error = interlaced.validate().expect_err("interlaced output must fail closed");
-        assert!(error.to_string().contains("逐行"));
+        interlaced.validate().expect("qualified 1080i25 TFF output");
+        for unsupported in [
+            SequenceSettings {
+                field_order: FieldOrder::LowerFirst,
+                ..Default::default()
+            },
+            SequenceSettings {
+                field_order: FieldOrder::UpperFirst,
+                resolution: Resolution::UHD4K,
+                ..Default::default()
+            },
+            SequenceSettings {
+                field_order: FieldOrder::UpperFirst,
+                frame_rate: Rational::FPS_30,
+                ..Default::default()
+            },
+        ] {
+            let error = unsupported.validate().expect_err("unqualified interlaced row");
+            assert!(error.to_string().contains("未资格化"));
+        }
 
         let unknown_par = SequenceSettings {
             pixel_aspect_ratio: PixelAspectRatio::Unknown,

@@ -100,11 +100,15 @@ Clip's Track lock. Every App mutation still commits through one Authoring
 Transaction, advances Sequence revision/generation once, and participates in
 bounded Undo/Redo.
 
-Sequence Program Output currently admits only progressive scan and a known
-pixel-aspect preset. Clip-local media interpretation similarly rejects an
-explicit unknown PAR or non-progressive override. Source SAR and orientation
-are evaluated before the authored Clip transform; Sequence PAR never mutates a
-Clip's X/Y, anchor, scale, or Auto Fit values.
+Sequence Program Output admits progressive scan plus the closed interlaced
+qualification rows 1920x1080 at 25 or 30000/1001 encoded pictures per second,
+TFF only. BFF, UHD interlace, and unqualified cadences fail before author commit.
+Clip-local media interpretation may explicitly bind progressive, TFF, or BFF;
+the Media Field Processing Module owns physical execution and rejects unknown,
+mixed, or contradictory decoded evidence. Explicit unknown PAR remains invalid.
+Source SAR, scan processing, and orientation are evaluated before the authored
+Clip transform; Sequence PAR never mutates a Clip's X/Y, anchor, scale, or Auto
+Fit values.
 
 ### Structurally Shared Author Collections
 

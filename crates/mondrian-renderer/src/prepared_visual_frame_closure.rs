@@ -15,8 +15,8 @@ use crate::{
 };
 use mondrian_core::timeline_data::{NestedColorProcessing, TimelineClipExecutionRef};
 use mondrian_core::{
-    FramePosition, Resolution, SequenceId, SequenceRevision, SourceSampleTarget, TimelineTime,
-    WorkingColorSpace,
+    FramePosition, Rational, Resolution, SequenceId, SequenceRevision, SourceSampleTarget,
+    TimelineTime, WorkingColorSpace,
 };
 use mondrian_effects::EffectTemporalFrameRequest;
 use mondrian_timeline::sequence::{
@@ -176,8 +176,8 @@ pub struct PreparedVisualFrameClosureRequest<'a> {
     pub root_sequence: &'a Sequence,
     /// Reachable Sequence snapshots available to nested lookup.
     pub sequences: &'a [Sequence],
-    /// Exact nonnegative root frame on the root Sequence Evaluation Grid.
-    pub root_frame: i64,
+    /// Exact nonnegative root sample on the frame or doubled field grid.
+    pub root_position: FramePosition,
     /// Explicit root execution/output raster.
     pub root_resolution: Resolution,
     /// Exact root Program color context.
@@ -242,7 +242,7 @@ pub struct PreparedVisualFrameNode<T> {
     program: Arc<PreparedVisualProgram>,
     sequence_id: SequenceId,
     sequence_revision: SequenceRevision,
-    frame: i64,
+    position: FramePosition,
     time: TimelineTime,
     materialization: PreparedVisualMaterializationContract,
     execution_resolution: Resolution,
@@ -276,7 +276,12 @@ impl<T> PreparedVisualFrameNode<T> {
 
     /// Projected frame on this Sequence's Evaluation Grid.
     pub const fn frame(&self) -> i64 {
-        self.frame
+        self.position.frame
+    }
+
+    /// Exact frame-grid or doubled-field-grid evaluation coordinate.
+    pub const fn position(&self) -> FramePosition {
+        self.position
     }
 
     /// Exact Sequence-local sample time represented by `frame`.
@@ -341,7 +346,7 @@ impl<T> PreparedVisualFrameNode<T> {
             program: self.program,
             sequence_id: self.sequence_id,
             sequence_revision: self.sequence_revision,
-            frame: self.frame,
+            position: self.position,
             time: self.time,
             materialization: self.materialization,
             execution_resolution: self.execution_resolution,
@@ -463,14 +468,14 @@ struct NestedDemand {
     color_processing: NestedColorProcessing,
 }
 
-/// Build the sole recursive visual closure for one root frame.
+/// Build the sole recursive visual closure for one root picture sample.
 ///
 /// `resolve_program` binds each distinct Sequence snapshot to exactly one
 /// immutable Program. The Program identity, revision, and conservative author
 /// fingerprint are validated before `evaluate` can observe it.
 ///
 /// `evaluate` receives no raw Sequence and may only lower the already prepared
-/// Program for the exact frame, execution raster, color context, and normalized
+/// Program for the exact frame/field position, execution raster, color context, and normalized
 /// authored Preview scale supplied here. It may attach consumer-specific
 /// evidence that is local to this node, but must not recurse. Evidence that
 /// needs canonical child bindings is finalized later through
@@ -481,7 +486,7 @@ pub fn prepare_visual_frame_closure<T>(
     mut resolve_program: impl FnMut(&Sequence) -> Result<Arc<PreparedVisualProgram>, String>,
     evaluate: impl FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
@@ -510,15 +515,15 @@ pub fn prepare_bound_visual_frame_closure<T>(
     mut resolve_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
     mut evaluate: impl FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
     ) -> Result<PreparedVisualFrameEvaluation<T>, String>,
 ) -> Result<PreparedVisualFrameClosure<T>, PreparedVisualFrameClosureError> {
-    if request.root_frame < 0 {
+    if request.root_position.frame < 0 {
         return Err(PreparedVisualFrameClosureError::NegativeRootFrame {
-            frame: request.root_frame,
+            frame: request.root_position.frame,
         });
     }
     validate_resolution(request.root_sequence.id, request.root_resolution)?;
@@ -553,7 +558,7 @@ pub fn prepare_bound_visual_frame_closure<T>(
     };
     let root = builder.prepare_node(
         request.root_sequence,
-        request.root_frame,
+        request.root_position,
         request.root_resolution,
         request.root_color_context,
         Arc::from([]),
@@ -576,7 +581,7 @@ impl<'a, T, Evaluate> PreparedVisualFrameClosureBuilder<'a, T, Evaluate>
 where
     Evaluate: FnMut(
         &Arc<PreparedVisualProgram>,
-        i64,
+        FramePosition,
         Resolution,
         &ProgramColorContext,
         f32,
@@ -586,7 +591,7 @@ where
     fn prepare_node(
         &mut self,
         sequence: &Sequence,
-        frame: i64,
+        position: FramePosition,
         execution_resolution: Resolution,
         color_context: ProgramColorContext,
         instance_path: Arc<[PreparedVisualNestedInstanceStep]>,
@@ -605,22 +610,20 @@ where
             path.push(sequence.id);
             return Err(PreparedVisualFrameClosureError::Cycle { path });
         }
-        if frame < 0 {
+        if position.frame < 0 {
             return Err(PreparedVisualFrameClosureError::NegativeNestedFrame {
                 sequence_id: sequence.id,
-                frame,
+                frame: position.frame,
             });
         }
         validate_resolution(sequence.id, execution_resolution)?;
-        let time =
-            TimelineTime::from_frame_position(FramePosition::new(frame, sequence.time_base()))
-                .map_err(
-                    |error| PreparedVisualFrameClosureError::FrameTimeProjection {
-                        sequence_id: sequence.id,
-                        frame,
-                        reason: error.to_string(),
-                    },
-                )?;
+        let time = TimelineTime::from_frame_position(position).map_err(|error| {
+            PreparedVisualFrameClosureError::FrameTimeProjection {
+                sequence_id: sequence.id,
+                frame: position.frame,
+                reason: error.to_string(),
+            }
+        })?;
 
         self.active_path.push(sequence.id);
         let result = (|| {
@@ -631,17 +634,17 @@ where
             );
             let evaluation = (self.evaluate)(
                 &program,
-                frame,
+                position,
                 execution_resolution,
                 &color_context,
                 preview_resolution_scale,
             )
             .map_err(|reason| PreparedVisualFrameClosureError::Evaluation {
                 sequence_id: sequence.id,
-                frame,
+                frame: position.frame,
                 reason,
             })?;
-            validate_evaluation(sequence, frame, &evaluation.plan)?;
+            validate_evaluation(sequence, position, &evaluation.plan)?;
             let demands = collect_nested_demands(&evaluation.plan, &evaluation.temporal_batches);
             let node_index = u32::try_from(self.nodes.len())
                 .map_err(|_| PreparedVisualFrameClosureError::NodeCapacityExceeded)?;
@@ -652,7 +655,7 @@ where
                 program,
                 sequence_id: sequence.id,
                 sequence_revision: sequence.revision,
-                frame,
+                position,
                 time,
                 execution_resolution,
                 color_context: color_context.clone(),
@@ -692,20 +695,17 @@ where
                         );
                     }
                 }
-                let child_frame = demand
-                    .source_sample
-                    .to_frame_position(child.settings.frame_rate)
+                let child_position = exact_nested_visual_position(demand.source_sample, child)
                     .map_err(
-                        |error| PreparedVisualFrameClosureError::NestedTimeProjection {
+                        |reason| PreparedVisualFrameClosureError::NestedTimeProjection {
                             parent_sequence_id: sequence.id,
                             nested_sequence_id: child.id,
                             placement: Box::new(demand.placement),
                             source_time: demand.source_sample.time(),
-                            reason: error.to_string(),
+                            reason,
                         },
-                    )?
-                    .frame;
-                if child_frame < 0 {
+                    )?;
+                if child_position.frame < 0 {
                     return Err(PreparedVisualFrameClosureError::InsufficientNestedHandle {
                         parent_sequence_id: sequence.id,
                         nested_sequence_id: child.id,
@@ -729,7 +729,7 @@ where
                 });
                 let child_id = self.prepare_node(
                     child,
-                    child_frame,
+                    child_position,
                     child_resolution,
                     child_context.clone(),
                     Arc::from(child_path),
@@ -805,25 +805,62 @@ where
 
 fn validate_evaluation(
     sequence: &Sequence,
-    frame: i64,
+    position: FramePosition,
     plan: &TimelineRenderPlan,
 ) -> Result<(), PreparedVisualFrameClosureError> {
-    if plan.position.frame != frame {
+    if plan.position.frame != position.frame {
         return Err(PreparedVisualFrameClosureError::EvaluationFrameMismatch {
             sequence_id: sequence.id,
-            requested: frame,
+            requested: position.frame,
             evaluated: plan.position.frame,
         });
     }
-    let expected_time_base = sequence.time_base();
-    if plan.position.time_base != expected_time_base {
+    if plan.position.time_base != position.time_base {
         return Err(PreparedVisualFrameClosureError::EvaluationGridMismatch {
             sequence_id: sequence.id,
-            expected: expected_time_base,
+            expected: position.time_base,
             evaluated: plan.position.time_base,
         });
     }
     Ok(())
+}
+
+fn exact_nested_visual_position(
+    target: SourceSampleTarget,
+    sequence: &Sequence,
+) -> Result<FramePosition, String> {
+    let frame_position = target
+        .to_frame_position(sequence.settings.frame_rate)
+        .map_err(|error| error.to_string())?;
+    if target.boundary() == mondrian_core::SourceSamplingBoundary::Covering
+        && TimelineTime::from_frame_position(frame_position).map_err(|error| error.to_string())?
+            == target.time()
+    {
+        return Ok(frame_position);
+    }
+    let field_rate = Rational::new(
+        sequence
+            .settings
+            .frame_rate
+            .num
+            .checked_mul(2)
+            .ok_or_else(|| "nested field-rate grid overflowed".to_owned())?,
+        sequence.settings.frame_rate.den,
+    );
+    let field_position = target.to_frame_position(field_rate).map_err(|error| error.to_string())?;
+    let selected_time =
+        TimelineTime::from_frame_position(field_position).map_err(|error| error.to_string())?;
+    let exact = match target.boundary() {
+        mondrian_core::SourceSamplingBoundary::Covering => selected_time == target.time(),
+        mondrian_core::SourceSamplingBoundary::StrictPredecessor => selected_time < target.time(),
+    };
+    if !exact {
+        return Err(format!(
+            "nested source time {} is not representable on the child frame or field grid",
+            target.time()
+        ));
+    }
+    Ok(field_position)
 }
 
 fn collect_nested_demands(
@@ -1321,7 +1358,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: root,
                 sequences,
-                root_frame,
+                root_position: FramePosition::new(root_frame, root.time_base()),
                 root_resolution,
                 root_color_context,
                 child_canvas_policy,
@@ -1331,13 +1368,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, _, _, _| {
+            |program, position, _, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 Ok(PreparedVisualFrameEvaluation::new(plan, Vec::new(), ()))
@@ -1436,7 +1470,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: root,
                 sequences,
-                root_frame,
+                root_position: FramePosition::new(root_frame, root.time_base()),
                 root_resolution,
                 root_color_context: root_color_context(root),
                 child_canvas_policy,
@@ -1446,13 +1480,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, resolution, _, _| {
+            |program, position, resolution, _, _| {
                 let plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 let extent = EffectFrameExtent::new(resolution.width, resolution.height);
@@ -1486,7 +1517,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[duplicate],
-                root_frame: 0,
+                root_position: FramePosition::new(0, root.time_base()),
                 root_resolution: root.settings.resolution,
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1523,7 +1554,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[],
-                root_frame: 0,
+                root_position: FramePosition::new(0, root.time_base()),
                 root_resolution: Resolution { width: 64, height: 36 },
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1558,7 +1589,7 @@ mod tests {
             PreparedVisualFrameClosureRequest {
                 root_sequence: &root,
                 sequences: &[],
-                root_frame: 3,
+                root_position: FramePosition::new(3, root.time_base()),
                 root_resolution: Resolution { width: 64, height: 36 },
                 root_color_context: root_color_context(&root),
                 child_canvas_policy: PreparedVisualChildCanvasPolicy::Authored,
@@ -1568,13 +1599,10 @@ mod tests {
                     .map(Arc::new)
                     .map_err(|error| error.to_string())
             },
-            |program, frame, _, _, _| {
+            |program, position, _, _, _| {
                 let mut plan = evaluate_prepared_visual_program(
                     program,
-                    crate::TimelineEvaluationRequest::export(FramePosition::new(
-                        frame,
-                        program.evaluation_time_base(),
-                    )),
+                    crate::TimelineEvaluationRequest::export(position),
                 )
                 .map_err(|error| error.to_string())?;
                 plan.position.time_base = equivalent_but_not_identical;
