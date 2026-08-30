@@ -55,6 +55,7 @@ mondrian-render-cache = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
+mondrian-interchange = { workspace = true }
 mondrian-renderer = { workspace = true }
 mondrian-assets   = { workspace = true }
 mondrian-effects  = { workspace = true }

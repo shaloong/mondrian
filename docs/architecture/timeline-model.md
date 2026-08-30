@@ -10,6 +10,15 @@ binding under another delivery label.
 `mondrian-editor-state::AuthoringSession` owns project transactions and bounded
 Undo/Redo; the Timeline crate has no second mutable document or command history.
 
+Foreign editorial formats never deserialize directly into this author model.
+`mondrian-interchange` first inspects a bounded native artifact through a
+profile Adapter, lowers it into one private exact representation, requires
+product-owned strong Asset bindings, and only then materializes a detached
+candidate. The App appends that candidate through one Project author
+transaction. Export projects an immutable canonical Sequence in the opposite
+direction and attaches explicit preservation/loss evidence. See
+[Timeline Interchange](timeline-interchange.md).
+
 Persisted positions, ranges, automation keys, and temporal handles use canonical
 exact rational `TimelineTime`. `FramePosition` is an evaluation/display adapter,
 not an author coordinate, and the former `TimeTicks = frame * 1000` path has
@@ -17,6 +26,13 @@ been deleted. Sequence frame rate remains a
 video evaluation/snap grid and display-timecode input, not the universal storage
 time base; audio edits may therefore retain sample-accurate boundaries without
 creating a second Timeline model.
+
+`MediaInterpretation::editorial_source` retains optional reel identity, exact
+source SMPTE reference, and foreign item identity for conform and round trip.
+These are source-interpretation facts, not Asset identity, placement authority,
+or a replacement for canonical `TimelineTime`. The Core display-timecode
+contract owns the exact inverse label parser used at interchange seams,
+including drop-frame legality and negative-label handling.
 
 The semantic Move/Trim/Seek inputs receive a complete `FramePosition` from an
 input Adapter, and its `time_base` is never discarded.

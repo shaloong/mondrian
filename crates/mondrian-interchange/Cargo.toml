@@ -1,0 +1,20 @@
+[package]
+name = "mondrian-interchange"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+mondrian-core = { workspace = true }
+mondrian-timeline = { workspace = true }
+mondrian-effects = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+roxmltree = { workspace = true }
+tempfile = { workspace = true }
+glam = { workspace = true }
+
+[dev-dependencies]

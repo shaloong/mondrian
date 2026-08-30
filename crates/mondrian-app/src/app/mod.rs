@@ -115,6 +115,7 @@ mod grade_authoring;
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_viewer_gpu;
+mod interchange;
 pub mod media_asset_mutation;
 mod media_import;
 pub(crate) mod native_video_import;

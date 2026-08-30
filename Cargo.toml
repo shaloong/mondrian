@@ -5,6 +5,7 @@ members = [
     "crates/mondrian-core",
     "crates/mondrian-media",
     "crates/mondrian-timeline",
+    "crates/mondrian-interchange",
     "crates/mondrian-renderer",
     "crates/mondrian-assets",
     "crates/mondrian-ai",
@@ -43,6 +44,7 @@ mondrian-storage  = { path = "crates/mondrian-storage" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
+mondrian-interchange = { path = "crates/mondrian-interchange" }
 mondrian-renderer = { path = "crates/mondrian-renderer" }
 mondrian-assets   = { path = "crates/mondrian-assets" }
 mondrian-ai       = { path = "crates/mondrian-ai" }

@@ -2311,6 +2311,7 @@ dependencies = [
  "mondrian-editor-state",
  "mondrian-effects",
  "mondrian-export",
+ "mondrian-interchange",
  "mondrian-media",
  "mondrian-platform",
  "mondrian-playback",
@@ -2472,6 +2473,22 @@ dependencies = [
  "tracing",
  "uuid",
  "wgpu",
+]
+
+[[package]]
+name = "mondrian-interchange"
+version = "0.2.0"
+dependencies = [
+ "glam",
+ "mondrian-core",
+ "mondrian-effects",
+ "mondrian-timeline",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

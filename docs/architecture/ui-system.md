@@ -28,6 +28,15 @@ profile-specific external tool qualification.
 
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
+Timeline interchange composition remains outside panel code. The App inspects
+native bytes through `mondrian-interchange`, presents its media requirements and
+loss report, verifies user-selected bindings against the canonical Asset
+Library, and commits one detached Sequence through one reversible Project
+transaction. Export preparation reads the active canonical Sequence plus
+immutable Asset records and returns bytes coupled to the report; file dialogs
+and durable publication are separate platform/storage Adapter work. An import
+does not silently change the active open-Session Sequence.
+
 Color-space selectors expose Rec.601 PAL and Rec.601 NTSC as distinct encoded
 identities. They are not native window surface color spaces; viewer
 presentation still passes through the configured display/view transform before

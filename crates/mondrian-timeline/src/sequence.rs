@@ -2675,6 +2675,17 @@ fn validate_clip_local_author_contract(
         title.validate_author_state()?;
     }
     if let Some(interpretation) = clip.content.media_interpretation() {
+        if let Some(editorial_source) = &interpretation.editorial_source {
+            editorial_source.validate().map_err(|error| {
+                mondrian_core::MondrianError::WorkflowStepFailed {
+                    step_id: "validate_sequence_author_contract".to_owned(),
+                    reason: format!(
+                        "Clip {} editorial source identity is invalid: {error}",
+                        clip.id
+                    ),
+                }
+            })?;
+        }
         if interpretation
             .pixel_aspect_ratio_override
             .is_some_and(|ratio| ratio.exact_ratio().is_none())

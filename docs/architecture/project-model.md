@@ -624,7 +624,7 @@ library/index.db
 Archive `format_version`, document `schema_version`, and embedded library
 `PRAGMA user_version` are independent contracts. `manifest.json` records the
 expected library schema version in addition to archive layout. The current
-archive-v1 manifest explicitly writes `library_schema_version: 5`.
+archive-v1 manifest explicitly writes `library_schema_version: 6`.
 
 Archive and document JSON pass through separate version registries before typed
 deserialization. The ordinary current-schema path streams each JSON ZIP entry
@@ -633,7 +633,7 @@ through a bounded reader directly into its typed Manifest or
 The value-based registry remains the explicit seam for future migrations
 without imposing its peak-memory cost on current Projects.
 
-Document schema v25 is the sole accepted Alpha author schema. It persists the
+Document schema v26 is the sole accepted Alpha author schema. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 `TimelineTime`, canonical signal layouts and channel mappings, typed Routes and
 processor schemas, canonical proxy membership, closed `ClipContent`,
@@ -642,8 +642,12 @@ with stable shape-key identities and explicit interpolation, complete Basic
 Title properties, a Clip-local visual author origin, closed Sequence `color`
 and `delivery` structures, and one tagged `ClipSourceTimeMap` whose constant
 variant persists exact origin, signed scale, and covering/strict-predecessor
-sampling boundary while deriving its terminal boundary from duration. Unknown
-fields and older or future document versions fail closed; no alias, fallback,
+sampling boundary while deriving its terminal boundary from duration. Schema v26 also
+persists each media Clip's optional bounded editorial-source identity (reel,
+exact SMPTE source reference, and foreign item key) inside
+`MediaInterpretation`; it never promotes those interchange facts into Asset or
+placement identity. Unknown fields and older or future document versions fail
+closed; no alias, fallback,
 default synthesis, or inferred migration is promised during Alpha.
 
 SQLite schema ownership remains in `mondrian-assets`; the current version is

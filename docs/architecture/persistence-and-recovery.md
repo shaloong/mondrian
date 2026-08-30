@@ -703,7 +703,7 @@ runtime copy only; saving is the sole path back into `.mdp`.
 
 ## Document Schema Contract
 
-Document schema v25 is the current Alpha author contract. It persists the
+Document schema v26 is the current Alpha author contract. It persists the
 Project-owned color environment and future-Sequence template, exact rational
 author time, canonical audio layout/routing/processor schemas, canonical proxy
 membership, closed Clip content, multi-member link groups, strong visual
@@ -711,7 +711,9 @@ Transitions, complete Mask and Basic Title properties, Clip-local visual author
 time, closed Sequence color/delivery structures, and one exact
 `ClipSourceTimeMap` whose constant mapping persists origin, signed scale, and
 covering/strict-predecessor sampling boundary while its terminal boundary is
-derived from duration.
+derived from duration. Media Clip interpretation may also retain a bounded reel
+name, exact SMPTE source reference, and foreign item identity for interchange;
+these facts never replace Asset or placement identity.
 
 Every old or future document schema and every unknown author field fails closed
 during Alpha. Reopen must never synthesize missing defaults, infer a legacy

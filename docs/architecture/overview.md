@@ -16,7 +16,7 @@ mondrian-app
   -> mondrian-render-cache
   -> mondrian-audio
   -> mondrian-ui-* crates
-  -> mondrian-assets / mondrian-timeline / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
+  -> mondrian-assets / mondrian-timeline / mondrian-interchange / mondrian-renderer / mondrian-media / mondrian-effects / mondrian-export
 
 foundation:
   mondrian-storage
@@ -86,6 +86,11 @@ foundation:
 - `mondrian-timeline`: sequence/track/clip domain model, editing commands, and
   the revision-bound Prepared Visual Schedule used to index immutable visual
   placement semantics for production execution.
+- `mondrian-interchange`: bounded native OTIO, CMX 3600, FCP 7 XML, and
+  helper-isolated AAF Adapters. It owns one private exact lowering model and
+  machine-readable preservation evidence, while canonical `Sequence` remains
+  the only public author authority. See
+  [Timeline Interchange](timeline-interchange.md).
 - `mondrian-media`: FFmpeg probing/decoding plus media source, waveform, proxy,
   cache, Audio Playback, and physical output adapters. It does not interpret
   Timeline audio routing or processor order.
