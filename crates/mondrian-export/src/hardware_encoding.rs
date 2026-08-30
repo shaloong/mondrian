@@ -27,6 +27,7 @@ pub(crate) enum ResolvedVideoEncoder {
     LibaomAv1,
     ProResKs,
     Gif,
+    Professional(crate::mezzanine::MezzanineEncoderAdapter),
     NvidiaNvenc,
     IntelQsv,
     AmdAmf,
@@ -45,6 +46,7 @@ impl ResolvedVideoEncoder {
             (Self::LibaomAv1, VideoCodecConfig::Av1 { .. }) => "libaom-av1",
             (Self::ProResKs, VideoCodecConfig::ProRes { .. }) => "prores_ks",
             (Self::Gif, VideoCodecConfig::Gif { .. }) => "gif",
+            (Self::Professional(adapter), _) => adapter.ffmpeg_name(),
             (Self::NvidiaNvenc, VideoCodecConfig::H264 { .. }) => "h264_nvenc",
             (Self::NvidiaNvenc, VideoCodecConfig::Hevc { .. }) => "hevc_nvenc",
             (Self::IntelQsv, VideoCodecConfig::H264 { .. }) => "h264_qsv",
@@ -139,6 +141,14 @@ pub(crate) const fn software_encoder(codec: &VideoCodecConfig) -> ResolvedVideoE
         VideoCodecConfig::Hevc { .. } => ResolvedVideoEncoder::Libx265,
         VideoCodecConfig::Av1 { .. } => ResolvedVideoEncoder::LibaomAv1,
         VideoCodecConfig::ProRes { .. } => ResolvedVideoEncoder::ProResKs,
+        VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => {
+            let Some(contract) = crate::mezzanine::professional_mezzanine_contract(codec) else {
+                panic!("professional codec must resolve an encoder Adapter");
+            };
+            ResolvedVideoEncoder::Professional(contract.adapter)
+        }
         VideoCodecConfig::Gif { .. } => ResolvedVideoEncoder::Gif,
     }
 }
@@ -222,6 +232,15 @@ pub(crate) fn apply_video_encoder_args(
     coding: ResolvedVideoCodingStructure,
     encoder: ResolvedVideoEncoder,
 ) {
+    if matches!(encoder, ResolvedVideoEncoder::Professional(_)) {
+        let applied = crate::mezzanine::apply_professional_mezzanine_encoder_args(command, codec);
+        debug_assert!(
+            applied,
+            "professional encoder selected for non-professional codec"
+        );
+        apply_coding_structure(command, coding);
+        return;
+    }
     command.arg("-c:v").arg(encoder.ffmpeg_name(codec));
     match encoder {
         ResolvedVideoEncoder::Libx264 | ResolvedVideoEncoder::Libx265 => {
@@ -254,6 +273,7 @@ pub(crate) fn apply_video_encoder_args(
             }
         }
         ResolvedVideoEncoder::Gif => {}
+        ResolvedVideoEncoder::Professional(_) => unreachable!("handled above"),
     }
     apply_coding_structure(command, coding);
 }
@@ -265,6 +285,9 @@ fn apply_profile(command: &mut Command, codec: &VideoCodecConfig) {
         VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. } => "main10",
         VideoCodecConfig::Av1 { .. }
         | VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
         | VideoCodecConfig::Gif { .. } => return,
     };
     command.arg("-profile:v").arg(profile);
@@ -275,7 +298,11 @@ fn codec_rate_control(codec: &VideoCodecConfig) -> Option<VideoRateControl> {
         VideoCodecConfig::H264 { rate_control, .. }
         | VideoCodecConfig::Hevc { rate_control, .. }
         | VideoCodecConfig::Av1 { rate_control, .. } => Some(*rate_control),
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => None,
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => None,
     }
 }
 

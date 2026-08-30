@@ -606,7 +606,13 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
                     let (frame_rate, frame_rate_proven) = map_rational(stream.avg_frame_rate());
                     video_streams.push(VideoStreamInfo {
                         index: stream.index() as u32,
-                        codec: map_video_codec(params.id()),
+                        codec: map_video_codec_with_profile(
+                            params.id(),
+                            // SAFETY: `decoder` owns a live AVCodecContext for
+                            // this scope; reading the integer profile field does
+                            // not mutate or outlive that context.
+                            unsafe { (*decoder.as_ptr()).profile },
+                        ),
                         duration: stream_duration,
                         codec_profile: map_video_codec_profile(decoder.profile()),
                         width,
@@ -643,7 +649,12 @@ pub fn probe_media_info(path: &Path) -> mondrian_core::Result<MediaProbeSnapshot
 
                 video_streams.push(VideoStreamInfo {
                     index: stream.index() as u32,
-                    codec: map_video_codec(params.id()),
+                    codec: map_video_codec_with_profile(
+                        params.id(),
+                        // SAFETY: `params` owns a live AVCodecParameters for
+                        // this stream; the profile field is read synchronously.
+                        unsafe { (*params.as_ptr()).profile },
+                    ),
                     duration: stream_duration,
                     codec_profile: VideoCodecProfile::Unknown,
                     width,
@@ -2080,7 +2091,7 @@ fn normalized_stream_metadata(value: Option<&str>) -> Option<String> {
     value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned)
 }
 
-fn map_video_codec(id: ffmpeg::codec::Id) -> VideoCodec {
+fn map_video_codec_with_profile(id: ffmpeg::codec::Id, profile: i32) -> VideoCodec {
     use ffmpeg::codec::Id;
 
     match id {
@@ -2088,10 +2099,29 @@ fn map_video_codec(id: ffmpeg::codec::Id) -> VideoCodec {
         Id::HEVC => VideoCodec::H265,
         Id::AV1 => VideoCodec::Av1,
         Id::VP9 => VideoCodec::Vp9,
-        Id::PRORES => VideoCodec::ProRes(ProResVariant::Standard),
+        Id::PRORES => VideoCodec::ProRes(match profile {
+            ffmpeg::ffi::FF_PROFILE_PRORES_PROXY => ProResVariant::Proxy,
+            ffmpeg::ffi::FF_PROFILE_PRORES_LT => ProResVariant::Lt,
+            ffmpeg::ffi::FF_PROFILE_PRORES_HQ => ProResVariant::Hq,
+            ffmpeg::ffi::FF_PROFILE_PRORES_4444 => ProResVariant::R4444,
+            ffmpeg::ffi::FF_PROFILE_PRORES_XQ => ProResVariant::R4444Xq,
+            _ => ProResVariant::Standard,
+        }),
+        Id::DNXHD
+            if matches!(
+                profile,
+                ffmpeg::ffi::FF_PROFILE_DNXHR_LB
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_SQ
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQ
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_HQX
+                    | ffmpeg::ffi::FF_PROFILE_DNXHR_444
+            ) =>
+        {
+            VideoCodec::DnxHr
+        }
         Id::DNXHD => VideoCodec::DnxHd,
         Id::CFHD => VideoCodec::Cineform,
-        Id::RAWVIDEO => VideoCodec::Raw,
+        Id::RAWVIDEO | Id::V210 | Id::V210X | Id::R210 => VideoCodec::Raw,
         other => VideoCodec::Other(format!("{other:?}")),
     }
 }
@@ -2380,6 +2410,29 @@ mod tests {
         assert_eq!(
             map_video_codec_profile(ffmpeg::codec::Profile::Unknown),
             VideoCodecProfile::Unknown
+        );
+    }
+
+    #[test]
+    fn probe_mapping_distinguishes_dnxhr_and_uncompressed_essence() {
+        assert_eq!(
+            map_video_codec_with_profile(
+                ffmpeg::codec::Id::DNXHD,
+                ffmpeg::ffi::FF_PROFILE_DNXHR_HQX,
+            ),
+            VideoCodec::DnxHr
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::DNXHD, 0),
+            VideoCodec::DnxHd
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::V210, 0),
+            VideoCodec::Raw
+        );
+        assert_eq!(
+            map_video_codec_with_profile(ffmpeg::codec::Id::R210, 0),
+            VideoCodec::Raw
         );
     }
 

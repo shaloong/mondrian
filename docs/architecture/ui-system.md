@@ -8,6 +8,13 @@ PCM24 audio-stem preset presents a directory containing every public Audio
 Program Output. Directory artifacts cannot manufacture media-file fields.
 Built-in preset selection replaces the complete editable draft and rewrites
 only an output suffix that still follows the previous built-in artifact.
+The professional codec menu is generated from the Export-owned mezzanine
+catalog. Selecting DNxHR, AVC-Intra, or uncompressed essence atomically applies
+its compatible depth/chroma/range, Intra-only structure, preferred container,
+and any fixed raster/cadence; AVC-Intra MXF also disables audio because that
+Adapter cannot preserve a validator-visible PCM layout. The panel never exposes
+XAVC or Class 50 as a near-match and queue admission revalidates the complete
+preset after every edit.
 
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 

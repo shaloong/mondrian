@@ -187,7 +187,14 @@ fn video_codec_matches(
                     mondrian_core::ProResVariant::R4444Xq
                 )
         ),
-        (VideoCodecConfig::Av1 { .. } | VideoCodecConfig::Gif { .. }, _)
+        (
+            VideoCodecConfig::Av1 { .. }
+            | VideoCodecConfig::DnxHr { .. }
+            | VideoCodecConfig::AvcIntra { .. }
+            | VideoCodecConfig::Uncompressed { .. }
+            | VideoCodecConfig::Gif { .. },
+            _,
+        )
         | (VideoCodecConfig::H264 { .. }, _)
         | (VideoCodecConfig::Hevc { .. }, _)
         | (VideoCodecConfig::ProRes { .. }, _) => false,

@@ -1729,6 +1729,31 @@ target, Alpha policy, byte length, and SHA-256 for every zero-based
 `frame-00000000.ext` object before whole-directory publication. Cancellation or
 ordinary failure leaves no final namespace; create-new collision never merges
 partial inventories.
+
+`mondrian-export::mezzanine` is the corresponding deep Module for professional
+media-file essence. One closed contract owns DNxHR LB/SQ/HQ/HQX/444,
+AVC-Intra Class 100/200, and MOV 2vuy/v210/raw RGB/r210 lowering: software
+encoder Adapter, qualified container, profile/class, exact output pixel format,
+depth/chroma/range, Intra-only structure, raster/cadence constraints, runtime
+capability tokens, and finished-output codec/profile/level/tag evidence. Queue,
+delivery, validator, and App controls consume that authority. Hardware H.264
+selection cannot accept AVC-Intra. The codec-matrix test completes and
+re-probes every supported profile/container row; a second test runs four
+built-in presets through the real renderer, supervised FFmpeg process,
+finished-output validator, and durable file publication path. Professional MXF
+is currently video-only because FFmpeg does not preserve a probe-visible PCM
+channel-layout identity. XAVC is fail-closed: generic H.264 MXF essence is not
+treated as a Sony XAVC conformance contract.
+
+For raw MOV, the `2vuy`/`v210`/`raw `/`r210` sample entry and exact decoded
+pixel format prove representation. MOV omits a separate range tag for raw
+sample entries, so Legal/Full code mapping is owned by the explicit final scale
+Seam and fixed representation rather than guessed from absent metadata. RGB
+professional outputs explicitly write and re-probe primaries, transfer, and
+GBR matrix tags. When stream-level field order is absent, the existing bounded
+first-frame decode must prove `interlaced_frame=0`; missing evidence is not
+accepted as progressive.
+
 If both the GPU output path and renderer-owned CPU float helper fail, 10/12-bit
 export fails closed. It must never manufacture an `rgba64le` payload from an
 RGBA8 boundary. Export diagnostics record `FloatBoundaryUnavailable`, retain

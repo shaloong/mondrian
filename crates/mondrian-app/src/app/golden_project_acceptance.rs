@@ -472,6 +472,9 @@ fn assert_export_contract(
         VideoCodecConfig::Hevc { profile: HevcProfile::Main10, .. } => ("hevc", "main10"),
         VideoCodecConfig::Av1 { .. } => ("av1", "main"),
         VideoCodecConfig::ProRes { .. } => ("prores", "typed"),
+        VideoCodecConfig::DnxHr { .. } => ("dnxhr", "typed"),
+        VideoCodecConfig::AvcIntra { .. } => ("avc-intra", "typed"),
+        VideoCodecConfig::Uncompressed { .. } => ("uncompressed", "typed"),
         VideoCodecConfig::Gif { .. } => ("gif", "gif"),
     };
     let bit_depth = match resolved.bit_depth {

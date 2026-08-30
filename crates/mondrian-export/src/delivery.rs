@@ -6,6 +6,10 @@
 //! Timeline Export Snapshot before admitting work.
 
 use crate::image_sequence::resolve_image_sequence_encoding;
+use crate::mezzanine::{
+    professional_mezzanine_contract, validate_professional_mezzanine_delivery,
+    ProfessionalMezzanineDeliveryIssue,
+};
 use crate::preset::{
     AudioCodecConfig, AudioStemFormat, Av1Profile, Container, ExportAlphaMode,
     ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget, ExportFrameSampling,
@@ -205,6 +209,13 @@ pub fn resolve_export_delivery(
         }
     };
 
+    let sample_aspect_ratio = settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
+        ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleColorOutput,
+            "Sequence Program Output 像素宽高比未解析",
+        )
+    })?;
+
     if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
         validate_alpha(preset)?;
     }
@@ -219,6 +230,34 @@ pub fn resolve_export_delivery(
     };
     if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
         validate_dimensions(resolution, chroma_sampling)?;
+    }
+    if let ExportArtifactEncoding::MediaFile(media) = &preset.artifact {
+        validate_professional_mezzanine_delivery(
+            &media.video,
+            media.container,
+            resolution,
+            frame_rate,
+            sample_aspect_ratio,
+            bit_depth,
+            video_range,
+            chroma_sampling,
+        )
+        .map_err(|error| {
+            let code = match error.issue {
+                ProfessionalMezzanineDeliveryIssue::Resolution => {
+                    ExportDeliveryIssueCode::InvalidResolution
+                }
+                ProfessionalMezzanineDeliveryIssue::FrameRate => {
+                    ExportDeliveryIssueCode::InvalidFrameRate
+                }
+                ProfessionalMezzanineDeliveryIssue::Signal
+                | ProfessionalMezzanineDeliveryIssue::SampleAspectRatio
+                | ProfessionalMezzanineDeliveryIssue::Range => {
+                    ExportDeliveryIssueCode::IncompatibleVideoSignal
+                }
+            };
+            ExportDeliveryError::new(code, error.detail)
+        })?;
     }
     let color_target = resolve_export_color_target(preset, settings, color_environment)?;
     if preset.legalizer.is_active() {
@@ -250,12 +289,7 @@ pub fn resolve_export_delivery(
         frame_rate,
         frame_sampling: preset.frame_sampling,
         video_coding,
-        sample_aspect_ratio: settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
-            ExportDeliveryError::new(
-                ExportDeliveryIssueCode::IncompatibleColorOutput,
-                "Sequence Program Output 像素宽高比未解析",
-            )
-        })?,
+        sample_aspect_ratio,
         field_order: settings.field_order,
         bit_depth,
         video_range,
@@ -356,7 +390,11 @@ fn validate_rate_control(codec: &VideoCodecConfig) -> Result<(), ExportDeliveryE
         VideoCodecConfig::H264 { rate_control, .. } => ("H.264", 51, rate_control),
         VideoCodecConfig::Hevc { rate_control, .. } => ("HEVC", 51, rate_control),
         VideoCodecConfig::Av1 { rate_control, .. } => ("AV1", 63, rate_control),
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => return Ok(()),
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => return Ok(()),
     };
     validate_rate_control_values(name, max_crf, *rate_control)
 }
@@ -457,6 +495,21 @@ fn validate_container(
     video: &VideoCodecConfig,
     audio: &AudioCodecConfig,
 ) -> Result<(), ExportDeliveryError> {
+    if let Some(contract) = professional_mezzanine_contract(video) {
+        if contract.supports_container(*container) {
+            if *container == Container::Mxf && !matches!(audio, AudioCodecConfig::Disabled) {
+                return Err(ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::UnsupportedContainerAudio,
+                    "当前专业 MXF Adapter 不保留可独立验证的 PCM channel-layout identity；请选择无音频 MXF 或 MOV + PCM",
+                ));
+            }
+            return validate_container_audio(container, audio);
+        }
+        return Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::UnsupportedContainerCodec,
+            "所选容器不支持该专业中间编码合同",
+        ));
+    }
     let video_supported = match container {
         Container::Mp4 => matches!(
             video,
@@ -487,6 +540,13 @@ fn validate_container(
         ));
     }
 
+    validate_container_audio(container, audio)
+}
+
+fn validate_container_audio(
+    container: &Container,
+    audio: &AudioCodecConfig,
+) -> Result<(), ExportDeliveryError> {
     let audio_supported = match container {
         Container::Mp4 => matches!(
             audio,
@@ -518,6 +578,18 @@ fn resolve_pixel_format(
     bit_depth: DeliveryBitDepth,
     chroma: ExportChromaSampling,
 ) -> Result<&'static str, ExportDeliveryError> {
+    if let Some(contract) = professional_mezzanine_contract(codec) {
+        if bit_depth == contract.bit_depth
+            && chroma == contract.chroma_sampling
+            && alpha_mode == ExportAlphaMode::FlattenBlack
+        {
+            return Ok(contract.output_pixel_format);
+        }
+        return Err(ExportDeliveryError::new(
+            ExportDeliveryIssueCode::IncompatibleVideoSignal,
+            "professional mezzanine profile、位深、色度采样与 Alpha 设置不匹配",
+        ));
+    }
     let pixel_format = match codec {
         VideoCodecConfig::H264 { profile: crate::preset::H264Profile::High, .. }
             if bit_depth == DeliveryBitDepth::Eight && chroma == ExportChromaSampling::Yuv420 =>
@@ -578,6 +650,9 @@ fn resolve_pixel_format(
                 "GIF 调色板颜色数必须在 2..=256",
             ));
         }
+        VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => unreachable!("handled above"),
         _ => {
             return Err(ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleVideoSignal,
@@ -689,16 +764,20 @@ fn validate_color_output(
                 "Camera log 输出需要 10-bit 或更高位深",
             ));
         }
-        if !matches!(
-            preset.media_file().map(|media| (&media.container, &media.video)),
-            Some((
-                Container::Mov | Container::Mxf,
-                VideoCodecConfig::ProRes { .. }
-            ))
-        ) {
+        let professional_log = preset.media_file().is_some_and(|media| {
+            matches!(
+                (&media.container, &media.video),
+                (
+                    Container::Mov | Container::Mxf,
+                    VideoCodecConfig::ProRes { .. }
+                )
+            ) || professional_mezzanine_contract(&media.video)
+                .is_some_and(|contract| contract.bit_depth != DeliveryBitDepth::Eight)
+        });
+        if !professional_log {
             return Err(ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleColorOutput,
-                "Camera log 输出仅支持 MOV/MXF + ProRes 专业中间格式",
+                "Camera log 输出仅支持已验证的 10-bit 以上专业中间格式",
             ));
         }
     }
@@ -843,7 +922,8 @@ fn validate_color_output(
 mod tests {
     use super::*;
     use crate::preset::{
-        EncodedMediaOutput, ExportParameter, ExportVideoSignal, H264Profile, VideoRateControl,
+        AvcIntraClass, EncodedMediaOutput, ExportParameter, ExportVideoSignal, H264Profile,
+        VideoRateControl,
     };
 
     #[test]
@@ -859,6 +939,69 @@ mod tests {
         assert_eq!(contract.bit_depth, DeliveryBitDepth::Eight);
         assert_eq!(contract.video_range, VideoRange::Legal);
         assert_eq!(contract.pixel_format, "yuv420p");
+    }
+
+    #[test]
+    fn professional_builtin_presets_resolve_exact_delivery_contracts() {
+        let cases = [
+            (
+                ExportPreset::dnxhr_hqx_intermediate(),
+                Container::Mov,
+                "yuv422p10le",
+            ),
+            (
+                ExportPreset::avc_intra_100_intermediate(),
+                Container::Mxf,
+                "yuv422p10le",
+            ),
+            (
+                ExportPreset::uncompressed_v210_master(),
+                Container::Mov,
+                "yuv422p10le",
+            ),
+            (
+                ExportPreset::uncompressed_r210_master(),
+                Container::Mov,
+                "gbrp10le",
+            ),
+        ];
+        for (preset, container, pixel_format) in cases {
+            let contract = resolve_export_delivery(
+                &preset,
+                &SequenceSettings::default(),
+                &ProjectColorEnvironment::default(),
+            )
+            .unwrap_or_else(|error| panic!("{} did not resolve: {error}", preset.name));
+            assert_eq!(contract.pixel_format, pixel_format);
+            assert_eq!(
+                contract.video_coding,
+                crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
+            );
+            assert!(matches!(
+                contract.artifact,
+                ResolvedExportArtifactEncoding::MediaFile { container: actual, .. }
+                    if actual == container
+            ));
+        }
+    }
+
+    #[test]
+    fn professional_mxf_rejects_unverifiable_pcm_layout_before_execution() {
+        let mut preset = ExportPreset::avc_intra_100_intermediate();
+        let media = preset.media_file_mut().expect("media preset");
+        media.video = VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class200 };
+        media.audio = AudioCodecConfig::Pcm { bit_depth: 24 };
+
+        let error = resolve_export_delivery(
+            &preset,
+            &SequenceSettings::default(),
+            &ProjectColorEnvironment::default(),
+        )
+        .expect_err("MXF PCM layout cannot be independently proven");
+        assert_eq!(
+            error.code,
+            ExportDeliveryIssueCode::UnsupportedContainerAudio
+        );
     }
 
     #[test]

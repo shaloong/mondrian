@@ -166,6 +166,50 @@ impl ProResProfile {
     }
 }
 
+/// Avid DNxHR profile variants qualified against the product FFmpeg Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DnxHrProfile {
+    /// Low-bandwidth 8-bit 4:2:2 editorial proxy.
+    Lb,
+    /// Standard-quality 8-bit 4:2:2 intermediate.
+    Sq,
+    /// High-quality 8-bit 4:2:2 intermediate.
+    Hq,
+    /// High-quality 10-bit 4:2:2 intermediate.
+    Hqx,
+    /// High-quality 10-bit 4:4:4 RGB intermediate.
+    FourFourFour,
+}
+
+/// Panasonic AVC-Intra classes with an exact progressive HD contract.
+///
+/// Class 50 is intentionally absent: its 1440x1080 anamorphic representation
+/// requires a preset-owned sample-aspect-ratio override that the current
+/// Program Output model does not expose.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AvcIntraClass {
+    /// AVC-Intra Class 100, High 4:2:2 Intra, 10-bit.
+    Class100,
+    /// AVC-Intra Class 200, High 4:2:2 Intra, 10-bit.
+    Class200,
+}
+
+/// Exact uncompressed video representations qualified in a MOV container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UncompressedVideoFormat {
+    /// Packed UYVY 8-bit 4:2:2 (`2vuy`).
+    Yuv422Eight,
+    /// Packed v210 10-bit 4:2:2.
+    Yuv422Ten,
+    /// Packed 8-bit RGB (`raw `).
+    RgbEight,
+    /// Packed r210 10-bit RGB.
+    RgbTen,
+}
+
 /// Single-pass quality control with an optional, properly bounded VBV ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VideoRateControl {
@@ -228,6 +272,21 @@ pub enum VideoCodecConfig {
     ProRes {
         /// Exact encoder profile.
         profile: ProResProfile,
+    },
+    /// Avid DNxHR encoding with an exact profile-owned signal contract.
+    DnxHr {
+        /// Exact DNxHR profile.
+        profile: DnxHrProfile,
+    },
+    /// AVC-Intra encoding through libx264's explicit class mode.
+    AvcIntra {
+        /// Exact AVC-Intra class.
+        class: AvcIntraClass,
+    },
+    /// Uncompressed RGB or YUV essence with an exact packed representation.
+    Uncompressed {
+        /// Exact uncompressed representation.
+        format: UncompressedVideoFormat,
     },
     /// Palette GIF encoding.
     Gif {
@@ -557,6 +616,66 @@ impl ExportPreset {
         }
     }
 
+    /// DNxHR HQX 10-bit 4:2:2 MOV intermediate with PCM audio.
+    pub fn dnxhr_hqx_intermediate() -> Self {
+        professional_media_preset(
+            "DNxHR HQX 10-bit Intermediate",
+            Container::Mov,
+            VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hqx },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        )
+    }
+
+    /// AVC-Intra Class 100 1080/25p video-only MXF intermediate.
+    pub fn avc_intra_100_intermediate() -> Self {
+        let mut preset = professional_media_preset(
+            "AVC-Intra Class 100 1080p25",
+            Container::Mxf,
+            VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class100 },
+            Some(Resolution { width: 1920, height: 1080 }),
+            ExportParameter::Explicit(Rational::FPS_25),
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        );
+        if let Some(media) = preset.media_file_mut() {
+            media.audio = AudioCodecConfig::Disabled;
+        }
+        preset
+    }
+
+    /// Uncompressed v210 10-bit 4:2:2 MOV master with PCM audio.
+    pub fn uncompressed_v210_master() -> Self {
+        professional_media_preset(
+            "Uncompressed v210 10-bit YUV",
+            Container::Mov,
+            VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Ten },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+        )
+    }
+
+    /// Uncompressed r210 10-bit RGB MOV master with PCM audio.
+    pub fn uncompressed_r210_master() -> Self {
+        professional_media_preset(
+            "Uncompressed r210 10-bit RGB",
+            Container::Mov,
+            VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbTen },
+            None,
+            ExportParameter::FollowSequence,
+            DeliveryBitDepth::Ten,
+            VideoRange::Full,
+            ExportChromaSampling::Rgb,
+        )
+    }
+
     /// Lossless, full-range sRGB PNG frames with straight alpha.
     pub fn png_sequence() -> Self {
         Self {
@@ -678,6 +797,35 @@ fn image_master_preset(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn professional_media_preset(
+    name: &str,
+    container: Container,
+    video: VideoCodecConfig,
+    resolution: Option<Resolution>,
+    frame_rate: ExportParameter<Rational>,
+    bit_depth: DeliveryBitDepth,
+    range: VideoRange,
+    chroma_sampling: ExportChromaSampling,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.into(),
+        artifact: ExportArtifactEncoding::MediaFile(EncodedMediaOutput {
+            container,
+            video,
+            audio: AudioCodecConfig::Pcm { bit_depth: 24 },
+            video_coding: VideoCodingStructure::IntraOnly,
+        }),
+        resolution,
+        frame_rate,
+        frame_sampling: ExportFrameSampling::FrameHold,
+        video_signal: ExportVideoSignal::explicit(bit_depth, range, chroma_sampling),
+        alpha_mode: ExportAlphaMode::FlattenBlack,
+        color_target: ExportColorTarget::FollowSequence,
+        legalizer: SignalLegalizer::Off,
+    }
+}
+
 /// Stable identities for product-owned delivery presets.
 ///
 /// The app and Headless validation use this catalog instead of independently
@@ -696,6 +844,14 @@ pub enum BuiltinExportPreset {
     Proxy720p,
     /// ProRes 4444 XQ with preserved alpha.
     ProRes4444Alpha,
+    /// DNxHR HQX 10-bit 4:2:2 intermediate.
+    DnxHrHqx,
+    /// AVC-Intra Class 100 1080/25p intermediate.
+    AvcIntra100,
+    /// Uncompressed v210 10-bit YUV master.
+    UncompressedV210,
+    /// Uncompressed r210 10-bit RGB master.
+    UncompressedR210,
     /// Lossless numbered PNG frames with a durable manifest.
     PngSequence,
     /// Lossless 16-bit PNG image sequence.
@@ -716,12 +872,16 @@ pub enum BuiltinExportPreset {
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 17] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
         Self::Proxy720p,
         Self::ProRes4444Alpha,
+        Self::DnxHrHqx,
+        Self::AvcIntra100,
+        Self::UncompressedV210,
+        Self::UncompressedR210,
         Self::PngSequence,
         Self::Png16Sequence,
         Self::OpenExrHalfSequence,
@@ -740,6 +900,10 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "tiktok-vertical",
             Self::Proxy720p => "proxy-720p",
             Self::ProRes4444Alpha => "prores-4444-alpha",
+            Self::DnxHrHqx => "dnxhr-hqx",
+            Self::AvcIntra100 => "avc-intra-100",
+            Self::UncompressedV210 => "uncompressed-v210",
+            Self::UncompressedR210 => "uncompressed-r210",
             Self::PngSequence => "png-sequence",
             Self::Png16Sequence => "png16-sequence",
             Self::OpenExrHalfSequence => "openexr-half-sequence",
@@ -759,6 +923,10 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => "TikTok 竖屏 9:16",
             Self::Proxy720p => "代理文件 720p",
             Self::ProRes4444Alpha => "ProRes 4444 XQ + Alpha（12-bit）",
+            Self::DnxHrHqx => "DNxHR HQX（10-bit 4:2:2）",
+            Self::AvcIntra100 => "AVC-Intra Class 100（1080p25）",
+            Self::UncompressedV210 => "Uncompressed v210（10-bit YUV）",
+            Self::UncompressedR210 => "Uncompressed r210（10-bit RGB）",
             Self::PngSequence => "PNG 图像序列（无损 + Alpha）",
             Self::Png16Sequence => "PNG 16-bit 图像序列（无损 + Alpha）",
             Self::OpenExrHalfSequence => "OpenEXR Half 图像序列（线性 + Alpha）",
@@ -778,6 +946,10 @@ impl BuiltinExportPreset {
             Self::TiktokVertical => ExportPreset::tiktok_vertical(),
             Self::Proxy720p => ExportPreset::proxy_720p(),
             Self::ProRes4444Alpha => ExportPreset::prores_4444_alpha(),
+            Self::DnxHrHqx => ExportPreset::dnxhr_hqx_intermediate(),
+            Self::AvcIntra100 => ExportPreset::avc_intra_100_intermediate(),
+            Self::UncompressedV210 => ExportPreset::uncompressed_v210_master(),
+            Self::UncompressedR210 => ExportPreset::uncompressed_r210_master(),
             Self::PngSequence => ExportPreset::png_sequence(),
             Self::Png16Sequence => ExportPreset::png16_sequence(),
             Self::OpenExrHalfSequence => ExportPreset::open_exr_half_sequence(),

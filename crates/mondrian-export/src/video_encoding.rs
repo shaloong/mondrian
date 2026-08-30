@@ -140,7 +140,11 @@ pub fn resolve_video_coding_structure(
             })
         }
         (
-            VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. },
+            VideoCodecConfig::ProRes { .. }
+            | VideoCodecConfig::DnxHr { .. }
+            | VideoCodecConfig::AvcIntra { .. }
+            | VideoCodecConfig::Uncompressed { .. }
+            | VideoCodecConfig::Gif { .. },
             VideoCodingStructure::IntraOnly,
         ) => Ok(ResolvedVideoCodingStructure::IntraOnly),
         (VideoCodecConfig::H264 { .. } | VideoCodecConfig::Hevc { .. }, _) => {
@@ -149,9 +153,14 @@ pub fn resolve_video_coding_structure(
         (VideoCodecConfig::Av1 { .. }, _) => {
             Err("AV1 导出需要显式 AV1 Random Access 编码结构".to_owned())
         }
-        (VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. }, _) => {
-            Err("ProRes/GIF 导出必须使用 Intra-only 编码结构".to_owned())
-        }
+        (
+            VideoCodecConfig::ProRes { .. }
+            | VideoCodecConfig::DnxHr { .. }
+            | VideoCodecConfig::AvcIntra { .. }
+            | VideoCodecConfig::Uncompressed { .. }
+            | VideoCodecConfig::Gif { .. },
+            _,
+        ) => Err("professional intermediate/GIF export requires Intra-only coding".to_owned()),
     }
 }
 

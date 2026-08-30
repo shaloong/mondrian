@@ -2227,6 +2227,25 @@ H.264/HEVC, `mov` for DNxHR), and the command passes that muxer explicitly.
 Inferring the container from the temporary file name is forbidden; it can fail
 before encoding and would make atomic publication platform/tool-version
 dependent.
+
+DNxHR proxy generation and professional Export are separate Modules even
+though both use FFmpeg's `dnxhd` Adapter. The packaged runtime now qualifies
+all five DNxHR profile tokens plus 10-bit 4:2:2/RGB pixel formats, libx264's
+`avcintra-class` and `yuv422p10le`, and the `v210`/`r210` encoders. Registry
+presence alone remains insufficient: Export owns real encode/re-probe tests for
+every advertised professional row. Media re-import reads the raw FFmpeg profile
+integer that the wrapper's generic `Profile` enum omits, classifies DNxHR as
+`VideoCodec::DnxHr` instead of DNxHD, preserves exact ProRes variants, and maps
+RAWVIDEO/v210/r210 to `VideoCodec::Raw`. This codec identity is evidence for
+asset diagnostics and future conservative reuse; it does not by itself grant
+Smart Render or vendor-format conformance.
+
+The current FFmpeg MXF muxer can carry H.264 essence but exposes no
+XAVC-specific authoring contract. Consequently Media and Export must not infer
+XAVC from an H.264 profile, filename, MXF container, or arbitrary codec tag.
+External NLE/vendor conformance remains a separate HITL qualification even for
+the exact DNxHR and AVC-Intra paths implemented here.
+
 `ProxyConfig.concurrent_jobs` is an execution contract, not a UI preference.
 `app::proxy_generation::ProxyGenerationService` acquires cache-root capacity
 before an attempt leaves Queued and enters Running; workers therefore cannot

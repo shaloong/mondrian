@@ -35,6 +35,9 @@ const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
     "libaom-av1",
     "prores_ks",
     "dnxhd",
+    "rawvideo",
+    "v210",
+    "r210",
     "gif",
     "aac",
     "pcm_s16le",
@@ -140,7 +143,48 @@ fn verify_packaged_command_tools(path: &Path) -> Result<()> {
         path,
         Command::new(&ffmpeg).args(["-hide_banner", "-muxers"]),
     )?;
-    verify_listing(path, "muxers", &muxers, REQUIRED_COMMAND_MUXERS)
+    verify_listing(path, "muxers", &muxers, REQUIRED_COMMAND_MUXERS)?;
+    verify_professional_encoder_contracts(path, &ffmpeg)
+}
+
+fn verify_professional_encoder_contracts(path: &Path, ffmpeg: &Path) -> Result<()> {
+    for (encoder, required) in [
+        (
+            "dnxhd",
+            &[
+                "dnxhr_lb",
+                "dnxhr_sq",
+                "dnxhr_hq",
+                "dnxhr_hqx",
+                "dnxhr_444",
+                "yuv422p10le",
+                "gbrp10le",
+            ][..],
+        ),
+        ("libx264", &["avcintra-class", "yuv422p10le"][..]),
+        ("v210", &["yuv422p10le"][..]),
+        ("r210", &["gbrp10le"][..]),
+    ] {
+        let help = command_output(
+            path,
+            Command::new(ffmpeg).args(["-hide_banner", "-h", &format!("encoder={encoder}")]),
+        )?;
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|token| !help.contains(token))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(runtime_error(
+                path,
+                format!(
+                    "packaged FFmpeg encoder {encoder} is missing professional contract tokens: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_packaged_tool(path: &Path, tool: FfmpegTool) -> Result<std::path::PathBuf> {

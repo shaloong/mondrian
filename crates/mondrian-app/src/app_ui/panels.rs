@@ -37,10 +37,10 @@ use mondrian_effects::{
 };
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
-    AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
-    ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset, H264Profile,
-    HevcProfile, ImageSequenceFormat, ProResProfile, Resolution as ExportResolution,
-    TimelineExportRange, VideoCodecConfig, VideoRateControl,
+    AudioCodecConfig, Av1Profile, AvcIntraClass, BuiltinExportPreset, Container, DnxHrProfile,
+    ExportAlphaMode, ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset,
+    H264Profile, HevcProfile, ImageSequenceFormat, ProResProfile, Resolution as ExportResolution,
+    TimelineExportRange, UncompressedVideoFormat, VideoCodecConfig, VideoRateControl,
 };
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
@@ -4644,6 +4644,9 @@ fn export_container_items(preset: &ExportPreset) -> Vec<MenuItem> {
 }
 
 fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
+    if let Some(label) = mondrian_export::mezzanine::professional_mezzanine_label(video) {
+        return label;
+    }
     match video {
         VideoCodecConfig::H264 { profile: H264Profile::High, .. } => "H.264 High",
         VideoCodecConfig::Hevc { profile: HevcProfile::Main, .. } => "HEVC Main",
@@ -4656,6 +4659,9 @@ fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour } => "ProRes 4444",
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq } => "ProRes 4444 XQ",
         VideoCodecConfig::Gif { .. } => "GIF palette",
+        VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => unreachable!("handled above"),
     }
 }
 
@@ -4676,7 +4682,11 @@ fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateContr
         VideoCodecConfig::H264 { rate_control, .. }
         | VideoCodecConfig::Hevc { rate_control, .. } => Some((*rate_control, 51)),
         VideoCodecConfig::Av1 { rate_control, .. } => Some((*rate_control, 63)),
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => None,
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => None,
     }
 }
 
@@ -4702,6 +4712,17 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
         VideoCodecConfig::ProRes { profile: ProResProfile::Hq },
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFour },
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Lb },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Sq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hq },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::Hqx },
+        VideoCodecConfig::DnxHr { profile: DnxHrProfile::FourFourFour },
+        VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class100 },
+        VideoCodecConfig::AvcIntra { class: AvcIntraClass::Class200 },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Eight },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::Yuv422Ten },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbEight },
+        VideoCodecConfig::Uncompressed { format: UncompressedVideoFormat::RgbTen },
         VideoCodecConfig::Gif { colors: gif_colors, dither: gif_dither },
     ];
     choices
@@ -4714,13 +4735,40 @@ fn export_video_codec_items(preset: &ExportPreset) -> Vec<MenuItem> {
                     VideoCodingStructure::h26x_delivery()
                 }
                 VideoCodecConfig::Av1 { .. } => VideoCodingStructure::av1_delivery(),
-                VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => {
-                    VideoCodingStructure::IntraOnly
-                }
+                VideoCodecConfig::ProRes { .. }
+                | VideoCodecConfig::DnxHr { .. }
+                | VideoCodecConfig::AvcIntra { .. }
+                | VideoCodecConfig::Uncompressed { .. }
+                | VideoCodecConfig::Gif { .. } => VideoCodingStructure::IntraOnly,
             };
+            if let Some(defaults) =
+                mondrian_export::mezzanine::professional_mezzanine_authoring_defaults(&video)
+            {
+                updated.video_signal.bit_depth = ExportParameter::Explicit(defaults.bit_depth);
+                updated.video_signal.range = ExportParameter::Explicit(defaults.video_range);
+                updated.video_signal.chroma_sampling = defaults.chroma_sampling;
+                updated.alpha_mode = ExportAlphaMode::FlattenBlack;
+                if let Some(resolution) = defaults.resolution {
+                    updated.resolution = Some(ExportResolution {
+                        width: resolution.width,
+                        height: resolution.height,
+                    });
+                }
+                if let Some(frame_rate) = defaults.frame_rate {
+                    updated.frame_rate = ExportParameter::Explicit(frame_rate);
+                }
+            }
             if let Some(media) = updated.media_file_mut() {
                 media.video_coding = video_coding;
-                media.video = video;
+                media.video = video.clone();
+                if let Some(defaults) =
+                    mondrian_export::mezzanine::professional_mezzanine_authoring_defaults(&video)
+                {
+                    media.container = defaults.container;
+                    if defaults.video_only {
+                        media.audio = AudioCodecConfig::Disabled;
+                    }
+                }
             }
             MenuItem::new(label, export_preset_update_action(updated))
         })
@@ -5083,7 +5131,11 @@ fn export_with_rate_control(
         VideoCodecConfig::H264 { rate_control: current, .. }
         | VideoCodecConfig::Hevc { rate_control: current, .. }
         | VideoCodecConfig::Av1 { rate_control: current, .. } => *current = rate_control,
-        VideoCodecConfig::ProRes { .. } | VideoCodecConfig::Gif { .. } => {}
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
+        | VideoCodecConfig::Gif { .. } => {}
     }
     preset
 }
@@ -5828,7 +5880,10 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         VideoCodecConfig::H264 { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Hevc { rate_control, .. } => export_rate_control_label(*rate_control),
         VideoCodecConfig::Av1 { rate_control, .. } => export_rate_control_label(*rate_control),
-        VideoCodecConfig::ProRes { .. } => "固定 Profile 质量".to_owned(),
+        VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. } => "固定 Profile/Class 表示".to_owned(),
         VideoCodecConfig::Gif { colors, dither } => {
             format!(
                 "{colors} 色 / dither {}",

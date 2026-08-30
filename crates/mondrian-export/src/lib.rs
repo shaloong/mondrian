@@ -9,6 +9,7 @@ pub mod delivery;
 pub mod frame_contract;
 mod hardware_encoding;
 mod image_sequence;
+pub mod mezzanine;
 pub mod preset;
 pub mod queue;
 mod smart_render;

@@ -51,18 +51,25 @@ struct ExportVideoSignalContract {
     scale_range: Option<&'static str>,
     yuv_matrix: Option<ExportYuvMatrix>,
     color_space: ColorSpace,
+    professional_rgb_tags: bool,
 }
 
 impl ExportVideoSignalContract {
     fn resolve(_settings: &SequenceSettings, delivery: &ResolvedExportDeliveryContract) -> Self {
         let color_space = delivery.color_target.color_space;
         if delivery.chroma_sampling == crate::preset::ExportChromaSampling::Rgb {
+            let professional_rgb_tags = matches!(
+                &delivery.artifact,
+                ResolvedExportArtifactEncoding::MediaFile { video, .. }
+                    if crate::mezzanine::professional_mezzanine_contract(video).is_some()
+            );
             return Self {
                 pixel_format: delivery.pixel_format,
                 codec_range: None,
                 scale_range: None,
                 yuv_matrix: None,
                 color_space,
+                professional_rgb_tags,
             };
         }
         let (codec_range, scale_range) = match delivery.video_range {
@@ -93,6 +100,7 @@ impl ExportVideoSignalContract {
             scale_range: Some(scale_range),
             yuv_matrix: Some(yuv_matrix),
             color_space,
+            professional_rgb_tags: false,
         }
     }
 
@@ -106,7 +114,10 @@ impl ExportVideoSignalContract {
             color_range: self.codec_range.map(str::to_owned),
             color_primaries: tags.map(|tags| tags.color_primaries.to_owned()),
             color_transfer: tags.map(|tags| tags.color_trc.to_owned()),
-            color_matrix: self.yuv_matrix.map(|matrix| matrix.tag_name().to_owned()),
+            color_matrix: self
+                .yuv_matrix
+                .map(|matrix| matrix.tag_name().to_owned())
+                .or_else(|| self.professional_rgb_tags.then(|| "gbr".to_owned())),
             sample_aspect_ratio: Some(delivery.sample_aspect_ratio),
             field_order: Some("progressive".to_owned()),
             require_color_tags_absent: tags.is_none(),
@@ -182,6 +193,15 @@ pub(crate) fn apply_export_video_signal_args(
             .arg(tags.color_trc)
             .arg("-colorspace")
             .arg(matrix.tag_name());
+    } else if let Some(tags) = contract.color_space.ffmpeg_tags()
+        && contract.professional_rgb_tags
+    {
+        cmd.arg("-color_primaries")
+            .arg(tags.color_primaries)
+            .arg("-color_trc")
+            .arg(tags.color_trc)
+            .arg("-colorspace")
+            .arg("rgb");
     }
 }
 
@@ -220,10 +240,27 @@ pub(crate) fn apply_encoder_signal_params(
             }
             cmd.arg("-x265-params").arg(params.join(":"));
         }
+        VideoCodecConfig::AvcIntra { .. }
+            if matches!(
+                encoder,
+                crate::hardware_encoding::ResolvedVideoEncoder::Professional(
+                    crate::mezzanine::MezzanineEncoderAdapter::Libx264AvcIntra
+                )
+            ) =>
+        {
+            let mut params = Vec::new();
+            append_encoder_vui_params(&mut params, contract);
+            if !params.is_empty() {
+                cmd.arg("-x264-params").arg(params.join(":"));
+            }
+        }
         VideoCodecConfig::H264 { .. }
         | VideoCodecConfig::Hevc { .. }
         | VideoCodecConfig::Av1 { .. }
         | VideoCodecConfig::ProRes { .. }
+        | VideoCodecConfig::DnxHr { .. }
+        | VideoCodecConfig::AvcIntra { .. }
+        | VideoCodecConfig::Uncompressed { .. }
         | VideoCodecConfig::Gif { .. } => {}
     }
     Ok(())

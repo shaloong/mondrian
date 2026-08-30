@@ -1,7 +1,8 @@
 use crate::delivery::ffmpeg_audio_channel_layout;
+use crate::mezzanine::professional_mezzanine_contract;
 use crate::preset::{
-    AudioCodecConfig, Av1Profile, Container, H264Profile, HevcProfile, ProResProfile,
-    VideoCodecConfig,
+    AudioCodecConfig, Av1Profile, AvcIntraClass, Container, DnxHrProfile, H264Profile, HevcProfile,
+    ProResProfile, UncompressedVideoFormat, VideoCodecConfig,
 };
 use mondrian_core::{
     AudioChannelLayout, ExecutionCancellationToken, VideoContentLightMetadata,
@@ -61,6 +62,9 @@ pub struct MediaStreamSummary {
 pub struct ExpectedVideoConstraints {
     /// Exact encoded codec/profile identity.
     pub encoding: Option<ExpectedVideoEncoding>,
+    /// Exact codec/sample-entry tag when the selected container exposes a
+    /// stable independently useful identity.
+    pub codec_tag: Option<String>,
     /// Exact encoded sample depth.
     pub bit_depth: Option<u8>,
     /// Exact encoded width.
@@ -75,6 +79,8 @@ pub struct ExpectedVideoConstraints {
     pub signal: Option<ExpectedVideoSignalConstraints>,
     /// Exact admitted picture structure to verify on the finished stream.
     pub coding: Option<crate::video_encoding::ResolvedVideoCodingStructure>,
+    /// Require the independently decoded first frame to prove progressive scan.
+    pub require_progressive_frame: bool,
 }
 
 /// Codec/profile identities supported by the production export Adapter.
@@ -100,12 +106,31 @@ pub enum ExpectedVideoEncoding {
     ProRes4444,
     /// ProRes 4444 XQ.
     ProRes4444Xq,
+    /// One exact Avid DNxHR profile.
+    DnxHr(DnxHrProfile),
+    /// One exact AVC-Intra class.
+    AvcIntra(AvcIntraClass),
+    /// One exact uncompressed RGB/YUV representation.
+    Uncompressed(UncompressedVideoFormat),
     /// Palette GIF.
     Gif,
 }
 
 impl ExpectedVideoEncoding {
-    const fn codec_name(self) -> &'static str {
+    fn professional_contract(self) -> Option<crate::mezzanine::ProfessionalMezzanineContract> {
+        let codec = match self {
+            Self::DnxHr(profile) => VideoCodecConfig::DnxHr { profile },
+            Self::AvcIntra(class) => VideoCodecConfig::AvcIntra { class },
+            Self::Uncompressed(format) => VideoCodecConfig::Uncompressed { format },
+            _ => return None,
+        };
+        professional_mezzanine_contract(&codec)
+    }
+
+    fn codec_name(self) -> &'static str {
+        if let Some(contract) = self.professional_contract() {
+            return contract.codec_name;
+        }
         match self {
             Self::H264High => "h264",
             Self::HevcMain | Self::HevcMain10 => "hevc",
@@ -116,11 +141,17 @@ impl ExpectedVideoEncoding {
             | Self::ProResHq
             | Self::ProRes4444
             | Self::ProRes4444Xq => "prores",
+            Self::DnxHr(_) | Self::AvcIntra(_) | Self::Uncompressed(_) => {
+                unreachable!("professional encoding resolved above")
+            }
             Self::Gif => "gif",
         }
     }
 
-    const fn accepted_profiles(self) -> &'static [&'static str] {
+    fn accepted_profiles(self) -> &'static [&'static str] {
+        if let Some(contract) = self.professional_contract() {
+            return contract.accepted_profiles;
+        }
         match self {
             Self::H264High => &["High"],
             Self::HevcMain => &["Main"],
@@ -132,8 +163,15 @@ impl ExpectedVideoEncoding {
             Self::ProResHq => &["HQ"],
             Self::ProRes4444 => &["4444"],
             Self::ProRes4444Xq => &["XQ", "4444 XQ"],
+            Self::DnxHr(_) | Self::AvcIntra(_) | Self::Uncompressed(_) => {
+                unreachable!("professional encoding resolved above")
+            }
             Self::Gif => &[],
         }
+    }
+
+    fn expected_level(self) -> Option<i32> {
+        self.professional_contract().and_then(|contract| contract.expected_level)
     }
 }
 
@@ -241,6 +279,10 @@ pub struct ProbedVideoStream {
     pub codec_name: Option<String>,
     /// ffprobe profile identity.
     pub profile: Option<String>,
+    /// Container-visible codec/sample-entry tag.
+    pub codec_tag: Option<String>,
+    /// Codec level when ffprobe exposes one.
+    pub level: Option<i32>,
     /// Encoded width.
     pub width: Option<u32>,
     /// Encoded height.
@@ -335,6 +377,7 @@ struct FfprobeFrameReport {
 struct FfprobeFrame {
     #[serde(default)]
     side_data_list: Vec<FfprobeFrameSideData>,
+    interlaced_frame: Option<u8>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -353,6 +396,8 @@ struct FfprobeStream {
     codec_type: Option<String>,
     codec_name: Option<String>,
     profile: Option<String>,
+    codec_tag_string: Option<String>,
+    level: Option<i32>,
     width: Option<u32>,
     height: Option<u32>,
     r_frame_rate: Option<String>,
@@ -412,6 +457,9 @@ pub(crate) const fn expected_video_encoding(codec: &VideoCodecConfig) -> Expecte
         VideoCodecConfig::ProRes { profile: ProResProfile::FourFourFourFourXq } => {
             ExpectedVideoEncoding::ProRes4444Xq
         }
+        VideoCodecConfig::DnxHr { profile } => ExpectedVideoEncoding::DnxHr(*profile),
+        VideoCodecConfig::AvcIntra { class } => ExpectedVideoEncoding::AvcIntra(*class),
+        VideoCodecConfig::Uncompressed { format } => ExpectedVideoEncoding::Uncompressed(*format),
         VideoCodecConfig::Gif { .. } => ExpectedVideoEncoding::Gif,
     }
 }
@@ -488,15 +536,19 @@ pub fn validate_export_output_cancellable(
         ExpectedStream::Forbidden => None,
     }
     .map(|signal| &signal.static_hdr_metadata);
-    let side_data = if has_video {
-        Some(ffprobe_first_video_frame_side_data(
-            output_path,
-            cancellation,
-        )?)
+    let first_frame = if has_video {
+        Some(ffprobe_first_video_frame(output_path, cancellation)?)
     } else {
         None
     };
-    match (expected_static_hdr, side_data.as_deref()) {
+    if let ExpectedStream::Required(expected_video) = &expectations.video
+        && expected_video.require_progressive_frame
+        && first_frame.as_ref().and_then(|frame| frame.interlaced_frame) != Some(0)
+    {
+        return Err("导出成品首帧未证明 progressive scan".to_owned());
+    }
+    let side_data = first_frame.as_ref().map(|frame| frame.side_data_list.as_slice());
+    match (expected_static_hdr, side_data) {
         (None | Some(ExpectedStaticHdrMetadata::Unspecified), _) => {}
         (Some(ExpectedStaticHdrMetadata::Absent), Some(side_data)) => {
             validate_static_hdr_metadata_absent(side_data)?;
@@ -508,7 +560,7 @@ pub fn validate_export_output_cancellable(
             return Err("未取得导出成品首帧，无法证明静态 HDR metadata 合同".to_string());
         }
     }
-    Ok(build_output_probe(&report, side_data.as_deref()))
+    Ok(build_output_probe(&report, side_data))
 }
 
 /// Probe an export into stable typed evidence without applying a delivery
@@ -521,10 +573,12 @@ pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
         .streams
         .iter()
         .any(|stream| stream.codec_type.as_deref() == Some("video"));
-    let side_data = has_video
-        .then(|| ffprobe_first_video_frame_side_data(path, &cancellation))
-        .transpose()?;
-    Ok(build_output_probe(&report, side_data.as_deref()))
+    let first_frame =
+        has_video.then(|| ffprobe_first_video_frame(path, &cancellation)).transpose()?;
+    Ok(build_output_probe(
+        &report,
+        first_frame.as_ref().map(|frame| frame.side_data_list.as_slice()),
+    ))
 }
 
 /// Probe only stream presence and duration for lightweight media admission.
@@ -566,10 +620,10 @@ fn ffprobe_report(
         .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
 }
 
-fn ffprobe_first_video_frame_side_data(
+fn ffprobe_first_video_frame(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<Vec<FfprobeFrameSideData>, String> {
+) -> Result<FfprobeFrame, String> {
     let mut command = mondrian_media::ffprobe_command();
     command
         .arg("-v")
@@ -580,7 +634,7 @@ fn ffprobe_first_video_frame_side_data(
         .arg("%+#1")
         .arg("-show_frames")
         .arg("-show_entries")
-        .arg("frame=side_data_list")
+        .arg("frame=side_data_list,interlaced_frame")
         .arg("-print_format")
         .arg("json")
         .arg(path);
@@ -606,7 +660,6 @@ fn ffprobe_first_video_frame_side_data(
         .frames
         .into_iter()
         .next()
-        .map(|frame| frame.side_data_list)
         .ok_or_else(|| "ffprobe 未能解码导出视频的首帧，无法校验静态 HDR metadata".to_string())
 }
 
@@ -804,6 +857,13 @@ fn validate_report(
         if let Some(encoding) = expected.encoding {
             validate_video_encoding(stream, encoding)?;
         }
+        if let Some(expected_tag) = expected.codec_tag.as_deref() {
+            validate_exact_codec_field(
+                "codec tag",
+                expected_tag,
+                stream.codec_tag_string.as_deref(),
+            )?;
+        }
         if let Some(expected_bit_depth) = expected.bit_depth {
             let actual_bit_depth = stream.pix_fmt.as_deref().and_then(pixel_format_bit_depth);
             if actual_bit_depth != Some(expected_bit_depth) {
@@ -987,6 +1047,17 @@ fn validate_video_encoding(
         .iter()
         .any(|candidate| normalized_identity(candidate) == actual_profile)
     {
+        if let Some(expected_level) = expected.expected_level()
+            && stream.level != Some(expected_level)
+        {
+            return Err(format!(
+                "导出视频 level 不匹配：期望 {expected_level}，实际 {}",
+                stream
+                    .level
+                    .map(|level| level.to_string())
+                    .unwrap_or_else(|| "<missing>".to_owned())
+            ));
+        }
         return Ok(());
     }
     Err(format!(
@@ -1070,6 +1141,7 @@ fn pixel_format_bit_depth(pixel_format: &str) -> Option<u8> {
             | "gbrap"
             | "gray"
             | "rgb24"
+            | "uyvy422"
             | "rgba"
             | "bgra"
             | "pal8"
@@ -1268,6 +1340,8 @@ fn build_output_probe(
             ProbedVideoStream {
                 codec_name: stream.codec_name.clone(),
                 profile: stream.profile.clone(),
+                codec_tag: stream.codec_tag_string.clone(),
+                level: stream.level,
                 width: stream.width,
                 height: stream.height,
                 frame_rate_num: frame_rate.map(|(num, _)| num),
@@ -1610,6 +1684,7 @@ mod tests {
             container: Container::Mp4,
             video: ExpectedStream::Required(ExpectedVideoConstraints {
                 encoding: Some(ExpectedVideoEncoding::HevcMain10),
+                codec_tag: None,
                 bit_depth: Some(10),
                 width: Some(1920),
                 height: Some(1080),
@@ -1617,6 +1692,7 @@ mod tests {
                 fps_den: Some(1),
                 signal: None,
                 coding: None,
+                require_progressive_frame: false,
             }),
             audio: base_audio_expectation(),
             expected_duration_secs: Some(10.0),

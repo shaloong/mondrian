@@ -1136,7 +1136,16 @@ exit. `Omit` deliveries do not pay this extra probe.
 Camera-log and GIF contracts additionally require color tags to be absent, so
 an encoder cannot silently replace an intentionally untagged signal with
 guessed metadata. ProRes 422 profiles are verified as 10-bit 4:2:2, while
-ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4.
+ProRes 4444/4444 XQ are verified as 12-bit 4:4:4:4. Professional mezzanine
+resolution is owned by `mondrian-export::mezzanine`: DNxHR LB/SQ/HQ are 8-bit
+4:2:2, HQX is 10-bit 4:2:2, DNxHR 444 is 10-bit RGB, AVC-Intra Class 100/200
+are 10-bit 4:2:2, and uncompressed MOV is one exact 2vuy/v210/raw RGB/r210
+representation. RGB forms require Full range; YUV presets default Legal. The
+final scale Seam owns code-value mapping before the single encoded UNORM pack.
+Raw MOV sample entries do not expose a separate range tag, so validation relies
+on that fixed representation plus exact codec tag/pixel format rather than
+inventing metadata. Professional RGB output writes and re-probes primaries,
+transfer, and GBR matrix tags.
 
 Delivery sample depth and renderer transport precision are separate contracts.
 `DeliveryBitDepth` exposes only the 8-bit, 10-bit, and 12-bit formats implemented
@@ -1298,9 +1307,11 @@ changes must keep these contracts green or update them only with intentional
 visual-reference and diagnostics-contract changes.
 
 Camera-log output is treated as a professional intermediate path. Export
-validation rejects consumer delivery codecs for camera-log output and only
-allows 10-bit-or-higher MOV/MXF ProRes configurations until richer metadata
-carriage is implemented.
+validation rejects consumer delivery codecs and admits only independently
+resolved 10-bit-or-higher professional representations: MOV/MXF ProRes,
+DNxHR HQX/444, AVC-Intra Class 100/200, and 10-bit uncompressed MOV. Static HDR
+metadata remains HEVC Main10-only; admitting a colorimetric Log intermediate
+does not imply ST 2086/CLLI, XAVC identity, or vendor certification.
 
 ## Unknown Media
 

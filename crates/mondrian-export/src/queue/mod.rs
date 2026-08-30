@@ -2829,11 +2829,22 @@ fn execute_timeline_export(
         }
 
         let (width, height) = (delivery.resolution.width, delivery.resolution.height);
-        let expected_video_signal =
+        let mut expected_video_signal =
             match expected_export_video_signal(&timeline.sequence.settings, &delivery) {
                 Ok(signal) => signal,
                 Err(error) => return JobExecutionResult::Failed(error),
             };
+        if let ResolvedExportArtifactEncoding::MediaFile { video, .. } = &delivery.artifact
+            && crate::mezzanine::professional_mezzanine_contract(video).is_some()
+        {
+            // DNxHR and raw MOV/MXF streams may omit stream-level field_order;
+            // finished-output validation proves progressive scan from the
+            // independently decoded first frame instead.
+            expected_video_signal.field_order = None;
+            if !crate::mezzanine::requires_stream_range_tag(video) {
+                expected_video_signal.color_range = None;
+            }
+        }
         let validation_contract = match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { container, video, audio } => {
                 let expected_audio = match &audio_input {
@@ -2854,6 +2865,10 @@ fn execute_timeline_export(
                     container: *container,
                     video: ExpectedStream::Required(ExpectedVideoConstraints {
                         encoding: Some(expected_video_encoding(video)),
+                        codec_tag: (*container == Container::Mov)
+                            .then(|| crate::mezzanine::expected_mov_codec_tag(video))
+                            .flatten()
+                            .map(str::to_owned),
                         bit_depth: Some(delivery_bit_depth_value(delivery.bit_depth)),
                         width: Some(width),
                         height: Some(height),
@@ -2861,6 +2876,7 @@ fn execute_timeline_export(
                         fps_den: Some(range.fps_den),
                         signal: Some(expected_video_signal),
                         coding: Some(delivery.video_coding),
+                        require_progressive_frame: true,
                     }),
                     audio: expected_audio
                         .map(ExpectedStream::Required)
@@ -9252,6 +9268,70 @@ mod tests {
         assert_eq!(analysis.integrated_lufs, None);
         assert_eq!(analysis.true_peak_dbtp, None);
         assert!(analysis.sample_frames > 0);
+    }
+
+    #[test]
+    fn ffmpeg_executor_publishes_each_professional_mezzanine_family() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping professional mezzanine integration test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary mezzanine export parent");
+        let cases = [
+            (
+                crate::preset::ExportPreset::dnxhr_hqx_intermediate(),
+                "dnxhr-hqx.mov",
+                Some(crate::preset::Resolution { width: 256, height: 128 }),
+                "dnxhd",
+            ),
+            (
+                crate::preset::ExportPreset::avc_intra_100_intermediate(),
+                "avc-intra-100.mxf",
+                None,
+                "h264",
+            ),
+            (
+                crate::preset::ExportPreset::uncompressed_v210_master(),
+                "uncompressed-v210.mov",
+                Some(crate::preset::Resolution { width: 256, height: 128 }),
+                "v210",
+            ),
+            (
+                crate::preset::ExportPreset::uncompressed_r210_master(),
+                "uncompressed-r210.mov",
+                Some(crate::preset::Resolution { width: 256, height: 128 }),
+                "r210",
+            ),
+        ];
+
+        for (mut preset, output_name, test_resolution, expected_codec) in cases {
+            if let Some(resolution) = test_resolution {
+                preset.resolution = Some(resolution);
+            }
+            let output = directory.path().join(output_name);
+            let mut config = dummy_config(&output.to_string_lossy());
+            config.preset = preset;
+            refresh_test_execution_snapshot(&mut config.timeline, true);
+            let job = RenderJob::new(config);
+            let result = FfmpegExportExecutor.execute(
+                &job,
+                &ExecutionCancellationToken::new(),
+                &open_execution_gate(),
+                &mut |_| {},
+                &mut |_| {},
+            );
+
+            assert!(
+                matches!(result, JobExecutionResult::Published(_)),
+                "{output_name} failed: {result:?}"
+            );
+            let probe = crate::validator::probe_export_output(&output)
+                .unwrap_or_else(|error| panic!("probe {output_name}: {error}"));
+            assert_eq!(
+                probe.video.and_then(|video| video.codec_name),
+                Some(expected_codec.to_owned())
+            );
+        }
     }
 
     #[test]

@@ -922,6 +922,40 @@ fn export_panel_model_reads_app_export_draft() {
 }
 
 #[test]
+fn export_codec_menu_exposes_the_complete_professional_mezzanine_matrix() {
+    let items = export_video_codec_items(&ExportPreset::h264_aac_sdr_1080p());
+    let labels = items.iter().map(|item| item.label.as_str()).collect::<Vec<_>>();
+    for expected in [
+        "DNxHR LB",
+        "DNxHR SQ",
+        "DNxHR HQ",
+        "DNxHR HQX",
+        "DNxHR 444 RGB",
+        "AVC-Intra Class 100",
+        "AVC-Intra Class 200",
+        "Uncompressed YUV 4:2:2 8-bit (2vuy)",
+        "Uncompressed YUV 4:2:2 10-bit (v210)",
+        "Uncompressed RGB 8-bit",
+        "Uncompressed RGB 10-bit (r210)",
+    ] {
+        assert!(
+            labels.contains(&expected),
+            "missing codec menu item: {expected}"
+        );
+    }
+
+    let presets = builtin_export_presets();
+    for expected in [
+        BuiltinExportPreset::DnxHrHqx,
+        BuiltinExportPreset::AvcIntra100,
+        BuiltinExportPreset::UncompressedV210,
+        BuiltinExportPreset::UncompressedR210,
+    ] {
+        assert!(presets.iter().any(|preset| preset.id == expected));
+    }
+}
+
+#[test]
 fn export_panel_validates_the_materialized_signal_draft_and_submits_it_exactly() {
     let mut state = AppState::new();
     let sequence = Sequence::new("Deliverable");
