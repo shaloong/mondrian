@@ -496,6 +496,7 @@ impl AppState {
     ///
     /// Persistence ownership must be retired before this method is called.
     pub(super) fn finalize_project_close_state(&mut self) {
+        let _ = self.reference_output.retire();
         self.audio_idle_warmup.set_dispatch_enabled(false);
         self.audio_idle_warmup.bind_authoring(None);
         self.visual_tracking.cancel_all();

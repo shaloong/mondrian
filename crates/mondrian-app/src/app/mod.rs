@@ -45,6 +45,7 @@ use project_persistence::{
 };
 pub(crate) use project_recovery::discover_crash_recovery_candidates;
 pub use project_recovery::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
+pub use reference_output::{AppReferenceOutputError, ReferenceOutputBinding};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;
@@ -165,6 +166,7 @@ mod project_persistence;
 mod project_recovery;
 pub(crate) mod project_runtime;
 pub mod proxy_generation;
+mod reference_output;
 mod selection;
 mod single_worker_activity;
 pub mod thumbnail_service;
@@ -383,6 +385,8 @@ pub struct AppState {
     viewer_display_management: DisplayManagementPolicy,
     /// Viewer-only frozen-still comparison; never Project author data.
     gallery_comparison: Option<gallery_authoring::GalleryComparisonState>,
+    /// Machine-local professional clean-feed output; never Project author data.
+    reference_output: reference_output::AppReferenceOutputService,
 
     // 播放状态
     /// Sole authority for transport position, epoch, and Clock Master.
@@ -475,6 +479,7 @@ impl AppState {
             autosave_in_flight_request: None,
             viewer_display_management: DisplayManagementPolicy::default(),
             gallery_comparison: None,
+            reference_output: reference_output::AppReferenceOutputService::default(),
             playback_engine: PlaybackEngine::default(),
             playback_evidence: PlaybackEvidenceCollector::default(),
             playback_evidence_now: MonotonicTimestamp::ZERO,

@@ -338,6 +338,8 @@ pub enum RenderOutputColorBoundaryTarget {
     Display,
     /// Encoded delivery/export output.
     Export,
+    /// Full-raster clean feed for a professional Reference Output Adapter.
+    ReferenceOutput,
 }
 
 /// Renderer-owned description of a working-frame to final-output color boundary.
@@ -468,6 +470,21 @@ impl RenderOutputColorBoundary {
         }
     }
 
+    /// Build a full-raster clean-feed Program Output boundary.
+    pub fn reference_output(
+        output_color_space: ColorSpace,
+        tone_map: bool,
+        engine: ColorEngine,
+    ) -> Self {
+        Self {
+            target: RenderOutputColorBoundaryTarget::ReferenceOutput,
+            output_color_space,
+            display_view: None,
+            tone_map,
+            engine,
+        }
+    }
+
     fn transform(&self) -> RenderColorTransform {
         match self.target {
             RenderOutputColorBoundaryTarget::Display => match &self.display_view {
@@ -484,7 +501,8 @@ impl RenderOutputColorBoundary {
                     self.engine.clone(),
                 ),
             },
-            RenderOutputColorBoundaryTarget::Export => match &self.display_view {
+            RenderOutputColorBoundaryTarget::Export
+            | RenderOutputColorBoundaryTarget::ReferenceOutput => match &self.display_view {
                 Some(display_view) => RenderColorTransform::delivery_view(
                     self.output_color_space,
                     display_view.display.clone(),

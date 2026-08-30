@@ -1349,3 +1349,13 @@ Those capabilities must deepen the same compiler, prepared schedule, Host, and
 Runtime. Unknown layouts or dependencies continue to fail closed; no item may
 be closed by adding only schema, a disconnected UI, or a consumer-specific
 fallback mixer.
+
+## Embedded audio for Reference Output
+
+Professional Reference Output consumes exact 48 kHz windows from one public
+Audio Program output. It never reads the Monitor Path or infers speaker meaning
+from channel count. Rational video-frame boundaries select sample intervals,
+and video plus audio schedule atomically as one bounded bundle; fractional
+cadences therefore accumulate exact sample positions instead of rounding every
+frame. Device routing and reference lock remain in the Reference Output Module,
+not the Audio Program. See [Reference Output](reference-output.md).

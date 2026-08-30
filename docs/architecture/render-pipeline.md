@@ -3221,3 +3221,15 @@ the raster CPU correctness path. This fail-closed gate is intentional:
 unsupported effects, blend modes, transforms, or resampling must not silently
 run through a visually different GPU approximation, and unsupported GPU
 compositing must not make transport controls or window close unresponsive.
+
+## Professional Reference Output
+
+Renderer exposes one distinct `ProgramOutputRole::ReferenceOutput` and the
+`ReferenceOutputProgram` full-raster clean-feed Seam. It applies canonical
+Sequence Program Output and then packs v210 10-bit 4:2:2 or portable 12-bit RGB
+plus exact embedded-audio intervals for the deep
+`mondrian-reference-output` Module. Viewer scale, comparison, monitor/ICC,
+Scopes, warnings, and presentation background cannot enter this route. The
+current Implementation is the CPU Float32 correctness path; a future resident
+GPU/device path must reuse this same Interface and color identity. See
+[Reference Output](reference-output.md).

@@ -14,6 +14,7 @@ members = [
     "crates/mondrian-project",
     "crates/mondrian-playback",
     "crates/mondrian-render-cache",
+    "crates/mondrian-reference-output",
     "crates/mondrian-audio",
     "crates/mondrian-app",
     "crates/mondrian-editor-state",
@@ -53,6 +54,7 @@ mondrian-export   = { path = "crates/mondrian-export" }
 mondrian-project  = { path = "crates/mondrian-project" }
 mondrian-playback = { path = "crates/mondrian-playback" }
 mondrian-render-cache = { path = "crates/mondrian-render-cache" }
+mondrian-reference-output = { path = "crates/mondrian-reference-output" }
 mondrian-audio    = { path = "crates/mondrian-audio" }
 
 # ---- 新 UI 架构 ----

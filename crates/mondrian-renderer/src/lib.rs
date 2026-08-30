@@ -37,6 +37,7 @@ pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
 pub mod realtime_performance;
+pub mod reference_output;
 mod resident_encode;
 mod resolved_visual_identity;
 pub mod shot_match;
@@ -330,6 +331,7 @@ pub use realtime_performance::{
     REALTIME_VISUAL_PERFORMANCE_REPORT_SCHEMA_VERSION,
     SEALED_REALTIME_PERFORMANCE_EXECUTION_POLICY,
 };
+pub use reference_output::{ReferenceOutputProgram, ReferenceOutputProgramError};
 pub use resident_encode::{
     D3D12ResidentEncodeAdapter, D3D12ResidentEncodeAdapterContract,
     D3D12ResidentEncodeAdapterCreateError, D3D12ResidentEncodeAdapterDiagnostics,

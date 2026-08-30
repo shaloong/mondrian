@@ -399,6 +399,7 @@ struct AppUiViewerGpuOutputFrameContext {
 enum AppUiViewerGpuOutputTarget {
     Display,
     Export,
+    ReferenceOutput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -866,6 +867,7 @@ impl From<ProgramOutputRole> for AppUiViewerGpuOutputTarget {
         match target {
             ProgramOutputRole::Display => Self::Display,
             ProgramOutputRole::Export => Self::Export,
+            ProgramOutputRole::ReferenceOutput => Self::ReferenceOutput,
         }
     }
 }

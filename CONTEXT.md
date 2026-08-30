@@ -163,6 +163,17 @@ _Avoid_: Per-frame current-config selection, cache revision bolted onto complete
 The validated machine-local user preference applied only after the engine-owned Program Output: one monitor-output intent, optional final ICC device calibration plus rendering intent, and an SDR/PQ/HLG presentation policy. An exact OCIO display/view is admitted only when the active Project Color Environment maps it to a standardized monitor target. The policy is stored in user preferences, never in `.mdp`; actual monitor and surface capability remain Window/platform evidence.
 _Avoid_: Second creative output View authority, monitor policy in Sequence settings, ICC profile as source interpretation, user-requested HDR treated as swapchain proof, arbitrary relative ICC id/path
 
+**Reference Output Module**:
+The machine-local deep execution Module that pairs one canonical full-raster
+Program Output with exact 48 kHz Audio Program intervals, admits one closed
+physical signal, and owns bounded scheduled playout through a DeckLink/AJA
+Adapter Seam. It binds device authority to exact Sequence revision and Project
+author generation. Viewer scaling, comparison, monitor/ICC, Scopes, warnings,
+Monitor Path PCM, Export publication, device routing preferences, and vendor
+ABI handles are outside the clean-feed semantic payload. A simulated Adapter
+can prove Module behavior only and permanently carries non-hardware evidence.
+_Avoid_: Viewer window as SDI output, Project-owned device ID, implicit device conversion, per-frame rounded audio, fake device when SDK is absent, simulated output presented as hardware qualification
+
 **Professional Scopes Controls**:
 The versioned machine-local Viewer preference selecting Luma or RGB Parade, encoded IRE or transfer-decoded absolute-nits aggregation, exact Program Output or pre-ICC Monitor Output tap, skin-tone line, 75% color targets, and overview/grid/single-scope layout. Waveform mode, scale, and tap form the GPU analysis identity; guides and layout are presentation-only. A hidden Scopes panel performs no aggregation, and none of these controls enter `.mdp` author state or render-cache identity.
 _Avoid_: Nits as relabelled code values, implicit tap changes on monitor movement, scopes after ICC calibration, layout invalidating analysis, hidden-panel GPU work
@@ -1093,6 +1104,7 @@ _Avoid_: loading external plugin code in the Mondrian process, process-per-block
 - A parent binds nested PCM through the child's stable public output identities and records any semantic assignment separately against parent-local **Audio Roles**; it never references child-internal Audio Role identities.
 - A **Delivery Mapping** packages Sequence outputs but cannot address private child tracks, buses, or routes.
 - A **Monitor Path** consumes logical Sequence outputs and cannot alter program or exported samples.
+- A **Reference Output Module** consumes one public Audio Program plus the canonical full-raster Program Output; it cannot consume Monitor Path processing or Viewer presentation pixels.
 - **Audio Render Admission** and **Monitor Sink Admission** are independent; a missing Monitor Sink never invalidates an Audio Program or stops Synthetic Clock transport.
 - During `Priming`, **Audio Playback** may render and queue PCM but must keep device consumption inactive. Only `Playing` or `Recovering` grants consumption permission; a late/missing video frame cannot revoke it or rotate the audio render generation.
 - **Audio Playback** records isolated underruns without changing Clock Master; sustained missing-sample evidence enters recovery through a continuous Synthetic handoff and fresh preroll.

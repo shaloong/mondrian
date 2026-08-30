@@ -978,6 +978,7 @@ impl AppUiAppRoot {
             viewer_canvas_background: self.models.viewer.canvas_background,
             video_scopes: self.models.scopes.settings,
             audio_output_device: Default::default(),
+            reference_output: Default::default(),
             display_management: self.preferences_model.display_management.clone(),
         };
         self.refresh_from_app_state_with_preferences(state, &preferences);

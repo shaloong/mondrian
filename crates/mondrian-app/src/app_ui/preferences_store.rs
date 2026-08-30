@@ -51,6 +51,10 @@ pub struct AppUiPreferences {
     /// Runtime output-device intent. This is a user preference, never Project state.
     #[serde(default)]
     pub audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection,
+    /// Machine-local professional output routing intent. Loading preferences
+    /// never auto-acquires a DeckLink/AJA device.
+    #[serde(default)]
+    pub reference_output: mondrian_reference_output::ReferenceOutputRoutingPreferences,
     /// Machine-local Viewer monitor target, ICC calibration, and HDR policy.
     /// This value never enters `.mdp` Project authoring state.
     #[serde(default)]
@@ -70,6 +74,7 @@ impl Default for AppUiPreferences {
             viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
             video_scopes: VideoScopesSettings::default(),
             audio_output_device: mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault,
+            reference_output: Default::default(),
             display_management: mondrian_core::DisplayManagementPolicy::default(),
         }
     }
@@ -217,6 +222,7 @@ mod tests {
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 video_scopes: Default::default(),
                 audio_output_device: Default::default(),
+                reference_output: Default::default(),
                 display_management: Default::default(),
             })
             .expect("serialize preferences"),
@@ -264,6 +270,19 @@ mod tests {
                     "wasapi:round-trip-device",
                 )
                 .expect("fixture device identity"),
+            },
+            reference_output: mondrian_reference_output::ReferenceOutputRoutingPreferences {
+                provider: Some(mondrian_reference_output::ReferenceOutputProvider::DeckLink),
+                device_id: Some(
+                    mondrian_reference_output::ReferenceOutputDeviceId::new(
+                        "decklink:round-trip-device",
+                    )
+                    .expect("fixture reference-output identity"),
+                ),
+                pixel_format:
+                    mondrian_reference_output::ReferenceOutputPixelFormat::Rgb444TwelveIn16Le,
+                reference_policy:
+                    mondrian_reference_output::ReferenceOutputReferencePolicy::RequireExternalLock,
             },
             display_management: mondrian_core::DisplayManagementPolicy::default()
                 .with_calibration(mondrian_core::DisplayCalibrationPolicy::OsDefault)
@@ -321,6 +340,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_preferences_without_reference_output_restore_disabled_routing() {
+        let path = temp_preferences_path("legacy-reference-output");
+        let mut value = serde_json::to_value(AppUiPreferences::default())
+            .expect("serialize current preferences");
+        value.as_object_mut().expect("preferences object").remove("reference_output");
+        fs::write(
+            &path,
+            serde_json::to_vec(&value).expect("serialize legacy preferences"),
+        )
+        .expect("write legacy preferences");
+
+        let loaded = load_app_ui_preferences_from(&path);
+        fs::remove_file(path).ok();
+
+        assert_eq!(
+            loaded.reference_output,
+            mondrian_reference_output::ReferenceOutputRoutingPreferences::default()
+        );
+    }
+
+    #[test]
     fn legacy_preferences_without_scopes_controls_restore_professional_defaults() {
         let path = temp_preferences_path("legacy-scopes-controls");
         let mut value = serde_json::to_value(AppUiPreferences::default())
@@ -353,6 +393,7 @@ mod tests {
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 video_scopes: Default::default(),
                 audio_output_device: Default::default(),
+                reference_output: Default::default(),
                 display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Split {
                     direction: SplitDirection::Vertical,
@@ -417,6 +458,7 @@ mod tests {
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 video_scopes: Default::default(),
                 audio_output_device: Default::default(),
+                reference_output: Default::default(),
                 display_management: Default::default(),
                 custom_workspace_layout: Some(AppUiWorkspaceLayout::Panel {
                     kind: mondrian_editor_state::state::PanelKind::Assets,
@@ -488,6 +530,7 @@ mod tests {
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 video_scopes: Default::default(),
                 audio_output_device: Default::default(),
+                reference_output: Default::default(),
                 display_management: Default::default(),
             })
             .expect("serialize preferences"),
@@ -521,6 +564,7 @@ mod tests {
                 viewer_canvas_background: ViewerCanvasBackground::Checkerboard,
                 video_scopes: Default::default(),
                 audio_output_device: Default::default(),
+                reference_output: Default::default(),
                 display_management: Default::default(),
             })
             .expect("serialize preferences"),

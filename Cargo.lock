@@ -2316,6 +2316,7 @@ dependencies = [
  "mondrian-platform",
  "mondrian-playback",
  "mondrian-project",
+ "mondrian-reference-output",
  "mondrian-render-cache",
  "mondrian-renderer",
  "mondrian-storage",
@@ -2569,6 +2570,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mondrian-reference-output"
+version = "0.2.0"
+dependencies = [
+ "mondrian-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "mondrian-render-cache"
 version = "0.2.0"
 dependencies = [
@@ -2599,6 +2611,7 @@ dependencies = [
  "mondrian-core",
  "mondrian-effects",
  "mondrian-media",
+ "mondrian-reference-output",
  "mondrian-timeline",
  "naga",
  "objc2-core-foundation",

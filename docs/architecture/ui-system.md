@@ -2023,3 +2023,12 @@ without implying HDR10+ certification and states that Remake requires a
 qualified/licensed Adapter plus independent validation and human QC. The App
 commits every action through the normal Authoring Session, so availability is a
 read-only early projection and dispatch revalidates the complete Sequence.
+
+Professional Reference Output routing is a machine-local preference and App
+runtime service, never a ProductAction or `.mdp` author field. Preferences may
+remember optional provider/device identity, carrier, and external-reference
+policy, but loading them never acquires hardware. The App exposes explicit
+discover/open/schedule/start/poll/stop Interfaces, binds an open Session to the
+exact Sequence revision and Project author generation, and stops it on edit,
+navigation invalidation, Project close, device loss, or required reference
+loss. See [Reference Output](reference-output.md).

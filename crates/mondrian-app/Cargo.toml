@@ -52,6 +52,7 @@ mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }
 mondrian-playback = { workspace = true }
 mondrian-render-cache = { workspace = true }
+mondrian-reference-output = { workspace = true }
 mondrian-audio    = { workspace = true }
 mondrian-media    = { workspace = true }
 mondrian-timeline = { workspace = true }
