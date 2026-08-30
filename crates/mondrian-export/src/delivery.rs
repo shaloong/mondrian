@@ -5,6 +5,7 @@
 //! call it for early feedback; the queue calls it again against the immutable
 //! Timeline Export Snapshot before admitting work.
 
+use crate::image_sequence::resolve_image_sequence_encoding;
 use crate::preset::{
     AudioCodecConfig, AudioStemFormat, Av1Profile, Container, ExportAlphaMode,
     ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget, ExportFrameSampling,
@@ -211,12 +212,9 @@ pub fn resolve_export_delivery(
         ExportArtifactEncoding::MediaFile(media) => {
             resolve_pixel_format(&media.video, preset.alpha_mode, bit_depth, chroma_sampling)?
         }
-        ExportArtifactEncoding::ImageSequence { format } => resolve_image_sequence_pixel_format(
-            *format,
-            preset.alpha_mode,
-            bit_depth,
-            chroma_sampling,
-        )?,
+        ExportArtifactEncoding::ImageSequence { format } => {
+            resolve_image_sequence_pixel_format(*format, preset.alpha_mode, chroma_sampling)?
+        }
         ExportArtifactEncoding::AudioStems { .. } => "none",
     };
     if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
@@ -295,7 +293,7 @@ fn resolve_export_color_target(
             })
         }
         ExportColorTarget::Colorimetric(color_space) => {
-            validate_explicit_export_color_space(color_space)?;
+            validate_explicit_export_color_space(preset, color_space)?;
             Ok(ResolvedExportColorTarget {
                 color_space,
                 tone_map: false,
@@ -338,14 +336,18 @@ fn resolve_export_color_target(
 }
 
 fn validate_explicit_export_color_space(
+    preset: &ExportPreset,
     color_space: ColorSpace,
 ) -> Result<(), ExportDeliveryError> {
-    if color_space.is_display_referred() || color_space.encoding().is_scene_log() {
+    if color_space.is_display_referred()
+        || color_space.encoding().is_scene_log()
+        || (preset.image_sequence_format().is_some() && color_space.is_scene_linear())
+    {
         return Ok(());
     }
     Err(ExportDeliveryError::new(
         ExportDeliveryIssueCode::IncompatibleColorOutput,
-        "显式导出目标必须是显示/交付色彩空间或受支持的 Camera Log 编码",
+        "显式导出目标必须是显示/交付色彩空间、受支持的 Camera Log，或图像 Master 的 scene-linear 空间",
     ))
 }
 
@@ -589,27 +591,19 @@ fn resolve_pixel_format(
 fn resolve_image_sequence_pixel_format(
     format: ImageSequenceFormat,
     alpha_mode: ExportAlphaMode,
-    bit_depth: DeliveryBitDepth,
     chroma: ExportChromaSampling,
 ) -> Result<&'static str, ExportDeliveryError> {
-    match (format, alpha_mode, bit_depth, chroma) {
-        (
-            ImageSequenceFormat::Png8,
-            ExportAlphaMode::Preserve,
-            DeliveryBitDepth::Eight,
-            ExportChromaSampling::Rgb,
-        ) => Ok("rgba"),
-        (
-            ImageSequenceFormat::Png8,
-            ExportAlphaMode::FlattenBlack,
-            DeliveryBitDepth::Eight,
-            ExportChromaSampling::Rgb,
-        ) => Ok("rgb24"),
-        _ => Err(ExportDeliveryError::new(
+    if chroma != ExportChromaSampling::Rgb {
+        return Err(ExportDeliveryError::new(
             ExportDeliveryIssueCode::IncompatibleVideoSignal,
-            "PNG 图像序列仅支持 8-bit Full RGB，可选择保留或压平 Alpha",
-        )),
+            "图像序列 Master 仅支持 RGB/RGBA，不接受 YUV 色度采样",
+        ));
     }
+    resolve_image_sequence_encoding(format, alpha_mode)
+        .map(|contract| contract.output_pixel_format)
+        .map_err(|detail| {
+            ExportDeliveryError::new(ExportDeliveryIssueCode::IncompatibleVideoSignal, detail)
+        })
 }
 
 fn validate_dimensions(
@@ -657,7 +651,9 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
             (&media.container, &media.video),
             (Container::Mov, VideoCodecConfig::ProRes { profile }) if profile.is_4444()
         ),
-        ExportArtifactEncoding::ImageSequence { format: ImageSequenceFormat::Png8 } => true,
+        ExportArtifactEncoding::ImageSequence { format } => {
+            resolve_image_sequence_encoding(*format, ExportAlphaMode::Preserve).is_ok()
+        }
         ExportArtifactEncoding::AudioStems { .. } => false,
     };
     if supported {
@@ -665,7 +661,7 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
     }
     Err(ExportDeliveryError::new(
         ExportDeliveryIssueCode::UnsupportedAlpha,
-        "保留 Alpha 当前仅支持 MOV + ProRes 4444/4444 XQ 或 PNG 图像序列",
+        "所选编码表示不能保留 Straight Alpha；请选择 MOV + ProRes 4444/4444 XQ，或支持 Alpha 的 PNG/EXR/TIFF 图像序列 Master",
     ))
 }
 
@@ -683,7 +679,10 @@ fn validate_color_output(
         StaticHdrMetadataPolicy::WriteAuthored
     );
 
-    if output.encoding().is_scene_log() {
+    let image_format = preset.image_sequence_format();
+    let high_precision_image =
+        image_format.is_some_and(|format| format != ImageSequenceFormat::Png8);
+    if output.encoding().is_scene_log() && !high_precision_image {
         if bit_depth == DeliveryBitDepth::Eight {
             return Err(ExportDeliveryError::new(
                 ExportDeliveryIssueCode::IncompatibleColorOutput,
@@ -733,15 +732,46 @@ fn validate_color_output(
         ));
     }
 
-    if preset.image_sequence_format().is_some()
-        && (output != ColorSpace::Srgb
-            || bit_depth != DeliveryBitDepth::Eight
-            || video_range != VideoRange::Full)
-    {
-        return Err(ExportDeliveryError::new(
-            ExportDeliveryIssueCode::IncompatibleColorOutput,
-            "PNG 图像序列当前仅允许显式 sRGB / 8-bit / Full 输出",
-        ));
+    if let Some(format) = image_format {
+        if video_range != VideoRange::Full {
+            return Err(ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleColorOutput,
+                "图像序列 Master 必须使用 Full range",
+            ));
+        }
+        match format {
+            ImageSequenceFormat::Png8 | ImageSequenceFormat::Png16
+                if output != ColorSpace::Srgb =>
+            {
+                return Err(ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::IncompatibleColorOutput,
+                    "PNG 图像序列当前仅允许显式 sRGB 输出",
+                ));
+            }
+            ImageSequenceFormat::OpenExrHalf
+            | ImageSequenceFormat::OpenExrFloat
+            | ImageSequenceFormat::TiffFloat
+                if !output.is_scene_linear() =>
+            {
+                return Err(ExportDeliveryError::new(
+                    ExportDeliveryIssueCode::IncompatibleColorOutput,
+                    "Float image master requires an explicit scene-linear color target",
+                ));
+            }
+            _ => {}
+        }
+        if matches!(
+            format,
+            ImageSequenceFormat::OpenExrHalf
+                | ImageSequenceFormat::OpenExrFloat
+                | ImageSequenceFormat::TiffFloat
+        ) && preset.legalizer.is_active()
+        {
+            return Err(ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleColorOutput,
+                "Float image master cannot enable normalized delivery legalization",
+            ));
+        }
     }
 
     if write_static_hdr {
@@ -865,6 +895,58 @@ mod tests {
             crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
         );
         assert_eq!(contract.color_target.color_space, ColorSpace::Srgb);
+    }
+
+    #[test]
+    fn high_precision_image_master_presets_resolve_exact_representations() {
+        let cases = [
+            (
+                ExportPreset::png16_sequence(),
+                ImageSequenceFormat::Png16,
+                "rgba64be",
+            ),
+            (
+                ExportPreset::open_exr_half_sequence(),
+                ImageSequenceFormat::OpenExrHalf,
+                "gbrapf32le",
+            ),
+            (
+                ExportPreset::open_exr_float_sequence(),
+                ImageSequenceFormat::OpenExrFloat,
+                "gbrapf32le",
+            ),
+            (
+                ExportPreset::dpx16_sequence(),
+                ImageSequenceFormat::Dpx16,
+                "rgb48be",
+            ),
+            (
+                ExportPreset::tiff16_sequence(),
+                ImageSequenceFormat::Tiff16,
+                "rgba64le",
+            ),
+            (
+                ExportPreset::tiff_float_sequence(),
+                ImageSequenceFormat::TiffFloat,
+                "rgbaf32-native",
+            ),
+        ];
+
+        for (preset, expected_format, expected_pixel_format) in cases {
+            let contract = resolve_export_delivery(
+                &preset,
+                &SequenceSettings::default(),
+                &ProjectColorEnvironment::default(),
+            )
+            .unwrap_or_else(|error| panic!("{expected_format:?} did not resolve: {error}"));
+            assert_eq!(
+                contract.artifact,
+                ResolvedExportArtifactEncoding::ImageSequence { format: expected_format }
+            );
+            assert_eq!(contract.pixel_format, expected_pixel_format);
+            assert_eq!(contract.video_range, VideoRange::Full);
+            assert_eq!(contract.chroma_sampling, ExportChromaSampling::Rgb);
+        }
     }
 
     #[test]

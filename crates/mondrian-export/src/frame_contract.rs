@@ -10,7 +10,8 @@ use mondrian_renderer::GpuColorFrameTextureFormat;
 use mondrian_timeline::sequence::DeliveryBitDepth;
 
 /// Exact sample representation and layout of one FFmpeg raw-video frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExportFrameContract {
     /// Interleaved encoded RGBA with four 8-bit unsigned-normalized channels.
     EncodedRgba8Unorm,
@@ -54,6 +55,12 @@ pub enum ExportFramePackingError {
     /// A finite Float32 sample cannot be represented as finite Float16.
     #[error("export float component {component_index} exceeds the finite Float16 range")]
     Float16OutOfRange {
+        /// Component index in interleaved RGBA order.
+        component_index: usize,
+    },
+    /// A float master carried coverage outside the normalized alpha domain.
+    #[error("export float alpha component {component_index} is outside [0, 1]")]
+    AlphaOutOfRange {
         /// Component index in interleaved RGBA order.
         component_index: usize,
     },
@@ -172,6 +179,7 @@ impl ExportFrameContract {
                 Ok(out)
             }
             Self::FloatMasterRgba16 => {
+                validate_float_alpha(rgba)?;
                 let mut out = Vec::with_capacity(rgba.len() * 2);
                 let max = f16::MAX.to_f32();
                 for (component_index, channel) in rgba.iter().copied().enumerate() {
@@ -182,7 +190,10 @@ impl ExportFrameContract {
                 }
                 Ok(out)
             }
-            Self::FloatMasterRgba32 => pack_gbrap_f32(rgba),
+            Self::FloatMasterRgba32 => {
+                validate_float_alpha(rgba)?;
+                pack_gbrap_f32(rgba)
+            }
         }
     }
 
@@ -215,6 +226,30 @@ impl ExportFrameContract {
             }
             Self::FloatMasterRgba32 => unpack_gbrap_f32_to_rgba8(bytes),
         }
+    }
+
+    /// Decode exact pipe bytes into interleaved RGBA Float32 samples.
+    ///
+    /// This preserves finite extended-range values for native float image
+    /// encoders and never passes through an integer inspection boundary.
+    pub fn to_rgba_f32(self, bytes: &[u8]) -> Result<Vec<f32>, ExportFramePackingError> {
+        validate_pipe_byte_count(bytes.len(), self.bytes_per_pixel())?;
+        let rgba = match self {
+            Self::EncodedRgba8Unorm => {
+                bytes.iter().map(|value| f32::from(*value) / 255.0).collect()
+            }
+            Self::EncodedRgba16Unorm => bytes
+                .chunks_exact(2)
+                .map(|value| f32::from(u16::from_le_bytes([value[0], value[1]])) / 65_535.0)
+                .collect(),
+            Self::FloatMasterRgba16 => bytes
+                .chunks_exact(2)
+                .map(|value| f16::from_le_bytes([value[0], value[1]]).to_f32())
+                .collect(),
+            Self::FloatMasterRgba32 => unpack_gbrap_f32(bytes)?,
+        };
+        validate_finite(&rgba)?;
+        Ok(rgba)
     }
 
     /// Replace `canvas` with an opaque black frame in this contract's exact
@@ -278,6 +313,19 @@ fn validate_finite(rgba: &[f32]) -> Result<(), ExportFramePackingError> {
     Ok(())
 }
 
+fn validate_float_alpha(rgba: &[f32]) -> Result<(), ExportFramePackingError> {
+    if let Some((pixel_index, _)) = rgba
+        .chunks_exact(4)
+        .enumerate()
+        .find(|(_, pixel)| !(0.0..=1.0).contains(&pixel[3]))
+    {
+        return Err(ExportFramePackingError::AlphaOutOfRange {
+            component_index: pixel_index * 4 + 3,
+        });
+    }
+    Ok(())
+}
+
 fn pack_gbrap_f32(rgba: &[f32]) -> Result<Vec<u8>, ExportFramePackingError> {
     validate_rgba_component_count(rgba.len())?;
     validate_finite(rgba)?;
@@ -308,6 +356,13 @@ fn pack_gbrap_f32_from_rgba8(rgba: &[u8]) -> Vec<u8> {
 }
 
 fn unpack_gbrap_f32_to_rgba8(bytes: &[u8]) -> Result<Vec<u8>, ExportFramePackingError> {
+    Ok(unpack_gbrap_f32(bytes)?
+        .into_iter()
+        .map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8)
+        .collect())
+}
+
+fn unpack_gbrap_f32(bytes: &[u8]) -> Result<Vec<f32>, ExportFramePackingError> {
     validate_pipe_byte_count(bytes.len(), 16)?;
     let pixels = bytes.len() / 16;
     let plane_bytes = pixels * std::mem::size_of::<f32>();
@@ -324,7 +379,7 @@ fn unpack_gbrap_f32_to_rgba8(bytes: &[u8]) -> Result<Vec<u8>, ExportFramePacking
             ]);
         }
         validate_finite(&rgba)?;
-        out.extend(rgba.map(|value| (value.clamp(0.0, 1.0) * 255.0).round() as u8));
+        out.extend(rgba);
     }
     Ok(out)
 }
@@ -406,7 +461,7 @@ mod tests {
 
     #[test]
     fn float16_master_preserves_extended_range_without_unorm_clamp() {
-        let input = [-0.25, 0.5, 1.0, 1.5];
+        let input = [-0.25, 0.5, 1.5, 1.0];
         let packed = ExportFrameContract::FloatMasterRgba16
             .pack_rgba_f32(&input)
             .expect("pack Float16");

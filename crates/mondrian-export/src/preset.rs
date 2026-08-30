@@ -269,6 +269,18 @@ pub struct EncodedMediaOutput {
 pub enum ImageSequenceFormat {
     /// Lossless 8-bit RGBA PNG.
     Png8,
+    /// Lossless 16-bit RGB/RGBA PNG.
+    Png16,
+    /// OpenEXR with IEEE-754 binary16 RGB/RGBA channels.
+    OpenExrHalf,
+    /// OpenEXR with IEEE-754 binary32 RGB/RGBA channels.
+    OpenExrFloat,
+    /// 16-bit integer RGB DPX.
+    Dpx16,
+    /// Lossless 16-bit integer RGB/RGBA TIFF.
+    Tiff16,
+    /// Lossless IEEE-754 binary32 RGB/RGBA TIFF.
+    TiffFloat,
 }
 
 /// Sample representation used by every file in an audio-stem package.
@@ -564,6 +576,66 @@ impl ExportPreset {
         }
     }
 
+    /// Lossless, full-range sRGB 16-bit PNG frames with straight alpha.
+    pub fn png16_sequence() -> Self {
+        image_master_preset(
+            "PNG 16-bit 图像序列",
+            ImageSequenceFormat::Png16,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::RenderingView(ColorSpace::Srgb),
+        )
+    }
+
+    /// Scene-linear OpenEXR Half frames with straight alpha.
+    pub fn open_exr_half_sequence() -> Self {
+        image_master_preset(
+            "OpenEXR Half 图像序列",
+            ImageSequenceFormat::OpenExrHalf,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Scene-linear OpenEXR Float32 frames with straight alpha.
+    pub fn open_exr_float_sequence() -> Self {
+        image_master_preset(
+            "OpenEXR Float32 图像序列",
+            ImageSequenceFormat::OpenExrFloat,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Full-range 16-bit RGB DPX frames.
+    pub fn dpx16_sequence() -> Self {
+        image_master_preset(
+            "DPX 16-bit 图像序列",
+            ImageSequenceFormat::Dpx16,
+            ExportAlphaMode::FlattenBlack,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Lossless full-range 16-bit TIFF frames with straight alpha.
+    pub fn tiff16_sequence() -> Self {
+        image_master_preset(
+            "TIFF 16-bit 图像序列",
+            ImageSequenceFormat::Tiff16,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
+    /// Lossless Float32 TIFF frames with straight alpha.
+    pub fn tiff_float_sequence() -> Self {
+        image_master_preset(
+            "TIFF Float32 图像序列",
+            ImageSequenceFormat::TiffFloat,
+            ExportAlphaMode::Preserve,
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+
     /// Lossless 24-bit WAV files for every public Program Output.
     pub fn audio_stems_pcm24() -> Self {
         Self {
@@ -577,6 +649,32 @@ impl ExportPreset {
             color_target: ExportColorTarget::FollowSequence,
             legalizer: SignalLegalizer::Off,
         }
+    }
+}
+
+fn image_master_preset(
+    name: &str,
+    format: ImageSequenceFormat,
+    alpha_mode: ExportAlphaMode,
+    color_target: ExportColorTarget,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.into(),
+        artifact: ExportArtifactEncoding::ImageSequence { format },
+        resolution: None,
+        frame_rate: ExportParameter::FollowSequence,
+        frame_sampling: ExportFrameSampling::FrameHold,
+        // Image representations own their exact integer/float scalar type.
+        // This legacy video-signal depth is deliberately not reinterpreted as
+        // the file sample type during delivery resolution.
+        video_signal: ExportVideoSignal {
+            bit_depth: ExportParameter::FollowSequence,
+            range: ExportParameter::Explicit(VideoRange::Full),
+            chroma_sampling: ExportChromaSampling::Rgb,
+        },
+        alpha_mode,
+        color_target,
+        legalizer: SignalLegalizer::Off,
     }
 }
 
@@ -600,19 +698,37 @@ pub enum BuiltinExportPreset {
     ProRes4444Alpha,
     /// Lossless numbered PNG frames with a durable manifest.
     PngSequence,
+    /// Lossless 16-bit PNG image sequence.
+    Png16Sequence,
+    /// Scene-linear OpenEXR Half image sequence.
+    OpenExrHalfSequence,
+    /// Scene-linear OpenEXR Float32 image sequence.
+    OpenExrFloatSequence,
+    /// Full-range 16-bit DPX image sequence.
+    Dpx16Sequence,
+    /// Lossless 16-bit TIFF image sequence.
+    Tiff16Sequence,
+    /// Lossless Float32 TIFF image sequence.
+    TiffFloatSequence,
     /// Lossless WAV package containing every public Program Output.
     AudioStemsPcm24,
 }
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 13] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
         Self::Proxy720p,
         Self::ProRes4444Alpha,
         Self::PngSequence,
+        Self::Png16Sequence,
+        Self::OpenExrHalfSequence,
+        Self::OpenExrFloatSequence,
+        Self::Dpx16Sequence,
+        Self::Tiff16Sequence,
+        Self::TiffFloatSequence,
         Self::AudioStemsPcm24,
     ];
 
@@ -625,6 +741,12 @@ impl BuiltinExportPreset {
             Self::Proxy720p => "proxy-720p",
             Self::ProRes4444Alpha => "prores-4444-alpha",
             Self::PngSequence => "png-sequence",
+            Self::Png16Sequence => "png16-sequence",
+            Self::OpenExrHalfSequence => "openexr-half-sequence",
+            Self::OpenExrFloatSequence => "openexr-float-sequence",
+            Self::Dpx16Sequence => "dpx16-sequence",
+            Self::Tiff16Sequence => "tiff16-sequence",
+            Self::TiffFloatSequence => "tiff-float-sequence",
             Self::AudioStemsPcm24 => "audio-stems-pcm24",
         }
     }
@@ -638,6 +760,12 @@ impl BuiltinExportPreset {
             Self::Proxy720p => "代理文件 720p",
             Self::ProRes4444Alpha => "ProRes 4444 XQ + Alpha（12-bit）",
             Self::PngSequence => "PNG 图像序列（无损 + Alpha）",
+            Self::Png16Sequence => "PNG 16-bit 图像序列（无损 + Alpha）",
+            Self::OpenExrHalfSequence => "OpenEXR Half 图像序列（线性 + Alpha）",
+            Self::OpenExrFloatSequence => "OpenEXR Float32 图像序列（线性 + Alpha）",
+            Self::Dpx16Sequence => "DPX 16-bit 图像序列（线性 RGB）",
+            Self::Tiff16Sequence => "TIFF 16-bit 图像序列（无损 + Alpha）",
+            Self::TiffFloatSequence => "TIFF Float32 图像序列（无损 + Alpha）",
             Self::AudioStemsPcm24 => "Program Output Stems（24-bit WAV）",
         }
     }
@@ -651,6 +779,12 @@ impl BuiltinExportPreset {
             Self::Proxy720p => ExportPreset::proxy_720p(),
             Self::ProRes4444Alpha => ExportPreset::prores_4444_alpha(),
             Self::PngSequence => ExportPreset::png_sequence(),
+            Self::Png16Sequence => ExportPreset::png16_sequence(),
+            Self::OpenExrHalfSequence => ExportPreset::open_exr_half_sequence(),
+            Self::OpenExrFloatSequence => ExportPreset::open_exr_float_sequence(),
+            Self::Dpx16Sequence => ExportPreset::dpx16_sequence(),
+            Self::Tiff16Sequence => ExportPreset::tiff16_sequence(),
+            Self::TiffFloatSequence => ExportPreset::tiff_float_sequence(),
             Self::AudioStemsPcm24 => ExportPreset::audio_stems_pcm24(),
         }
     }

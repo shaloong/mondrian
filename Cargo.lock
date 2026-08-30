@@ -1224,6 +1224,7 @@ dependencies = [
  "miniz_oxide",
  "num-complex",
  "pulp",
+ "rayon-core",
  "smallvec",
  "zune-inflate",
 ]
@@ -2447,6 +2448,7 @@ dependencies = [
  "async-trait",
  "bytemuck",
  "chrono",
+ "exr",
  "half",
  "image",
  "mondrian-audio",
@@ -2462,6 +2464,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "tiff",
  "tokio",
  "tracing",
  "uuid",

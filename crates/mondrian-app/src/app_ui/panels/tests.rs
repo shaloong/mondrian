@@ -952,18 +952,28 @@ fn export_panel_validates_the_materialized_signal_draft_and_submits_it_exactly()
 
 #[test]
 fn export_color_target_modes_expose_only_semantically_valid_spaces() {
-    let rendering = export_color_target_spaces(ExportColorTargetMode::RenderingView);
+    let media_preset = ExportPreset::h264_aac_sdr_1080p();
+    let rendering = export_color_target_spaces(ExportColorTargetMode::RenderingView, &media_preset);
     assert!(rendering.contains(&ColorSpace::Rec709));
     assert!(rendering.contains(&ColorSpace::Rec2100Hlg));
     assert!(rendering.contains(&ColorSpace::Rec2100Pq));
     assert!(!rendering.contains(&ColorSpace::AppleLogBt2020));
     assert!(!rendering.contains(&ColorSpace::LinearRec709));
 
-    let colorimetric = export_color_target_spaces(ExportColorTargetMode::Colorimetric);
+    let colorimetric =
+        export_color_target_spaces(ExportColorTargetMode::Colorimetric, &media_preset);
     assert!(colorimetric.contains(&ColorSpace::Rec709));
     assert!(colorimetric.contains(&ColorSpace::AppleLogBt2020));
     assert!(!colorimetric.contains(&ColorSpace::LinearRec709));
     assert!(!colorimetric.contains(&ColorSpace::Aces2065_1));
+
+    let image_master = export_color_target_spaces(
+        ExportColorTargetMode::Colorimetric,
+        &ExportPreset::open_exr_float_sequence(),
+    );
+    assert!(image_master.contains(&ColorSpace::LinearRec709));
+    assert!(image_master.contains(&ColorSpace::Aces2065_1));
+    assert!(image_master.contains(&ColorSpace::AcesCg));
 }
 
 #[test]

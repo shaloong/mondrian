@@ -39,8 +39,8 @@ use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
     AudioCodecConfig, Av1Profile, BuiltinExportPreset, Container, ExportAlphaMode,
     ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset, H264Profile,
-    HevcProfile, ProResProfile, Resolution as ExportResolution, TimelineExportRange,
-    VideoCodecConfig, VideoRateControl,
+    HevcProfile, ImageSequenceFormat, ProResProfile, Resolution as ExportResolution,
+    TimelineExportRange, VideoCodecConfig, VideoRateControl,
 };
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
@@ -4659,6 +4659,18 @@ fn export_video_codec_label(video: &VideoCodecConfig) -> &'static str {
     }
 }
 
+fn export_image_sequence_format_label(format: ImageSequenceFormat) -> &'static str {
+    match format {
+        ImageSequenceFormat::Png8 => "PNG 8-bit（无损）",
+        ImageSequenceFormat::Png16 => "PNG 16-bit（无损）",
+        ImageSequenceFormat::OpenExrHalf => "OpenEXR Half（ZIP16）",
+        ImageSequenceFormat::OpenExrFloat => "OpenEXR Float32（ZIP16）",
+        ImageSequenceFormat::Dpx16 => "DPX 16-bit RGB",
+        ImageSequenceFormat::Tiff16 => "TIFF 16-bit（Deflate）",
+        ImageSequenceFormat::TiffFloat => "TIFF Float32（无损）",
+    }
+}
+
 fn export_video_rate_control(video: &VideoCodecConfig) -> Option<(VideoRateControl, u8)> {
     match video {
         VideoCodecConfig::H264 { rate_control, .. }
@@ -4999,13 +5011,24 @@ fn is_explicit_export_color_space(color_space: ColorSpace) -> bool {
     color_space.is_display_referred() || color_space.encoding().is_scene_log()
 }
 
-fn export_color_target_spaces(mode: ExportColorTargetMode) -> Vec<ColorSpace> {
+fn export_color_target_spaces(
+    mode: ExportColorTargetMode,
+    preset: &ExportPreset,
+) -> Vec<ColorSpace> {
     ColorSpace::ALL
         .into_iter()
         .filter(|color_space| match mode {
             ExportColorTargetMode::FollowSequence => false,
             ExportColorTargetMode::RenderingView => color_space.is_display_referred(),
-            ExportColorTargetMode::Colorimetric => is_explicit_export_color_space(*color_space),
+            ExportColorTargetMode::Colorimetric => {
+                is_explicit_export_color_space(*color_space)
+                    || (preset.image_sequence_format().is_some_and(|format| {
+                        !matches!(
+                            format,
+                            ImageSequenceFormat::Png8 | ImageSequenceFormat::Png16
+                        )
+                    }) && color_space.is_scene_linear())
+            }
         })
         .collect()
 }
@@ -5030,7 +5053,7 @@ fn export_color_target_mode_items(preset: &ExportPreset) -> Vec<MenuItem> {
 
 fn export_color_target_space_items(preset: &ExportPreset) -> Vec<MenuItem> {
     let mode = export_color_target_mode(preset.color_target);
-    export_color_target_spaces(mode)
+    export_color_target_spaces(mode, preset)
         .into_iter()
         .map(|color_space| {
             let mut updated = preset.clone();
@@ -5096,9 +5119,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     .with_max_visible_items(6)
     .enabled(media.is_some());
     let video_codec_dropdown = Dropdown::new(
-        media
-            .map(|media| export_video_codec_label(&media.video))
-            .unwrap_or("PNG（无损）"),
+        media.map(|media| export_video_codec_label(&media.video)).unwrap_or_else(|| {
+            model
+                .preset
+                .image_sequence_format()
+                .map(export_image_sequence_format_label)
+                .unwrap_or("无视频")
+        }),
         export_video_codec_items(&model.preset),
     )
     .with_max_visible_items(8)
@@ -5117,7 +5144,8 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_bit_depth_label(model.preset.video_signal.bit_depth),
         export_bit_depth_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some());
     let color_target_mode = export_color_target_mode(model.preset.color_target);
     let color_target_mode_dropdown = Dropdown::new(
         export_color_target_mode_label(color_target_mode),
@@ -5139,12 +5167,14 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_video_range_label(model.preset.video_signal.range),
         export_video_range_items(&model.preset),
     )
-    .with_max_visible_items(3);
+    .with_max_visible_items(3)
+    .enabled(media.is_some());
     let chroma_dropdown = Dropdown::new(
         export_chroma_label(model.preset.video_signal.chroma_sampling),
         export_chroma_items(&model.preset),
     )
-    .with_max_visible_items(4);
+    .with_max_visible_items(4)
+    .enabled(media.is_some());
     let alpha_dropdown = Dropdown::new(
         export_alpha_mode_label(model.preset.alpha_mode),
         export_alpha_mode_items(&model.preset),

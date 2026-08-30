@@ -25,6 +25,8 @@ const REQUIRED_LINKED_DECODERS: &[(&std::ffi::CStr, &str)] = &[
     (c"pcm_f32le", "PCM F32LE"),
     (c"png", "PNG"),
     (c"exr", "OpenEXR"),
+    (c"dpx", "DPX"),
+    (c"tiff", "TIFF"),
 ];
 
 const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
@@ -39,10 +41,15 @@ const REQUIRED_COMMAND_ENCODERS: &[&str] = &[
     "pcm_s24le",
     "pcm_s32le",
     "pcm_f32le",
+    "png",
+    "exr",
+    "dpx",
+    "tiff",
 ];
 
 const REQUIRED_COMMAND_FILTERS: &[&str] = &["scale", "setparams", "pan", "anullsrc"];
-const REQUIRED_COMMAND_MUXERS: &[&str] = &["mp4", "mov", "matroska", "webm", "mxf", "gif"];
+const REQUIRED_COMMAND_MUXERS: &[&str] =
+    &["mp4", "mov", "matroska", "webm", "mxf", "gif", "image2"];
 
 /// Initialize FFmpeg once with Mondrian's product log policy.
 pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {

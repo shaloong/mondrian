@@ -1151,8 +1151,14 @@ master seams as `rgbaf16le` interleaved RGBA and `gbrapf32le` planar G/B/R/A.
 Those float seams preserve finite extended-range values without normalized
 clamping; UNORM seams validate finite input, clamp once to `[0, 1]`, and
 quantize. Non-finite samples and finite values outside Float16 range fail
-closed. No current user-facing preset selects a float master until the image/
-video master backends are implemented. If GPU output and the renderer-owned
+closed. OpenEXR Half uses a planar Float32 encoder seam and quantizes once in
+the EXR encoder, avoiding the packaged FFmpeg packed-Float16 conversion that
+clamps extended-range RGB. OpenEXR Half/Float32 and TIFF Float32 presets select
+those float contracts with explicit scene-linear Colorimetric targets. They
+reject display Rendering Views, normalized delivery legalization, NaN/Inf,
+out-of-range Half values, and Alpha outside `[0, 1]`; negative and greater-than-
+one RGB remain intact. Integer PNG16/DPX16/TIFF16 use the distinct UNORM16
+single-quantization contract. If GPU output and the renderer-owned
 CPU float boundary both fail, export stops with structured precision-failure
 diagnostics; an RGBA8 boundary is never expanded into a nominally high-bit pipe.
 

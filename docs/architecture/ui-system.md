@@ -1255,6 +1255,15 @@ snapshot, so no parallel UI-only field bag can disagree with enqueue. A
 container edit rewrites the output suffix only when that suffix still matched
 the previous container; an explicitly custom suffix is preserved. Admission
 freezes the edited preset into the job.
+High-precision image Masters are separate built-in representations rather than
+values in the video-codec bit-depth dropdown: PNG16, OpenEXR Half, OpenEXR
+Float32, DPX16, TIFF16, and TIFF Float32. Their exact scalar type is format-owned,
+so the panel disables the generic 8/10/12-bit, range, and chroma controls for a
+sequence artifact, shows the resolved representation label, and uses
+`.pngseq`, `.exrseq`, `.dpxseq`, or `.tiffseq` directory suffixes. Scene-linear
+Colorimetric endpoints are offered only for image Masters; ordinary media-file
+presets retain display/Camera-Log endpoint restrictions. The complete typed
+preset remains the only action payload and queue admission remains authoritative.
 The same materialized preset exposes an explicit delivery Legalizer checkbox.
 It is independent from Full/Legal range: enabled means clamp final
 display-encoded RGB before quantization; disabled preserves excursions. The UI

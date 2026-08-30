@@ -1686,25 +1686,49 @@ terminates the attempt, while only total-deadline expiry records
 backoff. Map, unpack, planning, admission, or recording failures remain
 route-local and cannot poison required heterogeneous execution.
 
-Export readback is serialized through the export frame contract selected from
-delivery sample depth: 8-bit delivery writes RGBA8 raw-video bytes, while
+Export readback is serialized through one resolved export frame contract.
+Media-file delivery selects it from delivery sample depth: 8-bit delivery
+writes RGBA8 raw-video bytes, while
 10-bit and 12-bit delivery read the renderer GPU `Rgba16Float` boundary and
 pack normalized channels into the explicitly named `EncodedRgba16Unorm`
 contract and FFmpeg `rgba64le` pipe bytes. Renderer texture precision is not
 pipe sample encoding. The same deep contract module defines true
 `FloatMasterRgba16` (`rgbaf16le`, interleaved) and `FloatMasterRgba32`
-(`gbrapf32le`, planar G/B/R/A) seams for later master formats. UNORM packing
+(`gbrapf32le`, planar G/B/R/A) seams. OpenEXR Half/Float32 and TIFF
+Float32 image Masters consume the true float seam. UNORM packing
 validates finite samples, clamps to `[0, 1]`, and quantizes once; float packing
 validates finite/range constraints and preserves negative or greater-than-one
-values without normalized clamp. Its corpus proves byte layout and the bundled
-FFmpeg binary consumes every declared raw-video layout. No current delivery
-preset selects a float master. When GPU output is
+RGB values without normalized clamp, while coverage Alpha must remain finite
+and normalized. Its corpus proves byte layout and the bundled FFmpeg binary
+consumes every declared raw-video layout. PNG16, DPX16, and TIFF16 select the
+single UNORM16 quantization Seam; OpenEXR Half/Float32 select true float pipes.
+OpenEXR Half deliberately uses the planar Float32 pipe and performs its only
+Half quantization in the EXR encoder: the packaged FFmpeg's packed Float16
+conversion clamps extended-range RGB. Independent decode tests prove negative
+and greater-than-one samples survive while the file channels are actually F16;
+the native TIFF Float32 Adapter losslessly interleaves the same planar Float32
+frame without an RGBA8 or UNORM boundary. When GPU output is
 unavailable, 10/12-bit delivery CPU fallback must use the renderer-owned
 `execute_cpu_output_boundary_float(...)` helper, which applies the working ->
 output OCIO float transform without u8 quantization. The caller flattens the
 float result into `[f32]` and uses
 `ExportFrameContract::pack_rgba_f32(...)`; the selected UNORM16 contract alone
 performs the final normalized clamp and `rgba64le` quantization.
+
+`mondrian-export::image_sequence` owns the complete Image Sequence Master
+Module. Its Interface resolves representation, frame contract, encoder Adapter,
+output pixel format, extension, and Alpha capability once. Queue execution is
+a shallow consumer: it either streams exact frames to one supervised FFmpeg
+image2 process or calls the native TIFF Float32 Adapter per frame. Every staged
+frame is then independently decoded. PNG/TIFF validation proves exact integer
+or IEEE Float scalar type and channel count, EXR validation additionally proves
+the header's F16/F32 channel storage, and DPX validation proves its endian
+header, 16-bit RGB descriptor, dimensions, and a complete decode. The schema-2
+manifest records representation, frame contract, output pixel format, color
+target, Alpha policy, byte length, and SHA-256 for every zero-based
+`frame-00000000.ext` object before whole-directory publication. Cancellation or
+ordinary failure leaves no final namespace; create-new collision never merges
+partial inventories.
 If both the GPU output path and renderer-owned CPU float helper fail, 10/12-bit
 export fails closed. It must never manufacture an `rgba64le` payload from an
 RGBA8 boundary. Export diagnostics record `FloatBoundaryUnavailable`, retain

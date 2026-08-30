@@ -62,6 +62,15 @@ Storage primitive: a caller that needs version replacement must publish a new
 immutable generation and switch a small manifest/pointer through the atomic-file
 Seam.
 
+The Export Image Sequence Master Module is a direct consumer. It populates one
+identity-bound sibling with deterministic numbered frames, independently proves
+every frame's file representation and decode, hashes the complete inventory,
+and durably adds manifest schema 2 before publication. The final path uses only
+create-new publication; cancellation and ordinary encoding/validation failure
+let the owned sibling clean itself up, while a failure after the source is
+preserved for namespace publication reports that exact recoverable staging path.
+No retry scans loose frame names or adopts an existing output directory.
+
 `ensure_durable_directory_chain` accepts one caller-selected, already-existing
 absolute anchor and one strict absolute descendant. It publishes each missing
 suffix node through the same direct-child seam. It never walks or flushes

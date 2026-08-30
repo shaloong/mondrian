@@ -6,8 +6,8 @@ use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::prepare_timeline_export_dependencies_with_audio_selection;
 use mondrian_export::preset::{
     BuiltinExportPreset, Container, ExportAudioProgramSelection, ExportConfig,
-    ExportMediaDependency, ExportOutputPolicy, ExportPreset, TimelineExportRange,
-    TimelineExportSnapshot,
+    ExportMediaDependency, ExportOutputPolicy, ExportPreset, ImageSequenceFormat,
+    TimelineExportRange, TimelineExportSnapshot,
 };
 use mondrian_export::queue::{
     ExportCancelOutcome, ExportJobSnapshot, ExportQueueDiagnostics, RenderJob,
@@ -87,6 +87,14 @@ pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
     if preset.audio_stem_format().is_some() {
         return "wavstems";
     }
+    if let Some(format) = preset.image_sequence_format() {
+        return match format {
+            ImageSequenceFormat::Png8 | ImageSequenceFormat::Png16 => "pngseq",
+            ImageSequenceFormat::OpenExrHalf | ImageSequenceFormat::OpenExrFloat => "exrseq",
+            ImageSequenceFormat::Dpx16 => "dpxseq",
+            ImageSequenceFormat::Tiff16 | ImageSequenceFormat::TiffFloat => "tiffseq",
+        };
+    }
     match preset.media_file().map(|media| media.container) {
         Some(Container::Mp4) => "mp4",
         Some(Container::Mov) => "mov",
@@ -94,7 +102,7 @@ pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
         Some(Container::Gif) => "gif",
         Some(Container::Mxf) => "mxf",
         Some(Container::Webm) => "webm",
-        None => "pngseq",
+        None => "export",
     }
 }
 
@@ -886,6 +894,21 @@ mod tests {
         state.set_export_draft_preset(mov);
 
         assert_eq!(state.export_draft.output_path, "E:/renders/delivery.custom");
+    }
+
+    #[test]
+    fn image_master_presets_expose_representation_specific_directory_suffixes() {
+        let cases = [
+            (BuiltinExportPreset::Png16Sequence, "pngseq"),
+            (BuiltinExportPreset::OpenExrHalfSequence, "exrseq"),
+            (BuiltinExportPreset::OpenExrFloatSequence, "exrseq"),
+            (BuiltinExportPreset::Dpx16Sequence, "dpxseq"),
+            (BuiltinExportPreset::Tiff16Sequence, "tiffseq"),
+            (BuiltinExportPreset::TiffFloatSequence, "tiffseq"),
+        ];
+        for (builtin, expected) in cases {
+            assert_eq!(export_preset_extension(&builtin.preset()), expected);
+        }
     }
 
     #[test]

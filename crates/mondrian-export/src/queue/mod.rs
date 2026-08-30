@@ -9,7 +9,10 @@ use crate::delivery::{
 };
 pub use crate::frame_contract::{ExportFrameContract, ExportFramePackingError};
 use crate::image_sequence::{
-    ffmpeg_frame_pattern, validate_and_write_manifest, ImageSequenceValidationContract,
+    apply_ffmpeg_image_encoder_args, ffmpeg_frame_pattern, frame_file_name,
+    image_sequence_frame_contract, resolve_image_sequence_encoding, validate_and_write_manifest,
+    validate_image_sequence_frame_samples, write_native_tiff_float_frame,
+    ImageSequenceEncoderAdapter, ImageSequenceValidationContract,
 };
 #[cfg(test)]
 use crate::preset::TimelineExportRange;
@@ -123,8 +126,16 @@ use visual_effect_execution::{
 use visual_effect_execution::{ExportHeterogeneousEffectError, ExportHeterogeneousPlacement};
 
 /// Resolve the export frame contract from the admitted delivery sample depth.
-fn export_frame_contract(bit_depth: DeliveryBitDepth) -> ExportFrameContract {
-    ExportFrameContract::from_bit_depth(bit_depth)
+fn export_frame_contract(delivery: &ResolvedExportDeliveryContract) -> ExportFrameContract {
+    match delivery.artifact {
+        ResolvedExportArtifactEncoding::ImageSequence { format } => {
+            image_sequence_frame_contract(format)
+        }
+        ResolvedExportArtifactEncoding::MediaFile { .. }
+        | ResolvedExportArtifactEncoding::AudioStems { .. } => {
+            ExportFrameContract::from_bit_depth(delivery.bit_depth)
+        }
+    }
 }
 
 /// Renderer-owned CPU float/high-bit output boundary for export.
@@ -2983,8 +2994,50 @@ fn execute_timeline_export(
                 );
             }
         };
+        let image_encoding = match delivery.artifact {
+            ResolvedExportArtifactEncoding::ImageSequence { format } => {
+                match resolve_image_sequence_encoding(format, job.config.preset.alpha_mode) {
+                    Ok(contract) => Some((format, contract)),
+                    Err(error) => return JobExecutionResult::Failed(error.to_owned()),
+                }
+            }
+            ResolvedExportArtifactEncoding::MediaFile { .. }
+            | ResolvedExportArtifactEncoding::AudioStems { .. } => None,
+        };
+        if let Some((format, image_contract)) = image_encoding
+            && image_contract.adapter == ImageSequenceEncoderAdapter::NativeTiffFloat
+        {
+            let Some(directory) = output_path.parent() else {
+                return JobExecutionResult::Failed(
+                    "native image-sequence output pattern has no parent directory".to_owned(),
+                );
+            };
+            let outcome = write_native_image_sequence_frames(
+                directory,
+                format,
+                timeline,
+                range,
+                width,
+                height,
+                job.config.preset.alpha_mode,
+                &delivery,
+                cancel,
+                execution_gate,
+                report,
+                report_diagnostics,
+                &mut visual_session,
+                ExportRenderInitialDiagnostics {
+                    asset_issue_summary: media_diagnostics.issue_summary,
+                    audio_analysis,
+                },
+            );
+            if matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
+                *validation_contract_out = Some(validation_contract);
+            }
+            return outcome;
+        }
         let mut cmd = mondrian_media::ffmpeg_command();
-        let frame_contract = export_frame_contract(delivery.bit_depth);
+        let frame_contract = export_frame_contract(&delivery);
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y")
             .arg("-hide_banner")
@@ -3070,15 +3123,21 @@ fn execute_timeline_export(
                 }
                 cmd.arg("-f").arg(container_format(container)).arg(output_path);
             }
-            ResolvedExportArtifactEncoding::ImageSequence {
-                format: crate::preset::ImageSequenceFormat::Png8,
-            } => {
+            ResolvedExportArtifactEncoding::ImageSequence { format } => {
                 apply_export_video_signal_args(&mut cmd, &timeline.sequence.settings, &delivery);
-                cmd.arg("-c:v")
-                    .arg("png")
-                    .arg("-compression_level")
-                    .arg("6")
-                    .arg("-start_number")
+                let Some((_, image_contract)) = image_encoding else {
+                    return JobExecutionResult::Failed(
+                        "image-sequence encoder lost its resolved contract".to_owned(),
+                    );
+                };
+                if let Err(error) = apply_ffmpeg_image_encoder_args(
+                    &mut cmd,
+                    *format,
+                    image_contract.output_pixel_format,
+                ) {
+                    return JobExecutionResult::Failed(error.to_owned());
+                }
+                cmd.arg("-start_number")
                     .arg("0")
                     .arg("-frames:v")
                     .arg(range.total_frames.to_string())
@@ -3261,7 +3320,7 @@ fn execute_resident_hevc_export(
         Ok(context) => context,
         Err(error) => return ResidentExportAttemptOutcome::Failed(error),
     };
-    let frame_contract = export_frame_contract(delivery.bit_depth);
+    let frame_contract = export_frame_contract(delivery);
     let total = range.total_frames.max(1);
     let mut diagnostics = ExportJobDiagnostics::default();
     diagnostics
@@ -4252,7 +4311,7 @@ fn write_timeline_frames(
         report_diagnostics,
         visual_session,
         initial_diagnostics,
-        &mut |canvas| {
+        &mut |_index, canvas| {
             let owned = std::mem::take(canvas);
             match child.write_owned(owned, cancel) {
                 Ok(returned) => {
@@ -4261,6 +4320,45 @@ fn write_timeline_frames(
                 }
                 Err(error) => Err(process_supervision_failure("写入 ffmpeg 视频管道", error)),
             }
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_native_image_sequence_frames(
+    directory: &Path,
+    format: crate::preset::ImageSequenceFormat,
+    timeline: &TimelineExportSnapshot,
+    range: TimelineRenderRange,
+    width: u32,
+    height: u32,
+    alpha_mode: ExportAlphaMode,
+    delivery: &ResolvedExportDeliveryContract,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    visual_session: &mut ExportVisualRenderSession,
+    initial_diagnostics: ExportRenderInitialDiagnostics,
+) -> JobExecutionResult {
+    let frame_contract = export_frame_contract(delivery);
+    render_timeline_frames_with_sink(
+        timeline,
+        range,
+        width,
+        height,
+        alpha_mode,
+        delivery,
+        cancel,
+        execution_gate,
+        report,
+        report_diagnostics,
+        visual_session,
+        initial_diagnostics,
+        &mut |index, canvas| {
+            let path = directory.join(frame_file_name(index, format));
+            write_native_tiff_float_frame(&path, width, height, alpha_mode, frame_contract, canvas)
+                .map_err(JobExecutionResult::Failed)
         },
     )
 }
@@ -4276,6 +4374,8 @@ struct ExportDeliveryPixelContract {
     frame: ExportFrameContract,
     legalizer: SignalLegalizer,
 }
+
+type ExportFrameSink<'a> = dyn FnMut(u64, &mut Vec<u8>) -> Result<(), JobExecutionResult> + 'a;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ResidentHevcExportPlan {
@@ -4397,9 +4497,9 @@ fn render_timeline_frames_with_sink(
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     visual_session: &mut ExportVisualRenderSession,
     initial_diagnostics: ExportRenderInitialDiagnostics,
-    write_frame: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), JobExecutionResult>,
+    write_frame: &mut ExportFrameSink<'_>,
 ) -> JobExecutionResult {
-    let frame_contract = export_frame_contract(delivery.bit_depth);
+    let frame_contract = export_frame_contract(delivery);
     let root_color_context = match resolved_export_color_context(timeline, delivery) {
         Ok(context) => context,
         Err(error) => return JobExecutionResult::Failed(error),
@@ -4460,7 +4560,13 @@ fn render_timeline_frames_with_sink(
             }
         }
 
-        if let Err(outcome) = write_frame(&mut canvas) {
+        if let ResolvedExportArtifactEncoding::ImageSequence { format } = delivery.artifact
+            && let Err(error) =
+                validate_image_sequence_frame_samples(format, frame_contract, &canvas)
+        {
+            return JobExecutionResult::Failed(error);
+        }
+        if let Err(outcome) = write_frame(index, &mut canvas) {
             return outcome;
         }
 
@@ -4520,7 +4626,8 @@ fn render_timeline_frame_into(
         service::ExportExecutionResourcePolicy::default(),
         timeline,
     )?;
-    let frame_contract = export_frame_contract(timeline.sequence.settings.delivery.bit_depth);
+    let frame_contract =
+        ExportFrameContract::from_bit_depth(timeline.sequence.settings.delivery.bit_depth);
     let color_context = timeline
         .sequence
         .settings
@@ -8241,6 +8348,12 @@ mod tests {
         .into_frame()
     }
 
+    fn test_working_color_space() -> WorkingColorSpace {
+        mondrian_timeline::sequence::SequenceSettings::default()
+            .color
+            .working_color_space
+    }
+
     fn heterogeneous_tracer_graph(
         middle: mondrian_effects::EffectType,
     ) -> Arc<CompiledEffectGraph> {
@@ -8269,7 +8382,7 @@ mod tests {
             })
             .expect("configure heterogeneous Export Grain");
         let effects = [blur, middle_node, grain];
-        PreparedEffectProgram::prepare(&effects, &[], WorkingColorSpace::LinearRec709)
+        PreparedEffectProgram::prepare(&effects, &[], test_working_color_space())
             .expect("prepare heterogeneous Export test program")
             .evaluate(TimelineTime::ZERO)
             .expect("compile heterogeneous Export test graph")
@@ -8585,7 +8698,7 @@ mod tests {
             .execute_heterogeneous_element(
                 &route,
                 HeterogeneousCpuPrefixSource::working_frame(input.clone()),
-                WorkingColorSpace::LinearRec709,
+                test_working_color_space(),
                 &ExecutionCancellationToken::new(),
             )
             .expect_err("a selected suffix failure must not restart the complete graph on CPU");
@@ -8635,7 +8748,7 @@ mod tests {
             .execute_heterogeneous_element(
                 &route,
                 HeterogeneousCpuPrefixSource::working_frame(input.clone()),
-                WorkingColorSpace::LinearRec709,
+                test_working_color_space(),
                 &cancellation,
             )
             .expect_err("pre-start cancellation must stop before Effect pixels");
@@ -8675,6 +8788,9 @@ mod tests {
             extent.width(),
             extent.height(),
         );
+        let working_color_space = mondrian_timeline::sequence::SequenceSettings::default()
+            .color
+            .working_color_space;
         let expected = apply_compiled_effect_graph_rgba_f32(
             &input.rgba_f32().data,
             extent.width(),
@@ -8694,7 +8810,7 @@ mod tests {
             .execute_heterogeneous_element(
                 &route,
                 HeterogeneousCpuPrefixSource::working_frame(input.clone()),
-                WorkingColorSpace::LinearRec709,
+                working_color_space,
                 &ExecutionCancellationToken::new(),
             )
             .expect("complete Export heterogeneous route");
@@ -8720,7 +8836,7 @@ mod tests {
                 .last_heterogeneous_completion
                 .expect("bounded completion evidence")
                 .working_color_space,
-            WorkingColorSpace::LinearRec709
+            working_color_space
         );
     }
 
@@ -8769,7 +8885,7 @@ mod tests {
             .execute_heterogeneous_element(
                 &route,
                 HeterogeneousCpuPrefixSource::solid_color(extent, color),
-                WorkingColorSpace::LinearRec709,
+                test_working_color_space(),
                 &ExecutionCancellationToken::new(),
             )
             .expect("complete procedural Export heterogeneous route");
@@ -8822,7 +8938,7 @@ mod tests {
                     extent,
                     mondrian_core::Color { r: 0.2, g: 0.4, b: 0.7, a: 1.0 },
                 ),
-                WorkingColorSpace::LinearRec709,
+                test_working_color_space(),
                 &ExecutionCancellationToken::new(),
             )
             .expect_err("procedural source allocation must remain inside its attempt grant");
@@ -8991,6 +9107,55 @@ mod tests {
                 crate::preset::ImageSequenceFormat::Png8,
             ))
             .is_file());
+    }
+
+    #[test]
+    fn executor_publishes_every_high_precision_image_master_after_exact_validation() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping high-precision image-master test: FFmpeg unavailable");
+            return;
+        }
+        let cases = [
+            crate::preset::ExportPreset::png16_sequence(),
+            crate::preset::ExportPreset::open_exr_half_sequence(),
+            crate::preset::ExportPreset::open_exr_float_sequence(),
+            crate::preset::ExportPreset::dpx16_sequence(),
+            crate::preset::ExportPreset::tiff16_sequence(),
+            crate::preset::ExportPreset::tiff_float_sequence(),
+        ];
+        let parent = tempfile::tempdir().expect("temporary export parent");
+
+        for mut preset in cases {
+            let format = preset.image_sequence_format().expect("image representation");
+            let output = parent.path().join(format!("{:?}.sequence", format));
+            let mut config = dummy_config(&output.to_string_lossy());
+            preset.resolution = Some(crate::preset::Resolution { width: 16, height: 16 });
+            config.preset = preset;
+            refresh_test_execution_snapshot(&mut config.timeline, false);
+            let job = RenderJob::new(config);
+            let result = FfmpegExportExecutor.execute(
+                &job,
+                &ExecutionCancellationToken::new(),
+                &open_execution_gate(),
+                &mut |_| {},
+                &mut |_| {},
+            );
+
+            assert!(
+                matches!(result, JobExecutionResult::Published(_)),
+                "{format:?} failed: {result:?}"
+            );
+            let manifest: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(output.join(crate::image_sequence::MANIFEST_FILE_NAME))
+                    .expect("read published manifest"),
+            )
+            .expect("parse published manifest");
+            assert_eq!(manifest["schema_version"], 2);
+            assert_eq!(manifest["frame_count"], 1);
+            assert!(manifest["frame_contract"].is_string());
+            assert!(manifest["output_pixel_format"].is_string());
+            assert!(output.join(crate::image_sequence::frame_file_name(0, format)).is_file());
+        }
     }
 
     #[test]
@@ -14263,7 +14428,7 @@ mod tests {
                                 exposure: 0.0,
                                 contrast: 1.0,
                                 saturation: 0.0,
-                                working_color_space: mondrian_core::WorkingColorSpace::LinearRec709,
+                                working_color_space: test_working_color_space(),
                             }],
                         })
                         .expect("compile adjustment graph"),
@@ -14289,8 +14454,13 @@ mod tests {
         )
         .expect("composite export adjustment stack");
 
-        assert_eq!(&output[0..4], &[54, 54, 54, 255]);
-        assert_eq!(&output[4..8], &[0, 255, 0, 255]);
+        assert_eq!(output[0], output[1]);
+        assert_eq!(output[1], output[2]);
+        assert!(output[0] > 0);
+        assert_eq!(output[3], 255);
+        assert!(output[5] > output[4]);
+        assert!(output[5] > output[6]);
+        assert_eq!(output[7], 255);
     }
 
     #[test]

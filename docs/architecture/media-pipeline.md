@@ -2945,10 +2945,14 @@ primary diagnostic channel. Developers can opt into noisier FFmpeg output with
 `MONDRIAN_FFMPEG_LOG_LEVEL`; product health should use structured decode
 diagnostics and explicit frame failure/cancellation reasons instead.
 Packaged runtime verification checks FFmpeg's public decoder registry for the
-declared baseline video, audio, image, and PCM families, including PNG and
-OpenEXR. It separately interrogates the adjacent CLI tools for every software
+declared baseline video, audio, image, and PCM families, including PNG,
+OpenEXR, DPX, and TIFF. It separately interrogates the adjacent CLI tools for
+every software
 encoder and filter consumed by current Proxy, Audio, Export, and validation
-Implementations. Windows CI, release, and developer setup therefore install the
+Implementations, including PNG/OpenEXR/DPX/TIFF encoders and the image2 muxer.
+TIFF Float32 encoding is a native Export Adapter, but the packaged decoder is
+still required as independent product validation evidence. Windows CI, release,
+and developer setup therefore install the
 explicit `zlib,ffmpeg,ffprobe,gpl,x264,x265,aom` vcpkg profile; a
 `libavcodec.pc` file alone is not runtime evidence. The vcpkg step is
 idempotent and uses `--recurse`, and its cache identity includes the product
