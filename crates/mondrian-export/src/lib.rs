@@ -11,6 +11,7 @@ mod hardware_encoding;
 mod image_sequence;
 pub mod mezzanine;
 pub mod preset;
+pub mod professional_delivery;
 pub mod queue;
 mod smart_render;
 pub mod validator;
@@ -33,7 +34,8 @@ pub use frame_contract::{ExportFrameContract, ExportFramePackingError};
 pub use preset::{
     AudioStemFormat, BuiltinExportPreset, ExportAudioProgramSelection, ExportConfig,
     ExportFrameSampling, ExportMediaDependency, ExportOutputPolicy, ExportPreset,
-    ExportSmartRenderPolicy, ResolvedTimelineExportRange, TimelineExportRange,
+    ExportSmartRenderPolicy, ProfessionalDeliveryMetadata, ProfessionalDeliveryOutput,
+    ProfessionalDeliveryProfile, ResolvedTimelineExportRange, TimelineExportRange,
     TimelineExportRangeError, TimelineExportSnapshot,
 };
 pub use queue::{

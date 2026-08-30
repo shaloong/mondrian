@@ -350,6 +350,54 @@ pub enum AudioStemFormat {
     WavePcm24,
 }
 
+/// Exact professional delivery profile owned by one package or constrained MXF file.
+///
+/// These are deliberately narrow product rows rather than aliases for the broad
+/// IMF, AS-11, or DCP standard families.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfessionalDeliveryProfile {
+    /// SMPTE RDD 45 IMF Application ProRes, single composition/segment, 1080p25.
+    ImfAppProResRdd45_1080p25,
+    /// AMWA AS-11 X9 NABA HD, progressive 720p59.94 AVC High 4:2:2.
+    As11X9NabaHd720p5994,
+    /// SMPTE DCP, 2D 2K Flat 24 fps, unencrypted and unsigned.
+    SmpteDcp2kFlat24,
+}
+
+/// Human-authored package metadata frozen with one export request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfessionalDeliveryMetadata {
+    /// Display title carried by the package composition or AS-11 clip.
+    pub title: String,
+    /// Organization issuing the deliverable.
+    pub issuer: String,
+    /// Application or operator creating the deliverable.
+    pub creator: String,
+    /// RFC 5646 primary spoken-language tag used for explicit audio labeling.
+    pub language: String,
+}
+
+impl Default for ProfessionalDeliveryMetadata {
+    fn default() -> Self {
+        Self {
+            title: "Mondrian Composition".to_owned(),
+            issuer: "Mondrian".to_owned(),
+            creator: "Mondrian".to_owned(),
+            language: "en".to_owned(),
+        }
+    }
+}
+
+/// One professional package or constrained-file output contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfessionalDeliveryOutput {
+    /// Exact qualified profile row.
+    pub profile: ProfessionalDeliveryProfile,
+    /// Metadata validated and frozen before any essence is rendered.
+    pub metadata: ProfessionalDeliveryMetadata,
+}
+
 /// Public Program Output selection implied by one physical artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportAudioProgramSelection {
@@ -377,6 +425,8 @@ pub enum ExportArtifactEncoding {
         /// Exact sample representation shared by every stem.
         format: AudioStemFormat,
     },
+    /// One profile-qualified IMF/DCP package directory or AS-11 MXF file.
+    ProfessionalDelivery(ProfessionalDeliveryOutput),
 }
 
 /// How timeline coverage is delivered by an export preset.
@@ -440,7 +490,8 @@ impl ExportPreset {
         match &self.artifact {
             ExportArtifactEncoding::MediaFile(media) => Some(media),
             ExportArtifactEncoding::ImageSequence { .. }
-            | ExportArtifactEncoding::AudioStems { .. } => None,
+            | ExportArtifactEncoding::AudioStems { .. }
+            | ExportArtifactEncoding::ProfessionalDelivery(_) => None,
         }
     }
 
@@ -449,7 +500,8 @@ impl ExportPreset {
         match &mut self.artifact {
             ExportArtifactEncoding::MediaFile(media) => Some(media),
             ExportArtifactEncoding::ImageSequence { .. }
-            | ExportArtifactEncoding::AudioStems { .. } => None,
+            | ExportArtifactEncoding::AudioStems { .. }
+            | ExportArtifactEncoding::ProfessionalDelivery(_) => None,
         }
     }
 
@@ -459,6 +511,7 @@ impl ExportPreset {
             ExportArtifactEncoding::MediaFile(_) => None,
             ExportArtifactEncoding::ImageSequence { format } => Some(format),
             ExportArtifactEncoding::AudioStems { .. } => None,
+            ExportArtifactEncoding::ProfessionalDelivery(_) => None,
         }
     }
 
@@ -469,6 +522,17 @@ impl ExportPreset {
             ExportArtifactEncoding::MediaFile(_) | ExportArtifactEncoding::ImageSequence { .. } => {
                 None
             }
+            ExportArtifactEncoding::ProfessionalDelivery(_) => None,
+        }
+    }
+
+    /// Return the exact professional delivery request, when present.
+    pub const fn professional_delivery(&self) -> Option<&ProfessionalDeliveryOutput> {
+        match &self.artifact {
+            ExportArtifactEncoding::ProfessionalDelivery(delivery) => Some(delivery),
+            ExportArtifactEncoding::MediaFile(_)
+            | ExportArtifactEncoding::ImageSequence { .. }
+            | ExportArtifactEncoding::AudioStems { .. } => None,
         }
     }
 
@@ -483,6 +547,7 @@ impl ExportPreset {
             },
             ExportArtifactEncoding::ImageSequence { .. } => ExportAudioProgramSelection::Disabled,
             ExportArtifactEncoding::AudioStems { .. } => ExportAudioProgramSelection::All,
+            ExportArtifactEncoding::ProfessionalDelivery(_) => ExportAudioProgramSelection::Primary,
         }
     }
 
@@ -769,6 +834,77 @@ impl ExportPreset {
             legalizer: SignalLegalizer::Off,
         }
     }
+
+    /// IMF Application ProRes package, RDD 45, 1080p25 Rec.709.
+    pub fn imf_app_prores_rdd45_1080p25() -> Self {
+        professional_delivery_preset(
+            "IMF Application ProRes RDD 45（1080p25）",
+            ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25,
+            Resolution { width: 1920, height: 1080 },
+            Rational::FPS_25,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+            ExportColorTarget::Colorimetric(ColorSpace::Rec709),
+        )
+    }
+
+    /// AMWA AS-11 X9 NABA HD progressive 720p59.94 delivery.
+    pub fn as11_x9_naba_hd_720p5994() -> Self {
+        professional_delivery_preset(
+            "AS-11 X9 NABA HD（720p59.94）",
+            ProfessionalDeliveryProfile::As11X9NabaHd720p5994,
+            Resolution { width: 1280, height: 720 },
+            Rational::FPS_5994,
+            DeliveryBitDepth::Ten,
+            VideoRange::Legal,
+            ExportChromaSampling::Yuv422,
+            ExportColorTarget::Colorimetric(ColorSpace::Rec709),
+        )
+    }
+
+    /// Unencrypted, unsigned SMPTE DCP 2D 2K Flat at 24 fps.
+    pub fn smpte_dcp_2k_flat_24() -> Self {
+        professional_delivery_preset(
+            "SMPTE DCP 2K Flat（24p）",
+            ProfessionalDeliveryProfile::SmpteDcp2kFlat24,
+            Resolution { width: 1998, height: 1080 },
+            Rational::FPS_24,
+            DeliveryBitDepth::Twelve,
+            VideoRange::Full,
+            ExportChromaSampling::Rgb,
+            // The renderer supplies display-linear Rec.709. The DCP Adapter
+            // owns the explicit ST 428-1 XYZ 12-bit output-referred encoding.
+            ExportColorTarget::Colorimetric(ColorSpace::LinearRec709),
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn professional_delivery_preset(
+    name: &str,
+    profile: ProfessionalDeliveryProfile,
+    resolution: Resolution,
+    frame_rate: Rational,
+    bit_depth: DeliveryBitDepth,
+    range: VideoRange,
+    chroma_sampling: ExportChromaSampling,
+    color_target: ExportColorTarget,
+) -> ExportPreset {
+    ExportPreset {
+        name: name.to_owned(),
+        artifact: ExportArtifactEncoding::ProfessionalDelivery(ProfessionalDeliveryOutput {
+            profile,
+            metadata: ProfessionalDeliveryMetadata::default(),
+        }),
+        resolution: Some(resolution),
+        frame_rate: ExportParameter::Explicit(frame_rate),
+        frame_sampling: ExportFrameSampling::FrameHold,
+        video_signal: ExportVideoSignal::explicit(bit_depth, range, chroma_sampling),
+        alpha_mode: ExportAlphaMode::FlattenBlack,
+        color_target,
+        legalizer: SignalLegalizer::Off,
+    }
 }
 
 fn image_master_preset(
@@ -868,11 +1004,17 @@ pub enum BuiltinExportPreset {
     TiffFloatSequence,
     /// Lossless WAV package containing every public Program Output.
     AudioStemsPcm24,
+    /// IMF Application ProRes RDD 45 package.
+    ImfAppProResRdd45,
+    /// AMWA AS-11 X9 NABA HD file.
+    As11X9NabaHd,
+    /// SMPTE DCP 2K Flat package.
+    SmpteDcp2kFlat24,
 }
 
 impl BuiltinExportPreset {
     /// Stable product-owned preset order shared by every frontend.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::H264AacSdr1080p,
         Self::HevcMain10Aac,
         Self::TiktokVertical,
@@ -890,6 +1032,9 @@ impl BuiltinExportPreset {
         Self::Tiff16Sequence,
         Self::TiffFloatSequence,
         Self::AudioStemsPcm24,
+        Self::ImfAppProResRdd45,
+        Self::As11X9NabaHd,
+        Self::SmpteDcp2kFlat24,
     ];
 
     /// Stable non-localized identifier for Headless validation and preset selection.
@@ -912,6 +1057,9 @@ impl BuiltinExportPreset {
             Self::Tiff16Sequence => "tiff16-sequence",
             Self::TiffFloatSequence => "tiff-float-sequence",
             Self::AudioStemsPcm24 => "audio-stems-pcm24",
+            Self::ImfAppProResRdd45 => "imf-app-prores-rdd45",
+            Self::As11X9NabaHd => "as11-x9-naba-hd",
+            Self::SmpteDcp2kFlat24 => "smpte-dcp-2k-flat-24",
         }
     }
 
@@ -935,6 +1083,9 @@ impl BuiltinExportPreset {
             Self::Tiff16Sequence => "TIFF 16-bit 图像序列（无损 + Alpha）",
             Self::TiffFloatSequence => "TIFF Float32 图像序列（无损 + Alpha）",
             Self::AudioStemsPcm24 => "Program Output Stems（24-bit WAV）",
+            Self::ImfAppProResRdd45 => "IMF Application ProRes RDD 45（1080p25）",
+            Self::As11X9NabaHd => "AS-11 X9 NABA HD（720p59.94）",
+            Self::SmpteDcp2kFlat24 => "SMPTE DCP 2K Flat（24p）",
         }
     }
 
@@ -958,6 +1109,9 @@ impl BuiltinExportPreset {
             Self::Tiff16Sequence => ExportPreset::tiff16_sequence(),
             Self::TiffFloatSequence => ExportPreset::tiff_float_sequence(),
             Self::AudioStemsPcm24 => ExportPreset::audio_stems_pcm24(),
+            Self::ImfAppProResRdd45 => ExportPreset::imf_app_prores_rdd45_1080p25(),
+            Self::As11X9NabaHd => ExportPreset::as11_x9_naba_hd_720p5994(),
+            Self::SmpteDcp2kFlat24 => ExportPreset::smpte_dcp_2k_flat_24(),
         }
     }
 }

@@ -71,6 +71,15 @@ let the owned sibling clean itself up, while a failure after the source is
 preserved for namespace publication reports that exact recoverable staging path.
 No retry scans loose frame names or adopts an existing output directory.
 
+IMF and DCP professional delivery use the same
+`OwnedPublicationDirectory` Interface. The Export Module wraps essence and
+constructs CPL/PKL/AssetMap documents only below one identity-bound sibling,
+reimports the closed inventory, runs an independent standards validator, and
+only then requests durable tree publication. AS-11 X9 uses
+`OwnedPublicationFile` plus the external-writer reservation/reclaim protocol.
+Neither path exposes a partially populated final route or treats tool exit as
+durability evidence.
+
 `ensure_durable_directory_chain` accepts one caller-selected, already-existing
 absolute anchor and one strict absolute descendant. It publishes each missing
 suffix node through the same direct-child seam. It never walks or flushes

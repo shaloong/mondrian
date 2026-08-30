@@ -187,6 +187,15 @@ _Avoid_: Making a Sequence Program Output illegal to request Camera Log, inferri
 The instance-owned offline Module that admits immutable Timeline Export Snapshots into a bounded dedicated queue, reserves final output identities, owns attempt generations and cancellation, consumes each heavy payload once, and exposes only bounded lightweight lifecycle/evidence snapshots. It shares cross-domain execution value semantics but not worker capacity with Preview, Thumbnail, Waveform, Proxy, or realtime audio.
 _Avoid_: Process-global queue, universal media worker pool, UI-mutated job status, unbounded terminal Project retention, enqueue success after worker failure
 
+**Professional Delivery Contract**:
+One exact constrained IMF RDD 45, AS-11 X9, or SMPTE DCP product row frozen in
+the ordinary Export Snapshot. The Export-owned deep Module alone lowers it to
+wrapped essence, metadata, CPL/PKL/AssetMap where applicable, profile-specific
+independent reimport, and identity-bound durable publication. Tool discovery
+is profile-local and fail-closed; author metadata remains typed, while raster,
+cadence, signal, audio, and color endpoints must exactly match the row.
+_Avoid_: Generic “IMF-compatible” toggle, invented AS-11 metadata framework, placeholder RegXML, self-generated XML as its own conformance oracle, package files written directly to the final route, external-tool success treated as durable publication
+
 **Export Deliverable Publication**:
 The typed filesystem boundary for one exact admitted absolute output route and frozen namespace policy. Admission requires an existing canonical parent directory. `CreateNew` is the default and atomically preserves any route created during a long export; explicit `OverwriteExisting` is final-publication-time last-writer-wins authority, not admitted-identity compare-and-swap. Export reserves one unique direct sibling object through the shared Storage Adapter, releases only that identity-bound path to FFmpeg, reclaims and proves the same object before validation, then publishes under that frozen policy. `Completed`/`Published` require durable publication evidence; pre-namespace failure retains the validated partial, a target proven to name the new object without confirmed crash durability is `DurabilityUnconfirmed`, and an unprovable namespace postcondition retains `NamespaceIndeterminate` artifact evidence projected to queue state `OutcomeUnknown`.
 _Avoid_: FFmpeg writing the final path directly, path-only partial ownership, deleting a validated partial after pre-namespace failure, private ReplaceFile/rename logic, validation success treated as publication success, late cancellation overriding typed publication evidence

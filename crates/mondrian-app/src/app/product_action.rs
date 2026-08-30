@@ -2648,11 +2648,19 @@ impl<'a> ProductActionAvailability<'a> {
                 }
             },
             ExportProductAction::Enqueue(request) => {
+                let sequence = request.sequence_id.map_or_else(
+                    || self.state.active_sequence(),
+                    |sequence_id| self.state.sequence_by_id(sequence_id),
+                );
                 !request.output_path.as_os_str().is_empty()
-                    && request.sequence_id.map_or_else(
-                        || self.state.active_sequence().is_some(),
-                        |sequence_id| self.state.sequence_by_id(sequence_id).is_some(),
-                    )
+                    && sequence.is_some_and(|sequence| {
+                        mondrian_export::delivery::resolve_export_delivery(
+                            &request.preset,
+                            &sequence.settings,
+                            self.state.project_color_environment(),
+                        )
+                        .is_ok()
+                    })
             }
             ExportProductAction::Cancel(job_id) => self.state.render_queue.can_cancel(*job_id),
             ExportProductAction::ClearTerminalHistory => {
@@ -4447,6 +4455,29 @@ mod tests {
             },
         )));
         assert!(!state.product_action_availability().allows(&stale_enqueue));
+        let imf_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            TimelineExportRequest {
+                preset: ExportPreset::imf_app_prores_rdd45_1080p25(),
+                sequence_id: Some(sequence_id),
+                range: TimelineExportRange::EntireSequence,
+                output_path: PathBuf::from("delivery.imf"),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            },
+        )));
+        assert!(state.product_action_availability().allows(&imf_enqueue));
+        let mut invalid_dcp = ExportPreset::smpte_dcp_2k_flat_24();
+        invalid_dcp.resolution =
+            Some(mondrian_export::preset::Resolution { width: 2_048, height: 1_080 });
+        let dcp_enqueue = ProductAction::Export(ExportProductAction::Enqueue(Box::new(
+            TimelineExportRequest {
+                preset: invalid_dcp,
+                sequence_id: Some(sequence_id),
+                range: TimelineExportRange::EntireSequence,
+                output_path: PathBuf::from("delivery.dcp"),
+                output_policy: mondrian_export::preset::ExportOutputPolicy::CreateNew,
+            },
+        )));
+        assert!(!state.product_action_availability().allows(&dcp_enqueue));
         assert!(
             !state.product_action_availability().allows(&ProductAction::Export(
                 ExportProductAction::Cancel(JobId::new())

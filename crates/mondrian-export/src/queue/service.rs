@@ -155,6 +155,8 @@ pub enum ExportProgressPhase {
     Rendering,
     /// Encode or mux media.
     Encoding,
+    /// Wrap encoded essence and construct a delivery package.
+    Packaging,
     /// Validate the complete temporary deliverable.
     Validating,
     /// Atomically publish the validated deliverable.
@@ -204,6 +206,14 @@ impl ExportProgress {
     pub(crate) const fn encoding(fraction: f32) -> Self {
         Self {
             phase: ExportProgressPhase::Encoding,
+            fraction,
+            detail: ExportProgressDetail::None,
+        }
+    }
+
+    pub(crate) const fn packaging(fraction: f32) -> Self {
+        Self {
+            phase: ExportProgressPhase::Packaging,
             fraction,
             detail: ExportProgressDetail::None,
         }
@@ -290,8 +300,9 @@ impl ExportProgressPhase {
             Self::Preparing => 0,
             Self::Rendering => 1,
             Self::Encoding => 2,
-            Self::Validating => 3,
-            Self::Publishing => 4,
+            Self::Packaging => 3,
+            Self::Validating => 4,
+            Self::Publishing => 5,
         }
     }
 }
@@ -395,6 +406,7 @@ impl JobStatus {
                     phase: ExportProgressPhase::Preparing
                         | ExportProgressPhase::Rendering
                         | ExportProgressPhase::Encoding
+                        | ExportProgressPhase::Packaging
                         | ExportProgressPhase::Validating
                 }
             )

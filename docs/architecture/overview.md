@@ -138,7 +138,10 @@ foundation:
   closure preflight, job-local materialization/FFmpeg encoding, and timeline
   export orchestration. Raw Sequence snapshots stop at closure preparation;
   frame materialization retains only frozen media/color facts and closure
-  nodes. It must not maintain a second nested Sequence walker.
+  nodes. Its constrained IMF RDD 45, AS-11 X9, and SMPTE DCP rows are owned by
+  one profile-qualified packaging/validation Module; see
+  [Professional Delivery](professional-delivery.md). It must not maintain a
+  second nested Sequence walker or a second filesystem publication model.
 - `mondrian-ai`: experimental Provider contracts and workflow schema. Its
   current orchestrator fails closed because no production Provider or editor
   mutation Adapter is installed. Lifecycle events are observation-only:

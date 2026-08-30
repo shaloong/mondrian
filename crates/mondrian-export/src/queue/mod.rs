@@ -18,7 +18,14 @@ use crate::image_sequence::{
 use crate::preset::TimelineExportRange;
 use crate::preset::{
     AudioCodecConfig, Container, ExportAlphaMode, ExportChromaSampling, ExportConfig,
-    ExportOutputPolicy, HevcProfile, TimelineExportSnapshot, VideoCodecConfig,
+    ExportOutputPolicy, HevcProfile, ProfessionalDeliveryProfile, TimelineExportSnapshot,
+    VideoCodecConfig,
+};
+use crate::professional_delivery::{
+    build_and_validate_package, encode_linear_rec709_as_dcdm_xyz12le,
+    resolve_professional_delivery, DeliverableLayout, ImfTrackMetadata, PackageAssetId,
+    PackageAssetRole, PackageElementId, PackageRelativePath, ProfessionalDeliveryToolchain,
+    ProfessionalPackageBuildRequest, ProfessionalPackageDocumentIds, ProfessionalPackageTrack,
 };
 use crate::validator::{
     delivery_bit_depth_value, expected_audio_constraints, expected_video_encoding,
@@ -26,6 +33,7 @@ use crate::validator::{
     ExportValidationExpectations,
 };
 use crate::{PreparedTimelineAudioOutputSnapshot, PreparedTimelineVisualSnapshot};
+use chrono::Utc;
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
     AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
@@ -47,12 +55,12 @@ use mondrian_media::AudioSourceCache;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
 use mondrian_media::{
-    D3D12ResidentHevcEncoderSession, DecodedVideoRange, DecodedVideoRangeContract,
-    MediaFileFingerprint, PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome,
-    PreviewDecodeRequest, PreviewDecodeSessionContext, PreviewSourceColorContract,
-    ResidentEncodeBitDepth, ResidentEncodeColorimetry, ResidentHevcEncoderConfig, SupervisedChild,
-    SupervisedProcessError, SupervisedProcessPolicy, SupervisedStreamCapture,
-    VideoColorDiagnosticIssueAggregate,
+    run_supervised_command, D3D12ResidentHevcEncoderSession, DecodedVideoRange,
+    DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeAccessMode,
+    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
+    PreviewDecodeSessionContext, PreviewSourceColorContract, ResidentEncodeBitDepth,
+    ResidentEncodeColorimetry, ResidentHevcEncoderConfig, SupervisedChild, SupervisedProcessError,
+    SupervisedProcessPolicy, SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_renderer::{
     color::{
@@ -132,7 +140,8 @@ fn export_frame_contract(delivery: &ResolvedExportDeliveryContract) -> ExportFra
             image_sequence_frame_contract(format)
         }
         ResolvedExportArtifactEncoding::MediaFile { .. }
-        | ResolvedExportArtifactEncoding::AudioStems { .. } => {
+        | ResolvedExportArtifactEncoding::AudioStems { .. }
+        | ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => {
             ExportFrameContract::from_bit_depth(delivery.bit_depth)
         }
     }
@@ -2248,6 +2257,16 @@ impl ExportExecutor for FfmpegExportExecutor {
                 report_diagnostics,
             );
         }
+        if job.config.preset.professional_delivery().is_some() {
+            return execute_professional_delivery_export(
+                job,
+                final_output,
+                cancel,
+                execution_gate,
+                report,
+                report_diagnostics,
+            );
+        }
         let staging = match OwnedPublicationFile::create_sibling(
             final_output,
             &format!("export-{}", job.id()),
@@ -2317,6 +2336,934 @@ impl ExportExecutor for FfmpegExportExecutor {
         match finalize_export_output(staging, final_output, job.config.output_policy) {
             Ok(evidence) => JobExecutionResult::Published(evidence),
             Err(failure) => JobExecutionResult::PublicationFailed(failure),
+        }
+    }
+}
+
+fn execute_professional_delivery_export(
+    job: &RenderJob,
+    final_output: &Path,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+) -> JobExecutionResult {
+    let Some(author_output) = job.config.preset.professional_delivery().cloned() else {
+        return JobExecutionResult::Failed(
+            "professional delivery executor received a non-professional preset".to_owned(),
+        );
+    };
+    if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+        return JobExecutionResult::Failed(reason);
+    }
+    let delivery = match crate::delivery::resolve_export_delivery(
+        &job.config.preset,
+        &job.config.timeline.sequence.settings,
+        &job.config.timeline.color_environment,
+    ) {
+        Ok(delivery) => delivery,
+        Err(error) => return JobExecutionResult::Failed(error.to_string()),
+    };
+    let contract = match resolve_professional_delivery(
+        &author_output,
+        delivery.resolution,
+        delivery.frame_rate,
+        delivery.bit_depth,
+        delivery.video_range,
+        delivery.chroma_sampling,
+        delivery.color_target.color_space,
+        job.config.timeline.sequence.settings.audio_channel_layout,
+    ) {
+        Ok(contract) => contract,
+        Err(error) => return JobExecutionResult::Failed(error.to_string()),
+    };
+    if job.config.timeline.sequence.settings.field_order
+        != mondrian_core::timeline_data::FieldOrder::Progressive
+    {
+        return JobExecutionResult::Failed(
+            "qualified IMF/AS-11/DCP rows require progressive Program Output".to_owned(),
+        );
+    }
+    if contract.layout == DeliverableLayout::ImmutableDirectory
+        && job.config.output_policy != ExportOutputPolicy::CreateNew
+    {
+        return JobExecutionResult::Failed(
+            "IMF and DCP packages support immutable CreateNew publication only".to_owned(),
+        );
+    }
+    let range = match compute_timeline_render_range_for_delivery(&job.config.timeline, &delivery) {
+        Ok(range) if range.total_frames > 0 => range,
+        Ok(_) => {
+            return JobExecutionResult::Failed("professional delivery range is empty".to_owned())
+        }
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
+    let toolchain = match ProfessionalDeliveryToolchain::discover(author_output.profile) {
+        Ok(toolchain) => toolchain,
+        Err(error) => return JobExecutionResult::Failed(error.to_string()),
+    };
+    if let Err(error) = toolchain.qualify_for(author_output.profile) {
+        return JobExecutionResult::Failed(error.to_string());
+    }
+    let parent = final_output.parent().unwrap_or_else(|| Path::new("."));
+    let work = match tempfile::Builder::new()
+        .prefix("mondrian-professional-delivery-")
+        .tempdir_in(parent)
+    {
+        Ok(work) => work,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "failed to allocate professional delivery work directory: {error}"
+            ));
+        }
+    };
+
+    let Some(prepared_visual) =
+        job.config.timeline.prepared_execution().map(|execution| execution.visual())
+    else {
+        return JobExecutionResult::Failed(
+            "professional delivery has no admitted visual execution closure".to_owned(),
+        );
+    };
+    let resource_policy = execution_gate.resource_policy();
+    let mut visual_session = match ExportVisualRenderSession::for_execution_generation(
+        execution_gate.attempt_generation(),
+        resource_policy,
+        prepared_visual,
+    ) {
+        Ok(session) => session,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
+    let export_color_context = match resolved_export_color_context(&job.config.timeline, &delivery)
+    {
+        Ok(context) => context,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
+    if let Err(outcome) = preflight_timeline_visual_range_at_resolution(
+        &job.config.timeline,
+        range,
+        Resolution {
+            width: delivery.resolution.width,
+            height: delivery.resolution.height,
+        },
+        export_color_context,
+        cancel,
+        execution_gate,
+        &mut visual_session,
+    ) {
+        return outcome;
+    }
+    let media_diagnostics = match export_media_diagnostic_set(&job.config.timeline) {
+        Ok(diagnostics) => diagnostics,
+        Err(error) => return JobExecutionResult::Failed(error),
+    };
+    if let Err(error) = validate_timeline_dynamic_hdr_delivery(
+        &job.config.timeline,
+        media_diagnostics.issue_summary,
+    ) {
+        return JobExecutionResult::Failed(error);
+    }
+    let (wave_path, audio_analysis) = match render_professional_pcm24_wave(
+        work.path(),
+        &job.config.timeline,
+        range,
+        contract.audio_sample_rate,
+        cancel,
+        execution_gate,
+        report,
+    ) {
+        Ok(value) => value,
+        Err(outcome) => return outcome,
+    };
+    let mca_labels = work.path().join("stereo-mca-labels.txt");
+    if let Err(error) = write_stereo_mca_labels(&mca_labels, &author_output.metadata.language) {
+        return JobExecutionResult::Failed(error);
+    }
+    let initial_diagnostics = ExportRenderInitialDiagnostics {
+        asset_issue_summary: media_diagnostics.issue_summary,
+        audio_analysis: Some(audio_analysis),
+    };
+    let video_output = match render_professional_picture_essence(
+        work.path(),
+        author_output.profile,
+        &job.config.timeline,
+        range,
+        &delivery,
+        cancel,
+        execution_gate,
+        report,
+        report_diagnostics,
+        &mut visual_session,
+        initial_diagnostics,
+    ) {
+        Ok(path) => path,
+        Err(outcome) => return outcome,
+    };
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::encoding(0.94));
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Packaging, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::packaging(0.95));
+
+    match author_output.profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
+            let staging = match OwnedPublicationDirectory::create_sibling(
+                final_output,
+                &format!("export-{}", job.id()),
+            ) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    return JobExecutionResult::Failed(format!(
+                        "failed to reserve IMF package staging directory: {error:#}"
+                    ));
+                }
+            };
+            let picture_pattern = staging.path().join("picture_{fp_uuid}.mxf");
+            let mut picture_command = toolchain.imf_picture_command(
+                &video_output,
+                &picture_pattern,
+                &author_output.metadata.title,
+            );
+            if let Err(outcome) =
+                run_professional_tool(&mut picture_command, "IMF picture wrapping", cancel)
+            {
+                return outcome;
+            }
+            let audio_pattern = staging.path().join("audio_{fp_uuid}.mxf");
+            let mut audio_command =
+                toolchain.imf_audio_command(&wave_path, &mca_labels, &audio_pattern);
+            if let Err(outcome) =
+                run_professional_tool(&mut audio_command, "IMF audio wrapping", cancel)
+            {
+                return outcome;
+            }
+            let (picture_path, picture_id) = match find_bmx_track(staging.path(), "picture_") {
+                Ok(value) => value,
+                Err(error) => return JobExecutionResult::Failed(error),
+            };
+            let (audio_path, audio_id) = match find_bmx_track(staging.path(), "audio_") {
+                Ok(value) => value,
+                Err(error) => return JobExecutionResult::Failed(error),
+            };
+            for path in [&picture_path, &audio_path] {
+                let mut command = toolchain.bmx_reimport_command(path, false);
+                if let Err(outcome) =
+                    run_professional_tool(&mut command, "IMF MXF reimport", cancel)
+                {
+                    return outcome;
+                }
+            }
+            let picture_descriptor_xml = match extract_imf_descriptor_xml(
+                &toolchain,
+                &picture_path,
+                &work.path().join("photon-picture"),
+                "IMF picture",
+                cancel,
+            ) {
+                Ok(xml) => xml,
+                Err(outcome) => return outcome,
+            };
+            let audio_descriptor_xml = match extract_imf_descriptor_xml(
+                &toolchain,
+                &audio_path,
+                &work.path().join("photon-audio"),
+                "IMF audio",
+                cancel,
+            ) {
+                Ok(xml) => xml,
+                Err(outcome) => return outcome,
+            };
+            let picture_relative = match PackageRelativePath::new(
+                picture_path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+            ) {
+                Ok(path) => path,
+                Err(error) => return JobExecutionResult::Failed(error.to_string()),
+            };
+            let audio_relative = match PackageRelativePath::new(
+                audio_path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+            ) {
+                Ok(path) => path,
+                Err(error) => return JobExecutionResult::Failed(error.to_string()),
+            };
+            let Some(audio_duration) = range.total_frames.checked_mul(1_920) else {
+                return JobExecutionResult::Failed(
+                    "IMF audio resource duration exceeds the supported integer range".to_owned(),
+                );
+            };
+            let request = ProfessionalPackageBuildRequest {
+                profile: author_output.profile,
+                metadata: author_output.metadata.clone(),
+                composition_id: crate::professional_delivery::CompositionPlaylistId::new(),
+                packing_list_id: crate::professional_delivery::PackingListId::new(),
+                issued_at: Utc::now(),
+                document_ids: ProfessionalPackageDocumentIds::new(),
+                picture: ProfessionalPackageTrack {
+                    id: picture_id,
+                    path: picture_relative,
+                    role: PackageAssetRole::PictureTrack,
+                    imf: Some(ImfTrackMetadata {
+                        essence_descriptor_id: PackageElementId::new(),
+                        essence_descriptor_xml: picture_descriptor_xml,
+                        edit_rate: Rational::FPS_25,
+                        intrinsic_duration: range.total_frames,
+                        source_duration: range.total_frames,
+                    }),
+                },
+                audio: Some(ProfessionalPackageTrack {
+                    id: audio_id,
+                    path: audio_relative,
+                    role: PackageAssetRole::AudioTrack,
+                    imf: Some(ImfTrackMetadata {
+                        essence_descriptor_id: PackageElementId::new(),
+                        essence_descriptor_xml: audio_descriptor_xml,
+                        edit_rate: Rational::new(48_000, 1),
+                        intrinsic_duration: audio_duration,
+                        source_duration: audio_duration,
+                    }),
+                }),
+                edit_rate: contract.edit_rate,
+                duration: range.total_frames,
+            };
+            if let Err(error) = build_and_validate_package(staging.path(), &request) {
+                return JobExecutionResult::Failed(format!(
+                    "IMF package validation failed: {error}"
+                ));
+            }
+            let mut photon = toolchain.photon_imp_validation_command(staging.path());
+            let photon_output = match run_professional_tool_capture(
+                &mut photon,
+                "IMF Photon package validation",
+                cancel,
+            ) {
+                Ok(output) => output,
+                Err(outcome) => return outcome,
+            };
+            if photon_output.contains("FATAL") || photon_output.contains("ERROR") {
+                return JobExecutionResult::Failed(
+                    "IMF Photon package validation reported an error".to_owned(),
+                );
+            }
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+                return JobExecutionResult::Cancelled;
+            }
+            report(ExportProgress::validating(0.975));
+            publish_professional_directory(staging, final_output, cancel, execution_gate, report)
+        }
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => {
+            let staging = match OwnedPublicationFile::create_sibling(
+                final_output,
+                &format!("export-{}", job.id()),
+            ) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    return JobExecutionResult::Failed(format!(
+                        "failed to reserve AS-11 staging file: {error:#}"
+                    ));
+                }
+            };
+            let partial_output = staging.path().to_path_buf();
+            let reservation = staging.release_for_external_writer();
+            let mut command = toolchain.as11_x9_command(
+                &video_output,
+                &wave_path,
+                &mca_labels,
+                &partial_output,
+                &author_output.metadata.title,
+            );
+            if let Err(outcome) = run_professional_tool(&mut command, "AS-11 X9 wrapping", cancel) {
+                return outcome;
+            }
+            let mut inspect = toolchain.bmx_reimport_command(&partial_output, true);
+            let inspection =
+                match run_professional_tool_capture(&mut inspect, "AS-11 X9 reimport", cancel) {
+                    Ok(output) => output,
+                    Err(outcome) => return outcome,
+                };
+            for required in [
+                "op_label        : OP1A",
+                "edit_rate       : 60000/1001",
+                "essence_type    : AVC_High_422",
+                "component_depth : 10",
+                "channel_count        : 2",
+                "bits_per_sample      : 24",
+                "spec_identifier : urn:smpte:ul:060e2b34.04010101.0d010801.05090000",
+                "is_complete     : true",
+                "last_frame      : true",
+            ] {
+                if !inspection.contains(required) {
+                    return JobExecutionResult::Failed(format!(
+                        "AS-11 X9 reimport evidence is missing {required:?}"
+                    ));
+                }
+            }
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+                return JobExecutionResult::Cancelled;
+            }
+            report(ExportProgress::validating(0.98));
+            if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+                return JobExecutionResult::Failed(reason);
+            }
+            let staging = match reservation.reclaim() {
+                Ok(staging) => staging,
+                Err(error) => {
+                    return JobExecutionResult::Failed(format!(
+                        "AS-11 staging object identity changed: {error:#}"
+                    ));
+                }
+            };
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+                return JobExecutionResult::Cancelled;
+            }
+            report(ExportProgress::publishing(0.995));
+            match finalize_export_output(staging, final_output, job.config.output_policy) {
+                Ok(evidence) => JobExecutionResult::Published(evidence),
+                Err(failure) => JobExecutionResult::PublicationFailed(failure),
+            }
+        }
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => {
+            let staging = match OwnedPublicationDirectory::create_sibling(
+                final_output,
+                &format!("export-{}", job.id()),
+            ) {
+                Ok(staging) => staging,
+                Err(error) => {
+                    return JobExecutionResult::Failed(format!(
+                        "failed to reserve DCP package staging directory: {error:#}"
+                    ));
+                }
+            };
+            let picture_id = PackageAssetId::new();
+            let audio_id = PackageAssetId::new();
+            let picture_path = staging.path().join("picture.mxf");
+            let audio_path = staging.path().join("audio.mxf");
+            let mut picture_command = toolchain.dcp_picture_command(
+                &video_output,
+                &picture_path,
+                picture_id,
+                range.total_frames,
+            );
+            if let Err(outcome) =
+                run_professional_tool(&mut picture_command, "DCP picture wrapping", cancel)
+            {
+                return outcome;
+            }
+            let mut audio_command = toolchain.dcp_audio_command(
+                &wave_path,
+                &audio_path,
+                audio_id,
+                range.total_frames,
+                &author_output.metadata.language,
+            );
+            if let Err(outcome) =
+                run_professional_tool(&mut audio_command, "DCP audio wrapping", cancel)
+            {
+                return outcome;
+            }
+            for path in [&picture_path, &audio_path] {
+                let mut inspect = toolchain.asdcp_reimport_command(path);
+                if let Err(outcome) =
+                    run_professional_tool(&mut inspect, "DCP AS-DCP reimport", cancel)
+                {
+                    return outcome;
+                }
+            }
+            let picture_relative = match PackageRelativePath::new("picture.mxf") {
+                Ok(path) => path,
+                Err(error) => return JobExecutionResult::Failed(error.to_string()),
+            };
+            let audio_relative = match PackageRelativePath::new("audio.mxf") {
+                Ok(path) => path,
+                Err(error) => return JobExecutionResult::Failed(error.to_string()),
+            };
+            let request = ProfessionalPackageBuildRequest {
+                profile: author_output.profile,
+                metadata: author_output.metadata,
+                composition_id: crate::professional_delivery::CompositionPlaylistId::new(),
+                packing_list_id: crate::professional_delivery::PackingListId::new(),
+                issued_at: Utc::now(),
+                document_ids: ProfessionalPackageDocumentIds::new(),
+                picture: ProfessionalPackageTrack {
+                    id: picture_id,
+                    path: picture_relative,
+                    role: PackageAssetRole::PictureTrack,
+                    imf: None,
+                },
+                audio: Some(ProfessionalPackageTrack {
+                    id: audio_id,
+                    path: audio_relative,
+                    role: PackageAssetRole::AudioTrack,
+                    imf: None,
+                }),
+                edit_rate: contract.edit_rate,
+                duration: range.total_frames,
+            };
+            if let Err(error) = build_and_validate_package(staging.path(), &request) {
+                return JobExecutionResult::Failed(format!(
+                    "DCP package validation failed: {error}"
+                ));
+            }
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+                return JobExecutionResult::Cancelled;
+            }
+            report(ExportProgress::validating(0.975));
+            let mut verify = toolchain.dcp_package_validation_command(staging.path());
+            if let Err(outcome) = run_dcp_package_validator(&mut verify, cancel) {
+                return outcome;
+            }
+            publish_professional_directory(staging, final_output, cancel, execution_gate, report)
+        }
+    }
+}
+
+fn render_professional_pcm24_wave(
+    work: &Path,
+    timeline: &TimelineExportSnapshot,
+    range: TimelineRenderRange,
+    sample_rate: u32,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+) -> Result<(PathBuf, AudioLoudnessReport), JobExecutionResult> {
+    let raw_path = work.join("primary-audio.f32le");
+    let wave_path = work.join("primary-audio.wav");
+    let prepared_audio = timeline
+        .prepared_execution()
+        .and_then(|execution| execution.audio())
+        .ok_or_else(|| {
+            JobExecutionResult::Failed(
+                "professional delivery has no admitted primary Program Output audio closure"
+                    .to_owned(),
+            )
+        })?;
+    let (_, sample_frames) =
+        timeline_audio_sample_range(range, sample_rate).map_err(JobExecutionResult::Failed)?;
+    let analysis = if prepared_audio.execution_demand().requires_execution() {
+        let mut analysis = None;
+        match render_timeline_audio_to_pcm_f32(
+            &raw_path,
+            timeline,
+            prepared_audio.primary_output(),
+            range,
+            sample_rate,
+            AudioChannelLayout::Stereo,
+            execution_gate.resource_policy(),
+            cancel,
+            execution_gate,
+            report,
+            &mut analysis,
+        ) {
+            JobExecutionResult::ReversibleWorkCompleted => analysis.ok_or_else(|| {
+                JobExecutionResult::Failed(
+                    "professional delivery audio completed without analysis evidence".to_owned(),
+                )
+            })?,
+            other => return Err(other),
+        }
+    } else {
+        write_silent_pcm_f32(&raw_path, sample_frames, 2).map_err(JobExecutionResult::Failed)?;
+        AudioLoudnessReport::digital_silence(u64::try_from(sample_frames).map_err(|_| {
+            JobExecutionResult::Failed(
+                "professional delivery audio duration exceeds evidence capacity".to_owned(),
+            )
+        })?)
+    };
+    let mut command = mondrian_media::ffmpeg_command();
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg("-y")
+        .arg("-f")
+        .arg("f32le")
+        .arg("-ar")
+        .arg(sample_rate.to_string())
+        .arg("-ac")
+        .arg("2")
+        .arg("-i")
+        .arg(&raw_path)
+        .arg("-map")
+        .arg("0:a:0")
+        .arg("-c:a")
+        .arg("pcm_s24le")
+        .arg("-f")
+        .arg("wav")
+        .arg(&wave_path);
+    run_professional_tool(&mut command, "professional PCM24 WAV encoding", cancel)?;
+    Ok((wave_path, analysis))
+}
+
+fn write_silent_pcm_f32(path: &Path, frames: usize, channels: usize) -> Result<(), String> {
+    let file = std::fs::File::create(path)
+        .map_err(|error| format!("failed to create silent PCM staging file: {error}"))?;
+    let mut writer = BufWriter::new(file);
+    let chunk = vec![0_u8; 16 * 1024 * channels * std::mem::size_of::<f32>()];
+    let mut bytes_remaining = frames
+        .checked_mul(channels)
+        .and_then(|samples| samples.checked_mul(std::mem::size_of::<f32>()))
+        .ok_or_else(|| "silent PCM staging byte count overflow".to_owned())?;
+    while bytes_remaining > 0 {
+        let count = bytes_remaining.min(chunk.len());
+        writer
+            .write_all(&chunk[..count])
+            .map_err(|error| format!("failed to write silent PCM staging file: {error}"))?;
+        bytes_remaining -= count;
+    }
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush silent PCM staging file: {error}"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_professional_picture_essence(
+    work: &Path,
+    profile: ProfessionalDeliveryProfile,
+    timeline: &TimelineExportSnapshot,
+    range: TimelineRenderRange,
+    delivery: &ResolvedExportDeliveryContract,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    visual_session: &mut ExportVisualRenderSession,
+    initial_diagnostics: ExportRenderInitialDiagnostics,
+) -> Result<PathBuf, JobExecutionResult> {
+    let (width, height) = (delivery.resolution.width, delivery.resolution.height);
+    let input_pixel_format = match profile {
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "xyz12le",
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25
+        | ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => {
+            export_frame_contract(delivery).ffmpeg_pix_fmt()
+        }
+    };
+    let output = match profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => work.join("picture.prores"),
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => work.join("picture.h264"),
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => {
+            let directory = work.join("j2c");
+            std::fs::create_dir(&directory).map_err(|error| {
+                JobExecutionResult::Failed(format!("failed to create DCP J2C staging: {error}"))
+            })?;
+            directory
+        }
+    };
+    let mut command = mondrian_media::ffmpeg_command();
+    command
+        .arg("-hide_banner")
+        .arg("-nostdin")
+        .arg("-y")
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pix_fmt")
+        .arg(input_pixel_format)
+        .arg("-s:v")
+        .arg(format!("{width}x{height}"))
+        .arg("-r")
+        .arg(format!("{}/{}", range.fps_num, range.fps_den))
+        .arg("-i")
+        .arg("pipe:0")
+        .arg("-an");
+    match profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => {
+            command
+                .arg("-vf")
+                .arg("format=yuv422p10le")
+                .arg("-c:v")
+                .arg("prores_ks")
+                .arg("-profile:v")
+                .arg("3")
+                .arg("-vendor")
+                .arg("apl0")
+                .arg("-f")
+                .arg("rawvideo")
+                .arg(&output);
+        }
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => {
+            command
+                .arg("-vf")
+                .arg("format=yuv422p10le")
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-profile:v")
+                .arg("high422")
+                .arg("-level:v")
+                .arg("4.1")
+                .arg("-g")
+                .arg("1")
+                .arg("-keyint_min")
+                .arg("1")
+                .arg("-sc_threshold")
+                .arg("0")
+                .arg("-bf")
+                .arg("0")
+                .arg("-f")
+                .arg("h264")
+                .arg(&output);
+        }
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => {
+            command
+                .arg("-c:v")
+                .arg("libopenjpeg")
+                .arg("-format")
+                .arg("j2k")
+                .arg("-profile:v")
+                .arg("cinema2k")
+                .arg("-cinema_mode")
+                .arg("2k_24")
+                .arg("-pix_fmt")
+                .arg("xyz12le")
+                .arg("-start_number")
+                .arg("0")
+                .arg("-frames:v")
+                .arg(range.total_frames.to_string())
+                .arg("-f")
+                .arg("image2")
+                .arg(output.join("frame_%06d.j2c"));
+        }
+    }
+    let policy = SupervisedProcessPolicy {
+        pipe_stdin: true,
+        stdout: SupervisedStreamCapture::Drain,
+        stderr: SupervisedStreamCapture::Tail { limit_bytes: 64 * 1024 },
+        deadline: None,
+        ..SupervisedProcessPolicy::default()
+    };
+    let mut child = SupervisedChild::spawn(&mut command, policy).map_err(|error| {
+        process_supervision_failure("start professional picture encoder", error)
+    })?;
+    let render_outcome = if profile == ProfessionalDeliveryProfile::SmpteDcp2kFlat24 {
+        let frame_contract = export_frame_contract(delivery);
+        render_timeline_frames_with_sink(
+            timeline,
+            range,
+            width,
+            height,
+            ExportAlphaMode::FlattenBlack,
+            delivery,
+            cancel,
+            execution_gate,
+            report,
+            report_diagnostics,
+            visual_session,
+            initial_diagnostics,
+            &mut |_index, canvas| {
+                let rgba = frame_contract
+                    .to_rgba_f32(canvas)
+                    .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+                let xyz = encode_linear_rec709_as_dcdm_xyz12le(&rgba)
+                    .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
+                child.write_owned(xyz, cancel).map(|_| ()).map_err(|error| {
+                    process_supervision_failure("write DCDM XYZ picture pipe", error)
+                })
+            },
+        )
+    } else {
+        write_timeline_frames(
+            &mut child,
+            timeline,
+            range,
+            width,
+            height,
+            ExportAlphaMode::FlattenBlack,
+            delivery,
+            cancel,
+            execution_gate,
+            report,
+            report_diagnostics,
+            visual_session,
+            initial_diagnostics,
+        )
+    };
+    if !matches!(render_outcome, JobExecutionResult::ReversibleWorkCompleted) {
+        return Err(render_outcome);
+    }
+    let process = child.finish(cancel).map_err(|error| {
+        process_supervision_failure("finish professional picture encoder", error)
+    })?;
+    if !process.status.success() {
+        return Err(JobExecutionResult::Failed(format!(
+            "professional picture encoder failed: {}",
+            bounded_process_reason(&process)
+        )));
+    }
+    Ok(output)
+}
+
+fn write_stereo_mca_labels(path: &Path, language: &str) -> Result<(), String> {
+    let body = format!(
+        "0\nchL, chan=0\nchR, chan=1\nsgST, lang={language}, mcaaudiocontentkind=PRM, mcaaudioelementkind=FCMP, mcatitle=Mondrian, mcatitleversion=1\n"
+    );
+    std::fs::write(path, body)
+        .map_err(|error| format!("failed to write stereo MCA label contract: {error}"))
+}
+
+fn run_professional_tool(
+    command: &mut Command,
+    operation: &str,
+    cancel: &ExecutionCancellationToken,
+) -> Result<(), JobExecutionResult> {
+    run_professional_tool_capture(command, operation, cancel).map(|_| ())
+}
+
+fn run_professional_tool_capture(
+    command: &mut Command,
+    operation: &str,
+    cancel: &ExecutionCancellationToken,
+) -> Result<String, JobExecutionResult> {
+    let policy = SupervisedProcessPolicy {
+        stdout: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
+        stderr: SupervisedStreamCapture::Tail { limit_bytes: 2 * 1024 * 1024 },
+        deadline: Some(Instant::now() + Duration::from_secs(6 * 60 * 60)),
+        ..SupervisedProcessPolicy::default()
+    };
+    let output = run_supervised_command(command, None, policy, cancel)
+        .map_err(|error| process_supervision_failure(operation, error))?;
+    if !output.status.success() {
+        return Err(JobExecutionResult::Failed(format!(
+            "{operation} failed: {}",
+            bounded_process_reason(&output)
+        )));
+    }
+    let mut combined = output.stdout.clone();
+    combined.extend_from_slice(&output.stderr);
+    Ok(String::from_utf8_lossy(&combined).into_owned())
+}
+
+fn run_dcp_package_validator(
+    command: &mut Command,
+    cancel: &ExecutionCancellationToken,
+) -> Result<(), JobExecutionResult> {
+    let policy = SupervisedProcessPolicy {
+        stdout: SupervisedStreamCapture::Head { limit_bytes: 2 * 1024 * 1024, reject_excess: true },
+        stderr: SupervisedStreamCapture::Tail { limit_bytes: 2 * 1024 * 1024 },
+        deadline: Some(Instant::now() + Duration::from_secs(6 * 60 * 60)),
+        ..SupervisedProcessPolicy::default()
+    };
+    let output = run_supervised_command(command, None, policy, cancel)
+        .map_err(|error| process_supervision_failure("DCP package verification", error))?;
+    let mut combined = output.stdout.clone();
+    combined.extend_from_slice(&output.stderr);
+    let report = String::from_utf8_lossy(&combined);
+    if report.lines().any(|line| line.trim_start().starts_with("Error:")) {
+        return Err(JobExecutionResult::Failed(
+            "DCP package verification reported a SMPTE interoperability error".to_owned(),
+        ));
+    }
+    if !output.status.success()
+        && !report.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("Bv2.1 error:") || line.starts_with("Warning:")
+        })
+    {
+        return Err(JobExecutionResult::Failed(format!(
+            "DCP package verification failed: {}",
+            bounded_process_reason(&output)
+        )));
+    }
+    Ok(())
+}
+
+fn extract_imf_descriptor_xml(
+    toolchain: &ProfessionalDeliveryToolchain,
+    track: &Path,
+    work: &Path,
+    label: &str,
+    cancel: &ExecutionCancellationToken,
+) -> Result<String, JobExecutionResult> {
+    std::fs::create_dir(work).map_err(|error| {
+        JobExecutionResult::Failed(format!(
+            "failed to create {label} Photon work directory: {error}"
+        ))
+    })?;
+    let mut command = toolchain.photon_track_descriptor_command(track, work);
+    let output = run_professional_tool_capture(
+        &mut command,
+        &format!("{label} Photon descriptor extraction"),
+        cancel,
+    )?;
+    if !output.contains("No errors were detected in the IMFTrackFile") {
+        return Err(JobExecutionResult::Failed(format!(
+            "{label} Photon descriptor extraction did not return zero-error evidence"
+        )));
+    }
+    let descriptor_path = work.join("EssenceDescriptor.xml");
+    let metadata = std::fs::symlink_metadata(&descriptor_path).map_err(|error| {
+        JobExecutionResult::Failed(format!(
+            "failed to inspect {label} Photon descriptor: {error}"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 2 * 1024 * 1024
+    {
+        return Err(JobExecutionResult::Failed(format!(
+            "{label} Photon descriptor is not one bounded direct file"
+        )));
+    }
+    std::fs::read_to_string(&descriptor_path).map_err(|error| {
+        JobExecutionResult::Failed(format!("failed to read {label} Photon descriptor: {error}"))
+    })
+}
+
+fn bounded_process_reason(output: &mondrian_media::SupervisedProcessOutput) -> String {
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_owned())
+        .unwrap_or_else(|| format!("exit status {}", output.status))
+}
+
+fn find_bmx_track(root: &Path, prefix: &str) -> Result<(PathBuf, PackageAssetId), String> {
+    let mut matches = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .map_err(|error| format!("failed to inspect BMX output directory: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to inspect BMX output: {error}"))?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("failed to inspect BMX output metadata: {error}"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if metadata.is_file() && name.starts_with(prefix) && name.ends_with(".mxf") {
+            let uuid = name
+                .strip_prefix(prefix)
+                .and_then(|value| value.strip_suffix(".mxf"))
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .ok_or_else(|| format!("BMX output does not carry a parseable fp_uuid: {name}"))?;
+            matches.push((entry.path(), PackageAssetId::from_uuid(uuid)));
+        }
+    }
+    if matches.len() != 1 {
+        return Err(format!(
+            "expected exactly one BMX {prefix} Track File, found {}",
+            matches.len()
+        ));
+    }
+    Ok(matches.remove(0))
+}
+
+fn publish_professional_directory(
+    staging: OwnedPublicationDirectory,
+    final_output: &Path,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+) -> JobExecutionResult {
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::publishing(0.995));
+    let partial_output = staging.path().to_path_buf();
+    match staging.preserve_source_on_before_namespace_failure().publish_create_new() {
+        Ok(evidence) => JobExecutionResult::Published(
+            DurableExportPublication::from_directory_storage(evidence),
+        ),
+        Err(failure) => {
+            JobExecutionResult::PublicationFailed(ExportPublicationFailure::from_directory_storage(
+                failure,
+                final_output,
+                Some(partial_output),
+            ))
         }
     }
 }
@@ -2809,7 +3756,10 @@ fn execute_timeline_export(
         let audio_codec = match &delivery.artifact {
             ResolvedExportArtifactEncoding::MediaFile { audio, .. } => audio,
             ResolvedExportArtifactEncoding::ImageSequence { .. }
-            | ResolvedExportArtifactEncoding::AudioStems { .. } => &AudioCodecConfig::Disabled,
+            | ResolvedExportArtifactEncoding::AudioStems { .. }
+            | ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => {
+                &AudioCodecConfig::Disabled
+            }
         };
         let audio_input = prepare_timeline_audio_input(
             audio_codec,
@@ -2901,6 +3851,11 @@ fn execute_timeline_export(
             ResolvedExportArtifactEncoding::AudioStems { .. } => {
                 return JobExecutionResult::Failed(
                     "audio-stem package entered the visual export executor".to_owned(),
+                );
+            }
+            ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => {
+                return JobExecutionResult::Failed(
+                    "professional delivery entered the generic visual export executor".to_owned(),
                 );
             }
         };
@@ -3009,6 +3964,11 @@ fn execute_timeline_export(
                     "audio-stem package entered video encoder resolution".to_owned(),
                 );
             }
+            ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => {
+                return JobExecutionResult::Failed(
+                    "professional delivery entered generic video encoder resolution".to_owned(),
+                );
+            }
         };
         let image_encoding = match delivery.artifact {
             ResolvedExportArtifactEncoding::ImageSequence { format } => {
@@ -3018,7 +3978,8 @@ fn execute_timeline_export(
                 }
             }
             ResolvedExportArtifactEncoding::MediaFile { .. }
-            | ResolvedExportArtifactEncoding::AudioStems { .. } => None,
+            | ResolvedExportArtifactEncoding::AudioStems { .. }
+            | ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => None,
         };
         if let Some((format, image_contract)) = image_encoding
             && image_contract.adapter == ImageSequenceEncoderAdapter::NativeTiffFloat
@@ -3164,6 +4125,11 @@ fn execute_timeline_export(
             ResolvedExportArtifactEncoding::AudioStems { .. } => {
                 return JobExecutionResult::Failed(
                     "audio-stem package entered FFmpeg video command construction".to_owned(),
+                );
+            }
+            ResolvedExportArtifactEncoding::ProfessionalDelivery { .. } => {
+                return JobExecutionResult::Failed(
+                    "professional delivery entered generic FFmpeg command construction".to_owned(),
                 );
             }
         }

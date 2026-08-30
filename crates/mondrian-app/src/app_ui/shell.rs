@@ -306,6 +306,7 @@ fn export_phase_status_message(phase: ExportProgressPhase) -> &'static str {
         ExportProgressPhase::Preparing => "正在准备导出",
         ExportProgressPhase::Rendering => "正在渲染",
         ExportProgressPhase::Encoding => "正在编码",
+        ExportProgressPhase::Packaging => "正在封装交付包",
         ExportProgressPhase::Validating => "正在验证成品",
         ExportProgressPhase::Publishing => "正在发布成品",
     }
@@ -2915,6 +2916,14 @@ mod tests {
         assert_eq!(filters[0].name, "媒体");
         assert!(filters[0].extensions.iter().any(|extension| extension == "mp4"));
         assert!(filters[0].extensions.iter().any(|extension| extension == "gif"));
+    }
+
+    #[test]
+    fn packaging_phase_has_a_product_status_message() {
+        assert_eq!(
+            export_phase_status_message(ExportProgressPhase::Packaging),
+            "正在封装交付包"
+        );
     }
 
     #[test]

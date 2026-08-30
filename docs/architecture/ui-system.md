@@ -16,6 +16,16 @@ Adapter cannot preserve a validator-visible PCM layout. The panel never exposes
 XAVC or Class 50 as a near-match and queue admission revalidates the complete
 preset after every edit.
 
+Professional IMF/AS-11/DCP rows are projected from the same closed Export
+preset catalog. Their raster, cadence, signal, essence, and audio controls are
+read-only because changing one would leave the qualified row; title, issuer,
+creator, and RFC 5646 language remain ordinary editable preset metadata. The
+panel distinguishes immutable directory packages from one-file MXF output,
+uses `.imf`, `.dcp`, and `.mxf` suffixes, and exposes the explicit Packaging
+queue phase. Enqueue availability resolves the complete preset against the
+selected Sequence, while the queue repeats authoritative admission and
+profile-specific external tool qualification.
+
 Mondrian's UI is self-hosted: winit/platform integration, retained widgets, wgpu rendering, theme tokens, event routing, dock/layout, and app panel adapters.
 
 Color-space selectors expose Rec.601 PAL and Rec.601 NTSC as distinct encoded

@@ -14,7 +14,9 @@ fn test_parameter_address(parameter_id: &'static str) -> AnimationParameterAddre
         parameter_id: mondrian_core::ParameterId::new_static(parameter_id),
     }
 }
-use crate::app::product_action::{ProductAction, SequenceProductAction, TimelineProductAction};
+use crate::app::product_action::{
+    ExportProductAction, ProductAction, SequenceProductAction, TimelineProductAction,
+};
 use crate::app::ui_actions::{
     AppShellInterpretAssetDialogPayload, AppShellRelinkAssetDialogPayload,
     AssetsDeleteSelectionPayload, AssetsImportFilesPayload, AssetsMoveSelectionPayload,
@@ -1102,6 +1104,50 @@ fn export_panel_rejects_incompatible_delivery_before_building_an_action() {
 }
 
 #[test]
+fn export_panel_preserves_professional_metadata_and_reports_the_physical_artifact() {
+    let mut state = AppState::new();
+    let sequence = Sequence::new("IMF Deliverable");
+    let sequence_id = sequence.id;
+    state.test_set_sequence(Some(sequence));
+    state.set_export_draft_builtin_preset(BuiltinExportPreset::ImfAppProResRdd45);
+    state.set_export_draft_sequence_id(Some(sequence_id));
+    state.set_export_draft_output_path("E:/renders/master.imf");
+    let preset = state.export_draft.preset.clone();
+
+    let action = export_professional_metadata_action(
+        preset,
+        ProfessionalMetadataField::Title,
+        "Festival Master",
+    );
+    let ProductAction::Export(ExportProductAction::EditDraft(edit)) =
+        ProductAction::decode_external(&action)
+            .expect("valid export metadata payload")
+            .expect("recognized export metadata action")
+    else {
+        panic!("expected export draft edit");
+    };
+    let ExportDraftEdit::Preset(updated) = *edit else {
+        panic!("expected materialized preset edit");
+    };
+    assert_eq!(
+        updated.professional_delivery().expect("professional output").metadata.title,
+        "Festival Master"
+    );
+
+    let model = ExportPanelModel::from_app_state(&state);
+    assert!(model.can_enqueue());
+    let summary = export_preset_summary(Some(&model.preset));
+    assert!(summary.contains("IMF RDD 45"));
+    assert!(summary.contains("ProRes 422 HQ 10-bit 4:2:2"));
+    assert!(summary.contains("PCM 24-bit 48 kHz stereo"));
+    assert!(summary.contains("directory package"));
+    assert_eq!(
+        export_default_file_name(Some(&model.preset)),
+        "mondrian-export.imf"
+    );
+}
+
+#[test]
 fn export_panel_model_disables_sequence_scoped_controls_without_sequences() {
     let state = AppState::new();
 
@@ -1164,6 +1210,17 @@ fn export_panel_formats_structured_queue_status_and_diagnostics() {
             progress,
         ),
         "Encoding"
+    );
+    assert_eq!(
+        export_job_status_label(
+            &JobStatus::Running { phase: ExportProgressPhase::Packaging },
+            ExportProgress {
+                phase: ExportProgressPhase::Packaging,
+                fraction: 0.9,
+                detail: ExportProgressDetail::None,
+            },
+        ),
+        "Packaging"
     );
     assert_eq!(
         export_job_status_label(

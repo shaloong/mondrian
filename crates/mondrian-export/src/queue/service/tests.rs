@@ -645,6 +645,28 @@ fn progress_rejects_phase_and_unit_regression() {
     }
     .normalized(inconsistent_total);
     assert_eq!(wrong_unit.detail, ExportProgressDetail::None);
+
+    assert!(ExportProgressPhase::Encoding.rank() < ExportProgressPhase::Packaging.rank());
+    assert!(ExportProgressPhase::Packaging.rank() < ExportProgressPhase::Validating.rank());
+    assert_eq!(
+        serde_json::to_string(&ExportProgressPhase::Packaging).expect("serialize packaging phase"),
+        "\"packaging\""
+    );
+    assert_eq!(
+        serde_json::from_str::<ExportProgressPhase>("\"packaging\"")
+            .expect("deserialize packaging phase"),
+        ExportProgressPhase::Packaging
+    );
+}
+
+#[test]
+fn packaging_is_a_cooperative_cancellation_boundary_before_publication() {
+    let gate = ExportExecutionGate::always_open_for_test();
+    let cancellation = ExecutionCancellationToken::new();
+    cancellation.cancel();
+
+    assert!(!gate.wait_at_boundary(ExportProgressPhase::Packaging, &cancellation));
+    assert!(gate.wait_at_boundary(ExportProgressPhase::Publishing, &cancellation));
 }
 
 #[test]

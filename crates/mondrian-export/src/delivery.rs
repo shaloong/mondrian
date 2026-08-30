@@ -13,9 +13,10 @@ use crate::mezzanine::{
 use crate::preset::{
     AudioCodecConfig, AudioStemFormat, Av1Profile, Container, ExportAlphaMode,
     ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget, ExportFrameSampling,
-    ExportPreset, HevcProfile, ImageSequenceFormat, ProResProfile, Resolution, VideoCodecConfig,
-    VideoRateControl,
+    ExportPreset, HevcProfile, ImageSequenceFormat, ProResProfile, ProfessionalDeliveryMetadata,
+    ProfessionalDeliveryProfile, Resolution, VideoCodecConfig, VideoRateControl,
 };
+use crate::professional_delivery::resolve_professional_delivery;
 use mondrian_core::{
     AudioChannelLayout, ColorEngine, ColorSpace, OutputTransformIntent, ProjectColorEnvironment,
     SignalComplianceContract, SignalLegalizer,
@@ -109,6 +110,13 @@ pub enum ResolvedExportArtifactEncoding {
         /// Exact shared sample representation.
         format: AudioStemFormat,
     },
+    /// One profile-qualified package directory or constrained AS-11 MXF.
+    ProfessionalDelivery {
+        /// Exact qualified profile.
+        profile: ProfessionalDeliveryProfile,
+        /// Frozen package metadata.
+        metadata: ProfessionalDeliveryMetadata,
+    },
 }
 
 /// Fully explicit export target admitted before rendering begins.
@@ -174,6 +182,12 @@ pub fn resolve_export_delivery(
         ExportArtifactEncoding::AudioStems { format } => {
             ResolvedExportArtifactEncoding::AudioStems { format: *format }
         }
+        ExportArtifactEncoding::ProfessionalDelivery(output) => {
+            ResolvedExportArtifactEncoding::ProfessionalDelivery {
+                profile: output.profile,
+                metadata: output.metadata.clone(),
+            }
+        }
     };
 
     let bit_depth = preset.video_signal.bit_depth.resolve(settings.delivery.bit_depth);
@@ -207,6 +221,9 @@ pub fn resolve_export_delivery(
         ExportArtifactEncoding::AudioStems { .. } => {
             crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
         }
+        ExportArtifactEncoding::ProfessionalDelivery(_) => {
+            crate::video_encoding::ResolvedVideoCodingStructure::IntraOnly
+        }
     };
 
     let sample_aspect_ratio = settings.pixel_aspect_ratio.exact_ratio().ok_or_else(|| {
@@ -227,6 +244,11 @@ pub fn resolve_export_delivery(
             resolve_image_sequence_pixel_format(*format, preset.alpha_mode, chroma_sampling)?
         }
         ExportArtifactEncoding::AudioStems { .. } => "none",
+        ExportArtifactEncoding::ProfessionalDelivery(output) => match output.profile {
+            ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25
+            | ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "yuv422p10le",
+            ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "xyz12le",
+        },
     };
     if !matches!(preset.artifact, ExportArtifactEncoding::AudioStems { .. }) {
         validate_dimensions(resolution, chroma_sampling)?;
@@ -282,6 +304,24 @@ pub fn resolve_export_delivery(
         bit_depth,
         video_range,
     )?;
+    if let ExportArtifactEncoding::ProfessionalDelivery(output) = &preset.artifact {
+        resolve_professional_delivery(
+            output,
+            resolution,
+            frame_rate,
+            bit_depth,
+            video_range,
+            chroma_sampling,
+            color_target.color_space,
+            settings.audio_channel_layout,
+        )
+        .map_err(|error| {
+            ExportDeliveryError::new(
+                ExportDeliveryIssueCode::IncompatibleVideoSignal,
+                error.to_string(),
+            )
+        })?;
+    }
 
     Ok(ResolvedExportDeliveryContract {
         artifact,
@@ -375,7 +415,12 @@ fn validate_explicit_export_color_space(
 ) -> Result<(), ExportDeliveryError> {
     if color_space.is_display_referred()
         || color_space.encoding().is_scene_log()
-        || (preset.image_sequence_format().is_some() && color_space.is_scene_linear())
+        || ((preset.image_sequence_format().is_some()
+            || matches!(
+                preset.professional_delivery().map(|output| output.profile),
+                Some(ProfessionalDeliveryProfile::SmpteDcp2kFlat24)
+            ))
+            && color_space.is_scene_linear())
     {
         return Ok(());
     }
@@ -730,6 +775,7 @@ fn validate_alpha(preset: &ExportPreset) -> Result<(), ExportDeliveryError> {
             resolve_image_sequence_encoding(*format, ExportAlphaMode::Preserve).is_ok()
         }
         ExportArtifactEncoding::AudioStems { .. } => false,
+        ExportArtifactEncoding::ProfessionalDelivery(_) => false,
     };
     if supported {
         return Ok(());

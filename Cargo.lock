@@ -2446,6 +2446,7 @@ name = "mondrian-export"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytemuck",
  "chrono",
  "exr",
@@ -2459,8 +2460,10 @@ dependencies = [
  "mondrian-storage",
  "mondrian-timeline",
  "parking_lot",
+ "roxmltree",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tempfile",
  "thiserror 1.0.69",

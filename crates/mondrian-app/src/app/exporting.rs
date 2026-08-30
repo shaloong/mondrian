@@ -84,6 +84,13 @@ pub fn builtin_export_presets() -> Vec<ExportPresetOption> {
 
 /// File or directory suffix implied by an export artifact.
 pub fn export_preset_extension(preset: &ExportPreset) -> &'static str {
+    if let Some(delivery) = preset.professional_delivery() {
+        return match delivery.profile {
+            mondrian_export::ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "imf",
+            mondrian_export::ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "mxf",
+            mondrian_export::ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "dcp",
+        };
+    }
     if preset.audio_stem_format().is_some() {
         return "wavstems";
     }
@@ -907,6 +914,17 @@ mod tests {
             (BuiltinExportPreset::TiffFloatSequence, "tiffseq"),
         ];
         for (builtin, expected) in cases {
+            assert_eq!(export_preset_extension(&builtin.preset()), expected);
+        }
+    }
+
+    #[test]
+    fn professional_delivery_presets_expose_artifact_specific_suffixes() {
+        for (builtin, expected) in [
+            (BuiltinExportPreset::ImfAppProResRdd45, "imf"),
+            (BuiltinExportPreset::As11X9NabaHd, "mxf"),
+            (BuiltinExportPreset::SmpteDcp2kFlat24, "dcp"),
+        ] {
             assert_eq!(export_preset_extension(&builtin.preset()), expected);
         }
     }

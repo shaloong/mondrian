@@ -38,9 +38,10 @@ use mondrian_effects::{
 use mondrian_export::delivery::resolve_export_delivery;
 use mondrian_export::preset::{
     AudioCodecConfig, Av1Profile, AvcIntraClass, BuiltinExportPreset, Container, DnxHrProfile,
-    ExportAlphaMode, ExportChromaSampling, ExportColorTarget, ExportParameter, ExportPreset,
-    H264Profile, HevcProfile, ImageSequenceFormat, ProResProfile, Resolution as ExportResolution,
-    TimelineExportRange, UncompressedVideoFormat, VideoCodecConfig, VideoRateControl,
+    ExportAlphaMode, ExportArtifactEncoding, ExportChromaSampling, ExportColorTarget,
+    ExportParameter, ExportPreset, H264Profile, HevcProfile, ImageSequenceFormat, ProResProfile,
+    ProfessionalDeliveryProfile, Resolution as ExportResolution, TimelineExportRange,
+    UncompressedVideoFormat, VideoCodecConfig, VideoRateControl,
 };
 use mondrian_export::queue::{
     ExportColorHealthSeverity, ExportJobColorDiagnostics, ExportProgress, ExportProgressDetail,
@@ -5140,6 +5141,30 @@ fn export_with_rate_control(
     preset
 }
 
+#[derive(Clone, Copy)]
+enum ProfessionalMetadataField {
+    Title,
+    Issuer,
+    Creator,
+    Language,
+}
+
+fn export_professional_metadata_action(
+    mut preset: ExportPreset,
+    field: ProfessionalMetadataField,
+    value: &str,
+) -> Action {
+    if let ExportArtifactEncoding::ProfessionalDelivery(delivery) = &mut preset.artifact {
+        match field {
+            ProfessionalMetadataField::Title => delivery.metadata.title = value.to_owned(),
+            ProfessionalMetadataField::Issuer => delivery.metadata.issuer = value.to_owned(),
+            ProfessionalMetadataField::Creator => delivery.metadata.creator = value.to_owned(),
+            ProfessionalMetadataField::Language => delivery.metadata.language = value.to_owned(),
+        }
+    }
+    export_preset_update_action(preset)
+}
+
 fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let mut preset_label = model
         .presets
@@ -5162,48 +5187,66 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         .collect::<Vec<_>>();
     let preset_dropdown = Dropdown::new(preset_label, preset_items).with_max_visible_items(6);
     let media = model.preset.media_file();
+    let professional = model.preset.professional_delivery();
+    let professional_container_label = professional.map(|delivery| match delivery.profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "IMF package",
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AS-11 X9 OP1a MXF",
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "SMPTE DCP package",
+    });
+    let professional_video_label = professional.map(|delivery| match delivery.profile {
+        ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => "ProRes 422 HQ / RDD 45",
+        ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => "AVC High 4:2:2 / AS-11 X9",
+        ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => "JPEG 2000 / ST 428-1 XYZ 12-bit",
+    });
     let container_dropdown = Dropdown::new(
         media
             .map(|media| export_container_label(&media.container))
+            .or(professional_container_label)
             .unwrap_or("图像序列目录"),
         export_container_items(&model.preset),
     )
     .with_max_visible_items(6)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
     let video_codec_dropdown = Dropdown::new(
-        media.map(|media| export_video_codec_label(&media.video)).unwrap_or_else(|| {
-            model
-                .preset
-                .image_sequence_format()
-                .map(export_image_sequence_format_label)
-                .unwrap_or("无视频")
-        }),
+        media
+            .map(|media| export_video_codec_label(&media.video))
+            .or(professional_video_label)
+            .unwrap_or_else(|| {
+                model
+                    .preset
+                    .image_sequence_format()
+                    .map(export_image_sequence_format_label)
+                    .unwrap_or("无视频")
+            }),
         export_video_codec_items(&model.preset),
     )
     .with_max_visible_items(8)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
     let resolution_dropdown = Dropdown::new(
         export_resolution_label(model.preset.resolution),
         export_resolution_items(&model.preset),
     )
-    .with_max_visible_items(5);
+    .with_max_visible_items(5)
+    .enabled(professional.is_none());
     let frame_rate_dropdown = Dropdown::new(
         export_frame_rate_label(model.preset.frame_rate),
         export_frame_rate_items(&model.preset),
     )
-    .with_max_visible_items(8);
+    .with_max_visible_items(8)
+    .enabled(professional.is_none());
     let bit_depth_dropdown = Dropdown::new(
         export_bit_depth_label(model.preset.video_signal.bit_depth),
         export_bit_depth_items(&model.preset),
     )
     .with_max_visible_items(4)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
     let color_target_mode = export_color_target_mode(model.preset.color_target);
     let color_target_mode_dropdown = Dropdown::new(
         export_color_target_mode_label(color_target_mode),
         export_color_target_mode_items(&model.preset),
     )
-    .with_max_visible_items(3);
+    .with_max_visible_items(3)
+    .enabled(professional.is_none());
     let color_target_space_label = match model.preset.color_target {
         ExportColorTarget::FollowSequence => "由序列 Program Output 决定".to_owned(),
         ExportColorTarget::RenderingView(color_space)
@@ -5214,33 +5257,37 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
         export_color_target_space_items(&model.preset),
     )
     .with_max_visible_items(8)
-    .enabled(color_target_mode != ExportColorTargetMode::FollowSequence);
+    .enabled(professional.is_none() && color_target_mode != ExportColorTargetMode::FollowSequence);
     let video_range_dropdown = Dropdown::new(
         export_video_range_label(model.preset.video_signal.range),
         export_video_range_items(&model.preset),
     )
     .with_max_visible_items(3)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
     let chroma_dropdown = Dropdown::new(
         export_chroma_label(model.preset.video_signal.chroma_sampling),
         export_chroma_items(&model.preset),
     )
     .with_max_visible_items(4)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
     let alpha_dropdown = Dropdown::new(
         export_alpha_mode_label(model.preset.alpha_mode),
         export_alpha_mode_items(&model.preset),
     )
-    .with_max_visible_items(2);
+    .with_max_visible_items(2)
+    .enabled(professional.is_none());
     let legalizer_preset = model.preset.clone();
     let legalizer_checkbox = Checkbox::new(
         "限制到合法 RGB 信号范围",
         model.preset.legalizer == SignalLegalizer::ClampRgb,
     )
-    .enabled(!matches!(
-        model.preset.artifact,
-        mondrian_export::preset::ExportArtifactEncoding::AudioStems { .. }
-    ))
+    .enabled(
+        professional.is_none()
+            && !matches!(
+                model.preset.artifact,
+                mondrian_export::preset::ExportArtifactEncoding::AudioStems { .. }
+            ),
+    )
     .on_change(move |enabled| {
         let mut updated = legalizer_preset.clone();
         updated.legalizer = if enabled {
@@ -5253,11 +5300,58 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
     let audio_codec_dropdown = Dropdown::new(
         media
             .map(|media| export_audio_codec_label(&media.audio))
+            .or(professional.map(|_| "PCM 24-bit / 48 kHz / stereo"))
             .unwrap_or("无音频（图像序列）"),
         export_audio_codec_items(&model.preset),
     )
     .with_max_visible_items(4)
-    .enabled(media.is_some());
+    .enabled(media.is_some() && professional.is_none());
+    let metadata = professional.map(|delivery| delivery.metadata.clone());
+    let metadata_enabled = metadata.is_some();
+    let title_preset = model.preset.clone();
+    let title_input = TextInput::new("交付标题")
+        .with_text(metadata.as_ref().map(|value| value.title.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                title_preset.clone(),
+                ProfessionalMetadataField::Title,
+                value,
+            )
+        });
+    let issuer_preset = model.preset.clone();
+    let issuer_input = TextInput::new("发行方")
+        .with_text(metadata.as_ref().map(|value| value.issuer.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                issuer_preset.clone(),
+                ProfessionalMetadataField::Issuer,
+                value,
+            )
+        });
+    let creator_preset = model.preset.clone();
+    let creator_input = TextInput::new("创建系统")
+        .with_text(metadata.as_ref().map(|value| value.creator.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                creator_preset.clone(),
+                ProfessionalMetadataField::Creator,
+                value,
+            )
+        });
+    let language_preset = model.preset.clone();
+    let language_input = TextInput::new("RFC 5646 语言")
+        .with_text(metadata.as_ref().map(|value| value.language.clone()).unwrap_or_default())
+        .enabled(metadata_enabled)
+        .on_change(move |value| {
+            export_professional_metadata_action(
+                language_preset.clone(),
+                ProfessionalMetadataField::Language,
+                value,
+            )
+        });
 
     let selected_sequence = model.selected_sequence();
     let sequence_label = selected_sequence
@@ -5672,6 +5766,13 @@ fn export_panel(model: &ExportPanelModel) -> PropertyPanel {
                 ),
         )
         .with_section(format_section)
+        .with_section(
+            PropertySection::new("交付元数据")
+                .with_row(PropertyRow::new("标题", Box::new(title_input)))
+                .with_row(PropertyRow::new("发行方", Box::new(issuer_input)))
+                .with_row(PropertyRow::new("创建者", Box::new(creator_input)))
+                .with_row(PropertyRow::new("语言", Box::new(language_input))),
+        )
         .with_section(color_section)
         .with_section(signal_section)
         .with_section(encoding_section)
@@ -5868,6 +5969,30 @@ fn export_preset_summary(preset: Option<&ExportPreset>) -> String {
         .as_ref()
         .map(|resolution| format!("{}x{}", resolution.width, resolution.height))
         .unwrap_or_else(|| "Follow sequence".to_owned());
+    if let Some(delivery) = preset.professional_delivery() {
+        let (profile, layout, essence) = match delivery.profile {
+            ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => (
+                "IMF RDD 45",
+                "directory package",
+                "ProRes 422 HQ 10-bit 4:2:2",
+            ),
+            ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => (
+                "AMWA AS-11 X9",
+                "OP1a MXF file",
+                "AVC High 4:2:2 10-bit intra",
+            ),
+            ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => (
+                "SMPTE DCP 2K Flat",
+                "directory package",
+                "JPEG 2000 XYZ 12-bit",
+            ),
+        };
+        return format!(
+            "{resolution} / {profile} / {essence} / {} / PCM 24-bit 48 kHz stereo / {layout} / .{}",
+            export_frame_rate_label(preset.frame_rate),
+            export_preset_extension(preset),
+        );
+    }
     let Some(media) = preset.media_file() else {
         return format!(
             "{resolution} / PNG 无损序列 / sRGB / {} / {} / .{} 目录",
@@ -5955,6 +6080,7 @@ fn export_progress_phase_label(phase: ExportProgressPhase) -> &'static str {
         ExportProgressPhase::Preparing => "Preparing",
         ExportProgressPhase::Rendering => "Rendering",
         ExportProgressPhase::Encoding => "Encoding",
+        ExportProgressPhase::Packaging => "Packaging",
         ExportProgressPhase::Validating => "Validating",
         ExportProgressPhase::Publishing => "Publishing",
     }
