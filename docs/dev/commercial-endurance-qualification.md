@@ -79,6 +79,21 @@ with typed Reference Output diagnostics and `ExportQueueShutdownEvidence`, or
 use `finish_not_run` before any sample when an external prerequisite is absent.
 Commit phases in profile order and call `seal_manifest` once.
 
+Before recording an artifact event, call
+`mondrian_export::verify_export_artifact` with the stable Export job/artifact
+identity and explicit nonzero file-size and decode-time limits, then construct
+the App event with
+`EnduranceCampaignEvent::export_artifact_verified`. Do not synthesize the
+artifact, validator, or report digests from queue state. The verifier reopens
+the final regular file into a bounded immutable snapshot, hashes it, probes its
+typed streams, fully decodes every advertised video/audio stream under a
+supervised deadline, hashes decoded
+output, and rechecks the encoded bytes before issuing its sealed receipt. A
+decode timeout, cancellation, malformed terminal progress, empty selected
+video, changed file, or exceeded evidence-output bound is a verification
+failure, never an artifact counter increment. Artifact identities cannot repeat
+within one phase.
+
 Production orchestration should normally enter through
 `run_endurance_campaign`. Its concrete `EnduranceCampaignRuntime` must pump the
 actual owners until each absolute campaign deadline, return an atomic snapshot,

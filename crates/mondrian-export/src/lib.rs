@@ -3,6 +3,7 @@
 //! 导出与渲染系统：渲染队列 / 硬件编码 / 格式预设
 
 mod artifact_identity;
+mod artifact_verifier;
 mod audio_stems;
 pub mod capture;
 pub mod delivery;
@@ -19,6 +20,11 @@ mod smart_render;
 pub mod validator;
 pub mod video_encoding;
 
+pub use artifact_verifier::{
+    verify_export_artifact, verify_export_artifact_cancellable, IndependentExportArtifactPolicy,
+    IndependentExportArtifactReceipt, IndependentExportArtifactReport,
+    IndependentExportArtifactVerificationError, INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
+};
 pub use capture::{
     prepare_timeline_export_dependencies,
     prepare_timeline_export_dependencies_with_audio_selection,

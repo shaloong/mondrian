@@ -12,6 +12,34 @@ independent artifact re-open/content verification required by commercial
 endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+`mondrian-export` also owns an independent single-file artifact verifier for
+that post-publication boundary. It accepts only a direct regular file within an
+explicit byte limit, hashes the encoded bytes, derives the ordinary typed
+container/stream probe, and launches a separately supervised FFmpeg process
+against a verifier-owned immutable byte snapshot. It decodes every advertised
+video and audio stream through EOF. The child
+has an absolute deadline and strict stdout/stderr byte ceilings. Success
+requires a terminal progress record, a nonzero video-frame count when video is
+present, decoded duration evidence for a positive-duration artifact, and one
+FFmpeg SHA-256 over the decoded stream bytes. Metadata and encoded-byte SHA-256
+are rechecked against the published path after decode so a changing artifact
+cannot produce a receipt. Bounded snapshot copying reads at most one byte past
+the policy ceiling before rejecting a growing or oversized file.
+
+The result is a structured report plus the SHA-256 of its canonical JSON. The
+receipt fields are private and bind the caller's stable Export job/artifact
+identity, so App capture can construct
+`ExportArtifactVerified` only from completed verifier output rather than from
+caller-supplied strings. This proves bounded re-open, complete decodability,
+and stable content identity; it is not a pixel comparison against the source
+Timeline or an independent colorimetric oracle. Audio is covered by the
+combined decoded-stream hash and terminal duration rather than by a separately
+claimed sample-count qualification. The decoded terminal duration must agree
+with the independently probed duration under the validation tolerance. Direct
+symlinks and other non-regular
+objects are rejected; the admitted output path remains responsible for its
+already-canonical parent namespace.
+
 `mondrian-export::professional_delivery` is the deep Module for constrained
 IMF, AS-11, and DCP delivery. It deliberately exposes exact qualified product
 rows rather than claiming the complete standards families:

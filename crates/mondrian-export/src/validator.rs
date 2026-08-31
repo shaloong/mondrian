@@ -268,6 +268,10 @@ pub struct ExportOutputProbe {
     pub container_major_brand: Option<String>,
     /// Best available container or stream duration.
     pub duration_secs: Option<f64>,
+    /// Number of encoded video streams advertised by the artifact.
+    pub video_stream_count: u32,
+    /// Number of encoded audio streams advertised by the artifact.
+    pub audio_stream_count: u32,
     /// First encoded video stream, when present.
     pub video: Option<ProbedVideoStream>,
     /// First encoded audio stream, when present.
@@ -601,14 +605,21 @@ fn validate_frame_scan(
 /// expectation. Video outputs must expose a decodable first frame so HDR
 /// metadata presence cannot silently remain unknown.
 pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
-    let cancellation = ExecutionCancellationToken::new();
-    let report = ffprobe_report(path, &cancellation)?;
+    probe_export_output_cancellable(path, &ExecutionCancellationToken::new())
+}
+
+/// Probe stable typed evidence while retaining caller cancellation authority.
+pub fn probe_export_output_cancellable(
+    path: &Path,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<ExportOutputProbe, String> {
+    let report = ffprobe_report(path, cancellation)?;
     let has_video = report
         .streams
         .iter()
         .any(|stream| stream.codec_type.as_deref() == Some("video"));
     let frame_window = has_video
-        .then(|| ffprobe_video_frame_window(path, &cancellation))
+        .then(|| ffprobe_video_frame_window(path, cancellation))
         .transpose()?
         .unwrap_or_default();
     Ok(build_output_probe(
@@ -1363,6 +1374,18 @@ fn build_output_probe(
     report: &FfprobeReport,
     side_data: Option<&[FfprobeFrameSideData]>,
 ) -> ExportOutputProbe {
+    let video_stream_count = report
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("video"))
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let audio_stream_count = report
+        .streams
+        .iter()
+        .filter(|stream| stream.codec_type.as_deref() == Some("audio"))
+        .count()
+        .min(u32::MAX as usize) as u32;
     let video = report
         .streams
         .iter()
@@ -1425,6 +1448,8 @@ fn build_output_probe(
             .as_ref()
             .and_then(|format| format.tags.major_brand.clone()),
         duration_secs: summarize_report(report).duration_secs,
+        video_stream_count,
+        audio_stream_count,
         video,
         audio,
     }

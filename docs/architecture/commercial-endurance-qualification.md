@@ -152,6 +152,19 @@ record `seek -> surface_device_reopen -> export_cancel_retry -> cache_pressure`
 for every complete cycle. Event order, time, count, and terminal counters close
 twice: before App publication and again in the external PowerShell verifier.
 
+The independent Export receipt is produced only after a bounded regular-file
+check, encoded-byte hash, typed container/stream probe, and a separate FFmpeg
+decode of every advertised video/audio stream through EOF from an immutable
+verifier-owned snapshot. Its report binds the Export job/artifact identity,
+final
+video-frame and duration progress, a combined decoded-stream SHA-256, the
+stable verifier identity, and unchanged before/after artifact size and digest.
+App copies event fields from the sealed receipt and rejects repeated artifact
+identities within a phase; a runtime cannot promote
+durable publication or an opening-frame probe into `ExportArtifactVerified`.
+This integrity/decodability evidence remains distinct from source-pixel or
+colorimetric reference comparison.
+
 ## Identity and replay
 
 One run binds:

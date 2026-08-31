@@ -160,18 +160,7 @@ impl EnduranceCampaignClock for SystemEnduranceCampaignClock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnduranceCampaignEvent {
     /// Independent re-open/content verification of a published Export artifact.
-    ExportArtifactVerified {
-        /// Phase-local completion instant.
-        completed_at_us: u64,
-        /// Stable artifact identity.
-        artifact_id: String,
-        /// SHA-256 of the published artifact bytes.
-        artifact_sha256: String,
-        /// Stable independent validator identity.
-        validator_id: String,
-        /// SHA-256 of the validator's structured report.
-        validation_report_sha256: String,
-    },
+    ExportArtifactVerified(VerifiedExportArtifactEvent),
     /// One exact operation in a controlled recovery cycle.
     RecoveryStepCompleted {
         /// Phase-local completion instant.
@@ -183,6 +172,49 @@ pub enum EnduranceCampaignEvent {
         /// SHA-256 of the production owner's before/after operation receipt.
         operation_receipt_sha256: String,
     },
+}
+
+/// Sealed App projection of one independently verified Export artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedExportArtifactEvent {
+    completed_at_us: u64,
+    artifact_id: String,
+    artifact_sha256: String,
+    validator_id: String,
+    validation_report_sha256: String,
+}
+
+impl EnduranceCampaignEvent {
+    /// Construct an Export event only from a completed independent verifier receipt.
+    pub fn export_artifact_verified(
+        completed_at_us: u64,
+        receipt: &mondrian_export::IndependentExportArtifactReceipt,
+    ) -> Self {
+        Self::ExportArtifactVerified(VerifiedExportArtifactEvent {
+            completed_at_us,
+            artifact_id: receipt.report().artifact_id.clone(),
+            artifact_sha256: receipt.report().artifact_sha256.clone(),
+            validator_id: receipt.report().validator_id.to_owned(),
+            validation_report_sha256: receipt.validation_report_sha256().to_owned(),
+        })
+    }
+
+    #[cfg(test)]
+    fn test_export_artifact_verified(
+        completed_at_us: u64,
+        artifact_id: impl Into<String>,
+        artifact_sha256: impl Into<String>,
+        validator_id: impl Into<String>,
+        validation_report_sha256: impl Into<String>,
+    ) -> Self {
+        Self::ExportArtifactVerified(VerifiedExportArtifactEvent {
+            completed_at_us,
+            artifact_id: artifact_id.into(),
+            artifact_sha256: artifact_sha256.into(),
+            validator_id: validator_id.into(),
+            validation_report_sha256: validation_report_sha256.into(),
+        })
+    }
 }
 
 /// Result of attempting to admit one exact phase workload.
@@ -402,13 +434,13 @@ fn record_events(
 ) -> Result<(), EnduranceCampaignError> {
     for event in events {
         match event {
-            EnduranceCampaignEvent::ExportArtifactVerified {
+            EnduranceCampaignEvent::ExportArtifactVerified(VerifiedExportArtifactEvent {
                 completed_at_us,
                 artifact_id,
                 artifact_sha256,
                 validator_id,
                 validation_report_sha256,
-            } => phase.record_export_artifact_verified(
+            }) => phase.record_export_artifact_verified(
                 completed_at_us,
                 &artifact_id,
                 &artifact_sha256,
@@ -615,13 +647,13 @@ mod tests {
             let mut events = Vec::new();
             while self.verified_exports < target {
                 self.verified_exports += 1;
-                events.push(EnduranceCampaignEvent::ExportArtifactVerified {
-                    completed_at_us: self.verified_exports * 3_600_000_000,
-                    artifact_id: format!("artifact-{}", self.verified_exports),
-                    artifact_sha256: SHA.to_owned(),
-                    validator_id: "independent-validator-v1".to_owned(),
-                    validation_report_sha256: SHA.to_owned(),
-                });
+                events.push(EnduranceCampaignEvent::test_export_artifact_verified(
+                    self.verified_exports * 3_600_000_000,
+                    format!("artifact-{}", self.verified_exports),
+                    SHA,
+                    "independent-validator-v1",
+                    SHA,
+                ));
             }
             Ok(events)
         }

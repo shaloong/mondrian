@@ -186,6 +186,17 @@ impl EnduranceSemanticRecorder {
         {
             return Err(EnduranceCaptureError::InvalidProducerEvent);
         }
+        if self.events.iter().any(|event| {
+            matches!(
+                event,
+                EnduranceProducerEvent::ExportArtifactVerified {
+                    artifact_id: recorded_artifact_id,
+                    ..
+                } if recorded_artifact_id == artifact_id
+            )
+        }) {
+            return Err(EnduranceCaptureError::InvalidProducerEvent);
+        }
         self.prepare_event(completed_at_us)?;
         let sequence = u32::try_from(self.events.len())
             .map_err(|_| EnduranceCaptureError::ProducerEventLimitExceeded)?;
@@ -1261,15 +1272,22 @@ mod tests {
 
     #[test]
     fn producer_events_are_bounded_and_recovery_steps_are_exactly_ordered() {
-        let mut export = EnduranceSemanticRecorder::new(EndurancePhaseKind::ContinuousExport, 1);
+        let mut export = EnduranceSemanticRecorder::new(EndurancePhaseKind::ContinuousExport, 2);
         export
             .record_export_artifact_verified(1, "artifact-0", SHA, "validator-v1", SHA)
             .expect("record verified artifact");
         assert!(matches!(
-            export.record_export_artifact_verified(2, "artifact-1", SHA, "validator-v1", SHA),
+            export.record_export_artifact_verified(2, "artifact-0", SHA, "validator-v1", SHA),
+            Err(EnduranceCaptureError::InvalidProducerEvent)
+        ));
+        export
+            .record_export_artifact_verified(2, "artifact-1", SHA, "validator-v1", SHA)
+            .expect("record second verified artifact");
+        assert!(matches!(
+            export.record_export_artifact_verified(3, "artifact-2", SHA, "validator-v1", SHA),
             Err(EnduranceCaptureError::ProducerEventLimitExceeded)
         ));
-        assert_eq!(export.counters().verified_export_artifacts, 1);
+        assert_eq!(export.counters().verified_export_artifacts, 2);
 
         let mut recovery =
             EnduranceSemanticRecorder::new(EndurancePhaseKind::ConcurrentRecovery, 4);
