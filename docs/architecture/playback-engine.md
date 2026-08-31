@@ -1264,6 +1264,13 @@ Delivery pressure never changes this permission while transport remains
 `Playing`/`Recovering`; only audio device/underrun evidence may initiate audio
 recovery.
 
+Validation shutdown consumes the exact `AppAudioPlayback` owner used by this
+mapping and replaces it with an explicit unavailable state before joining its
+PCM render and device-lifecycle workers. A separately constructed Audio owner
+is never evidence for App Playback closure. Repeated consuming shutdown reports
+a never-started inventory; it cannot recreate execution or count an already
+retired worker twice.
+
 Playback prefetch has a two-second hard execution budget. A running playback
 prefetch is not preempted merely because the next Playback-current demand
 arrives: the exact same-key request may promote it, and a different sequential

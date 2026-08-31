@@ -57,7 +57,9 @@ files.
 
 Use the validation-only `EnduranceExecutionOwners` group for the software
 Preview/Audio/GPU lifetime. Its consuming shutdown must complete before the
-terminal sample. Supply an explicit GPU retirement timeout appropriate to the
+terminal sample and must receive the phase's actual `AppState`; a separately
+constructed Audio Playback instance is not closure evidence for workers pumped
+by that state. Supply an explicit GPU retirement timeout appropriate to the
 approved rig; `timed_out`, a rejected retirement handoff, worker panic, or an
 incomplete retirement receipt is a failed closure and must never be rewritten
 as quiescence. The detached progress worker remains the resource authority

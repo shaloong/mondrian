@@ -30,6 +30,31 @@ impl AppAudioPlayback {
         }
     }
 
+    #[cfg(any(test, feature = "validation"))]
+    fn shutdown_and_wait(
+        &mut self,
+        sample_rate: u32,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        let retired = std::mem::replace(
+            self,
+            Self::Unavailable {
+                sample_rate,
+                reason: "Audio Playback was synchronously retired".to_owned(),
+            },
+        );
+        match retired {
+            Self::Available(playback) => (*playback).shutdown_and_wait(),
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence {
+                schema_version: 1,
+                render_workers_started: 0,
+                render_workers_terminated: 0,
+                render_worker_panics: 0,
+                render_current_thread_detachments: 0,
+                output: Default::default(),
+            },
+        }
+    }
+
     fn execution_available(&self) -> bool {
         matches!(self, Self::Available(_))
     }
@@ -1263,6 +1288,14 @@ impl AppState {
         self.audio_playback.snapshot(self.audio_playback_mode())
     }
 
+    /// Consume and synchronously close the Audio owner used by this App State.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn shutdown_audio_playback_and_wait(
+        &mut self,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.audio_playback.shutdown_and_wait(self.audio_sample_rate)
+    }
+
     /// Latest successful CPAL host/device/configuration negotiation evidence.
     ///
     /// This remains available after device loss so diagnostics can explain
@@ -2194,6 +2227,30 @@ mod tests {
             FrameDeliveryCandidate::for_demand(identity, kind),
             state.playback_observation_instant_anchor,
         )
+    }
+
+    #[test]
+    fn endurance_shutdown_consumes_the_app_states_actual_audio_owner() {
+        let mut state = AppState::new();
+        let initial = state.shutdown_audio_playback_and_wait();
+        assert!(initial.all_workers_terminated());
+        state.audio_playback = AppAudioPlayback::Available(Box::new(
+            AudioPlayback::new(mondrian_media::AudioPlaybackConfig::product_default())
+                .expect("start deterministic Audio Playback owner"),
+        ));
+
+        let evidence = state.shutdown_audio_playback_and_wait();
+
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert!(evidence.all_workers_terminated());
+        assert_eq!(
+            state.audio_playback_unavailable_reason(),
+            Some("Audio Playback was synchronously retired")
+        );
+        let repeated = state.shutdown_audio_playback_and_wait();
+        assert_eq!(repeated.render_workers_started, 0);
+        assert!(repeated.all_workers_terminated());
     }
 
     #[test]

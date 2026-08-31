@@ -56,10 +56,12 @@ worker started over its lifetime. Earlier unexpected exits remain visible in
 cumulative termination and panic evidence instead of disappearing once their
 handles have been consumed by normal polling.
 
-The validation-only `EnduranceExecutionOwners` group composes those production
-Preview and Audio owners with the production Headless Viewer GPU Adapter. Its
-consuming close stops Preview and Audio before transferring the complete GPU
-device-generation retirement envelope to the existing progress worker. GPU
+The validation-only `EnduranceExecutionOwners` group composes the production
+Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
+the phase's `AppState`. It never starts a sidecar Audio instance: its consuming
+close takes and synchronously retires the same PCM/device workers pumped by
+Playback before transferring the complete GPU device-generation retirement
+envelope to the existing progress worker. GPU
 closure is bounded by an explicit timeout and records worker start/return,
 panic, timeout, retirement-handoff acceptance, and exact resource retirement.
 A timeout detaches the still-authoritative progress worker so that it can

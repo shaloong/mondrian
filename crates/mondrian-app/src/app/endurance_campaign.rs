@@ -25,6 +25,7 @@ use super::endurance_qualification::{
 use super::headless_preview_presentation::HeadlessPreviewRuntime;
 use super::headless_viewer_gpu::HeadlessViewerGpuAdapter;
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
+use super::AppState;
 
 /// Public projection of bounded Headless GPU retirement evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +80,6 @@ impl EnduranceExecutionOwnerClosure {
 pub struct EnduranceExecutionOwners {
     preview: Option<HeadlessPreviewRuntime>,
     gpu: Option<HeadlessViewerGpuAdapter>,
-    audio: Option<mondrian_media::AudioPlayback>,
 }
 
 impl EnduranceExecutionOwners {
@@ -87,18 +87,16 @@ impl EnduranceExecutionOwners {
     pub fn start() -> Result<Self, EnduranceCampaignError> {
         let gpu = HeadlessViewerGpuAdapter::new()
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
-        let audio = mondrian_media::AudioPlayback::product_default()
-            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
         Ok(Self {
             preview: Some(HeadlessPreviewRuntime::new()),
             gpu: Some(gpu),
-            audio: Some(audio),
         })
     }
 
-    /// Stop Preview and Audio first, then retire the complete GPU generation.
+    /// Stop Preview and the App State's actual Audio owner, then retire GPU.
     pub fn shutdown_and_wait(
         mut self,
+        app: &mut AppState,
         gpu_timeout: Duration,
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
         let preview = self
@@ -106,11 +104,7 @@ impl EnduranceExecutionOwners {
             .take()
             .ok_or_else(|| EnduranceCampaignError::Runtime("Preview owner is missing".to_owned()))?
             .shutdown_and_wait();
-        let audio = self
-            .audio
-            .take()
-            .ok_or_else(|| EnduranceCampaignError::Runtime("Audio owner is missing".to_owned()))?
-            .shutdown_and_wait();
+        let audio = app.shutdown_audio_playback_and_wait();
         let gpu = self
             .gpu
             .take()
