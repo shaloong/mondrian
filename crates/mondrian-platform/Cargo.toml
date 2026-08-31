@@ -13,6 +13,10 @@ arboard                = { workspace = true }
 rfd                    = "0.15"
 xcap                   = { workspace = true }
 windows-sys            = { workspace = true }
+anyhow                 = { workspace = true }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }
+sha2                   = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc                    = "0.2"

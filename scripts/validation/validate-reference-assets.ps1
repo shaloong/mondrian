@@ -42,10 +42,12 @@ $machineProfilePath = Join-Path $contractRootAbsolute "windows-alpha-reference.j
 $playbackPlanPath = Join-Path $contractRootAbsolute "playback-reference-gates.json"
 $commercialEnginePath = Join-Path $contractRootAbsolute "windows-commercial-engine.json"
 $gpuColorProfilePath = Join-Path $contractRootAbsolute "gpu-color-qualification.json"
+$platformGpuColorProfilePath = Join-Path $contractRootAbsolute "platform-gpu-color-gates.json"
 $viewerDisplayProfilePath = Join-Path $contractRootAbsolute "viewer-display-qualification.json"
 $realtimeMatrixPath = Join-Path $contractRootAbsolute "realtime-performance-matrix.json"
 $crossApplicationProfilePath = Join-Path $contractRootAbsolute "cross-application-color-qualification.json"
 $crossApplicationStimulusPath = Join-Path $contractRootAbsolute "cross-application-color-stimulus-v1.json"
+$platformMatrixPath = Join-Path $contractRootAbsolute "platform-driver-display-matrix.json"
 $contractPaths = @(
     $manifestPath,
     $goldenPath,
@@ -54,10 +56,12 @@ $contractPaths = @(
     $playbackPlanPath,
     $commercialEnginePath,
     $gpuColorProfilePath,
+    $platformGpuColorProfilePath,
     $viewerDisplayProfilePath
     $realtimeMatrixPath
     $crossApplicationProfilePath
     $crossApplicationStimulusPath
+    $platformMatrixPath
 )
 
 foreach ($path in $contractPaths) {
@@ -74,16 +78,24 @@ $playbackPlan = Get-Content -LiteralPath $playbackPlanPath -Raw | ConvertFrom-Js
 $machineProfile = Get-Content -LiteralPath $machineProfilePath -Raw | ConvertFrom-Json
 $commercialEngine = Get-Content -LiteralPath $commercialEnginePath -Raw | ConvertFrom-Json
 $gpuColorProfile = Get-Content -LiteralPath $gpuColorProfilePath -Raw | ConvertFrom-Json
+$platformGpuColorProfile = Get-Content -LiteralPath $platformGpuColorProfilePath -Raw | ConvertFrom-Json
 $viewerDisplayProfile = Get-Content -LiteralPath $viewerDisplayProfilePath -Raw | ConvertFrom-Json
 $realtimeMatrix = Get-Content -LiteralPath $realtimeMatrixPath -Raw | ConvertFrom-Json
 $crossApplicationProfile = Get-Content -LiteralPath $crossApplicationProfilePath -Raw | ConvertFrom-Json
 $crossApplicationStimulus = Get-Content -LiteralPath $crossApplicationStimulusPath -Raw | ConvertFrom-Json
+$platformMatrix = Get-Content -LiteralPath $platformMatrixPath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
 if ($commercialEngine.schema_version -ne 2) { Add-Issue "error" "commercial-engine.schema-unsupported" "Unsupported commercial engine schema: $($commercialEngine.schema_version)" }
 if ($gpuColorProfile.schema_version -ne 1) { Add-Issue "error" "gpu-color.schema-unsupported" "Unsupported GPU color profile schema: $($gpuColorProfile.schema_version)" }
 if ($gpuColorProfile.execution_policy -ne "sealed-required") { Add-Issue "error" "gpu-color.policy" "GPU color qualification must use sealed-required execution" }
+if ($platformGpuColorProfile.schema_version -ne 1 -or
+    $platformGpuColorProfile.single_test_result_required -ne $true -or
+    $platformGpuColorProfile.diagnostic_skip_forbidden -ne $true -or
+    @($platformGpuColorProfile.gates).Count -ne 8) {
+    Add-Issue "error" "platform-gpu-color.contract" "Platform GPU color profile must retain eight measured, non-skipped single-test gates"
+}
 $viewerDisplayScenarioIds = @($viewerDisplayProfile.scenarios | ForEach-Object { [string]$_.id })
 if ($viewerDisplayProfile.schema_version -ne 1) { Add-Issue "error" "viewer-display.schema-unsupported" "Unsupported Viewer display profile schema: $($viewerDisplayProfile.schema_version)" }
 if ($viewerDisplayProfile.execution_policy -ne "physical-display-hitl-required") { Add-Issue "error" "viewer-display.policy" "Viewer display qualification must remain physical-display HITL-required" }
@@ -100,6 +112,162 @@ if ($crossApplicationProfile.execution_policy -ne "sealed-required") {
 }
 if (@(Compare-Object @("adobe_premiere_pro", "blender", "davinci_resolve", "mondrian") ($crossApplicationProducers | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "cross-application.producers" "Cross-application qualification must require the exact commercial producer set"
+}
+$platformBackendPairs = @($platformMatrix.required_platform_backends | ForEach-Object { "$($_.platform)/$($_.backend)" })
+$platformScenarios = @($platformMatrix.required_scenarios_per_platform | ForEach-Object { [string]$_ })
+$platformEvidence = @($platformMatrix.required_evidence_per_cell | ForEach-Object { [string]$_ })
+$platformEvidenceOwners = @($platformMatrix.required_evidence_owners | ForEach-Object {
+    "$($_.kind)/$($_.owner)/$($_.verifier_id)/$($_.report_schema_version)"
+})
+if ($platformMatrix.schema_version -ne 1 -or $platformMatrix.execution_policy -ne "sealed-required") {
+    Add-Issue "error" "platform-matrix.schema-policy" "Platform/driver/display matrix must use schema 1 and sealed-required execution"
+}
+if ([string]$platformMatrix.runner.verifier_tool_id -ne "platform_qualification_replay" -or
+    [int]$platformMatrix.runner.timeout_seconds -le 0 -or
+    [int]$platformMatrix.runner.report_schema_version -ne 1) {
+    Add-Issue "error" "platform-matrix.runner" "Platform matrix must bind the approved standalone replay tool and bounded schema-1 report"
+}
+if ($platformMatrix.build_manifest_schema_version -ne 1 -or
+    [string]$platformMatrix.owner_verifier_script -ne "scripts/validation/verify-platform-driver-display-lane.ps1" -or
+    [string]$platformMatrix.source_verifier_script -ne "scripts/validation/verify-platform-driver-display-source.ps1" -or
+    [string]$platformMatrix.bundle_verifier_script -ne "scripts/validation/verify-platform-driver-display-matrix.ps1") {
+    Add-Issue "error" "platform-matrix.verifiers" "Platform matrix must bind the exact build-manifest schema and checked-in owner/bundle verifiers"
+}
+if (@(Compare-Object @("linux/vulkan", "mac_os/metal", "windows/dx12") ($platformBackendPairs | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.backends" "Platform matrix must require exact Windows/DX12, macOS/Metal, and Linux/Vulkan coverage"
+}
+if (@(Compare-Object @("display_p3", "hdr_pq", "managed_icc", "sdr_srgb") ($platformScenarios | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.scenarios" "Every platform must cover the exact SDR, P3, PQ, and ICC scenario union"
+}
+if (@(Compare-Object @("gpu_color", "platform_probe", "viewer_display") ($platformEvidence | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.evidence" "Every platform matrix cell must require exact platform, GPU, and Viewer evidence"
+}
+if (@(Compare-Object @(
+    "gpu_color/mondrian-renderer/gpu-color-qualification-v1/1",
+    "platform_probe/mondrian-platform/platform-display-probe-v1/1",
+    "viewer_display/mondrian-app/viewer-display-qualification-v1/1"
+) ($platformEvidenceOwners | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.evidence-owners" "Platform matrix evidence must retain exact owner Module and report schema contracts"
+}
+foreach ($field in @(
+    "cross_machine_row_aggregation_required",
+    "atomic_row_execution_required",
+    "row_execution_is_serial",
+    "clean_source_required",
+    "exact_target_artifact_required",
+    "executed_runtime_image_required",
+    "common_release_candidate_required",
+    "common_build_manifest_required",
+    "exact_environment_before_after_required",
+    "owner_verified_leaf_receipts_required",
+    "source_evidence_required",
+    "environment_snapshots_required",
+    "capture_authority_manifest_required",
+    "separately_approved_verifier_tools_required",
+    "runtime_cargo_replay_forbidden",
+    "hosted_ci_is_not_physical_evidence",
+    "capability_skip_forbidden"
+)) {
+    if (-not (Has-Property $platformMatrix $field) -or $platformMatrix.$field -ne $true) {
+        Add-Issue "error" "platform-matrix.invariant" "Platform matrix must require '$field'"
+    }
+}
+foreach ($field in @(
+    "ready_health_required",
+    "valid_display_contract_required",
+    "external_texture_presentation_required",
+    "zero_readback_stages_required",
+    "carrier_reuse_required_for_wide_color_and_hdr",
+    "operator_observation_required",
+    "capability_skip_forbidden",
+    "full_output_contract_sha256_required",
+    "exact_environment_sha256_required",
+    "executed_runtime_image_sha256_required"
+)) {
+    if (-not (Has-Property $platformMatrix.viewer_scenario_acceptance $field) -or
+        $platformMatrix.viewer_scenario_acceptance.$field -ne $true) {
+        Add-Issue "error" "platform-matrix.viewer-acceptance" "Platform matrix Viewer acceptance must require '$field'"
+    }
+}
+$platformOwnerGateIds = @($platformMatrix.owner_verifier_contracts.gpu_color_required_gates | ForEach-Object { [string]$_ })
+if ($platformMatrix.owner_verifier_contracts.raw_evidence_schema_version -ne 1 -or
+    $platformMatrix.owner_verifier_contracts.machine_report_schema_version -ne 1 -or
+    $platformMatrix.owner_verifier_contracts.raw_json_must_be_owner_evaluated -ne $true -or
+    [string]$platformMatrix.owner_verifier_contracts.qualified_gate_status -ne "qualified" -or
+    @(Compare-Object @(
+        "aces-pq-delta-e-itp",
+        "native-yuv-color-accuracy",
+        "output-smoke",
+        "standard-all-views-accuracy",
+        "standard-input-4k-performance",
+        "standard-pq-delta-e-itp",
+        "standard-rec709-accuracy",
+        "standard-view-4k-performance"
+    ) ($platformOwnerGateIds | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.owner-verifier-contracts" "Platform matrix must retain the exact owner-evaluated raw evidence and GPU gate contract"
+}
+$platformSourceOwners = @($platformMatrix.source_evidence_contracts.owners | ForEach-Object {
+    "$($_.kind)/$($_.source_verifier_id)"
+})
+if ($platformMatrix.capture_authority_manifest_schema_version -ne 1 -or
+    $platformMatrix.source_evidence_contracts.schema_version -ne 1 -or
+    $platformMatrix.source_evidence_contracts.environment_snapshot_schema_version -ne 1 -or
+    [string]$platformMatrix.source_evidence_contracts.platform_probe_producer_script -ne "scripts/validation/invoke-platform-display-probe-source.ps1" -or
+    [string]$platformMatrix.source_evidence_contracts.gpu_color_profile_path -ne "tests/validation/platform-gpu-color-gates.json" -or
+    [string]$platformMatrix.source_evidence_contracts.gpu_color_producer_script -ne "scripts/validation/invoke-platform-gpu-color-source.ps1" -or
+    @(Compare-Object @(
+        "authority-challenge.json", "build.stderr", "build.stdout", "capture-plan.json",
+        "producer-binary", "supervisor-summary.json"
+    ) @($platformMatrix.source_evidence_contracts.platform_probe_static_roles | Sort-Object)).Count -ne 0 -or
+    @(Compare-Object @(
+        "authority-challenge.json", "build.stderr", "build.stdout", "profile.json", "supervisor-summary.json"
+    ) @($platformMatrix.source_evidence_contracts.gpu_color_static_roles | Sort-Object)).Count -ne 0 -or
+    @(Compare-Object @("measurement.json", "report.json", "stderr", "stdout") `
+        @($platformMatrix.source_evidence_contracts.gpu_color_gate_roles | Sort-Object)).Count -ne 0 -or
+    [string]$platformMatrix.source_evidence_contracts.source_role_pattern -ne '^[a-z0-9][a-z0-9._-]{0,95}$' -or
+    @(Compare-Object @(
+        "gpu_color/gpu-color-source-replay-v1",
+        "platform_probe/platform-display-probe-source-replay-v1",
+        "viewer_display/viewer-display-source-replay-v1"
+    ) ($platformSourceOwners | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "platform-matrix.source-evidence" "Platform matrix must retain the exact source-replay owner contracts"
+}
+foreach ($producerPath in @(
+    [string]$platformMatrix.source_verifier_script,
+    [string]$platformMatrix.source_evidence_contracts.platform_probe_producer_script,
+    [string]$platformMatrix.source_evidence_contracts.gpu_color_producer_script
+)) {
+    try {
+        $producerAbsolute = Resolve-ContainedPath $repositoryRoot $producerPath "Platform qualification producer"
+        if (-not (Test-Path -LiteralPath $producerAbsolute -PathType Leaf)) {
+            throw "Platform qualification producer is missing: $producerPath"
+        }
+    }
+    catch { Add-Issue "error" "platform-matrix.producer-missing" $_.Exception.Message }
+}
+if (@($platformMatrix.native_probe_rules.mac_os.managed_icc).Count -eq 0 -or
+    @($platformMatrix.native_probe_rules.mac_os.wide_color_hdr_edr).Count -eq 0) {
+    Add-Issue "error" "platform-matrix.macos-native-rules" "macOS qualification must separate CoreGraphics ICC from AppKit wide-color/EDR evidence"
+}
+foreach ($field in @(
+    "qualified_status_required",
+    "exact_cell_closure_required",
+    "unique_row_run_ids_required",
+    "same_source_revision_required",
+    "same_release_candidate_required",
+    "build_manifest_hash_required",
+    "per_cell_product_artifact_required",
+    "profile_hash_required",
+    "machine_report_hash_required",
+    "raw_evidence_hash_required",
+    "environment_drift_forbidden",
+    "software_adapter_forbidden",
+    "missing_is_incomplete_not_pass",
+    "report_self_verification_required"
+)) {
+    if (-not (Has-Property $platformMatrix.acceptance $field) -or $platformMatrix.acceptance.$field -ne $true) {
+        Add-Issue "error" "platform-matrix.acceptance" "Platform matrix acceptance must require '$field'"
+    }
 }
 $declaredStimulusPath = Resolve-ContainedPath $repositoryRoot ([string]$crossApplicationProfile.stimulus.path) "Cross-application stimulus"
 $declaredStimulusHash = (Get-FileHash -LiteralPath $declaredStimulusPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -122,7 +290,7 @@ if (@(Compare-Object @("120-minute-authoring", "30-minute-audio-recovery", "30-m
 if (@(Compare-Object @("display-p3", "hdr-pq", "icc-sdr") ($viewerDisplayScenarioIds | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "viewer-display.scenarios" "Viewer display qualification must require exact P3, HDR-PQ, and ICC scenarios"
 }
-foreach ($field in @("ready_health_required", "valid_display_snapshot_required", "external_texture_presentation_required", "zero_readback_stages_required", "carrier_reuse_evidence_required", "operator_visual_observation_required", "capability_skip_forbidden")) {
+foreach ($field in @("ready_health_required", "valid_display_snapshot_required", "external_texture_presentation_required", "zero_readback_stages_required", "carrier_reuse_evidence_required", "full_output_contract_sha256_required", "full_output_contract_payload_required", "executed_runtime_image_sha256_required", "operator_visual_observation_required", "capability_skip_forbidden")) {
     if (-not (Has-Property $viewerDisplayProfile.acceptance $field) -or $viewerDisplayProfile.acceptance.$field -ne $true) {
         Add-Issue "error" "viewer-display.acceptance" "Viewer display qualification must require '$field'"
     }

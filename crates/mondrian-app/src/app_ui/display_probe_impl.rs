@@ -46,12 +46,23 @@ pub struct DisplaySnapshotResolution {
     pub calibration: Option<Arc<DisplayCalibrationLut3d>>,
 }
 
+/// Exact live display target facts used by the profile/HDR probes and snapshot.
+pub struct DisplaySnapshotTarget {
+    /// Product-facing display name when the platform exposes one.
+    pub name: Option<String>,
+    /// Desktop-space physical-pixel origin.
+    pub position: (i32, i32),
+    /// Physical-pixel extent; zero is treated as detached.
+    pub physical_size: (u32, u32),
+    /// Native platform display identity when a stable window-system ID exists.
+    pub native_display_id: Option<u64>,
+    /// Logical-to-physical display scale.
+    pub scale_factor: f64,
+}
+
 /// Resolve the live display contract and any matching runtime ICC calibration.
 pub fn resolve_display_snapshot(
-    display_name: Option<String>,
-    display_position: (i32, i32),
-    display_physical_size: (u32, u32),
-    scale_factor: f64,
+    display_target: DisplaySnapshotTarget,
     surface_format: wgpu::TextureFormat,
     surface_color_space: wgpu::SurfaceColorSpace,
     surface_hdr_mode_str: &str,
@@ -63,10 +74,10 @@ pub fn resolve_display_snapshot(
     refresh_reason: &str,
 ) -> DisplaySnapshotResolution {
     let profile_probe = if should_probe_os_icc_profile(policy) {
-        display_icc_profile_probe(DisplayProfileProbeTarget::new(
-            display_position,
-            display_physical_size,
-        ))
+        display_icc_profile_probe(
+            DisplayProfileProbeTarget::new(display_target.position, display_target.physical_size)
+                .with_native_display_id(display_target.native_display_id),
+        )
     } else {
         DisplayIccProfileProbeResult::unsupported("ICC profile not requested")
     };
@@ -78,10 +89,10 @@ pub fn resolve_display_snapshot(
         };
     let (monitor_profile_status, calibration) =
         resolve_monitor_profile_status(policy, &profile_probe, resolved_output_color_space);
-    let hdr_probe = display_hdr_state_probe(DisplayProfileProbeTarget::new(
-        display_position,
-        display_physical_size,
-    ));
+    let hdr_probe = display_hdr_state_probe(
+        DisplayProfileProbeTarget::new(display_target.position, display_target.physical_size)
+            .with_native_display_id(display_target.native_display_id),
+    );
 
     let hdr_mode_str = match surface_hdr_mode_str {
         "HdrPq" => "HdrPq",
@@ -135,12 +146,12 @@ pub fn resolve_display_snapshot(
     let snapshot = DisplayOutputSnapshot {
         display_management_policy: policy.clone(),
         display_id: DisplayId {
-            name: display_name,
-            position: display_position,
-            physical_size: display_physical_size,
+            name: display_target.name,
+            position: display_target.position,
+            physical_size: display_target.physical_size,
         },
         platform: current_platform(),
-        scale_factor: ScaleFactorPpm::from_f64(scale_factor),
+        scale_factor: ScaleFactorPpm::from_f64(display_target.scale_factor),
         surface_format: format!("{surface_format:?}"),
         surface_color_space: format!("{surface_color_space:?}"),
         surface_hdr_mode: hdr_mode_str.to_owned(),
@@ -176,10 +187,13 @@ fn generate_display_snapshot(
     refresh_reason: &str,
 ) -> DisplayOutputSnapshot {
     resolve_display_snapshot(
-        display_name,
-        display_position,
-        display_physical_size,
-        scale_factor,
+        DisplaySnapshotTarget {
+            name: display_name,
+            position: display_position,
+            physical_size: display_physical_size,
+            native_display_id: None,
+            scale_factor,
+        },
         surface_format,
         surface_color_space,
         surface_hdr_mode_str,
@@ -265,9 +279,11 @@ fn resolve_monitor_hdr_capability(
 pub(super) fn active_display_hdr_presentation_ready(
     display_position: (i32, i32),
     display_physical_size: (u32, u32),
+    native_display_id: Option<u64>,
     display_hdr_info: wgpu::DisplayHdrInfo,
 ) -> bool {
-    let target = DisplayProfileProbeTarget::new(display_position, display_physical_size);
+    let target = DisplayProfileProbeTarget::new(display_position, display_physical_size)
+        .with_native_display_id(native_display_id);
     let probe = display_hdr_state_probe(target);
     matches!(
         resolve_monitor_hdr_capability(&probe, display_hdr_info),

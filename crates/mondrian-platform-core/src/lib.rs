@@ -8,6 +8,7 @@
 mod desktop;
 mod display;
 mod memory;
+mod qualification_matrix;
 mod user_state_directory;
 
 pub use desktop::{
@@ -23,6 +24,20 @@ pub use memory::{
     PhysicalMemoryCapacityProbeResult, ProcessMemoryProbe, ProcessMemoryProbeBackend,
     ProcessMemoryProbeResult, ProcessMemoryScope, ProcessPrivateMemoryMetric, SystemMemoryProbe,
     SystemMemoryProbeBackend, SystemMemoryProbeResult,
+};
+pub use qualification_matrix::{
+    PlatformDriverDisplayQualificationProfile, PlatformQualificationCampaign,
+    PlatformQualificationCellObservation, PlatformQualificationCellReport,
+    PlatformQualificationCellRequirement, PlatformQualificationDriverIdentity,
+    PlatformQualificationEnvironment, PlatformQualificationError,
+    PlatformQualificationEvidenceKind, PlatformQualificationEvidenceReport,
+    PlatformQualificationEvidenceRequirement, PlatformQualificationLimits,
+    PlatformQualificationProductArtifact, PlatformQualificationReport,
+    PlatformQualificationScenarioEvidence, PlatformQualificationScenarioRequirement,
+    PlatformQualificationStatus, PreparedPlatformDriverDisplayQualification,
+    QualificationAdapterKind, QualificationDisplayScenario, QualificationGraphicsBackend,
+    QualificationHdrPresentation, QualificationHdrTransferFunction, QualificationPlatform,
+    QualificationPresentationTransfer, QualificationSurfaceColorSpace,
 };
 pub use user_state_directory::{UserStateDirectory, UserStateDirectoryError};
 

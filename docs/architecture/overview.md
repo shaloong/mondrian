@@ -45,7 +45,11 @@ foundation:
   owns dependency/lock/link-group admission and Timeline owns atomic map
   replacement.
 - `mondrian-platform-core`: narrow platform service traits and native-fact result
-  types, including stable per-user state-directory discovery. It makes no OS
+  types, including stable per-user state-directory discovery, plus the deep
+  platform/driver/display Matrix Module that compiles exact commercial rows and
+  deterministically correlates owner-verified physical evidence. Normalized
+  receipts remain small Core values; original probe/GPU/Viewer bytes are sealed
+  and replayed by platform validation Adapters. It makes no OS
   calls and owns no product filesystem namespace or persistence policy.
 - `mondrian-platform`: desktop platform implementations such as clipboard,
   dialogs, file reveal, stable per-user state-directory discovery,

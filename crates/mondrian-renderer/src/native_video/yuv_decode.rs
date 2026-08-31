@@ -871,6 +871,49 @@ mod tests {
     use mondrian_core::ColorTransferCharacteristic;
     use mondrian_core::WorkingColorSpace;
     use mondrian_media::DecodedGpuFrameHandleKind;
+    use std::fs::OpenOptions;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    fn emit_gpu_gate_measurements(
+        gate: &str,
+        adapter: &wgpu::AdapterInfo,
+        measurements: &[(&str, f64)],
+    ) {
+        let Some(path) =
+            std::env::var_os("MONDRIAN_GPU_COLOR_GATE_MEASUREMENT_OUTPUT").map(PathBuf::from)
+        else {
+            return;
+        };
+        let attestation = crate::qualification_attestation::gpu_color_gate_execution_attestation()
+            .expect("capture native YUV qualification execution attestation");
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "gate_id": gate,
+            "adapter": {
+                "name": adapter.name.clone(),
+                "backend": format!("{:?}", adapter.backend),
+                "device_type": format!("{:?}", adapter.device_type),
+                "driver": adapter.driver.clone(),
+                "driver_info": adapter.driver_info.clone(),
+                "vendor_id": format!("{:04x}", adapter.vendor),
+                "device_id": format!("{:04x}", adapter.device),
+            },
+            "attestation": attestation,
+            "measurements": measurements
+                .iter()
+                .map(|(metric, value)| serde_json::json!({ "metric": metric, "value": value }))
+                .collect::<Vec<_>>(),
+        });
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create native YUV measurement evidence");
+        serde_json::to_writer(&mut file, &payload)
+            .expect("serialize native YUV measurement evidence");
+        file.flush().expect("flush native YUV measurement evidence");
+    }
 
     #[test]
     fn limited_range_black_and_white_decode_exactly() {
@@ -1241,15 +1284,30 @@ mod tests {
         readback.unmap();
 
         let expected_luma = [0.0, 1.0, 110.0 / 219.0, 55.0 / 219.0];
+        let mut max_rgb_absolute_error = 0.0_f32;
+        let mut max_alpha_absolute_error = 0.0_f32;
         for (pixel, expected) in actual.chunks_exact(4).zip(expected_luma) {
             for channel in &pixel[..3] {
+                max_rgb_absolute_error = max_rgb_absolute_error.max((*channel - expected).abs());
                 assert!(
                     (*channel - expected).abs() < 0.0015,
                     "expected neutral {expected}, got {pixel:?}"
                 );
             }
+            max_alpha_absolute_error = max_alpha_absolute_error.max((pixel[3] - 1.0).abs());
             assert!((pixel[3] - 1.0).abs() < 0.001);
         }
+        emit_gpu_gate_measurements(
+            "native-yuv-color-accuracy",
+            &context.adapter.get_info(),
+            &[
+                ("max_rgb_absolute_error", f64::from(max_rgb_absolute_error)),
+                (
+                    "max_alpha_absolute_error",
+                    f64::from(max_alpha_absolute_error),
+                ),
+            ],
+        );
     }
 
     #[tokio::test]

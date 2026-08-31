@@ -558,6 +558,16 @@ impl DisplayOutputIdentity {
         &self.0
     }
 
+    /// Encode the complete identity as lowercase hexadecimal.
+    pub fn to_hex(self) -> String {
+        use std::fmt::Write as _;
+        let mut output = String::with_capacity(64);
+        for byte in self.0 {
+            write!(&mut output, "{byte:02x}").expect("writing to String is infallible");
+        }
+        output
+    }
+
     /// Compact diagnostic projection. Never use this value for equality.
     pub fn diagnostic_key(self) -> u64 {
         let mut bytes = [0_u8; 8];
@@ -695,6 +705,22 @@ mod tests {
         let mut b = sdr_pass_snapshot();
         b.display_id.name = Some("Different Monitor".to_owned());
         assert_ne!(a.contract_identity(), b.contract_identity());
+    }
+
+    #[test]
+    fn contract_identity_hex_preserves_all_256_bits() {
+        let identity = sdr_pass_snapshot().contract_identity();
+        let hex = identity.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert_eq!(
+            hex,
+            identity
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        );
     }
 
     #[test]

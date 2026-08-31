@@ -263,8 +263,9 @@ inferences from the selected policy.
 HITL profile. It requires exact Display P3, HDR-PQ, and managed-ICC scenarios on
 real displays. `scripts/validation/validate-viewer-display-qualification.ps1`
 consumes a product `MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT` JSONL file for each
-scenario plus one operator observation. A pass requires a valid Display Output
-Contract, Ready Viewer health, a registered and actually submitted external
+scenario plus one operator observation and the expected runtime-image SHA-256.
+A pass requires a valid full 256-bit Display Output Contract identity, Ready
+Viewer health, a registered and actually submitted external
 texture, zero readback stages, the exact native surface color space, the exact
 code-value transfer path, carrier allocation followed by steady reuse for
 P3/HDR, ICC processor proof for the ICC scenario, and a positive visual
@@ -277,6 +278,100 @@ OS compositor or monitor is disabled, unsupported, or unknown, the application
 retains the usable SDR sRGB UI carrier and the Viewer remains blocked by the
 typed display snapshot. This prevents DXGI format enumeration from switching
 an SDR desktop into a misleading PQ swapchain.
+
+## Platform / Driver / Display Matrix
+
+`mondrian-platform-core::PreparedPlatformDriverDisplayQualification` is the
+platform-neutral Matrix Module. A strict runtime profile explicitly enumerates
+finite commercial rows. Its `compile` Interface validates resource bounds,
+Windows/DX12, macOS/Metal, Linux/Vulkan closure, per-platform SDR/P3/PQ/ICC
+coverage, physical hardware adapters, platform-correct driver identities, and
+native probe sufficiency. Its `evaluate` Interface correlates a cross-machine
+campaign and emits a canonical, self-verifying report.
+
+The matrix deliberately permits different rows to come from different physical
+machines. One row itself is non-spliceable: source, target-specific product
+package, actually executed runtime image, build provenance, profile, machine report, unique run, exact
+environment, platform/GPU/Viewer receipts,
+normalized raw evidence, original owner source entries, and before/after
+environment snapshots must close atomically. A
+Windows driver is an explicit package; a macOS Metal driver binds the exact OS
+build; a Linux driver binds kernel, DRM, Vulkan ICD/driver, and Mesa when that
+stack uses Mesa. Software adapters cannot compile into a qualifying profile.
+Missing rows/evidence produce
+`incomplete`; an executed failure produces `failed` and dominates missing
+evidence. The aggregate binds one release-candidate/build manifest, not an
+impossible byte-identical executable across Windows, macOS, and Linux.
+
+The package and runtime image are separate identities: DMG, MSIX, AppImage, or
+DEB bytes prove the distribution artifact, while the Viewer JSONL measures the
+runtime image once per process and binds every record to a supervisor nonce,
+process instance, PID, and monotonic sequence. Linux reads `/proc/self/exe` to
+measure the mapped executable inode; Windows measures the locked executable.
+macOS loaded-image/code-signature provenance remains an external physical
+capture requirement. The same JSONL carries the complete canonical Display
+Output Contract plus the active wgpu adapter name,
+vendor/device IDs, device type, driver/driver-info, backend, and exact Window
+display target, so the Viewer cannot be correlated to an OS inventory entry by
+name alone. The target triple must match the captured machine
+architecture. Windows and Linux HDR rows require native PQ/link evidence;
+macOS requires a linear extended-range EDR carrier and headroom, without
+inventing PQ transfer, link bpc, or absolute peak-nit facts not exposed by
+AppKit. Carrier reuse is required only for P3/HDR; direct SDR sRGB and managed
+ICC paths may legitimately report no carrier reuse.
+
+The Module does not reinterpret Renderer accuracy metrics or Viewer execution.
+Exact verifier IDs route every source capture through a checked-in owner Adapter
+that parses ICC/EDID/native active-state facts, proves exact Cargo gate commands
+and test-emitted measurements, or deserializes the complete Viewer contract
+through Core and recomputes its canonical identity before the normalized
+receipt can enter a row. The active native display-path ID is shared by the
+profile, platform probes, Viewer stimulus, App JSONL, and operator observation.
+The Platform Adapter returns that ID from the same native enumeration that
+selects the ICC/HDR target; copied request metadata is never target proof.
+The aggregate
+sealer additionally consumes every row seal, verifies the cross-target build
+manifest and per-target provenance, and publishes a self-contained byte-closed
+bundle. Independent admission supplies external source, policy, runtime-profile,
+release-candidate, build-manifest, and separately hashed capture-authority
+anchors. The authority manifest approves exact source bytes and Viewer operator
+identity outside the bundle; it is the HITL provenance boundary, not a claim
+that hashes can observe a display. Admission streams the complete closure into
+a private create-only snapshot, replays every owner source and normalized verifier and
+the Matrix evaluator, and byte-compares the regenerated report. PowerShell owns
+clean checkout, file size, byte hashes, create-only snapshot/output, final
+bundle rehash, serial bounded execution, and exact artifact closure. See
+[Platform / Driver / Display Qualification](../dev/platform-driver-display-qualification.md).
+
+Qualification capture is product-owned rather than an authored native-state
+aggregate. A small `mondrian-platform` binary invokes the native ICC/HDR Adapter
+per scenario under a pre-issued authority challenge and emits strict raw API
+transcripts with producer-image, process, target, resolved native-output
+identity, sequence, and payload identity. Mutually exclusive desktop states are
+acquired only after a fresh authority transition acknowledgement chained to the
+previous transcript.
+GPU gates echo the same challenge from the actual test process. Final replay
+loads the exact PowerShell verifiers and checked source contracts into memory
+from one archived link-free Git object. Runtime Cargo is forbidden: three
+external verifier binaries are separately hash-approved and execute Core display
+contract replay, ICC/LUT replay, and Matrix evaluation. This removes mutable
+Cargo configuration and writable source paths from the verdict boundary.
+
+The row environment carries the exact wgpu renderer driver label and detail in
+addition to platform driver identity. Viewer JSONL, GPU measurements, stimulus,
+normalized receipts, and row environment must agree on the complete adapter
+fingerprint. Managed ICC reuses the admitted profile bytes and replays
+`DisplayCalibrationLut3d` with the product-reported rendering intent; the full
+profile fingerprint and LUT identity must agree across Platform and Viewer lanes.
+
+Platform display targeting now fails closed for empty extents. Quartz display
+sizes are consumed directly in physical pixels, preventing Retina double-scale
+misbinding. Windows ICC lookup first binds the active DisplayConfig adapter
+LUID/source ID through `ColorProfileGetDisplayDefault`, including Advanced Color
+profiles, then explicitly falls back to the documented WCS device default
+(`CPT_ICC + CPST_NONE`) rather than the global RGB working space. Linux
+DRM fallback requires the exact EDID block count and valid checksum on every
+block before exposing HDR capability.
 
 ### Action Codes
 
@@ -307,7 +402,8 @@ an SDR desktop into a misleading PQ swapchain.
 - Structured blocker taxonomy with health report integration
 - Fake display probe for testable display contract logic
 - Windows OS default ICC profile discovery via `mondrian-platform`
-  (`EnumDisplayMonitors` + WCS default profile lookup)
+  (`EnumDisplayMonitors` + DisplayConfig-bound
+  `ColorProfileGetDisplayDefault`, with WCS device-default fallback)
 - macOS active-display ICC payload discovery via CoreGraphics and real current,
   potential, and reference EDR headroom via `NSScreen`
 - Linux Wayland `color-management-v1` output image descriptions, including

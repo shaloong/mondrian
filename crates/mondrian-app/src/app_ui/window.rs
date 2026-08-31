@@ -5,11 +5,11 @@
 //! native event-loop wiring, renderer setup, shell command application, and the
 //! bridge between widget-dispatched actions and `AppState`.
 
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::app::preview_execution::{
@@ -91,6 +91,7 @@ use mondrian_ui_renderer::{command::DrawEncoder, ExternalTextureKey, ExternalTex
 use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation};
+use sha2::{Digest, Sha256};
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -172,6 +173,7 @@ enum ViewerHeterogeneousCompletionPoll {
 
 pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
 const VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV: &str = "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT";
+const VIEWER_QUALIFICATION_RUN_ID_ENV: &str = "MONDRIAN_VIEWER_QUALIFICATION_RUN_ID";
 const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
 const WORKSPACE_WINDOW_HEIGHT: f32 = 900.0;
 const WORKSPACE_MIN_WIDTH: f32 = 1024.0;
@@ -263,6 +265,28 @@ struct AppUiViewerGpuOutputTelemetry {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 struct AppUiViewerGpuOutputDiagnostics {
+    /// Supervisor-provided nonce shared by one non-spliceable Viewer run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qualification_run_id: Option<String>,
+    /// Process instance generated once at product startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_instance_id: Option<String>,
+    /// OS process ID retained for acquisition correlation, not as identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    process_id: Option<u32>,
+    /// Strictly increasing record number inside the process instance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    qualification_record_sequence: Option<u64>,
+    /// SHA-256 of the currently executing product image when qualification
+    /// diagnostics are enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_image_sha256: Option<String>,
+    /// Exact active wgpu Adapter identity driving the Viewer surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    renderer_adapter: Option<AppUiRendererAdapterDiagnostics>,
+    /// Exact active Window display target used by the native probes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_target: Option<AppUiDisplayTarget>,
     invocations: u64,
     non_workspace_skips: u64,
     current_skips: u64,
@@ -329,6 +353,42 @@ struct AppUiViewerGpuOutputDiagnostics {
     last_outcome: Option<AppUiViewerGpuOutputOutcome>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     display_snapshot: Option<DisplaySnapshotDiagnostics>,
+    /// Canonical display contract source value retained for qualification
+    /// replay; `display_snapshot.contract_sha256` is derived from this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_output_contract: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
+    /// Complete sampled ICC processor/LUT identity used by the Viewer frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_calibration_identity_sha256: Option<String>,
+    /// ICC rendering intent used to build the sampled calibration LUT.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct AppUiRendererAdapterDiagnostics {
+    name: String,
+    vendor_id: String,
+    device_id: String,
+    device_type: String,
+    driver: String,
+    driver_info: String,
+    backend: String,
+}
+
+impl AppUiRendererAdapterDiagnostics {
+    fn from_adapter(adapter: &wgpu::Adapter) -> Self {
+        let info = adapter.get_info();
+        Self {
+            name: info.name,
+            vendor_id: format!("{:04x}", info.vendor),
+            device_id: format!("{:04x}", info.device),
+            device_type: format!("{:?}", info.device_type),
+            driver: info.driver,
+            driver_info: info.driver_info,
+            backend: format!("{:?}", info.backend),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -349,6 +409,8 @@ struct DisplaySnapshotDiagnostics {
     blocker_count: u64,
     blocker_codes: Vec<String>,
     warning_count: u64,
+    /// Complete 256-bit Display Output Contract identity.
+    contract_sha256: String,
     contract_diagnostic_key: u64,
 }
 
@@ -371,6 +433,13 @@ impl DisplaySnapshotDiagnostics {
             blocker_count: snapshot.blockers.len() as u64,
             blocker_codes: snapshot.blockers.iter().map(|b| b.code().to_owned()).collect(),
             warning_count: snapshot.warnings.len() as u64,
+            contract_sha256: snapshot
+                .contract_identity()
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(""),
             contract_diagnostic_key: snapshot.contract_identity().diagnostic_key(),
         }
     }
@@ -539,6 +608,13 @@ impl AppUiViewerGpuOutputTelemetry {
         }
         let health = self.health_summary();
         AppUiViewerGpuOutputDiagnostics {
+            qualification_run_id: None,
+            process_instance_id: None,
+            process_id: None,
+            qualification_record_sequence: None,
+            runtime_image_sha256: None,
+            renderer_adapter: None,
+            display_target: None,
             invocations: self.invocations,
             non_workspace_skips: self.non_workspace_skips,
             current_skips: self.current_skips,
@@ -610,6 +686,9 @@ impl AppUiViewerGpuOutputTelemetry {
             display_issue_summary,
             last_outcome: self.last_outcome,
             display_snapshot: None,
+            display_output_contract: None,
+            display_calibration_identity_sha256: None,
+            display_calibration_rendering_intent: None,
         }
     }
 
@@ -1193,6 +1272,7 @@ struct AppUiWindowSession {
     display_output_contract: AppUiDisplayOutputContract,
     display_snapshot: Option<mondrian_core::display_contract::DisplayOutputSnapshot>,
     display_calibration: Option<Arc<mondrian_core::display_calibration::DisplayCalibrationLut3d>>,
+    renderer_adapter: AppUiRendererAdapterDiagnostics,
     color_engine: mondrian_core::ColorEngine,
     display_management_policy: mondrian_core::color_models::DisplayManagementPolicy,
     frame_renderer: AppUiFrameRenderer,
@@ -1788,6 +1868,9 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
                             &session.display_output_contract.display_target,
                             session.viewer_gpu_execution.color_output_diagnostics().into(),
                             session.display_snapshot.as_ref(),
+                            session.display_calibration.as_deref(),
+                            Some(session.display_management_policy.icc_rendering_intent()),
+                            Some(&session.renderer_adapter),
                             frame_result.metrics(),
                         );
                         if frame_result.needs_follow_up_redraw() {
@@ -2204,6 +2287,7 @@ fn app_ui_display_output_contract(
                 && !super::display_probe_impl::active_display_hdr_presentation_ready(
                     display_target.position,
                     display_target.physical_size,
+                    display_target.native_display_id,
                     display_hdr_info.clone(),
                 ) =>
         {
@@ -2305,6 +2389,8 @@ struct AppUiDisplayTarget {
     name: Option<String>,
     position: (i32, i32),
     physical_size: (u32, u32),
+    native_display_id: Option<u64>,
+    native_display_path_id: Option<String>,
     scale_factor_ppm: u32,
     refresh_rate_millihertz: Option<u32>,
 }
@@ -3100,6 +3186,8 @@ fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisp
             name: None,
             position: (0, 0),
             physical_size: (0, 0),
+            native_display_id: None,
+            native_display_path_id: None,
             scale_factor_ppm: 0,
             refresh_rate_millihertz: None,
         };
@@ -3112,9 +3200,54 @@ fn app_ui_display_target_for_window(window: &winit::window::Window) -> AppUiDisp
         name: monitor.name(),
         position: (position.x, position.y),
         physical_size: (size.width, size.height),
+        native_display_id: app_ui_monitor_native_display_id(&monitor),
+        native_display_path_id: app_ui_monitor_native_display_path_id(&monitor),
         scale_factor_ppm,
         refresh_rate_millihertz: monitor.refresh_rate_millihertz(),
     }
+}
+
+#[cfg(target_os = "macos")]
+fn app_ui_monitor_native_display_id(monitor: &winit::monitor::MonitorHandle) -> Option<u64> {
+    use winit::platform::macos::MonitorHandleExtMacOS as _;
+    Some(u64::from(monitor.native_id()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn app_ui_monitor_native_display_id(_monitor: &winit::monitor::MonitorHandle) -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::windows::MonitorHandleExtWindows as _;
+    let value = monitor.native_id();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+#[cfg(target_os = "macos")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::macos::MonitorHandleExtMacOS as _;
+    Some(monitor.native_id().to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn app_ui_monitor_native_display_path_id(
+    monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    use winit::platform::x11::MonitorHandleExtX11 as _;
+    Some(monitor.native_id().to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn app_ui_monitor_native_display_path_id(
+    _monitor: &winit::monitor::MonitorHandle,
+) -> Option<String> {
+    None
 }
 
 fn log_backend_event(event: AppUiBackendEvent) {
@@ -3230,14 +3363,38 @@ fn viewer_gpu_output_diagnostics(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_calibration: Option<&mondrian_core::display_calibration::DisplayCalibrationLut3d>,
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+    renderer_adapter: Option<&AppUiRendererAdapterDiagnostics>,
     frame_metrics: AppUiFrameMetrics,
 ) -> AppUiViewerGpuOutputDiagnostics {
     let mut diagnostics = telemetry.diagnostics(runtime_report);
+    if viewer_gpu_output_diagnostics_output_path().is_some() {
+        diagnostics.qualification_run_id = viewer_qualification_run_id();
+        diagnostics.process_instance_id = Some(viewer_process_instance_id().to_owned());
+        diagnostics.process_id = Some(std::process::id());
+        diagnostics.qualification_record_sequence = Some(next_viewer_qualification_record());
+        diagnostics.runtime_image_sha256 = viewer_runtime_image_sha256();
+    }
     diagnostics.last_color_rejection = host.current_viewer_color_rejection();
     if let Some(issue) = diagnostics.display_issue_summary.as_mut() {
         issue.display_target = Some(display_target.clone());
     }
     diagnostics.display_snapshot = display_snapshot.map(DisplaySnapshotDiagnostics::from_snapshot);
+    diagnostics.display_output_contract = display_snapshot.cloned();
+    diagnostics.display_calibration_identity_sha256 = display_calibration.map(|calibration| {
+        calibration
+            .identity()
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("")
+    });
+    diagnostics.display_calibration_rendering_intent =
+        display_calibration.map(|_| display_calibration_rendering_intent.unwrap_or_default());
+    diagnostics.renderer_adapter = renderer_adapter.cloned();
+    diagnostics.display_target = Some(display_target.clone());
     diagnostics.ui_surface_carrier_active = frame_metrics.surface_carrier_active;
     diagnostics.ui_surface_carrier_target_rebuilt = frame_metrics.surface_carrier_target_rebuilt;
     diagnostics.presented_external_texture_batches = frame_metrics.external_texture_batches;
@@ -3252,6 +3409,9 @@ fn trace_viewer_gpu_output_telemetry(
     display_target: &AppUiDisplayTarget,
     runtime_report: RenderGpuOutputRuntimeDiagnosticsReport,
     display_snapshot: Option<&mondrian_core::display_contract::DisplayOutputSnapshot>,
+    display_calibration: Option<&mondrian_core::display_calibration::DisplayCalibrationLut3d>,
+    display_calibration_rendering_intent: Option<mondrian_core::IccRenderingIntent>,
+    renderer_adapter: Option<&AppUiRendererAdapterDiagnostics>,
     frame_metrics: AppUiFrameMetrics,
 ) {
     let diagnostics = viewer_gpu_output_diagnostics(
@@ -3260,6 +3420,9 @@ fn trace_viewer_gpu_output_telemetry(
         display_target,
         runtime_report,
         display_snapshot,
+        display_calibration,
+        display_calibration_rendering_intent,
+        renderer_adapter,
         frame_metrics,
     );
     tracing::trace!(
@@ -3368,6 +3531,44 @@ fn write_viewer_gpu_output_diagnostics_to_path(
 
 fn viewer_gpu_output_diagnostics_output_path() -> Option<PathBuf> {
     std::env::var_os(VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV).map(PathBuf::from)
+}
+
+fn viewer_qualification_run_id() -> Option<String> {
+    std::env::var(VIEWER_QUALIFICATION_RUN_ID_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn viewer_process_instance_id() -> &'static str {
+    static PROCESS_INSTANCE_ID: OnceLock<String> = OnceLock::new();
+    PROCESS_INSTANCE_ID.get_or_init(|| uuid::Uuid::new_v4().to_string()).as_str()
+}
+
+fn next_viewer_qualification_record() -> u64 {
+    static RECORD_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    RECORD_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn viewer_runtime_image_sha256() -> Option<String> {
+    static RUNTIME_IMAGE_SHA256: OnceLock<Option<String>> = OnceLock::new();
+    RUNTIME_IMAGE_SHA256
+        .get_or_init(|| {
+            #[cfg(target_os = "linux")]
+            let mut file = File::open("/proc/self/exe").ok()?;
+            #[cfg(not(target_os = "linux"))]
+            let mut file = File::open(std::env::current_exe().ok()?).ok()?;
+            let mut buffer = [0_u8; 128 * 1024];
+            let mut hasher = Sha256::new();
+            loop {
+                let read = file.read(&mut buffer).ok()?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+            }
+            Some(format!("{:x}", hasher.finalize()))
+        })
+        .clone()
 }
 
 fn app_ui_interactive_playback_wake_delay(host: &AppUiHost, delay: Duration) -> Duration {
@@ -5366,10 +5567,13 @@ fn refresh_display_output_contract(
     let new_display_name = next.display_target.name.clone();
 
     let display_resolution = super::display_probe_impl::resolve_display_snapshot(
-        next.display_target.name.clone(),
-        next.display_target.position,
-        next.display_target.physical_size,
-        next.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+        super::display_probe_impl::DisplaySnapshotTarget {
+            name: next.display_target.name.clone(),
+            position: next.display_target.position,
+            physical_size: next.display_target.physical_size,
+            native_display_id: next.display_target.native_display_id,
+            scale_factor: next.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+        },
         next.surface_color.format,
         next.surface_color.color_space,
         &format!("{:?}", next.surface_color.hdr_mode),
@@ -5513,10 +5717,14 @@ impl AppUiWindowSession {
 
         let (color_engine, display_management_policy) = host.resolved_display_color_management();
         let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
-            display_output_contract.display_target.name.clone(),
-            display_output_contract.display_target.position,
-            display_output_contract.display_target.physical_size,
-            display_output_contract.display_target.scale_factor_ppm as f64 / 1_000_000.0,
+            super::display_probe_impl::DisplaySnapshotTarget {
+                name: display_output_contract.display_target.name.clone(),
+                position: display_output_contract.display_target.position,
+                physical_size: display_output_contract.display_target.physical_size,
+                native_display_id: display_output_contract.display_target.native_display_id,
+                scale_factor: display_output_contract.display_target.scale_factor_ppm as f64
+                    / 1_000_000.0,
+            },
             display_output_contract.surface_color.format,
             display_output_contract.surface_color.color_space,
             &format!("{:?}", display_output_contract.surface_color.hdr_mode),
@@ -5528,6 +5736,7 @@ impl AppUiWindowSession {
             "Startup",
         );
         let initial_snapshot = initial_display_resolution.snapshot;
+        let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
         host.set_display_output_snapshot(Some(&initial_snapshot));
 
         let frame_renderer =
@@ -5555,6 +5764,7 @@ impl AppUiWindowSession {
             display_output_contract,
             display_snapshot: Some(initial_snapshot),
             display_calibration: initial_display_resolution.calibration,
+            renderer_adapter,
             color_engine,
             display_management_policy,
             frame_renderer,
@@ -6010,6 +6220,18 @@ mod tests {
     use mondrian_ui_core::widget::{EventContext, PaintContext};
     use mondrian_ui_core::Widget;
     use std::sync::Mutex;
+
+    #[test]
+    fn qualification_diagnostics_bind_full_contract_and_runtime_image() {
+        let snapshot = mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        let diagnostics = DisplaySnapshotDiagnostics::from_snapshot(&snapshot);
+        assert_eq!(diagnostics.contract_sha256.len(), 64);
+        assert!(diagnostics.contract_sha256.chars().all(|value| value.is_ascii_hexdigit()));
+
+        let runtime_image = viewer_runtime_image_sha256().expect("test runtime image must hash");
+        assert_eq!(runtime_image.len(), 64);
+        assert!(runtime_image.chars().all(|value| value.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn delayed_viewer_callback_survives_native_window_replacement() {
@@ -6578,6 +6800,8 @@ mod tests {
                 name: Some("test-display".to_owned()),
                 position: (0, 0),
                 physical_size: (3840, 2160),
+                native_display_id: None,
+                native_display_path_id: None,
                 scale_factor_ppm: 1_000_000,
                 refresh_rate_millihertz: Some(60_000),
             },
@@ -7293,6 +7517,8 @@ mod tests {
             name: Some("Reference Monitor".to_owned()),
             position: (1920, 0),
             physical_size: (3840, 2160),
+            native_display_id: None,
+            native_display_path_id: None,
             scale_factor_ppm: 1_000_000,
             refresh_rate_millihertz: Some(60_000),
         };
@@ -7302,6 +7528,9 @@ mod tests {
             &telemetry,
             &display_target,
             RenderGpuOutputRuntimeDiagnosticsReport::default(),
+            None,
+            None,
+            None,
             None,
             AppUiFrameMetrics::default(),
         );
@@ -8013,6 +8242,29 @@ mod tests {
         });
         let mut diagnostics =
             telemetry.diagnostics(RenderGpuOutputRuntimeDiagnosticsReport::default());
+        diagnostics.qualification_run_id = Some("qualification-run".to_owned());
+        diagnostics.process_instance_id = Some("process-instance".to_owned());
+        diagnostics.process_id = Some(42);
+        diagnostics.qualification_record_sequence = Some(7);
+        diagnostics.runtime_image_sha256 = Some("a".repeat(64));
+        diagnostics.renderer_adapter = Some(AppUiRendererAdapterDiagnostics {
+            name: "Qualification GPU".to_owned(),
+            vendor_id: "10de".to_owned(),
+            device_id: "2684".to_owned(),
+            device_type: "DiscreteGpu".to_owned(),
+            driver: "qualified-driver".to_owned(),
+            driver_info: "qualified-driver-info".to_owned(),
+            backend: "Dx12".to_owned(),
+        });
+        let display_output_contract =
+            mondrian_core::display_probe::FakeDisplayProbe::sdr_pass().snapshot;
+        diagnostics.display_snapshot = Some(DisplaySnapshotDiagnostics::from_snapshot(
+            &display_output_contract,
+        ));
+        diagnostics.display_output_contract = Some(display_output_contract);
+        diagnostics.display_calibration_identity_sha256 = Some("b".repeat(64));
+        diagnostics.display_calibration_rendering_intent =
+            Some(mondrian_core::IccRenderingIntent::RelativeColorimetric);
         diagnostics.last_color_rejection = Some(PreviewColorRejection {
             asset_id: mondrian_core::types::AssetId::new(),
             path: PathBuf::from("E:/media/missing-color-tags.mov"),
@@ -8076,6 +8328,25 @@ mod tests {
         assert_eq!(json["health_counts"]["ready"], 1);
         assert_eq!(json["health_counts"]["degraded"], 0);
         assert_eq!(json["health_counts"]["failed"], 0);
+        assert_eq!(json["qualification_run_id"], "qualification-run");
+        assert_eq!(json["process_instance_id"], "process-instance");
+        assert_eq!(json["process_id"], 42);
+        assert_eq!(json["qualification_record_sequence"], 7);
+        assert_eq!(json["runtime_image_sha256"], "a".repeat(64));
+        assert_eq!(json["renderer_adapter"]["backend"], "Dx12");
+        assert_eq!(
+            json["display_snapshot"]["contract_sha256"].as_str().map(str::len),
+            Some(64)
+        );
+        assert_eq!(
+            json["display_output_contract"]["surface_color_space"],
+            "Srgb"
+        );
+        assert_eq!(json["display_calibration_identity_sha256"], "b".repeat(64));
+        assert_eq!(
+            json["display_calibration_rendering_intent"],
+            "RelativeColorimetric"
+        );
         assert_eq!(json["stage_gpu_color_stages"], 1);
         assert_eq!(json["accumulated_stage_report"]["gpu_color_stages"], 1);
         assert_eq!(json["accumulated_stage_report"]["upload_stages"], 1);

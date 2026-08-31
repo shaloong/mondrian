@@ -5264,6 +5264,41 @@ mod tests {
         }
     }
 
+    fn emit_gpu_gate_measurements(
+        gate: &str,
+        adapter: &wgpu::AdapterInfo,
+        measurements: &[(&str, f64)],
+    ) -> anyhow::Result<()> {
+        let Some(path) =
+            std::env::var_os("MONDRIAN_GPU_COLOR_GATE_MEASUREMENT_OUTPUT").map(PathBuf::from)
+        else {
+            return Ok(());
+        };
+        let attestation = crate::qualification_attestation::gpu_color_gate_execution_attestation()?;
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "gate_id": gate,
+            "adapter": {
+                "name": adapter.name.clone(),
+                "backend": format!("{:?}", adapter.backend),
+                "device_type": format!("{:?}", adapter.device_type),
+                "driver": adapter.driver.clone(),
+                "driver_info": adapter.driver_info.clone(),
+                "vendor_id": format!("{:04x}", adapter.vendor),
+                "device_id": format!("{:04x}", adapter.device),
+            },
+            "attestation": attestation,
+            "measurements": measurements
+                .iter()
+                .map(|(metric, value)| serde_json::json!({ "metric": metric, "value": value }))
+                .collect::<Vec<_>>(),
+        });
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        serde_json::to_writer(&mut file, &payload)?;
+        file.flush()?;
+        Ok(())
+    }
+
     #[test]
     fn output_boundary_resolves_product_intent_for_display_and_export() {
         let intent = OutputTransformIntent::mondrian_standard();
@@ -6250,6 +6285,7 @@ mod tests {
         let frame = standard_view_parity_working_frame();
         let mut runtime =
             RenderGpuOutputBoundaryRuntime::with_first_frame_id(1_200).expect("GPU output runtime");
+        let mut overall_max_delta = 0.0_f32;
         for output in [
             ColorSpace::Srgb,
             ColorSpace::Rec709,
@@ -6317,6 +6353,7 @@ mod tests {
                 .zip(actual.iter().copied())
                 .map(|(expected, actual)| (expected - actual).abs())
                 .fold(0.0_f32, f32::max);
+            overall_max_delta = overall_max_delta.max(max_delta);
             assert!(
                 max_delta <= 0.001,
                 "{output:?} Standard GPU/CPU max float delta {max_delta} exceeds RGBA16F budget"
@@ -6325,6 +6362,12 @@ mod tests {
             assert_eq!(record.stage_diagnostics.readback_stages, 1);
             runtime.clear_frame_resources();
         }
+        emit_gpu_gate_measurements(
+            "standard-all-views-accuracy",
+            &context.adapter.get_info(),
+            &[("max_absolute_float_delta", f64::from(overall_max_delta))],
+        )
+        .expect("write GPU all-views measurement evidence");
     }
 
     #[tokio::test]
@@ -6377,10 +6420,17 @@ mod tests {
             .expect("Standard Rec.709 readback should unpack");
         readback_buffer.unmap();
 
+        let max_delta = max_rgba_delta(&expected.rgba, actual.rgba());
         assert!(
-            max_rgba_delta(&expected.rgba, actual.rgba()) <= 1,
+            max_delta <= 1,
             "Standard Rec.709 GPU RGBA8 output diverged from CPU reference"
         );
+        emit_gpu_gate_measurements(
+            "standard-rec709-accuracy",
+            &context.adapter.get_info(),
+            &[("max_code_delta", f64::from(max_delta))],
+        )
+        .expect("write GPU Rec.709 measurement evidence");
     }
 
     async fn assert_gpu_pq_view_meets_delta_e_itp_budget(
@@ -6466,6 +6516,23 @@ mod tests {
         );
         assert_eq!(record.stage_diagnostics.gpu_color_stages, 1);
         assert_eq!(record.stage_diagnostics.readback_stages, 1);
+        emit_gpu_gate_measurements(
+            gate,
+            &context.adapter.get_info(),
+            &[
+                ("max_delta_e_itp", report.statistics.max_delta_e_itp),
+                ("mean_delta_e_itp", report.statistics.mean_delta_e_itp),
+                (
+                    "percentile_99_delta_e_itp",
+                    report.statistics.percentile_99_delta_e_itp,
+                ),
+                (
+                    "max_alpha_absolute_error",
+                    report.statistics.max_alpha_absolute_error,
+                ),
+            ],
+        )
+        .expect("write GPU PQ measurement evidence");
     }
 
     #[tokio::test]
@@ -6638,6 +6705,14 @@ mod tests {
             tolerance,
         };
         emit_gpu_output_smoke_report(&report)?;
+        emit_gpu_gate_measurements(
+            "output-smoke",
+            &context.adapter.get_info(),
+            &[
+                ("native_gpu_output_ready", if passed { 1.0 } else { 0.0 }),
+                ("readback_stages", report.stage.readback_stages as f64),
+            ],
+        )?;
 
         assert!(passed, "GPU output boundary smoke failed: {report:?}");
         Ok(())

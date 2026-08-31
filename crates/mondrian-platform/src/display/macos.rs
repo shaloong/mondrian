@@ -11,9 +11,18 @@ use objc2_core_graphics::{
     CGDisplayPixelsWide,
 };
 
+use super::physical_rect_matches_target;
+
 pub(crate) fn display_icc_profile(
     target: DisplayProfileProbeTarget,
 ) -> DisplayIccProfileProbeResult {
+    if !target.is_valid() {
+        return DisplayIccProfileProbeResult::missing(
+            DisplayProbeBackend::MacOsCoreGraphics,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     let Some((display_id, display_name, _)) = screen_for_target(target) else {
         return DisplayIccProfileProbeResult::missing(
             DisplayProbeBackend::MacOsCoreGraphics,
@@ -28,16 +37,25 @@ pub(crate) fn display_icc_profile(
             DisplayProbeBackend::MacOsCoreGraphics,
             Some(display_name),
             data.to_vec(),
-        ),
+        )
+        .with_native_display_path_id(Some(display_id.to_string())),
         _ => DisplayIccProfileProbeResult::missing(
             DisplayProbeBackend::MacOsCoreGraphics,
             Some(display_name),
             "CGDisplayCopyColorSpace returned no ICC payload for this display",
-        ),
+        )
+        .with_native_display_path_id(Some(display_id.to_string())),
     }
 }
 
 pub(crate) fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    if !target.is_valid() {
+        return DisplayHdrProbeResult::missing(
+            DisplayProbeBackend::MacOsAppKit,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     let Some((display_id, display_name, screen)) = screen_for_target(target) else {
         return DisplayHdrProbeResult::missing(
             DisplayProbeBackend::MacOsAppKit,
@@ -69,6 +87,7 @@ pub(crate) fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdr
             ..DisplayHdrProbeDetails::default()
         },
     )
+    .with_native_display_path_id(Some(display_id.to_string()))
 }
 
 fn screen_for_target(
@@ -77,31 +96,29 @@ fn screen_for_target(
     let mtm = MainThreadMarker::new()?;
     NSScreen::screens(mtm).to_vec().into_iter().find_map(|screen| {
         let display_id = screen.CGDirectDisplayID();
-        screen_matches_target(display_id, screen.backingScaleFactor(), target)
+        target
+            .native_display_id
+            .map_or_else(
+                || screen_matches_target(display_id, target),
+                |native_id| u64::from(display_id) == native_id,
+            )
             .then(|| (display_id, screen.localizedName().to_string(), screen))
     })
 }
 
-fn screen_matches_target(
-    display_id: CGDirectDisplayID,
-    scale_factor: f64,
-    target: DisplayProfileProbeTarget,
-) -> bool {
-    // Match winit's macOS MonitorHandle contract: CoreGraphics display sizes
-    // and bounds are logical screen coordinates converted by backing scale.
-    let pixel_width = (CGDisplayPixelsWide(display_id) as f64 * scale_factor).round() as u32;
-    let pixel_height = (CGDisplayPixelsHigh(display_id) as f64 * scale_factor).round() as u32;
+fn screen_matches_target(display_id: CGDirectDisplayID, target: DisplayProfileProbeTarget) -> bool {
+    // Quartz Display Services already reports pixels here. Applying AppKit's
+    // backing scale again doubles Retina extents and loses the target screen.
+    let pixel_width = CGDisplayPixelsWide(display_id) as u32;
+    let pixel_height = CGDisplayPixelsHigh(display_id) as u32;
     let bounds = CGDisplayBounds(display_id);
-    let left = (bounds.origin.x * scale_factor).round() as i32;
-    let top = (bounds.origin.y * scale_factor).round() as i32;
-    let right = left.saturating_add((bounds.size.width * scale_factor).round() as i32);
-    let bottom = top.saturating_add((bounds.size.height * scale_factor).round() as i32);
-    let center_x = target.x.saturating_add((target.width / 2) as i32);
-    let center_y = target.y.saturating_add((target.height / 2) as i32);
-
-    (pixel_width == target.width && pixel_height == target.height)
-        && ((left == target.x && top == target.y)
-            || (center_x >= left && center_x < right && center_y >= top && center_y < bottom))
+    physical_rect_matches_target(
+        bounds.origin.x.round() as i32,
+        bounds.origin.y.round() as i32,
+        pixel_width,
+        pixel_height,
+        target,
+    )
 }
 
 fn headroom_ppm(value: f64) -> Option<u32> {

@@ -16,7 +16,7 @@ use windows_sys::Win32::Devices::Display::{
     DISPLAYCONFIG_MODE_INFO, DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SDR_WHITE_LEVEL,
     DISPLAYCONFIG_SOURCE_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
-use windows_sys::Win32::Foundation::{LPARAM, LUID, RECT};
+use windows_sys::Win32::Foundation::{LocalFree, LPARAM, LUID, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFOEXW,
 };
@@ -26,12 +26,21 @@ use windows_sys::Win32::Graphics::Gdi::{
     DISPLAYCONFIG_COLOR_ENCODING_YCBCR444,
 };
 use windows_sys::Win32::UI::ColorSystem::{
-    WcsGetDefaultColorProfile, WcsGetDefaultColorProfileSize, CPST_NONE, CPST_RGB_WORKING_SPACE,
-    CPST_STANDARD_DISPLAY_COLOR_MODE, CPT_ICC, WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
+    ColorProfileGetDisplayDefault, WcsGetDefaultColorProfile, WcsGetDefaultColorProfileSize,
+    CPST_NONE, CPT_ICC, WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
     WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
 };
 
+use super::physical_rect_matches_target;
+
 pub fn display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfileProbeResult {
+    if !target.is_valid() {
+        return DisplayIccProfileProbeResult::missing(
+            DisplayProbeBackend::WindowsWcs,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     let display_device_name = match display_device_name_for_target(target) {
         Ok(Some(name)) => name,
         Ok(None) => {
@@ -51,20 +60,29 @@ pub fn display_icc_profile(target: DisplayProfileProbeTarget) -> DisplayIccProfi
     };
 
     match default_icc_profile_for_device(&display_device_name) {
-        Ok(path) => DisplayIccProfileProbeResult::found_path(
-            DisplayProbeBackend::WindowsWcs,
-            Some(display_device_name),
+        Ok((backend, path)) => DisplayIccProfileProbeResult::found_path(
+            backend,
+            Some(display_device_name.clone()),
             path,
-        ),
+        )
+        .with_native_display_path_id(Some(display_device_name)),
         Err(reason) => DisplayIccProfileProbeResult::missing(
             DisplayProbeBackend::WindowsWcs,
-            Some(display_device_name),
+            Some(display_device_name.clone()),
             reason,
-        ),
+        )
+        .with_native_display_path_id(Some(display_device_name)),
     }
 }
 
 pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeResult {
+    if !target.is_valid() {
+        return DisplayHdrProbeResult::missing(
+            DisplayProbeBackend::WindowsDisplayConfig,
+            None,
+            "display target has an empty physical extent",
+        );
+    }
     let display_device_name = match display_device_name_for_target(target) {
         Ok(Some(name)) => name,
         Ok(None) => {
@@ -86,7 +104,7 @@ pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeRe
     match advanced_color_for_device(&display_device_name) {
         Ok(state) => DisplayHdrProbeResult::found(
             DisplayProbeBackend::WindowsDisplayConfig,
-            Some(display_device_name),
+            Some(display_device_name.clone()),
             DisplayHdrProbeDetails {
                 hdr_supported: Some(state.advanced_color_supported),
                 hdr_enabled: Some(state.advanced_color_enabled),
@@ -97,12 +115,14 @@ pub fn display_hdr_state(target: DisplayProfileProbeTarget) -> DisplayHdrProbeRe
                 sdr_reference_white_nits: state.sdr_white_level.map(sdr_white_level_to_nits),
                 ..DisplayHdrProbeDetails::default()
             },
-        ),
+        )
+        .with_native_display_path_id(Some(display_device_name)),
         Err(reason) => DisplayHdrProbeResult::failed(
             DisplayProbeBackend::WindowsDisplayConfig,
-            Some(display_device_name),
+            Some(display_device_name.clone()),
             reason,
-        ),
+        )
+        .with_native_display_path_id(Some(display_device_name)),
     }
 }
 
@@ -168,38 +188,46 @@ unsafe extern "system" fn enum_monitor_proc(
 fn monitor_matches_target(rect: &RECT, target: DisplayProfileProbeTarget) -> bool {
     let width = rect.right.saturating_sub(rect.left) as u32;
     let height = rect.bottom.saturating_sub(rect.top) as u32;
-    let exact = rect.left == target.x
-        && rect.top == target.y
-        && width == target.width
-        && height == target.height;
-    if exact {
-        return true;
-    }
-
-    let center_x = target.x.saturating_add((target.width / 2) as i32);
-    let center_y = target.y.saturating_add((target.height / 2) as i32);
-    center_x >= rect.left && center_x < rect.right && center_y >= rect.top && center_y < rect.bottom
+    physical_rect_matches_target(rect.left, rect.top, width, height, target)
 }
 
-fn default_icc_profile_for_device(device_name: &str) -> Result<PathBuf, String> {
-    let device_name = wide_null(device_name);
+fn default_icc_profile_for_device(
+    device_name: &str,
+) -> Result<(DisplayProbeBackend, PathBuf), String> {
     let scopes = [
         WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
         WCS_PROFILE_MANAGEMENT_SCOPE_SYSTEM_WIDE,
     ];
-    let subtypes = [
-        CPST_RGB_WORKING_SPACE,
-        CPST_STANDARD_DISPLAY_COLOR_MODE,
-        CPST_NONE,
-    ];
-
     let mut failures = Vec::new();
-    for scope in scopes {
-        for subtype in subtypes {
-            match default_icc_profile_for_scope(device_name.as_ptr(), scope, subtype) {
-                Ok(path) => return Ok(resolve_color_profile_path(path)),
-                Err(reason) => failures.push(reason),
+    match active_display_path_for_device(device_name) {
+        Ok(path) => {
+            for scope in scopes {
+                match display_default_profile_for_path(&path, scope) {
+                    Ok(profile) => {
+                        return Ok((
+                            DisplayProbeBackend::WindowsColorProfileDisplayDefault,
+                            resolve_color_profile_path(profile),
+                        ));
+                    }
+                    Err(reason) => failures.push(reason),
+                }
             }
+        }
+        Err(reason) => failures.push(reason),
+    }
+
+    let device_name = wide_null(device_name);
+    for scope in scopes {
+        // CPT_ICC + CPST_NONE is the documented device-default profile.
+        // RGB_WORKING_SPACE is a global working space, not monitor calibration.
+        match default_icc_profile_for_scope(device_name.as_ptr(), scope, CPST_NONE) {
+            Ok(path) => {
+                return Ok((
+                    DisplayProbeBackend::WindowsWcs,
+                    resolve_color_profile_path(path),
+                ));
+            }
+            Err(reason) => failures.push(reason),
         }
     }
 
@@ -220,30 +248,37 @@ struct WindowsAdvancedColorState {
 }
 
 fn advanced_color_for_device(device_name: &str) -> Result<WindowsAdvancedColorState, String> {
-    let paths = active_display_paths()?;
-    for path in paths {
+    let path = active_display_path_for_device(device_name)?;
+    let advanced = advanced_color_info(&path)?;
+    let advanced_flags = unsafe { advanced.Anonymous.value };
+    let sdr_white_level = sdr_white_level(&path).ok();
+    Ok(WindowsAdvancedColorState {
+        advanced_color_supported: bit(advanced_flags, 0),
+        advanced_color_enabled: bit(advanced_flags, 1),
+        wide_color_enforced: bit(advanced_flags, 2),
+        advanced_color_force_disabled: bit(advanced_flags, 3),
+        bits_per_color_channel: advanced.bitsPerColorChannel,
+        color_encoding: Some(color_encoding_name(advanced.colorEncoding).to_owned()),
+        sdr_white_level,
+    })
+}
+
+fn active_display_path_for_device(device_name: &str) -> Result<DISPLAYCONFIG_PATH_INFO, String> {
+    let mut matching_path = None;
+    for path in active_display_paths()? {
         let source_name = source_gdi_device_name(&path)?;
-        if !source_name.eq_ignore_ascii_case(device_name) {
-            continue;
+        if source_name.eq_ignore_ascii_case(device_name) {
+            if matching_path.is_some() {
+                return Err(format!(
+                    "DisplayConfig source device '{device_name}' maps to multiple active targets"
+                ));
+            }
+            matching_path = Some(path);
         }
-
-        let advanced = advanced_color_info(&path)?;
-        let advanced_flags = unsafe { advanced.Anonymous.value };
-        let sdr_white_level = sdr_white_level(&path).ok();
-        return Ok(WindowsAdvancedColorState {
-            advanced_color_supported: bit(advanced_flags, 0),
-            advanced_color_enabled: bit(advanced_flags, 1),
-            wide_color_enforced: bit(advanced_flags, 2),
-            advanced_color_force_disabled: bit(advanced_flags, 3),
-            bits_per_color_channel: advanced.bitsPerColorChannel,
-            color_encoding: Some(color_encoding_name(advanced.colorEncoding).to_owned()),
-            sdr_white_level,
-        });
     }
-
-    Err(format!(
-        "DisplayConfig active paths did not include source device '{device_name}'"
-    ))
+    matching_path.ok_or_else(|| {
+        format!("DisplayConfig active paths did not include source device '{device_name}'")
+    })
 }
 
 fn active_display_paths() -> Result<Vec<DISPLAYCONFIG_PATH_INFO>, String> {
@@ -426,6 +461,50 @@ fn default_icc_profile_for_scope(
 
     let profile = utf16z_to_string(&buffer)
         .ok_or_else(|| format!("empty profile path for scope={scope} subtype={subtype}"))?;
+    Ok(PathBuf::from(profile))
+}
+
+fn display_default_profile_for_path(
+    path: &DISPLAYCONFIG_PATH_INFO,
+    scope: i32,
+) -> Result<PathBuf, String> {
+    let mut profile_name = ptr::null_mut();
+    let result = unsafe {
+        ColorProfileGetDisplayDefault(
+            scope,
+            path.sourceInfo.adapterId,
+            path.sourceInfo.id,
+            CPT_ICC,
+            CPST_NONE,
+            &mut profile_name,
+        )
+    };
+    if result < 0 || profile_name.is_null() {
+        return Err(format!(
+            "ColorProfileGetDisplayDefault failed for scope={scope} with HRESULT=0x{:08x}",
+            result as u32
+        ));
+    }
+
+    let profile = unsafe {
+        let mut length = 0usize;
+        while length < 32_768 && *profile_name.add(length) != 0 {
+            length += 1;
+        }
+        let value = if length == 0 || length == 32_768 {
+            None
+        } else {
+            Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+                profile_name,
+                length,
+            )))
+        };
+        let _ = LocalFree(profile_name.cast());
+        value
+    }
+    .ok_or_else(|| {
+        format!("ColorProfileGetDisplayDefault returned an invalid path for scope={scope}")
+    })?;
     Ok(PathBuf::from(profile))
 }
 

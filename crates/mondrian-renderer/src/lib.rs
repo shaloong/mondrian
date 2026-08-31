@@ -37,6 +37,8 @@ pub mod prepared_visual_program;
 pub mod prepared_visual_range_closure;
 pub mod profile;
 pub mod program_scopes_gpu;
+#[doc(hidden)]
+pub mod qualification_attestation;
 pub mod realtime_performance;
 pub mod reference_output;
 mod resident_encode;

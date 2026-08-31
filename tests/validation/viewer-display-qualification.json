@@ -31,6 +31,11 @@
     "external_texture_presentation_required": true,
     "zero_readback_stages_required": true,
     "carrier_reuse_evidence_required": true,
+    "full_output_contract_sha256_required": true,
+    "full_output_contract_payload_required": true,
+    "native_display_path_identity_required": true,
+    "icc_processor_identity_required": true,
+    "executed_runtime_image_sha256_required": true,
     "operator_visual_observation_required": true,
     "capability_skip_forbidden": true
   }

@@ -38,6 +38,42 @@ const DEFAULT_STANDARD_TO_ACES_P95_RATIO: f64 = 0.80;
 const DEFAULT_TRANSFORM_P95_BUDGET_US: u64 = 5_000;
 const WARMUP_COUNT: usize = 4;
 
+fn emit_gpu_gate_measurements(
+    gate: &str,
+    adapter: &wgpu::AdapterInfo,
+    measurements: &[(&str, f64)],
+) -> Result<()> {
+    let Some(path) =
+        std::env::var_os("MONDRIAN_GPU_COLOR_GATE_MEASUREMENT_OUTPUT").map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    let attestation =
+        mondrian_renderer::qualification_attestation::gpu_color_gate_execution_attestation()?;
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "gate_id": gate,
+        "adapter": {
+            "name": adapter.name.clone(),
+            "backend": format!("{:?}", adapter.backend),
+            "device_type": format!("{:?}", adapter.device_type),
+            "driver": adapter.driver.clone(),
+            "driver_info": adapter.driver_info.clone(),
+            "vendor_id": format!("{:04x}", adapter.vendor),
+            "device_id": format!("{:04x}", adapter.device),
+        },
+        "attestation": attestation,
+        "measurements": measurements
+            .iter()
+            .map(|(metric, value)| serde_json::json!({ "metric": metric, "value": value }))
+            .collect::<Vec<_>>(),
+    });
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    serde_json::to_writer(&mut file, &payload)?;
+    file.flush()?;
+    Ok(())
+}
+
 struct TimestampGpuContext {
     _instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -683,6 +719,28 @@ async fn standard_views_4k_gpu_timestamp_meet_budget_and_beat_aces2() -> Result<
     if let Some(path) = std::env::var_os("MONDRIAN_COLOR_VIEW_GPU_PERF_OUTPUT").map(PathBuf::from) {
         append_jsonl(&path, &json)?;
     }
+    emit_gpu_gate_measurements(
+        "standard-view-4k-performance",
+        &context.adapter.get_info(),
+        &[
+            (
+                "all_standard_views_within_budget",
+                if report.comparison.all_standard_views_within_budget {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+            (
+                "standard_beats_aces2",
+                if report.comparison.standard_pq_is_materially_faster {
+                    1.0
+                } else {
+                    0.0
+                },
+            ),
+        ],
+    )?;
 
     assert!(
         report.runtime_cache.warm_path_gate.passed,
@@ -917,6 +975,18 @@ async fn standard_input_transforms_4k_gpu_timestamp_meet_budget() -> Result<()> 
     {
         append_jsonl(&path, &json)?;
     }
+    emit_gpu_gate_measurements(
+        "standard-input-4k-performance",
+        &context.adapter.get_info(),
+        &[(
+            "all_transforms_within_budget",
+            if report.all_transforms_within_budget {
+                1.0
+            } else {
+                0.0
+            },
+        )],
+    )?;
 
     assert!(
         report.runtime_cache.warm_path_gate.passed,

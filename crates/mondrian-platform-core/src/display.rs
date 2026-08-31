@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use crate::NoopPlatformService;
+use serde::{Deserialize, Serialize};
 
 /// Display target used for OS display-profile probing.
 ///
@@ -18,6 +19,8 @@ pub struct DisplayProfileProbeTarget {
     pub width: u32,
     /// Physical monitor height in pixels.
     pub height: u32,
+    /// Native display identity when the window system exposes a stable one.
+    pub native_display_id: Option<u64>,
 }
 
 impl DisplayProfileProbeTarget {
@@ -28,7 +31,19 @@ impl DisplayProfileProbeTarget {
             y: position.1,
             width: physical_size.0,
             height: physical_size.1,
+            native_display_id: None,
         }
+    }
+
+    /// Bind a native display identity to this target.
+    pub fn with_native_display_id(mut self, native_display_id: Option<u64>) -> Self {
+        self.native_display_id = native_display_id;
+        self
+    }
+
+    /// Whether the target names a non-empty physical monitor rectangle.
+    pub fn is_valid(self) -> bool {
+        self.width > 0 && self.height > 0
     }
 }
 
@@ -41,6 +56,9 @@ pub struct DisplayIccProfileProbeResult {
     pub backend: Option<DisplayProbeBackend>,
     /// OS display-device identifier used by the platform API, if known.
     pub display_device_name: Option<String>,
+    /// Stable native output/path identity resolved by the same native
+    /// enumeration that selected the probed display.
+    pub native_display_path_id: Option<String>,
     /// Resolved ICC/ICM profile path, if the OS reported one.
     pub profile_path: Option<PathBuf>,
     /// ICC payload returned directly by APIs that do not expose a stable path.
@@ -51,8 +69,11 @@ pub struct DisplayIccProfileProbeResult {
 }
 
 /// Native backend used to discover display color-management state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DisplayProbeBackend {
+    /// Windows display-path default profile lookup, including Advanced Color.
+    WindowsColorProfileDisplayDefault,
     /// Windows Color System default-profile lookup.
     WindowsWcs,
     /// Windows DisplayConfig Advanced Color query.
@@ -73,6 +94,7 @@ impl DisplayProbeBackend {
     /// Stable backend label for diagnostics and cache evidence.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::WindowsColorProfileDisplayDefault => "windows-color-profile-display-default",
             Self::WindowsWcs => "windows-wcs",
             Self::WindowsDisplayConfig => "windows-display-config",
             Self::MacOsCoreGraphics => "macos-core-graphics",
@@ -128,6 +150,9 @@ pub struct DisplayHdrProbeResult {
     pub backend: Option<DisplayProbeBackend>,
     /// OS display-device identifier used by the platform API, if known.
     pub display_device_name: Option<String>,
+    /// Stable native output/path identity resolved by the same native
+    /// enumeration that selected the probed display.
+    pub native_display_path_id: Option<String>,
     /// Platform-neutral HDR/EDR capability and active-state evidence.
     pub details: DisplayHdrProbeDetails,
     /// Structured human-readable failure reason when discovery did not produce
@@ -146,6 +171,7 @@ impl DisplayHdrProbeResult {
             discovery_available: true,
             backend: Some(backend),
             display_device_name,
+            native_display_path_id: None,
             details,
             error: None,
         }
@@ -161,6 +187,7 @@ impl DisplayHdrProbeResult {
             discovery_available: true,
             backend: Some(backend),
             display_device_name,
+            native_display_path_id: None,
             details: DisplayHdrProbeDetails::default(),
             error: Some(reason.into()),
         }
@@ -181,18 +208,26 @@ impl DisplayHdrProbeResult {
             discovery_available: false,
             backend: None,
             display_device_name: None,
+            native_display_path_id: None,
             details: DisplayHdrProbeDetails::default(),
             error: Some(reason.into()),
         }
+    }
+
+    /// Bind the stable native output/path identity selected by the probe.
+    pub fn with_native_display_path_id(mut self, identity: Option<String>) -> Self {
+        self.native_display_path_id = identity;
+        self
     }
 
     /// Produce stable, human-readable evidence for display-contract diagnostics.
     pub fn evidence(&self) -> String {
         let backend = self.backend.map(DisplayProbeBackend::as_str).unwrap_or("unavailable");
         let device = self.display_device_name.as_deref().unwrap_or("unknown-display");
+        let native_path = self.native_display_path_id.as_deref().unwrap_or("unknown-native-path");
         let details = &self.details;
         format!(
-            "backend={backend} display={device} supported={:?} enabled={:?} force_disabled={:?} wide_supported={:?} wide_active={:?} active_transfer={:?} supported_transfers={:?} bpc={:?} sdr_white_nits={:?} min_millinits={:?} max_nits={:?} current_headroom_ppm={:?} potential_headroom_ppm={:?}",
+            "backend={backend} display={device} native_path={native_path} supported={:?} enabled={:?} force_disabled={:?} wide_supported={:?} wide_active={:?} active_transfer={:?} supported_transfers={:?} bpc={:?} sdr_white_nits={:?} min_millinits={:?} max_nits={:?} current_headroom_ppm={:?} potential_headroom_ppm={:?}",
             details.hdr_supported,
             details.hdr_enabled,
             details.force_disabled,
@@ -221,6 +256,7 @@ impl DisplayIccProfileProbeResult {
             discovery_available: true,
             backend: Some(backend),
             display_device_name,
+            native_display_path_id: None,
             profile_path: Some(profile_path),
             profile_bytes: None,
             error: None,
@@ -237,6 +273,7 @@ impl DisplayIccProfileProbeResult {
             discovery_available: true,
             backend: Some(backend),
             display_device_name,
+            native_display_path_id: None,
             profile_path: None,
             profile_bytes: Some(profile_bytes),
             error: None,
@@ -253,6 +290,7 @@ impl DisplayIccProfileProbeResult {
             discovery_available: true,
             backend: Some(backend),
             display_device_name,
+            native_display_path_id: None,
             profile_path: None,
             profile_bytes: None,
             error: Some(reason.into()),
@@ -274,10 +312,17 @@ impl DisplayIccProfileProbeResult {
             discovery_available: false,
             backend: None,
             display_device_name: None,
+            native_display_path_id: None,
             profile_path: None,
             profile_bytes: None,
             error: Some(reason.into()),
         }
+    }
+
+    /// Bind the stable native output/path identity selected by the probe.
+    pub fn with_native_display_path_id(mut self, identity: Option<String>) -> Self {
+        self.native_display_path_id = identity;
+        self
     }
 
     /// Stable source reference for diagnostics when no filesystem path exists.

@@ -80,6 +80,35 @@ Blender/Resolve/Premiere qualification evidence.
 See [Cross-Application Color Capture](cross-application-color-capture.md) for
 the application-specific acquisition and claim-boundary procedure.
 
+Cross-platform physical display qualification uses
+`tests/validation/platform-driver-display-matrix.json`. It requires exact
+Windows/DX12, macOS/Metal, and Linux/Vulkan rows, with SDR sRGB, Display P3, PQ
+HDR, and managed ICC scenarios plus platform-probe, GPU-color, and physical
+Viewer receipts on every row. Scenario coverage is the union of explicit rows
+per platform, so Linux X11 SDR/ICC and Wayland P3/PQ remain separate. Rows
+execute serially and are sealed independently; the final matrix may aggregate
+multiple physical machines only when profile,
+source, release-candidate, and build-manifest identities match; each platform
+retains its own package and actually executed runtime-image SHA. The independent
+bundle verifier requires external trust anchors, replays the original native
+probe/GPU-gate/Viewer JSONL source closure into each normalized owner receipt,
+requires a separately hashed external capture-authority manifest, snapshots the
+complete evidence closure, then replays Matrix evaluation before accepting the
+deterministic report. GPU gates use the checked-in cross-platform gate profile,
+exact one-test Cargo output, and test-emitted finite measurements; Viewer replay
+recomputes the full Core display-contract identity. Native Platform and GPU
+producers must echo a single-use authority challenge from the real process;
+managed ICC replay rebuilds the exact calibration LUT and compares profile and
+processor identity across Platform and Viewer. Native captures wait for a fresh
+authority acknowledgement before each mutually exclusive SDR/P3/HDR state and
+return the output identity resolved by the same OS probe. Final replay loads
+checked scripts/contracts into memory from the trusted Git archive and runs only
+separately hash-approved Core/Matrix replay binaries; runtime Cargo is forbidden.
+Missing rows remain incomplete.
+Hosted CI and DRM/EDID capability never become display qualification. See
+[Platform / Driver / Display Qualification](platform-driver-display-qualification.md)
+for acquisition and the row/matrix supervisors.
+
 The committed `mondrian-standard-quality-v1` numeric corpus is a separate
 objective stimulus contract pinned to the Standard package digest. It covers 22
 quality categories and drives the production CPU OCIO sRGB, Rec.709, Display

@@ -1340,6 +1340,24 @@ Frame-local handles remain strongly typed and monotonic, while submitted texture
 storage is returned to the pool without a CPU completion wait and reused only
 through ordered queue semantics. Device reset first returns every stage's frame
 resources and then clears the shared pool, preventing stale-device reuse.
+## Platform-matrix GPU evidence
+
+The platform/driver/display matrix uses one checked-in, backend-neutral GPU
+gate profile for DX12, Metal, and Vulkan. Each of its eight exact Cargo tests
+emits a create-only schema-1 measurement file from inside the real-device test:
+adapter name/vendor/device/backend plus finite measured values. The external
+serial supervisor preserves stdout/stderr, requires exactly one passing and no
+skipped test, applies the profile's `at_most`/`at_least` limits, and wraps the
+test-emitted bytes in a row-bound schema-2 receipt. Source replay verifies the
+profile bytes, exact test target/name, Cargo result, measurement hash/value,
+runtime image, and active adapter again. A hand-authored passing wrapper or a
+test exit code without measurements cannot qualify a row.
+Every measurement also carries an attestation emitted inside the exact test
+process: the pre-issued authority challenge, row/source/runtime identity,
+current test-image SHA, process ID, and trusted supervisor SHA. The supervisor
+records exact argv and bounded start/end/exit evidence, so synthetic stdout or
+a detached measurement envelope cannot satisfy source replay.
+
 # Realtime visual performance qualification
 
 The Renderer owns the versioned `realtime_visual_gpu_matrix_v1` decision
