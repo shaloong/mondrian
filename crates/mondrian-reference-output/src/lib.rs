@@ -15,10 +15,10 @@ pub use mondrian_broadcast::AncillaryFrame;
 pub use adapter::{
     ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
     ReferenceOutputAdapterSession, ReferenceOutputDeviceDescriptor, ReferenceOutputDeviceId,
-    ReferenceOutputProvider, ReferenceOutputProviderEvidence, ReferenceOutputRoutingPreferences,
-    ReferenceOutputRuntimeAvailability, SimulatedReferenceOutputAdapter,
-    UnavailableVendorReferenceOutputBridge, VendorReferenceOutputAdapter,
-    VendorReferenceOutputBridge,
+    ReferenceOutputHardwareTime, ReferenceOutputProvider, ReferenceOutputProviderEvidence,
+    ReferenceOutputRoutingPreferences, ReferenceOutputRuntimeAvailability,
+    SimulatedReferenceOutputAdapter, UnavailableVendorReferenceOutputBridge,
+    VendorReferenceOutputAdapter, VendorReferenceOutputBridge,
 };
 pub use frame::{
     pack_encoded_rgb_to_rgb12, pack_encoded_rgb_to_v210, pack_f32_audio_to_s24,

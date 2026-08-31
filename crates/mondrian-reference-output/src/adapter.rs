@@ -144,6 +144,19 @@ impl ReferenceOutputDeviceDescriptor {
     }
 }
 
+/// Provider hardware-clock timestamp with an explicit tick rate.
+///
+/// Raw ticks without a rate cannot prove callback cadence or drift and are not
+/// eligible long-duration evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceOutputHardwareTime {
+    /// Monotonic provider hardware-clock tick.
+    pub ticks: u64,
+    /// Exact hardware-clock ticks per second.
+    pub ticks_per_second: u64,
+}
+
 /// Low-frequency physical output event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReferenceOutputAdapterEvent {
@@ -152,7 +165,7 @@ pub enum ReferenceOutputAdapterEvent {
         /// Exact frame coordinate.
         frame_index: u64,
         /// Provider hardware time, absent for simulated output.
-        hardware_time: Option<u64>,
+        hardware_time: Option<ReferenceOutputHardwareTime>,
         /// Digest of the actual packet inventory read back by the provider.
         ancillary_readback_sha256: Option<[u8; 32]>,
     },
@@ -421,6 +434,8 @@ pub struct SimulatedReferenceOutputAdapter {
     evidence: ReferenceOutputProviderEvidence,
     devices: Vec<ReferenceOutputDeviceDescriptor>,
     scripted_events: VecDeque<ReferenceOutputAdapterEvent>,
+    #[cfg(test)]
+    fail_stop: bool,
 }
 
 impl SimulatedReferenceOutputAdapter {
@@ -444,6 +459,8 @@ impl SimulatedReferenceOutputAdapter {
                 modes,
             }],
             scripted_events: VecDeque::new(),
+            #[cfg(test)]
+            fail_stop: false,
         })
     }
 
@@ -453,6 +470,12 @@ impl SimulatedReferenceOutputAdapter {
         events: impl IntoIterator<Item = ReferenceOutputAdapterEvent>,
     ) -> Self {
         self.scripted_events.extend(events);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stop_failure(mut self) -> Self {
+        self.fail_stop = true;
         self
     }
 }
@@ -489,6 +512,8 @@ impl ReferenceOutputAdapter for SimulatedReferenceOutputAdapter {
             scripted_events: std::mem::take(&mut self.scripted_events),
             running: false,
             stopped: false,
+            #[cfg(test)]
+            fail_stop: self.fail_stop,
         }))
     }
 }
@@ -501,6 +526,8 @@ struct SimulatedSession {
     scripted_events: VecDeque<ReferenceOutputAdapterEvent>,
     running: bool,
     stopped: bool,
+    #[cfg(test)]
+    fail_stop: bool,
 }
 
 impl ReferenceOutputAdapterSession for SimulatedSession {
@@ -573,6 +600,13 @@ impl ReferenceOutputAdapterSession for SimulatedSession {
     }
 
     fn stop(&mut self) -> Result<(), ReferenceOutputAdapterError> {
+        #[cfg(test)]
+        if self.fail_stop {
+            return Err(ReferenceOutputAdapterError::Vendor {
+                operation: "stop",
+                detail: "synthetic stop failure".to_owned(),
+            });
+        }
         self.running = false;
         self.stopped = true;
         self.scheduled.clear();

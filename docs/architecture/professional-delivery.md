@@ -1,5 +1,17 @@
 # Professional Delivery
 
+The bounded Export queue also exposes a fixed-size long-duration snapshot with
+cumulative activity, rendered-frame, publication, failure, and active-job
+facts. Its explicit bounded shutdown terminalizes pending jobs, cancels
+reversible running work, waits for worker-loop return, and reports final queue
+closure. Shutdown is permanent admission state: later enqueue requests are
+rejected instead of creating work after the worker returned. Snapshot
+rejections, cancellations, durable publications, and independent verifications
+remain separate counters. Durable publication remains distinct from the
+independent artifact re-open/content verification required by commercial
+endurance qualification; see
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
+
 `mondrian-export::professional_delivery` is the deep Module for constrained
 IMF, AS-11, and DCP delivery. It deliberately exposes exact qualified product
 rows rather than claiming the complete standards families:

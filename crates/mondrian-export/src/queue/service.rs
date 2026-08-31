@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use mondrian_audio::AudioRuntimeResourceGrant;
@@ -548,6 +549,8 @@ pub enum ExportAdmissionError {
     WorkerUnavailable { detail: String },
     /// The queue can no longer issue a unique monotonic attempt generation.
     GenerationExhausted,
+    /// The queue has entered its permanent shutdown state.
+    QueueShutdown,
 }
 
 impl std::fmt::Display for ExportAdmissionError {
@@ -577,6 +580,7 @@ impl std::fmt::Display for ExportAdmissionError {
             Self::GenerationExhausted => {
                 formatter.write_str("export attempt generation space is exhausted")
             }
+            Self::QueueShutdown => formatter.write_str("export queue has shut down"),
         }
     }
 }
@@ -640,8 +644,70 @@ pub struct ExportQueueDiagnostics {
     pub failures: u64,
     /// Canceled admitted attempts.
     pub cancellations: u64,
+    /// Timeline frames accepted through monotonic job progress.
+    pub rendered_frames: u64,
+    /// Completed jobs carrying durable artifact publication evidence.
+    pub durable_artifacts: u64,
     /// Current lightweight job snapshots in admission order.
     pub jobs: Vec<ExportJobSnapshot>,
+}
+
+/// Fixed-size long-duration observation of the Export queue.
+///
+/// Heavy job payloads and bounded terminal history never enter this snapshot.
+/// A qualification Adapter samples it on its own cadence and maps the fields
+/// into the platform-neutral endurance contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportEnduranceSnapshot {
+    /// Snapshot schema version.
+    pub schema_version: u32,
+    /// Monotonic observation offset owned by the capture Adapter.
+    pub observed_at_us: u64,
+    /// Whether shutdown was requested.
+    pub shutdown_requested: bool,
+    /// Whether the dedicated worker is currently alive.
+    pub worker_running: bool,
+    /// Whether the dedicated worker returned from its loop.
+    pub worker_terminated: bool,
+    /// Monotonic accepted queue/job activity count.
+    pub activity_events: u64,
+    /// Successful admissions.
+    pub admissions: u64,
+    /// Rejected admissions.
+    pub rejections: u64,
+    /// Successful durable publications.
+    pub completions: u64,
+    /// Failed admitted attempts.
+    pub failures: u64,
+    /// Canceled admitted attempts.
+    pub cancellations: u64,
+    /// Frames truthfully reported by retained job progress.
+    pub rendered_frames: u64,
+    /// Completed jobs carrying durable artifact evidence.
+    pub durable_artifacts: u64,
+    /// Pending jobs.
+    pub pending_jobs: u64,
+    /// Running, cancelling, or committing jobs.
+    pub active_jobs: u64,
+    /// Whether worker startup failed.
+    pub worker_failed: bool,
+}
+
+/// Terminal evidence returned by explicit queue retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportQueueShutdownEvidence {
+    /// Shutdown evidence schema version.
+    pub schema_version: u32,
+    /// Whether the bounded wait observed worker-loop return.
+    pub worker_terminated: bool,
+    /// Pending jobs remaining after the wait.
+    pub pending_jobs: u64,
+    /// Active jobs remaining after the wait.
+    pub active_jobs: u64,
+    /// Final activity-event count.
+    pub activity_events: u64,
 }
 
 #[derive(Debug, Default)]
@@ -653,6 +719,8 @@ struct ExportQueueCounters {
     completions: u64,
     failures: u64,
     cancellations: u64,
+    rendered_frames: u64,
+    durable_artifacts: u64,
 }
 
 struct ExportJobEntry {
@@ -679,6 +747,9 @@ struct RenderQueueInner {
     shutdown: AtomicBool,
     revision: AtomicU64,
     jobs_revision: AtomicU64,
+    activity_events: AtomicU64,
+    worker_running: AtomicBool,
+    worker_terminated: AtomicBool,
 }
 
 impl RenderQueueInner {
@@ -689,6 +760,7 @@ impl RenderQueueInner {
     fn mark_jobs_changed(&self) {
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.jobs_revision.fetch_add(1, Ordering::AcqRel);
+        self.activity_events.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -863,6 +935,9 @@ impl RenderQueue {
                 shutdown: AtomicBool::new(false),
                 revision: AtomicU64::new(0),
                 jobs_revision: AtomicU64::new(0),
+                activity_events: AtomicU64::new(0),
+                worker_running: AtomicBool::new(false),
+                worker_terminated: AtomicBool::new(false),
             }),
         });
         queue.spawn_worker(executor);
@@ -871,10 +946,19 @@ impl RenderQueue {
 
     fn spawn_worker(&self, executor: Arc<dyn ExportExecutor>) {
         let inner = Arc::clone(&self.inner);
+        self.inner.worker_running.store(true, Ordering::Release);
         if let Err(error) = std::thread::Builder::new()
             .name("mondrian-export-worker".to_owned())
-            .spawn(move || export_worker_loop(inner, executor))
+            .spawn(move || {
+                export_worker_loop(Arc::clone(&inner), executor);
+                inner.worker_running.store(false, Ordering::Release);
+                inner.worker_terminated.store(true, Ordering::Release);
+                inner.mark_diagnostics_changed();
+                inner.wake.notify_all();
+            })
         {
+            self.inner.worker_running.store(false, Ordering::Release);
+            self.inner.worker_terminated.store(true, Ordering::Release);
             let mut state = self.inner.state.lock();
             state.worker_failure = Some(bounded_detail(format!(
                 "failed to start export worker: {error}"
@@ -886,6 +970,9 @@ impl RenderQueue {
 
     /// Admit a heavy immutable submission or return a structured rejection.
     pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            return self.reject(ExportAdmissionError::QueueShutdown);
+        }
         let audio_selection = job.config.preset.audio_program_selection();
         let resource_policy = self.inner.state.lock().resource_policy;
         if job.config.timeline.prepared_execution().is_none() {
@@ -993,6 +1080,12 @@ impl RenderQueue {
         job.config.output_path = output_path.clone();
 
         let mut state = self.inner.state.lock();
+        if self.inner.shutdown.load(Ordering::Acquire) {
+            state.counters.rejections = state.counters.rejections.saturating_add(1);
+            drop(state);
+            self.mark_diagnostics_changed();
+            return Err(ExportAdmissionError::QueueShutdown);
+        }
         if let Some(detail) = &state.worker_failure {
             let error = ExportAdmissionError::WorkerUnavailable { detail: detail.clone() };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
@@ -1245,6 +1338,8 @@ impl RenderQueue {
             completions: state.counters.completions,
             failures: state.counters.failures,
             cancellations: state.counters.cancellations,
+            rendered_frames: state.counters.rendered_frames,
+            durable_artifacts: state.counters.durable_artifacts,
             jobs: state.jobs.iter().map(|entry| entry.snapshot.clone()).collect(),
             ..ExportQueueDiagnostics::default()
         };
@@ -1271,6 +1366,120 @@ impl RenderQueue {
         diagnostics
     }
 
+    /// Capture one fixed-size queue observation for a long-duration producer.
+    pub fn endurance_snapshot(&self, observed_at_us: u64) -> ExportEnduranceSnapshot {
+        let diagnostics = self.diagnostics();
+        ExportEnduranceSnapshot {
+            schema_version: 1,
+            observed_at_us,
+            shutdown_requested: self.inner.shutdown.load(Ordering::Acquire),
+            worker_running: self.inner.worker_running.load(Ordering::Acquire),
+            worker_terminated: self.inner.worker_terminated.load(Ordering::Acquire),
+            activity_events: self.inner.activity_events.load(Ordering::Acquire),
+            admissions: diagnostics.admissions,
+            rejections: diagnostics.rejections,
+            completions: diagnostics.completions,
+            failures: diagnostics.failures,
+            cancellations: diagnostics.cancellations,
+            rendered_frames: diagnostics.rendered_frames,
+            durable_artifacts: diagnostics.durable_artifacts,
+            pending_jobs: diagnostics.pending as u64,
+            active_jobs: diagnostics
+                .running
+                .saturating_add(diagnostics.cancelling)
+                .saturating_add(diagnostics.committing) as u64,
+            worker_failed: diagnostics.worker_failure.is_some(),
+        }
+    }
+
+    /// Request queue shutdown and wait a bounded interval for worker return.
+    ///
+    /// Publication that already crossed the irreversible namespace boundary is
+    /// allowed to finish; every other live attempt receives cancellation.
+    pub fn shutdown_and_wait(&self, timeout: Duration) -> ExportQueueShutdownEvidence {
+        self.request_shutdown();
+        let deadline = Instant::now().checked_add(timeout);
+        let mut state = self.inner.state.lock();
+        while !self.inner.worker_terminated.load(Ordering::Acquire) {
+            let Some(deadline) = deadline else {
+                break;
+            };
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            self.inner.wake.wait_for(&mut state, remaining);
+        }
+        let pending_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
+            .count() as u64;
+        let active_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.snapshot.status,
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                )
+            })
+            .count() as u64;
+        ExportQueueShutdownEvidence {
+            schema_version: 1,
+            worker_terminated: self.inner.worker_terminated.load(Ordering::Acquire),
+            pending_jobs,
+            active_jobs,
+            activity_events: self.inner.activity_events.load(Ordering::Acquire),
+        }
+    }
+
+    fn request_shutdown(&self) {
+        let first_request = !self.inner.shutdown.swap(true, Ordering::AcqRel);
+        let mut state = self.inner.state.lock();
+        let mut pending_cancellations = 0_u64;
+        if first_request {
+            for entry in &mut state.jobs {
+                match entry.snapshot.status {
+                    JobStatus::Pending => {
+                        entry.cancellation.cancel();
+                        entry.payload = None;
+                        entry.snapshot.status = JobStatus::Cancelled;
+                        entry.snapshot.publication = ExportPublicationState::NotPublished;
+                        entry.snapshot.completed_at = Some(Utc::now());
+                        entry.snapshot.terminal_evidence = Some(ExecutionTerminalEvidence {
+                            generation: entry.snapshot.generation,
+                            priority: ExecutionPriority::UserInitiated,
+                            disposition: ExecutionTerminalDisposition::Canceled,
+                            deadline: ExecutionDeadlineStatus::NotApplicable,
+                        });
+                        pending_cancellations = pending_cancellations.saturating_add(1);
+                    }
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                        if entry.snapshot.publication != ExportPublicationState::Committing =>
+                    {
+                        entry.cancellation.cancel();
+                    }
+                    JobStatus::Running { .. }
+                    | JobStatus::Cancelling { .. }
+                    | JobStatus::Completed
+                    | JobStatus::Failed(_)
+                    | JobStatus::Cancelled => {}
+                }
+            }
+            state.counters.cancellations =
+                state.counters.cancellations.saturating_add(pending_cancellations);
+            if pending_cancellations > 0 {
+                trim_terminal_history(&mut state);
+            }
+        }
+        drop(state);
+        if first_request {
+            self.mark_jobs_changed();
+        }
+        self.inner.wake.notify_all();
+    }
+
     fn mark_diagnostics_changed(&self) {
         self.inner.mark_diagnostics_changed();
     }
@@ -1282,17 +1491,7 @@ impl RenderQueue {
 
 impl Drop for RenderQueue {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        let state = self.inner.state.lock();
-        for entry in &state.jobs {
-            if !entry.snapshot.status.is_terminal()
-                && entry.snapshot.publication != ExportPublicationState::Committing
-            {
-                entry.cancellation.cancel();
-            }
-        }
-        drop(state);
-        self.inner.wake.notify_all();
+        self.request_shutdown();
     }
 }
 
@@ -1415,15 +1614,27 @@ fn update_job_progress(
     if progress.phase.rank() < entry.snapshot.progress.phase.rank() {
         return;
     }
+    let previous_rendered_frames = progress_completed_frames(entry.snapshot.progress.detail);
     let progress = progress.normalized(entry.snapshot.progress);
+    let rendered_frame_delta =
+        progress_completed_frames(progress.detail).saturating_sub(previous_rendered_frames);
     let status = JobStatus::Running { phase: progress.phase };
     if entry.snapshot.progress == progress && entry.snapshot.status == status {
         return;
     }
     entry.snapshot.progress = progress;
     entry.snapshot.status = status;
+    state.counters.rendered_frames =
+        state.counters.rendered_frames.saturating_add(rendered_frame_delta);
     drop(state);
     inner.mark_jobs_changed();
+}
+
+fn progress_completed_frames(detail: ExportProgressDetail) -> u64 {
+    match detail {
+        ExportProgressDetail::Frames { completed, .. } => completed,
+        ExportProgressDetail::None | ExportProgressDetail::MediaTimeMicros { .. } => 0,
+    }
 }
 
 fn update_job_diagnostics(
@@ -1486,6 +1697,7 @@ fn publish_terminal(
         }
         ExportWorkerOutcome::Execution(JobExecutionResult::Published(evidence)) => {
             state.counters.completions = state.counters.completions.saturating_add(1);
+            state.counters.durable_artifacts = state.counters.durable_artifacts.saturating_add(1);
             (
                 JobStatus::Completed,
                 ExecutionTerminalDisposition::Completed,

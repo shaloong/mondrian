@@ -1,14 +1,17 @@
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
     ReferenceOutputAdapterSession, ReferenceOutputBundle, ReferenceOutputDeviceDescriptor,
-    ReferenceOutputDeviceId, ReferenceOutputOpenRequest, ReferenceOutputProviderEvidence,
-    ReferenceOutputReferencePolicy,
+    ReferenceOutputDeviceId, ReferenceOutputHardwareTime, ReferenceOutputOpenRequest,
+    ReferenceOutputProviderEvidence, ReferenceOutputReferencePolicy,
 };
 
 /// Product-visible lifecycle of one Reference Output Module instance.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReferenceOutputState {
     /// No device ownership or scheduled output.
     #[default]
@@ -26,8 +29,11 @@ pub enum ReferenceOutputState {
 }
 
 /// Cumulative bounded-session evidence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReferenceOutputDiagnostics {
+    /// Diagnostics schema version.
+    pub schema_version: u32,
     /// Current lifecycle state.
     pub state: ReferenceOutputState,
     /// Provider/runtime evidence, when discovery has occurred.
@@ -46,6 +52,12 @@ pub struct ReferenceOutputDiagnostics {
     pub dropped_frames: u64,
     /// Provider flushed-frame callbacks.
     pub flushed_frames: u64,
+    /// Queued frames explicitly aborted by stop, block, or failure.
+    pub aborted_frames: u64,
+    /// Current frames awaiting one terminal provider callback.
+    pub outstanding_frames: u64,
+    /// Total provider callback/status events consumed.
+    pub callback_events: u64,
     /// Exact embedded-audio sample frames accepted with video.
     pub scheduled_audio_frames: u64,
     /// Canonical ancillary packets accepted atomically with video/audio.
@@ -56,6 +68,18 @@ pub struct ReferenceOutputDiagnostics {
     pub verified_ancillary_readbacks: u64,
     /// Highest simultaneous scheduled queue depth.
     pub scheduled_high_water: u32,
+    /// External-reference lock-loss transitions after a positive lock.
+    pub reference_lock_losses: u64,
+    /// Completion callbacks carrying valid hardware-clock evidence.
+    pub hardware_timestamp_callbacks: u64,
+    /// Invalid, regressing, or rate-changing hardware timestamps.
+    pub hardware_time_failures: u64,
+    /// First valid provider hardware timestamp.
+    pub first_hardware_time: Option<ReferenceOutputHardwareTime>,
+    /// Latest valid provider hardware timestamp.
+    pub last_hardware_time: Option<ReferenceOutputHardwareTime>,
+    /// Largest adjacent hardware-clock gap in ticks.
+    pub maximum_hardware_time_gap_ticks: u64,
     /// Latest continuous external reference status.
     pub reference_locked: Option<bool>,
     /// Most recent stable blocker/failure detail.
@@ -65,6 +89,7 @@ pub struct ReferenceOutputDiagnostics {
 impl Default for ReferenceOutputDiagnostics {
     fn default() -> Self {
         Self {
+            schema_version: 1,
             state: ReferenceOutputState::Disabled,
             provider: None,
             device_id: None,
@@ -74,11 +99,20 @@ impl Default for ReferenceOutputDiagnostics {
             late_frames: 0,
             dropped_frames: 0,
             flushed_frames: 0,
+            aborted_frames: 0,
+            outstanding_frames: 0,
+            callback_events: 0,
             scheduled_audio_frames: 0,
             scheduled_ancillary_packets: 0,
             scheduled_ancillary_words: 0,
             verified_ancillary_readbacks: 0,
             scheduled_high_water: 0,
+            reference_lock_losses: 0,
+            hardware_timestamp_callbacks: 0,
+            hardware_time_failures: 0,
+            first_hardware_time: None,
+            last_hardware_time: None,
+            maximum_hardware_time_gap_ticks: 0,
             reference_locked: None,
             last_error: None,
         }
@@ -229,6 +263,7 @@ where
             .ok_or(ReferenceOutputError::AncillaryWordCountOverflow)?;
         self.diagnostics.scheduled_high_water =
             self.diagnostics.scheduled_high_water.max(self.scheduled.len() as u32);
+        self.diagnostics.outstanding_frames = self.scheduled.len() as u64;
         Ok(())
     }
 
@@ -257,6 +292,7 @@ where
                 Ok(None) => break,
                 Err(error) => {
                     self.record_failed(&error);
+                    self.abort_outstanding()?;
                     return Err(error.into());
                 }
             };
@@ -278,11 +314,12 @@ where
             && let Err(error) = session.stop()
         {
             self.record_failed(&error);
+            self.abort_outstanding()?;
             return Err(error.into());
         }
+        self.abort_outstanding()?;
         self.session = None;
         self.request = None;
-        self.scheduled.clear();
         self.diagnostics.state = ReferenceOutputState::Stopped;
         Ok(())
     }
@@ -296,13 +333,25 @@ where
         &mut self,
         event: ReferenceOutputAdapterEvent,
     ) -> Result<(), ReferenceOutputError> {
+        self.diagnostics.callback_events = self
+            .diagnostics
+            .callback_events
+            .checked_add(1)
+            .ok_or(ReferenceOutputError::CallbackCountOverflow)?;
         match event {
             ReferenceOutputAdapterEvent::FrameCompleted {
                 frame_index,
                 ancillary_readback_sha256,
-                ..
+                hardware_time,
             } => {
                 let expected = self.consume_scheduled(frame_index)?;
+                if let Some(hardware_time) = hardware_time
+                    && let Err(error) = self.record_hardware_time(hardware_time)
+                {
+                    self.abort_consumed_frame()?;
+                    self.abort_outstanding()?;
+                    return Err(error);
+                }
                 if self
                     .request
                     .as_ref()
@@ -312,12 +361,16 @@ where
                         self.record_failed_detail(format!(
                             "provider omitted required ancillary readback for frame {frame_index}"
                         ));
+                        self.abort_consumed_frame()?;
+                        self.abort_outstanding()?;
                         return Err(ReferenceOutputError::AncillaryReadbackMissing { frame_index });
                     };
                     if actual != expected.ancillary_sha256 {
                         self.record_failed_detail(format!(
                             "provider ancillary readback differed for frame {frame_index}"
                         ));
+                        self.abort_consumed_frame()?;
+                        self.abort_outstanding()?;
                         return Err(ReferenceOutputError::AncillaryReadbackMismatch {
                             frame_index,
                         });
@@ -343,6 +396,13 @@ where
                 self.diagnostics.flushed_frames += 1;
             }
             ReferenceOutputAdapterEvent::ReferenceLockChanged { locked } => {
+                if !locked && self.diagnostics.reference_locked == Some(true) {
+                    self.diagnostics.reference_lock_losses = self
+                        .diagnostics
+                        .reference_lock_losses
+                        .checked_add(1)
+                        .ok_or(ReferenceOutputError::ReferenceLockCountOverflow)?;
+                }
                 self.diagnostics.reference_locked = Some(locked);
                 if !locked
                     && self.request.as_ref().is_some_and(|request| {
@@ -369,26 +429,95 @@ where
     ) -> Result<ScheduledBundleEvidence, ReferenceOutputError> {
         let expected = self
             .scheduled
-            .pop_front()
+            .front()
+            .copied()
             .ok_or(ReferenceOutputError::UnexpectedCompletion { actual })?;
         if actual != expected.frame_index {
             self.record_failed_detail(format!(
                 "out-of-order provider completion: expected {}, got {actual}",
                 expected.frame_index
             ));
+            self.abort_outstanding()?;
             return Err(ReferenceOutputError::OutOfOrderCompletion {
                 expected: expected.frame_index,
                 actual,
             });
         }
+        self.scheduled.pop_front();
+        self.diagnostics.outstanding_frames = self.scheduled.len() as u64;
         Ok(expected)
     }
 
-    fn block_active(&mut self, detail: &str) -> Result<(), ReferenceOutputError> {
-        if let Some(session) = self.session.as_mut() {
-            session.stop()?;
+    fn abort_consumed_frame(&mut self) -> Result<(), ReferenceOutputError> {
+        self.diagnostics.aborted_frames = self
+            .diagnostics
+            .aborted_frames
+            .checked_add(1)
+            .ok_or(ReferenceOutputError::AbortedFrameCountOverflow)?;
+        Ok(())
+    }
+
+    fn record_hardware_time(
+        &mut self,
+        current: ReferenceOutputHardwareTime,
+    ) -> Result<(), ReferenceOutputError> {
+        if current.ticks_per_second == 0 {
+            self.diagnostics.hardware_time_failures =
+                self.diagnostics.hardware_time_failures.saturating_add(1);
+            self.record_failed_detail(
+                "provider hardware timestamp has a zero tick rate".to_owned(),
+            );
+            return Err(ReferenceOutputError::InvalidHardwareTime);
         }
+        if let Some(previous) = self.diagnostics.last_hardware_time {
+            if current.ticks_per_second != previous.ticks_per_second
+                || current.ticks <= previous.ticks
+            {
+                self.diagnostics.hardware_time_failures =
+                    self.diagnostics.hardware_time_failures.saturating_add(1);
+                self.record_failed_detail(
+                    "provider hardware timestamp regressed or changed tick rate".to_owned(),
+                );
+                return Err(ReferenceOutputError::InvalidHardwareTime);
+            }
+            self.diagnostics.maximum_hardware_time_gap_ticks = self
+                .diagnostics
+                .maximum_hardware_time_gap_ticks
+                .max(current.ticks - previous.ticks);
+        } else {
+            self.diagnostics.first_hardware_time = Some(current);
+        }
+        self.diagnostics.last_hardware_time = Some(current);
+        self.diagnostics.hardware_timestamp_callbacks = self
+            .diagnostics
+            .hardware_timestamp_callbacks
+            .checked_add(1)
+            .ok_or(ReferenceOutputError::HardwareTimestampCountOverflow)?;
+        Ok(())
+    }
+
+    fn abort_outstanding(&mut self) -> Result<(), ReferenceOutputError> {
+        let outstanding = u64::try_from(self.scheduled.len())
+            .map_err(|_| ReferenceOutputError::AbortedFrameCountOverflow)?;
+        self.diagnostics.aborted_frames = self
+            .diagnostics
+            .aborted_frames
+            .checked_add(outstanding)
+            .ok_or(ReferenceOutputError::AbortedFrameCountOverflow)?;
         self.scheduled.clear();
+        self.diagnostics.outstanding_frames = 0;
+        Ok(())
+    }
+
+    fn block_active(&mut self, detail: &str) -> Result<(), ReferenceOutputError> {
+        if let Some(session) = self.session.as_mut()
+            && let Err(error) = session.stop()
+        {
+            self.record_failed(&error);
+            self.abort_outstanding()?;
+            return Err(error.into());
+        }
+        self.abort_outstanding()?;
         self.diagnostics.state = ReferenceOutputState::Blocked;
         self.diagnostics.last_error = Some(detail.to_owned());
         Ok(())
@@ -467,6 +596,21 @@ pub enum ReferenceOutputError {
     /// Verified readback accounting overflowed.
     #[error("reference output ancillary readback accounting overflow")]
     AncillaryReadbackCountOverflow,
+    /// Provider callback accounting overflowed.
+    #[error("reference output callback accounting overflow")]
+    CallbackCountOverflow,
+    /// External-reference transition accounting overflowed.
+    #[error("reference output reference-lock accounting overflow")]
+    ReferenceLockCountOverflow,
+    /// Hardware timestamp accounting overflowed.
+    #[error("reference output hardware timestamp accounting overflow")]
+    HardwareTimestampCountOverflow,
+    /// Provider hardware timestamp was invalid or non-monotonic.
+    #[error("reference output provider hardware timestamp is invalid")]
+    InvalidHardwareTime,
+    /// Aborted outstanding-frame accounting overflowed.
+    #[error("reference output aborted-frame accounting overflow")]
+    AbortedFrameCountOverflow,
     /// Provider completed a frame that was never scheduled.
     #[error("reference output provider completed unscheduled frame {actual}")]
     UnexpectedCompletion { actual: u64 },
@@ -555,6 +699,30 @@ mod tests {
         (module, device)
     }
 
+    fn module_with_stop_failure(
+        request: &ReferenceOutputOpenRequest,
+        events: impl IntoIterator<Item = ReferenceOutputAdapterEvent>,
+    ) -> (
+        ReferenceOutputModule<SimulatedReferenceOutputAdapter>,
+        ReferenceOutputDeviceDescriptor,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
+            .expect("adapter")
+            .with_scripted_events(events)
+            .with_stop_failure();
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device)
+    }
+
     #[test]
     fn simulated_path_prerolls_and_accounts_exact_audio() {
         let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
@@ -567,6 +735,16 @@ mod tests {
         let diagnostics = module.diagnostics();
         assert_eq!(diagnostics.state, ReferenceOutputState::Running);
         assert_eq!(diagnostics.completed_frames, 2);
+        assert_eq!(diagnostics.outstanding_frames, 0);
+        assert_eq!(
+            diagnostics.scheduled_frames,
+            diagnostics.completed_frames
+                + diagnostics.late_frames
+                + diagnostics.dropped_frames
+                + diagnostics.flushed_frames
+                + diagnostics.aborted_frames
+                + diagnostics.outstanding_frames
+        );
         assert_eq!(diagnostics.scheduled_audio_frames, 3_840);
         assert_eq!(diagnostics.scheduled_high_water, 2);
         assert!(!diagnostics.provider.as_ref().expect("evidence").hardware_backed);
@@ -674,7 +852,10 @@ mod tests {
             &request,
             [ReferenceOutputAdapterEvent::FrameCompleted {
                 frame_index: 0,
-                hardware_time: Some(123),
+                hardware_time: Some(ReferenceOutputHardwareTime {
+                    ticks: 123,
+                    ticks_per_second: 25_000,
+                }),
                 ancillary_readback_sha256: None,
             }],
         );
@@ -687,5 +868,141 @@ mod tests {
         ));
         assert_eq!(module.diagnostics().state, ReferenceOutputState::Failed);
         assert_eq!(module.diagnostics().completed_frames, 0);
+        assert_eq!(module.diagnostics().aborted_frames, 1);
+        assert_eq!(module.diagnostics().outstanding_frames, 0);
+    }
+
+    #[test]
+    fn hardware_time_is_typed_monotonic_and_bounded() {
+        let mut request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        request.preroll_frames = 2;
+        let events = [
+            ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index: 0,
+                hardware_time: Some(ReferenceOutputHardwareTime {
+                    ticks: 1_000,
+                    ticks_per_second: 25_000,
+                }),
+                ancillary_readback_sha256: None,
+            },
+            ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index: 1,
+                hardware_time: Some(ReferenceOutputHardwareTime {
+                    ticks: 2_000,
+                    ticks_per_second: 25_000,
+                }),
+                ancillary_readback_sha256: None,
+            },
+        ];
+        let (mut module, device) = module(&request, events);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+        module.schedule(bundle(&request, 1)).expect("frame 1");
+        module.start().expect("start");
+        assert_eq!(module.poll(2).expect("poll"), 2);
+
+        let diagnostics = module.diagnostics();
+        assert_eq!(diagnostics.hardware_timestamp_callbacks, 2);
+        assert_eq!(diagnostics.hardware_time_failures, 0);
+        assert_eq!(diagnostics.maximum_hardware_time_gap_ticks, 1_000);
+        assert_eq!(
+            diagnostics.last_hardware_time,
+            Some(ReferenceOutputHardwareTime { ticks: 2_000, ticks_per_second: 25_000 })
+        );
+    }
+
+    #[test]
+    fn regressing_hardware_time_fails_and_closes_frame_accounting() {
+        let mut request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        request.preroll_frames = 2;
+        let events = [
+            ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index: 0,
+                hardware_time: Some(ReferenceOutputHardwareTime {
+                    ticks: 1_000,
+                    ticks_per_second: 25_000,
+                }),
+                ancillary_readback_sha256: None,
+            },
+            ReferenceOutputAdapterEvent::FrameCompleted {
+                frame_index: 1,
+                hardware_time: Some(ReferenceOutputHardwareTime {
+                    ticks: 999,
+                    ticks_per_second: 25_000,
+                }),
+                ancillary_readback_sha256: None,
+            },
+        ];
+        let (mut module, device) = module(&request, events);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+        module.schedule(bundle(&request, 1)).expect("frame 1");
+        module.start().expect("start");
+        assert!(matches!(
+            module.poll(2),
+            Err(ReferenceOutputError::InvalidHardwareTime)
+        ));
+
+        let diagnostics = module.diagnostics();
+        assert_eq!(diagnostics.state, ReferenceOutputState::Failed);
+        assert_eq!(diagnostics.hardware_time_failures, 1);
+        assert_eq!(diagnostics.completed_frames, 1);
+        assert_eq!(diagnostics.aborted_frames, 1);
+        assert_eq!(diagnostics.outstanding_frames, 0);
+        assert_eq!(diagnostics.scheduled_frames, 2);
+    }
+
+    #[test]
+    fn out_of_order_callback_fails_and_aborts_the_entire_queue() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module(
+            &request,
+            [ReferenceOutputAdapterEvent::FrameDropped { frame_index: 1 }],
+        );
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+        module.schedule(bundle(&request, 1)).expect("frame 1");
+        module.start().expect("start");
+
+        assert!(matches!(
+            module.poll(1),
+            Err(ReferenceOutputError::OutOfOrderCompletion { expected: 0, actual: 1 })
+        ));
+        let diagnostics = module.diagnostics();
+        assert_eq!(diagnostics.state, ReferenceOutputState::Failed);
+        assert_eq!(diagnostics.aborted_frames, 2);
+        assert_eq!(diagnostics.outstanding_frames, 0);
+        assert_eq!(
+            diagnostics.scheduled_frames,
+            diagnostics.completed_frames
+                + diagnostics.late_frames
+                + diagnostics.dropped_frames
+                + diagnostics.flushed_frames
+                + diagnostics.aborted_frames
+                + diagnostics.outstanding_frames
+        );
+    }
+
+    #[test]
+    fn device_loss_stop_failure_still_fails_and_closes_accounting() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) =
+            module_with_stop_failure(&request, [ReferenceOutputAdapterEvent::DeviceLost]);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+        module.schedule(bundle(&request, 1)).expect("frame 1");
+        module.start().expect("start");
+
+        assert!(matches!(
+            module.poll(1),
+            Err(ReferenceOutputError::Adapter(
+                ReferenceOutputAdapterError::Vendor { operation: "stop", .. }
+            ))
+        ));
+        let diagnostics = module.diagnostics();
+        assert_eq!(diagnostics.state, ReferenceOutputState::Failed);
+        assert_eq!(diagnostics.aborted_frames, 2);
+        assert_eq!(diagnostics.outstanding_frames, 0);
+        assert_eq!(diagnostics.scheduled_frames, diagnostics.aborted_frames);
     }
 }

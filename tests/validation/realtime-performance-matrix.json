@@ -17,7 +17,7 @@
     "8k30-hdr-multilayer-multieffect-scopes",
     "30-minute-video-playback",
     "30-minute-audio-recovery",
-    "120-minute-authoring"
+    "120-minute-program-authoring-scale"
   ],
   "gates": [
     {
@@ -89,7 +89,7 @@
       "build_timeout_seconds": 2700,
       "process_timeout_seconds": 3600,
       "required_dimensions": [
-        "120-minute-authoring"
+        "120-minute-program-authoring-scale"
       ],
       "environment": {
         "MONDRIAN_AUTHORING_PERF_ENFORCE": "1"

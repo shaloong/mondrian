@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "authority_id": "external-commercial-endurance-authority-v1",
+  "execution_policy": "single-use-external-approval-required",
+  "required_identity_fields": [
+    "run_id",
+    "profile_file_sha256",
+    "source_revision",
+    "release_candidate_id",
+    "product_artifact_sha256",
+    "runtime_image_sha256",
+    "build_provenance_sha256",
+    "machine_report_sha256",
+    "platform_cell_sha256",
+    "single_use_challenge"
+  ],
+  "required_phase_binding_fields": [
+    "phase_id",
+    "workload_sha256",
+    "producer_owner",
+    "producer_verifier_id"
+  ],
+  "owner_evidence_files_required": true,
+  "raw_evidence_files_required": true,
+  "create_only_capture_required": true,
+  "runtime_cargo_forbidden": true
+}

@@ -46,6 +46,12 @@ clock, long A/V synchronization, memory, and GPU-presentation gates. A test
 process that exits successfully after reporting `skipped` has not produced
 eligible performance evidence.
 
+The Realtime Performance Matrix's authoring row uses a 120-minute Program
+extent to qualify large-project operation scale; it is not a 120-minute
+wall-clock soak. Commercial long-duration claims use the separate serial
+72-hour contract and runbook in
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
+
 The reference audio gate uses report profile
 `cpal_av_48khz_30min_recovery_v2` and must be built and tested with the
 `validation` feature. It qualifies one real CPAL generation with one second of

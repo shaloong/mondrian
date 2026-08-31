@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "workload_id": "mondrian-col047/playback-reference/v1",
+  "phase_id": "01-playback-reference-24h",
+  "wall_clock_hours": 24,
+  "program_frame_rate": "60/1",
+  "playback_clock": "audio_device",
+  "reference_output": "physical-required",
+  "external_reference": "continuous-lock-required",
+  "hardware_timestamp": "every-completion",
+  "export_policy": "disabled",
+  "recovery_policy": "none"
+}

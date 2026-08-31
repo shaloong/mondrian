@@ -124,7 +124,15 @@ broadcast qualification.
 The queue is bounded to 64 complete bundles and reports scheduled high-water,
 completed/late/dropped/flushed counts, exact audio-frame accounting, provider
 versions, device generation, reference status, ancillary packet count, and
-ancillary word/readback-verification counts. The current Renderer seam
+ancillary word/readback-verification counts. Long-duration evidence additionally
+retains current outstanding and explicitly aborted frames, callback count,
+positive-to-negative reference-lock transitions, and typed provider hardware
+time (`ticks` plus `ticks_per_second`). Rate changes or non-monotonic hardware
+ticks fail the Session; stop/block/failure classifies every queued frame so
+`scheduled = completed + late + dropped + flushed + aborted + outstanding`
+always remains auditable. Provider poll/stop failures and out-of-order
+callbacks also enter stable failure and abort the complete remaining queue.
+The current Renderer seam
 has a correct CPU Float32 Program Output and packing path. It deliberately does
 not claim a GPU-to-device resident path; future work should deepen the same
 Module with reusable pinned buffers or device-resident transfers rather than

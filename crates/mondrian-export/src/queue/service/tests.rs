@@ -805,3 +805,83 @@ fn terminal_history_trimming_never_removes_active_work() {
         2
     );
 }
+
+#[test]
+fn endurance_snapshot_retains_cumulative_frames_and_durable_artifacts() {
+    let backend = GateExecutor::new([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("endurance-snapshot.mp4")))
+        .expect("enqueue");
+    backend.wait_started(1);
+    let generation = queue
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.id == job_id)
+        .expect("job")
+        .generation;
+    update_job_progress(
+        &queue.inner,
+        job_id,
+        generation,
+        ExportProgress::rendering(0.5, 12, 24),
+    );
+    let running = queue.endurance_snapshot(100);
+    assert!(running.worker_running);
+    assert!(!running.worker_terminated);
+    assert_eq!(running.rendered_frames, 12);
+    assert_eq!(running.active_jobs, 1);
+
+    backend.release(1);
+    wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+    let completed = queue.endurance_snapshot(200);
+    assert_eq!(completed.completions, 1);
+    assert_eq!(completed.durable_artifacts, 1);
+    assert_eq!(completed.rendered_frames, 12);
+    assert_eq!(completed.pending_jobs, 0);
+    assert_eq!(completed.active_jobs, 0);
+    assert!(completed.activity_events > running.activity_events);
+
+    let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+    assert!(shutdown.worker_terminated);
+    assert_eq!(shutdown.pending_jobs, 0);
+    assert_eq!(shutdown.active_jobs, 0);
+}
+
+#[test]
+fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
+    let backend = GateExecutor::new([]);
+    let queue = RenderQueue::new_with_executor(backend);
+    queue.set_dispatch_enabled(false);
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("shutdown-pending.mp4")))
+        .expect("enqueue pending");
+
+    let evidence = queue.shutdown_and_wait(Duration::from_secs(2));
+    assert!(evidence.worker_terminated);
+    assert_eq!(evidence.pending_jobs, 0);
+    assert_eq!(evidence.active_jobs, 0);
+    let snapshot = queue.endurance_snapshot(300);
+    assert!(snapshot.shutdown_requested);
+    assert!(!snapshot.worker_running);
+    assert!(snapshot.worker_terminated);
+    assert_eq!(snapshot.cancellations, 1);
+    assert!(matches!(
+        queue
+            .list_jobs()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("retained terminal")
+            .status,
+        JobStatus::Cancelled
+    ));
+
+    assert!(matches!(
+        queue.enqueue(RenderJob::new(dummy_config("after-shutdown.mp4"))),
+        Err(ExportAdmissionError::QueueShutdown)
+    ));
+    let after_rejection = queue.endurance_snapshot(301);
+    assert_eq!(after_rejection.pending_jobs, 0);
+    assert_eq!(after_rejection.active_jobs, 0);
+    assert_eq!(after_rejection.admissions, 1);
+}

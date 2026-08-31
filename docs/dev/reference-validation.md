@@ -109,6 +109,11 @@ Hosted CI and DRM/EDID capability never become display qualification. See
 [Platform / Driver / Display Qualification](platform-driver-display-qualification.md)
 for acquisition and the row/matrix supervisors.
 
+Commercial long-duration playback, physical reference output, repeated Export,
+and concurrent recovery use the separately sealed 72-hour profile described in
+[Commercial Endurance Qualification](commercial-endurance-qualification.md).
+Short performance or accelerated frame-loop probes cannot satisfy it.
+
 The committed `mondrian-standard-quality-v1` numeric corpus is a separate
 objective stimulus contract pinned to the Standard package digest. It covers 22
 quality categories and drives the production CPU OCIO sRGB, Rec.709, Display

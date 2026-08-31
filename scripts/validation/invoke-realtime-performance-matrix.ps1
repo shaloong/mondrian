@@ -174,7 +174,7 @@ function Test-VisualReports([object]$Gate, [object[]]$Reports) {
 
 function Test-AuthoringReports([object]$Gate, [object[]]$Reports) {
     $scale = @($Reports | Where-Object record_type -eq "authoring_scale_report")
-    $completion = @($Reports | Where-Object record_type -eq "authoring_evidence_complete")
+    $completion = @($Reports | Where-Object record_type -eq "authoring_run_completion")
     if ($scale.Count -ne [int]$Gate.expected_scale_reports -or $completion.Count -ne [int]$Gate.expected_completion_reports) { return $false }
     $runIds = @($Reports | ForEach-Object { [string]$_.run_id } | Select-Object -Unique)
     return (
@@ -199,7 +199,7 @@ $requiredDimensions = @(
     "8k30-hdr-multilayer-multieffect-scopes",
     "30-minute-video-playback",
     "30-minute-audio-recovery",
-    "120-minute-authoring"
+    "120-minute-program-authoring-scale"
 )
 Assert-ExactSet "realtime gate ids" $requiredGates @($matrix.gates | ForEach-Object { [string]$_.id })
 Assert-ExactSet "realtime acceptance gate ids" $requiredGates @($matrix.acceptance.required_gate_ids | ForEach-Object { [string]$_ })

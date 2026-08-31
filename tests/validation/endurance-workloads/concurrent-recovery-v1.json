@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "workload_id": "mondrian-col047/concurrent-recovery/v1",
+  "phase_id": "03-concurrent-recovery-24h",
+  "wall_clock_hours": 24,
+  "program_frame_rate": "60/1",
+  "playback_clock": "audio_device",
+  "reference_output": "physical-required",
+  "external_reference": "continuous-lock-required",
+  "export_policy": "repeat-frozen-sequence",
+  "artifact_validation": "independent-reopen-content-verify",
+  "recovery_cycle_count": 24,
+  "recovery_cycle": [
+    "seek",
+    "surface-device-reopen",
+    "export-cancel-retry",
+    "cache-pressure"
+  ],
+  "export_cancellation_count": 24
+}

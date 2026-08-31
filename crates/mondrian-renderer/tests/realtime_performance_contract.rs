@@ -38,7 +38,7 @@ fn sealed_matrix_matches_renderer_profile_and_product_resource_grant() {
     assert_eq!(
         strings(&matrix, "required_dimensions"),
         BTreeSet::from([
-            "120-minute-authoring".to_owned(),
+            "120-minute-program-authoring-scale".to_owned(),
             "30-minute-audio-recovery".to_owned(),
             "30-minute-video-playback".to_owned(),
             "4k60-hdr-multilayer-multieffect-scopes".to_owned(),

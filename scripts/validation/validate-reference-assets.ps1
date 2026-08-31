@@ -48,6 +48,13 @@ $realtimeMatrixPath = Join-Path $contractRootAbsolute "realtime-performance-matr
 $crossApplicationProfilePath = Join-Path $contractRootAbsolute "cross-application-color-qualification.json"
 $crossApplicationStimulusPath = Join-Path $contractRootAbsolute "cross-application-color-stimulus-v1.json"
 $platformMatrixPath = Join-Path $contractRootAbsolute "platform-driver-display-matrix.json"
+$enduranceProfilePath = Join-Path $contractRootAbsolute "commercial-endurance-qualification.json"
+$enduranceAuthorityContractPath = Join-Path $contractRootAbsolute "commercial-endurance-capture-authority.json"
+$enduranceWorkloadPaths = @{
+    "01-playback-reference-24h" = Join-Path $contractRootAbsolute "endurance-workloads/playback-reference-v1.json"
+    "02-continuous-export-24h" = Join-Path $contractRootAbsolute "endurance-workloads/continuous-export-v1.json"
+    "03-concurrent-recovery-24h" = Join-Path $contractRootAbsolute "endurance-workloads/concurrent-recovery-v1.json"
+}
 $contractPaths = @(
     $manifestPath,
     $goldenPath,
@@ -62,6 +69,9 @@ $contractPaths = @(
     $crossApplicationProfilePath
     $crossApplicationStimulusPath
     $platformMatrixPath
+    $enduranceProfilePath
+    $enduranceAuthorityContractPath
+    @($enduranceWorkloadPaths.Values)
 )
 
 foreach ($path in $contractPaths) {
@@ -84,6 +94,8 @@ $realtimeMatrix = Get-Content -LiteralPath $realtimeMatrixPath -Raw | ConvertFro
 $crossApplicationProfile = Get-Content -LiteralPath $crossApplicationProfilePath -Raw | ConvertFrom-Json
 $crossApplicationStimulus = Get-Content -LiteralPath $crossApplicationStimulusPath -Raw | ConvertFrom-Json
 $platformMatrix = Get-Content -LiteralPath $platformMatrixPath -Raw | ConvertFrom-Json
+$enduranceProfile = Get-Content -LiteralPath $enduranceProfilePath -Raw | ConvertFrom-Json
+$enduranceAuthorityContract = Get-Content -LiteralPath $enduranceAuthorityContractPath -Raw | ConvertFrom-Json
 if ($manifest.schema_version -ne 2) { Add-Issue "error" "schema.unsupported" "Unsupported corpus schema version: $($manifest.schema_version)" }
 if ($playbackPlan.schema_version -ne 4) { Add-Issue "error" "playback-plan.schema-unsupported" "Unsupported playback gate-plan schema: $($playbackPlan.schema_version)" }
 if ($machineProfile.schema_version -ne 3) { Add-Issue "error" "machine-profile.schema-unsupported" "Unsupported Windows machine-profile schema: $($machineProfile.schema_version)" }
@@ -103,6 +115,53 @@ $realtimeGateIds = @($realtimeMatrix.gates | ForEach-Object { [string]$_.id })
 $realtimeDimensionIds = @($realtimeMatrix.required_dimensions | ForEach-Object { [string]$_ })
 if ($realtimeMatrix.schema_version -ne 1) { Add-Issue "error" "realtime-matrix.schema-unsupported" "Unsupported realtime performance matrix schema: $($realtimeMatrix.schema_version)" }
 if ($realtimeMatrix.execution_policy -ne "sealed-required") { Add-Issue "error" "realtime-matrix.policy" "Realtime performance qualification must use sealed-required execution" }
+$enduranceKinds = @($enduranceProfile.phases | ForEach-Object { [string]$_.kind })
+if ($enduranceProfile.schema_version -ne 1 -or
+    [int64]$enduranceProfile.sample_interval_us -le 0 -or
+    [int]$enduranceProfile.maximum_samples_per_chunk -le 0 -or
+    [int]$enduranceProfile.maximum_chunks_per_phase -le 0 -or
+    [int]$enduranceProfile.maximum_producer_events_per_phase -le 0) {
+    Add-Issue "error" "endurance-profile.schema-limits" "Commercial endurance profile must use schema 1 and positive bounded capture limits"
+}
+if (@(Compare-Object @("concurrent_recovery", "continuous_export", "playback_reference") ($enduranceKinds | Sort-Object)).Count -ne 0) {
+    Add-Issue "error" "endurance-profile.phases" "Commercial endurance must cover playback/reference, continuous Export, and concurrent recovery"
+}
+if ((@($enduranceProfile.phases | Measure-Object -Property minimum_duration_us -Sum).Sum) -ne 259200000000) {
+    Add-Issue "error" "endurance-profile.duration" "Commercial endurance profile must retain exactly 72 wall-clock hours"
+}
+if (@($enduranceProfile.phases | Where-Object {
+    $_.counters.require_quiescent_terminal -ne $true -or
+    $_.counters.require_worker_shutdown -ne $true
+}).Count -ne 0) {
+    Add-Issue "error" "endurance-profile.terminal" "Every endurance phase must require quiescence and worker shutdown"
+}
+if ($enduranceAuthorityContract.schema_version -ne 1 -or
+    $enduranceAuthorityContract.authority_id -ne "external-commercial-endurance-authority-v1" -or
+    $enduranceAuthorityContract.owner_evidence_files_required -ne $true -or
+    $enduranceAuthorityContract.raw_evidence_files_required -ne $true -or
+    $enduranceAuthorityContract.create_only_capture_required -ne $true -or
+    $enduranceAuthorityContract.runtime_cargo_forbidden -ne $true) {
+    Add-Issue "error" "endurance-authority.contract" "Commercial endurance must retain the exact external, create-only capture-authority contract"
+}
+foreach ($phase in @($enduranceProfile.phases)) {
+    $phaseId = [string]$phase.phase_id
+    if (-not $enduranceWorkloadPaths.ContainsKey($phaseId)) {
+        Add-Issue "error" "endurance-workload.phase" "Commercial endurance phase has no checked-in workload artifact: $phaseId"
+        continue
+    }
+    $workloadPath = [string]$enduranceWorkloadPaths[$phaseId]
+    $workload = Get-Content -LiteralPath $workloadPath -Raw | ConvertFrom-Json
+    $workloadSha = (Get-FileHash -LiteralPath $workloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($workload.schema_version -ne 1 -or [string]$workload.phase_id -cne $phaseId -or
+        [string]$phase.workload_sha256 -cne $workloadSha) {
+        Add-Issue "error" "endurance-workload.identity" "Commercial endurance workload bytes do not match profile phase '$phaseId'"
+    }
+    if ([string]$phase.producer_owner -cne "mondrian-app" -or
+        [string]$phase.producer_verifier_id -cne "mondrian-app-endurance-capture-v1" -or
+        [int]$phase.producer_report_schema_version -ne 1) {
+        Add-Issue "error" "endurance-workload.producer" "Commercial endurance phase '$phaseId' uses an unapproved capture producer"
+    }
+}
 $crossApplicationProducers = @($crossApplicationProfile.required_producers | ForEach-Object { [string]$_ })
 if ($crossApplicationProfile.schema_version -ne 1 -or $crossApplicationStimulus.schema_version -ne 1) {
     Add-Issue "error" "cross-application.schema-unsupported" "Cross-application policy and stimulus must both use schema 1"
@@ -284,7 +343,7 @@ if ($realtimeMatrix.machine_profile -ne $machineProfile.id) { Add-Issue "error" 
 if (@(Compare-Object @("long-authoring", "playback-reference", "real-4k60-dual-layer", "renderer-visual") ($realtimeGateIds | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "realtime-matrix.gates" "Realtime performance matrix must define the exact four sealed gates"
 }
-if (@(Compare-Object @("120-minute-authoring", "30-minute-audio-recovery", "30-minute-video-playback", "4k60-hdr-multilayer-multieffect-scopes", "8k30-hdr-multilayer-multieffect-scopes", "real-4k60-main10-dual-layer-decode-publish") ($realtimeDimensionIds | Sort-Object)).Count -ne 0) {
+if (@(Compare-Object @("120-minute-program-authoring-scale", "30-minute-audio-recovery", "30-minute-video-playback", "4k60-hdr-multilayer-multieffect-scopes", "8k30-hdr-multilayer-multieffect-scopes", "real-4k60-main10-dual-layer-decode-publish") ($realtimeDimensionIds | Sort-Object)).Count -ne 0) {
     Add-Issue "error" "realtime-matrix.dimensions" "Realtime performance matrix coverage differs from the commercial contract"
 }
 if (@(Compare-Object @("display-p3", "hdr-pq", "icc-sdr") ($viewerDisplayScenarioIds | Sort-Object)).Count -ne 0) {

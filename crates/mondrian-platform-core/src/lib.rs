@@ -7,6 +7,7 @@
 
 mod desktop;
 mod display;
+mod endurance_qualification;
 mod memory;
 mod qualification_matrix;
 mod user_state_directory;
@@ -18,6 +19,15 @@ pub use desktop::{
 pub use display::{
     DisplayHdrProbe, DisplayHdrProbeDetails, DisplayHdrProbeResult, DisplayIccProfileProbeResult,
     DisplayProbeBackend, DisplayProfileProbe, DisplayProfileProbeTarget,
+};
+pub use endurance_qualification::{
+    EnduranceCounterRequirement, EnduranceCounters, EnduranceGauges, EnduranceMemoryRequirement,
+    EndurancePhaseChunkReceipt, EndurancePhaseKind, EndurancePhaseManifest,
+    EndurancePhaseProducerEvidence, EndurancePhaseReport, EndurancePhaseRequirement,
+    EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
+    EnduranceQualificationError, EnduranceQualificationProfile, EnduranceQualificationReport,
+    EnduranceQualificationStatus, EnduranceRunManifest, EnduranceSample, EnduranceSampleChunk,
+    PreparedEnduranceQualification,
 };
 pub use memory::{
     ExecutionMemoryProbe, PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,

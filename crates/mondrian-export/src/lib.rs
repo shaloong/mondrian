@@ -45,9 +45,10 @@ pub use queue::{
     ExportCancelOutcome, ExportColorHealthAction, ExportColorHealthArea, ExportColorHealthCheck,
     ExportColorHealthReport, ExportColorHealthRootCause, ExportColorHealthSeverity,
     ExportColorHealthVerdict, ExportDynamicHdrKind, ExportDynamicHdrPreservationEvidence,
-    ExportExecutionResourcePolicy, ExportFailure, ExportFailureReason, ExportJobColorDiagnostics,
-    ExportJobColorDiagnosticsSummary, ExportJobDiagnostics, ExportJobSnapshot, ExportProgress,
-    ExportProgressDetail, ExportProgressPhase, ExportPublicationState, ExportQueueDiagnostics,
+    ExportEnduranceSnapshot, ExportExecutionResourcePolicy, ExportFailure, ExportFailureReason,
+    ExportJobColorDiagnostics, ExportJobColorDiagnosticsSummary, ExportJobDiagnostics,
+    ExportJobSnapshot, ExportProgress, ExportProgressDetail, ExportProgressPhase,
+    ExportPublicationState, ExportQueueDiagnostics, ExportQueueShutdownEvidence,
     ExportSmartRenderEvidence, JobStatus, RenderJob, RenderQueue,
     EXPORT_HETEROGENEOUS_ROUTE_CONTRACT_LOGICAL_BYTES,
 };
