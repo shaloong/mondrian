@@ -81,6 +81,12 @@ foundation:
   failure enters one bounded background CPU Viewer Adapter, never an inline UI
   thread composite, and leaves it only after a replacement GPU generation is
   ready.
+  Validation-only commercial endurance runs enter one serial campaign
+  coordinator owned by the App composition root. The coordinator owns exact
+  phase order, monotonic cadence, process-tree memory sampling, bounded evidence
+  publication, and the shutdown-before-terminal-sample rule; concrete product
+  runtimes remain responsible for real Playback, Reference Output, Export,
+  recovery, and synchronous worker-closure receipts.
   Visual Mask tracking is another instance-owned execution domain: its bounded
   dedicated worker freezes exact author/media input, decodes exact stills,
   delegates only image analysis to Effects, and returns through one

@@ -26,11 +26,22 @@ The implementation is split at existing authority boundaries:
   publishes chunks and the run manifest create-only with file fsync, and
   derives terminal closure from typed Reference Output and Export shutdown
   evidence. It does not execute workloads or reinterpret gates.
+- `mondrian-app::app::endurance_campaign` owns exact serial phase admission,
+  monotonic cadence, native process-tree sampling, final-sample order, and
+  shutdown-before-terminal capture. It consumes an `EnduranceCampaignRuntime`;
+  the concrete runtime remains the authority for pumping real product work,
+  atomic owner snapshots, typed semantic events, and synchronous closure.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
 This direction prevents a validation harness from becoming a second Playback,
 Reference Output, Export, or process-resource implementation.
+
+The coordinator samples every phase at zero and at each profile cadence, pumps
+to the exact minimum-duration boundary, requests synchronous product shutdown,
+then takes the final sample. A missing physical prerequisite is admitted only
+as `NotRun` before any sample; a started phase cannot later relabel itself as
+`NotRun`.
 
 ## Commercial profile
 

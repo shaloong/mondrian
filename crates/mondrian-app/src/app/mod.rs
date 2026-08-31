@@ -107,6 +107,8 @@ mod clip_clipboard;
 mod clip_retime;
 mod dynamic_hdr_authoring;
 #[cfg(any(test, feature = "validation"))]
+pub mod endurance_campaign;
+#[cfg(any(test, feature = "validation"))]
 pub mod endurance_qualification;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;

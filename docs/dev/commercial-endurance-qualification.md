@@ -68,6 +68,16 @@ with typed Reference Output diagnostics and `ExportQueueShutdownEvidence`, or
 use `finish_not_run` before any sample when an external prerequisite is absent.
 Commit phases in profile order and call `seal_manifest` once.
 
+Production orchestration should normally enter through
+`run_endurance_campaign`. Its concrete `EnduranceCampaignRuntime` must pump the
+actual owners until each absolute campaign deadline, return an atomic snapshot,
+and synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
+coordinator takes the final sample. The coordinator owns cadence, native
+`ProductProcessTree` probing, phase order, and evidence publication. If a
+physical provider or required fixture is absent, `begin_phase` must return
+`NotRun` before starting work; a started phase cannot be downgraded to
+`NotRun`.
+
 At every profile cadence:
 
 1. record scheduled monotonic offset;
