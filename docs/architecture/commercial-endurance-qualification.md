@@ -50,6 +50,12 @@ same-thread detachment, and workers previously transferred to the ordinary UI
 asynchronous reaper; only an exact, panic-free, fully synchronous inventory
 closure may set the campaign's Playback/Preview worker-return fact.
 
+Audio closure is similarly owner-derived: `AudioPlayback` joins its PCM render
+worker and asks the concrete output Adapter to join every device-lifecycle
+worker started over its lifetime. Earlier unexpected exits remain visible in
+cumulative termination and panic evidence instead of disappearing once their
+handles have been consumed by normal polling.
+
 ## Commercial profile
 
 `tests/validation/commercial-endurance-qualification.json` fixes three serial

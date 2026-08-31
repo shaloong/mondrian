@@ -36,7 +36,7 @@ pub use audio_device::{
     RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
-pub use audio_output::RealtimeAudioOutputLossReason;
+pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
 #[cfg(feature = "validation")]
 pub use audio_playback::AudioPlaybackValidationError;
 pub use audio_playback::{
@@ -44,8 +44,8 @@ pub use audio_playback::{
     AudioPcmContinuity, AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest,
     AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError,
     AudioPlaybackCreateError, AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode,
-    AudioPlaybackPoll, AudioPlaybackShutdownError, AudioPlaybackSnapshot, AudioPlaybackState,
-    AudioRenderRecoveryDisposition,
+    AudioPlaybackPoll, AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence,
+    AudioPlaybackSnapshot, AudioPlaybackState, AudioRenderRecoveryDisposition,
 };
 pub use audio_source::{
     AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics, AudioSourceReader,

@@ -1076,6 +1076,13 @@ phantom in-flight requests. Concrete stream-generation identities are issued
 with checked monotonic allocation; exhaustion is a structured creation failure
 and never wraps to a reused or zero identity.
 
+The consuming `AudioPlayback::shutdown_and_wait` receipt closes the lifetime
+inventory of both PCM render and concrete device-lifecycle workers. Workers
+already joined after an unexpected disconnect remain in its cumulative
+terminated/panic counts; an absent handle therefore cannot be reinterpreted as
+"never started." Same-thread detachment and any panic fail the aggregate
+closure used by commercial endurance qualification.
+
 The output queue has one non-cloneable Manager-owned producer handle and one
 callback consumer. Enqueue validates exact sample rate, semantic channel
 layout, complete interleaved-frame shape, and remaining sample capacity before

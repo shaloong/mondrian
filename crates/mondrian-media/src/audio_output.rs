@@ -69,12 +69,33 @@ pub enum RealtimeAudioOutputLossReason {
 #[error("failed to spawn realtime audio device worker: {0}")]
 pub struct RealtimeAudioOutputWorkerStartError(#[source] io::Error);
 
-/// Failure while synchronously reclaiming the owned device lifecycle worker.
-#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-pub enum RealtimeAudioOutputShutdownError {
-    /// The worker panicked before it could be joined.
-    #[error("realtime audio device worker panicked")]
-    WorkerPanicked,
+/// Lifetime closure evidence for concrete audio-device lifecycle workers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RealtimeAudioOutputShutdownEvidence {
+    /// Workers successfully started over this manager lifetime.
+    pub workers_started: u32,
+    /// Started workers synchronously joined by polling or final shutdown.
+    pub workers_terminated: u32,
+    /// Joined workers whose thread body panicked.
+    pub worker_panics: u32,
+    /// Workers detached because the join was requested on that same thread.
+    pub current_thread_detachments: u32,
+}
+
+impl RealtimeAudioOutputShutdownEvidence {
+    /// Whether every started device worker returned synchronously without panic.
+    pub const fn all_workers_terminated(self) -> bool {
+        self.workers_started == self.workers_terminated
+            && self.worker_panics == 0
+            && self.current_thread_detachments == 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeviceWorkerJoinOutcome {
+    Terminated,
+    Panicked,
+    CurrentThreadSkipped,
 }
 
 enum WorkerEvent {
@@ -120,6 +141,7 @@ pub struct RealtimeAudioOutputManager {
     command_tx: Option<Sender<WorkerCommand>>,
     worker: Option<JoinHandle<()>>,
     shutdown: Arc<AtomicBool>,
+    shutdown_evidence: RealtimeAudioOutputShutdownEvidence,
 }
 
 impl RealtimeAudioOutputManager {
@@ -147,6 +169,7 @@ impl RealtimeAudioOutputManager {
             command_tx: None,
             worker: None,
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_evidence: RealtimeAudioOutputShutdownEvidence::default(),
         }
     }
 
@@ -184,6 +207,8 @@ impl RealtimeAudioOutputManager {
         self.event_rx = Some(event_rx);
         self.command_tx = Some(command_tx);
         self.worker = Some(worker);
+        self.shutdown_evidence.workers_started =
+            self.shutdown_evidence.workers_started.saturating_add(1);
         Ok(())
     }
 
@@ -198,9 +223,14 @@ impl RealtimeAudioOutputManager {
             Err(TryRecvError::Disconnected) => {
                 self.event_rx = None;
                 self.handle = None;
-                let reason = match self.worker.take().map(JoinHandle::join) {
-                    Some(Ok(())) => "device worker exited without shutdown".to_owned(),
-                    Some(Err(_)) => "device worker panicked".to_owned(),
+                let reason = match self.worker.take().map(|worker| self.join_worker(worker)) {
+                    Some(DeviceWorkerJoinOutcome::Terminated) => {
+                        "device worker exited without shutdown".to_owned()
+                    }
+                    Some(DeviceWorkerJoinOutcome::Panicked) => "device worker panicked".to_owned(),
+                    Some(DeviceWorkerJoinOutcome::CurrentThreadSkipped) => {
+                        "device worker could not join itself".to_owned()
+                    }
                     None => "device worker ownership was lost".to_owned(),
                 };
                 return Some(RealtimeAudioOutputEvent::WorkerStoppedUnexpectedly { reason });
@@ -223,21 +253,47 @@ impl RealtimeAudioOutputManager {
         }
     }
 
-    /// Signal shutdown and synchronously reclaim the owned device worker.
-    #[cfg(test)]
-    pub fn shutdown(mut self) -> Result<(), RealtimeAudioOutputShutdownError> {
+    pub(crate) fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
         self.stop_worker()
     }
 
-    fn stop_worker(&mut self) -> Result<(), RealtimeAudioOutputShutdownError> {
+    fn stop_worker(&mut self) -> RealtimeAudioOutputShutdownEvidence {
         self.shutdown.store(true, Ordering::Release);
         self.handle = None;
         self.event_rx = None;
         self.command_tx = None;
-        let Some(worker) = self.worker.take() else {
-            return Ok(());
+        if let Some(worker) = self.worker.take() {
+            self.join_worker(worker);
+        }
+        self.shutdown_evidence
+    }
+
+    fn join_worker(&mut self, worker: JoinHandle<()>) -> DeviceWorkerJoinOutcome {
+        let outcome = if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            DeviceWorkerJoinOutcome::CurrentThreadSkipped
+        } else if worker.join().is_err() {
+            DeviceWorkerJoinOutcome::Panicked
+        } else {
+            DeviceWorkerJoinOutcome::Terminated
         };
-        worker.join().map_err(|_| RealtimeAudioOutputShutdownError::WorkerPanicked)
+        match outcome {
+            DeviceWorkerJoinOutcome::Terminated => {
+                self.shutdown_evidence.workers_terminated =
+                    self.shutdown_evidence.workers_terminated.saturating_add(1);
+            }
+            DeviceWorkerJoinOutcome::Panicked => {
+                self.shutdown_evidence.workers_terminated =
+                    self.shutdown_evidence.workers_terminated.saturating_add(1);
+                self.shutdown_evidence.worker_panics =
+                    self.shutdown_evidence.worker_panics.saturating_add(1);
+            }
+            DeviceWorkerJoinOutcome::CurrentThreadSkipped => {
+                self.shutdown_evidence.current_thread_detachments =
+                    self.shutdown_evidence.current_thread_detachments.saturating_add(1);
+            }
+        }
+        outcome
     }
 
     /// Queue rendered PCM on the current stream, if one exists.
@@ -358,8 +414,12 @@ fn validate_controlled_recycle_generation(
 
 impl Drop for RealtimeAudioOutputManager {
     fn drop(&mut self) {
-        if let Err(error) = self.stop_worker() {
-            tracing::error!(%error, "failed to reclaim realtime audio device worker");
+        let evidence = self.stop_worker();
+        if evidence.worker_panics > 0 {
+            tracing::error!("realtime audio device worker panicked during shutdown");
+        }
+        if evidence.current_thread_detachments > 0 {
+            tracing::error!("realtime audio device worker could not synchronously join itself");
         }
     }
 }
@@ -616,9 +676,49 @@ mod tests {
             })
             .expect("spawn injected device worker");
 
-        manager.shutdown().expect("join device worker");
+        let evidence = manager.shutdown_and_wait();
 
         assert!(exited.load(Ordering::Acquire));
+        assert_eq!(evidence.workers_started, 1);
+        assert_eq!(evidence.workers_terminated, 1);
+        assert_eq!(evidence.worker_panics, 0);
+        assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn worker_panic_is_retained_after_poll_joins_disconnected_worker() {
+        let mut manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
+        manager
+            .ensure_worker_started_with(|_, _, _, _, event_tx, _| {
+                thread::Builder::new()
+                    .name("mondrian-audio-device-panic-test".to_owned())
+                    .spawn(move || {
+                        drop(event_tx);
+                        panic!("injected device worker panic");
+                    })
+            })
+            .expect("spawn injected device worker");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if matches!(
+                manager.poll(),
+                Some(RealtimeAudioOutputEvent::WorkerStoppedUnexpectedly { .. })
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "device worker panic was not observed"
+            );
+            thread::yield_now();
+        }
+        let evidence = manager.shutdown_and_wait();
+
+        assert_eq!(evidence.workers_started, 1);
+        assert_eq!(evidence.workers_terminated, 1);
+        assert_eq!(evidence.worker_panics, 1);
+        assert!(!evidence.all_workers_terminated());
     }
 
     #[test]

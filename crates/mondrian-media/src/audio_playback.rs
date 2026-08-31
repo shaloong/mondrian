@@ -8,6 +8,7 @@ use crate::audio::{
 use crate::audio_output::RealtimeAudioOutputRecycleError;
 use crate::audio_output::{
     RealtimeAudioOutputEvent, RealtimeAudioOutputLossReason, RealtimeAudioOutputManager,
+    RealtimeAudioOutputShutdownEvidence,
 };
 use crate::{
     AudioBuffer, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceEvidence,
@@ -112,12 +113,55 @@ pub enum AudioPlaybackValidationError {
     UnsupportedAdapter,
 }
 
-/// Failure while synchronously reclaiming the owned PCM render worker.
+/// Failure while synchronously reclaiming Audio Playback workers.
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum AudioPlaybackShutdownError {
     /// The render worker panicked before it could be joined.
     #[error("Audio Playback render worker panicked")]
     RenderWorkerPanicked,
+    /// The concrete output-device lifecycle worker panicked.
+    #[error("Audio Playback output-device worker panicked")]
+    OutputWorkerPanicked,
+    /// Shutdown was attempted from one of the workers it owns.
+    #[error("Audio Playback could not synchronously join a worker from that same thread")]
+    CurrentThreadDetachments,
+    /// Lifetime worker accounting did not close despite no explicit panic.
+    #[error("Audio Playback worker lifetime accounting did not close")]
+    IncompleteWorkerClosure,
+}
+
+/// Synchronous lifetime closure evidence for Audio Playback workers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioPlaybackShutdownEvidence {
+    /// Evidence schema version.
+    pub schema_version: u32,
+    /// PCM render workers successfully started over this owner lifetime.
+    pub render_workers_started: u32,
+    /// PCM render workers synchronously joined.
+    pub render_workers_terminated: u32,
+    /// Joined PCM render workers whose thread body panicked.
+    pub render_worker_panics: u32,
+    /// PCM render workers detached because shutdown ran on that same thread.
+    pub render_current_thread_detachments: u32,
+    /// Concrete output-device lifecycle closure evidence.
+    pub output: RealtimeAudioOutputShutdownEvidence,
+}
+
+impl AudioPlaybackShutdownEvidence {
+    /// Whether both render and concrete-device workers closed exactly.
+    pub const fn all_workers_terminated(self) -> bool {
+        self.render_workers_started == self.render_workers_terminated
+            && self.render_worker_panics == 0
+            && self.render_current_thread_detachments == 0
+            && self.output.all_workers_terminated()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderWorkerJoinOutcome {
+    Terminated,
+    Panicked,
+    CurrentThreadSkipped,
 }
 
 /// Failure to lower or advance one realtime Audio Playback sample coordinate.
@@ -615,6 +659,10 @@ trait AudioOutputAdapter {
     fn capacity_frames(&self) -> Option<usize>;
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot>;
 
+    fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        RealtimeAudioOutputShutdownEvidence::default()
+    }
+
     fn set_device_selection(&self, _selection: RealtimeAudioOutputDeviceSelection) -> bool {
         false
     }
@@ -677,6 +725,10 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
         RealtimeAudioOutputManager::snapshot(self)
     }
 
+    fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        RealtimeAudioOutputManager::shutdown_and_wait(self)
+    }
+
     fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
         RealtimeAudioOutputManager::set_device_selection(self, selection)
     }
@@ -733,6 +785,10 @@ pub struct AudioPlayback {
     recovery_preroll: bool,
     output_lifecycle: AudioOutputLifecycleDiagnostics,
     latest_output_device_evidence: Option<RealtimeAudioOutputDeviceEvidence>,
+    render_workers_started: u32,
+    render_workers_terminated: u32,
+    render_worker_panics: u32,
+    render_current_thread_detachments: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -833,21 +889,77 @@ impl AudioPlayback {
             recovery_preroll: false,
             output_lifecycle: AudioOutputLifecycleDiagnostics::default(),
             latest_output_device_evidence: None,
+            render_workers_started: 1,
+            render_workers_terminated: 0,
+            render_worker_panics: 0,
+            render_current_thread_detachments: 0,
         })
     }
 
-    /// Cancel, wake, and synchronously reclaim the owned render worker.
-    pub fn shutdown(mut self) -> Result<(), AudioPlaybackShutdownError> {
-        self.stop_render_worker()
+    /// Cancel, wake, and synchronously reclaim render and output workers.
+    pub fn shutdown(self) -> Result<(), AudioPlaybackShutdownError> {
+        let evidence = self.shutdown_and_wait();
+        if evidence.render_worker_panics > 0 {
+            Err(AudioPlaybackShutdownError::RenderWorkerPanicked)
+        } else if evidence.output.worker_panics > 0 {
+            Err(AudioPlaybackShutdownError::OutputWorkerPanicked)
+        } else if evidence.render_current_thread_detachments > 0
+            || evidence.output.current_thread_detachments > 0
+        {
+            Err(AudioPlaybackShutdownError::CurrentThreadDetachments)
+        } else if !evidence.all_workers_terminated() {
+            Err(AudioPlaybackShutdownError::IncompleteWorkerClosure)
+        } else {
+            Ok(())
+        }
     }
 
-    fn stop_render_worker(&mut self) -> Result<(), AudioPlaybackShutdownError> {
+    /// Stop PCM production and synchronously reclaim render and device workers.
+    pub fn shutdown_and_wait(mut self) -> AudioPlaybackShutdownEvidence {
+        self.stop_render_worker();
+        let output = self.output.shutdown_and_wait();
+        AudioPlaybackShutdownEvidence {
+            schema_version: 1,
+            render_workers_started: self.render_workers_started,
+            render_workers_terminated: self.render_workers_terminated,
+            render_worker_panics: self.render_worker_panics,
+            render_current_thread_detachments: self.render_current_thread_detachments,
+            output,
+        }
+    }
+
+    fn stop_render_worker(&mut self) {
         self.generation_cancellation.cancel();
         self.render_queue.stop();
         let Some(worker) = self.render_worker.take() else {
-            return Ok(());
+            return;
         };
-        worker.join().map_err(|_| AudioPlaybackShutdownError::RenderWorkerPanicked)
+        self.join_render_worker(worker);
+    }
+
+    fn join_render_worker(&mut self, worker: JoinHandle<()>) -> RenderWorkerJoinOutcome {
+        let outcome = if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            RenderWorkerJoinOutcome::CurrentThreadSkipped
+        } else if worker.join().is_err() {
+            RenderWorkerJoinOutcome::Panicked
+        } else {
+            RenderWorkerJoinOutcome::Terminated
+        };
+        match outcome {
+            RenderWorkerJoinOutcome::Terminated => {
+                self.render_workers_terminated = self.render_workers_terminated.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::Panicked => {
+                self.render_workers_terminated = self.render_workers_terminated.saturating_add(1);
+                self.render_worker_panics = self.render_worker_panics.saturating_add(1);
+            }
+            RenderWorkerJoinOutcome::CurrentThreadSkipped => {
+                self.render_current_thread_detachments =
+                    self.render_current_thread_detachments.saturating_add(1);
+            }
+        }
+        outcome
     }
 
     /// Install one immutable timeline PCM Adapter and start a new generation at `anchor`.
@@ -1459,9 +1571,14 @@ impl AudioPlayback {
         let Some(worker) = self.render_worker.take() else {
             return Some("render worker ownership was lost".to_owned());
         };
-        Some(match worker.join() {
-            Ok(()) => "render worker exited without shutdown".to_owned(),
-            Err(_) => "render worker panicked".to_owned(),
+        Some(match self.join_render_worker(worker) {
+            RenderWorkerJoinOutcome::Terminated => {
+                "render worker exited without shutdown".to_owned()
+            }
+            RenderWorkerJoinOutcome::Panicked => "render worker panicked".to_owned(),
+            RenderWorkerJoinOutcome::CurrentThreadSkipped => {
+                "render worker could not join itself".to_owned()
+            }
         })
     }
 
@@ -1576,8 +1693,21 @@ impl AudioPlayback {
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
-        if let Err(error) = self.stop_render_worker() {
-            tracing::error!(%error, "failed to reclaim Audio Playback render worker");
+        self.stop_render_worker();
+        let output = self.output.shutdown_and_wait();
+        if self.render_worker_panics > 0 {
+            tracing::error!("Audio Playback render worker panicked during shutdown");
+        }
+        if self.render_current_thread_detachments > 0 {
+            tracing::error!("Audio Playback render worker could not synchronously join itself");
+        }
+        if output.worker_panics > 0 {
+            tracing::error!("Audio Playback output-device worker panicked during shutdown");
+        }
+        if output.current_thread_detachments > 0 {
+            tracing::error!(
+                "Audio Playback output-device worker could not synchronously join itself"
+            );
         }
     }
 }
@@ -2653,6 +2783,11 @@ mod tests {
         );
         assert_eq!(failure.snapshot.in_flight, 0);
         assert_eq!(playback.render_queue.state.lock().pending.len(), 0);
+        let evidence = playback.shutdown_and_wait();
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert_eq!(evidence.render_worker_panics, 1);
+        assert!(!evidence.all_workers_terminated());
     }
 
     #[test]
@@ -2661,7 +2796,14 @@ mod tests {
         let playback =
             AudioPlayback::with_output(test_config(), output).expect("spawn test render worker");
 
-        playback.shutdown().expect("join render worker");
+        let evidence = playback.shutdown_and_wait();
+
+        assert_eq!(evidence.schema_version, 1);
+        assert_eq!(evidence.render_workers_started, 1);
+        assert_eq!(evidence.render_workers_terminated, 1);
+        assert_eq!(evidence.render_worker_panics, 0);
+        assert_eq!(evidence.output.workers_started, 0);
+        assert!(evidence.all_workers_terminated());
     }
 
     #[test]
