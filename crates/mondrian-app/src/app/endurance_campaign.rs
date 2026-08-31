@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
 use mondrian_platform::{
@@ -22,6 +22,114 @@ use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
 };
+use super::headless_preview_presentation::HeadlessPreviewRuntime;
+use super::headless_viewer_gpu::HeadlessViewerGpuAdapter;
+use super::preview_runtime::PreviewRuntimeShutdownEvidence;
+
+/// Public projection of bounded Headless GPU retirement evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnduranceGpuShutdownEvidence {
+    /// Whether the progress worker started.
+    pub worker_started: bool,
+    /// Whether it returned within the shutdown bound.
+    pub worker_terminated: bool,
+    /// Whether the worker panicked.
+    pub worker_panicked: bool,
+    /// Whether bounded shutdown expired.
+    pub timed_out: bool,
+    /// Whether the complete device-generation envelope reached the worker.
+    pub retirement_handoff_accepted: bool,
+    /// Whether every accepted GPU/native resource became safe to release.
+    pub retirement_completed: bool,
+}
+
+impl EnduranceGpuShutdownEvidence {
+    /// Whether GPU progress and generation retirement closed exactly.
+    pub const fn all_resources_retired(self) -> bool {
+        self.worker_started
+            && self.worker_terminated
+            && !self.worker_panicked
+            && !self.timed_out
+            && self.retirement_handoff_accepted
+            && self.retirement_completed
+    }
+}
+
+/// Synchronous closure across the headless Preview, Audio, and GPU owners.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EnduranceExecutionOwnerClosure {
+    /// Complete Preview worker inventory.
+    pub preview: PreviewRuntimeShutdownEvidence,
+    /// Realtime PCM render and device-lifecycle inventory.
+    pub audio: mondrian_media::AudioPlaybackShutdownEvidence,
+    /// Bounded GPU progress and generation-retirement evidence.
+    pub gpu: EnduranceGpuShutdownEvidence,
+}
+
+impl EnduranceExecutionOwnerClosure {
+    /// Whether every software execution owner returned without panic or detach.
+    pub const fn all_workers_terminated(self) -> bool {
+        self.preview.all_workers_terminated()
+            && self.audio.all_workers_terminated()
+            && self.gpu.all_resources_retired()
+    }
+}
+
+/// Validation owner group using the production Headless Preview/GPU and Audio paths.
+pub struct EnduranceExecutionOwners {
+    preview: Option<HeadlessPreviewRuntime>,
+    gpu: Option<HeadlessViewerGpuAdapter>,
+    audio: Option<mondrian_media::AudioPlayback>,
+}
+
+impl EnduranceExecutionOwners {
+    /// Start real software execution owners without admitting a campaign phase.
+    pub fn start() -> Result<Self, EnduranceCampaignError> {
+        let gpu = HeadlessViewerGpuAdapter::new()
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        let audio = mondrian_media::AudioPlayback::product_default()
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        Ok(Self {
+            preview: Some(HeadlessPreviewRuntime::new()),
+            gpu: Some(gpu),
+            audio: Some(audio),
+        })
+    }
+
+    /// Stop Preview and Audio first, then retire the complete GPU generation.
+    pub fn shutdown_and_wait(
+        mut self,
+        gpu_timeout: Duration,
+    ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
+        let preview = self
+            .preview
+            .take()
+            .ok_or_else(|| EnduranceCampaignError::Runtime("Preview owner is missing".to_owned()))?
+            .shutdown_and_wait();
+        let audio = self
+            .audio
+            .take()
+            .ok_or_else(|| EnduranceCampaignError::Runtime("Audio owner is missing".to_owned()))?
+            .shutdown_and_wait();
+        let gpu = self
+            .gpu
+            .take()
+            .ok_or_else(|| EnduranceCampaignError::Runtime("GPU owner is missing".to_owned()))?
+            .shutdown_and_wait(gpu_timeout);
+        Ok(EnduranceExecutionOwnerClosure {
+            preview,
+            audio,
+            gpu: EnduranceGpuShutdownEvidence {
+                worker_started: gpu.worker_started,
+                worker_terminated: gpu.worker_terminated,
+                worker_panicked: gpu.worker_panicked,
+                timed_out: gpu.timed_out,
+                retirement_handoff_accepted: gpu.retirement_handoff_accepted,
+                retirement_completed: gpu.retirement_completed,
+            },
+        })
+    }
+}
 
 /// Process-monotonic campaign clock. UTC is never duration authority.
 pub trait EnduranceCampaignClock {

@@ -55,6 +55,15 @@ production owners; the capture authority pins that producer, and the evidence
 supervisor emits typed raw events rather than accepting arbitrary counter/hash
 files.
 
+Use the validation-only `EnduranceExecutionOwners` group for the software
+Preview/Audio/GPU lifetime. Its consuming shutdown must complete before the
+terminal sample. Supply an explicit GPU retirement timeout appropriate to the
+approved rig; `timed_out`, a rejected retirement handoff, worker panic, or an
+incomplete retirement receipt is a failed closure and must never be rewritten
+as quiescence. The detached progress worker remains the resource authority
+after a timeout, so the containing validation process must also remain inside
+the external process-tree supervision policy until it is reaped.
+
 Construct `EnduranceRunCapture` from the exact profile, release identity, and
 capture-authority file. Start phases only through `begin_phase`; it verifies the
 raw checked-in workload contract bytes. Submit each owner observation through

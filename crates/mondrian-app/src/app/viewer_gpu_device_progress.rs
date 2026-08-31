@@ -278,6 +278,19 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
     WorkerPanicked(String),
 }
 
+/// Bounded synchronous closure evidence for one Viewer GPU progress domain.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ViewerGpuDeviceProgressShutdownEvidence {
+    pub(crate) worker_started: bool,
+    pub(crate) worker_terminated: bool,
+    pub(crate) worker_panicked: bool,
+    pub(crate) timed_out: bool,
+    pub(crate) retirement_requested: bool,
+    pub(crate) retirement_handoff_accepted: bool,
+    pub(crate) retirement_completed: bool,
+}
+
 /// Clone captured by the exact queue callback.
 #[derive(Clone)]
 pub(crate) struct ViewerGpuDeviceCompletionSignal {
@@ -579,6 +592,8 @@ struct ViewerGpuDeviceProgressWorker<I> {
     command_sender: Option<mpsc::Sender<ViewerGpuDeviceProgressCommand<I>>>,
     observation_receiver: mpsc::Receiver<ViewerGpuDeviceProgressObservation>,
     join_handle: Option<thread::JoinHandle<()>>,
+    #[cfg(any(test, feature = "validation"))]
+    exit_receiver: mpsc::Receiver<bool>,
     wake: ViewerGpuDeviceProgressWake,
     health: ViewerGpuDeviceGenerationHealth,
     progress_state: Arc<ViewerGpuDeviceProgressState>,
@@ -733,7 +748,18 @@ impl ViewerGpuDeviceProgressOwner {
         mut self,
         retirement: impl ViewerGpuDeviceGenerationRetirement,
     ) {
-        self.worker.enqueue_generation_retirement(Box::new(retirement));
+        let _ = self.worker.enqueue_generation_retirement(Box::new(retirement));
+    }
+
+    /// Transfer the retirement envelope and wait within an explicit bound.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retire_device_generation_and_wait(
+        mut self,
+        retirement: impl ViewerGpuDeviceGenerationRetirement,
+        timeout: Duration,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let handoff = self.worker.enqueue_generation_retirement(Box::new(retirement));
+        self.worker.shutdown_and_wait(true, handoff, timeout)
     }
 }
 
@@ -762,6 +788,8 @@ where
     {
         let (command_sender, command_receiver) = mpsc::channel();
         let (observation_sender, observation_receiver) = mpsc::channel();
+        #[cfg(any(test, feature = "validation"))]
+        let (exit_sender, exit_receiver) = mpsc::channel();
         let progress_state = Arc::new(ViewerGpuDeviceProgressState::new());
         let worker_wake = health.wake.clone();
         let worker_health = health.clone();
@@ -798,12 +826,16 @@ where
                 if !release_admission && let Some(admission) = generation_admission {
                     std::mem::forget(admission);
                 }
+                #[cfg(any(test, feature = "validation"))]
+                let _ = exit_sender.send(release_admission);
             })
             .map_err(ViewerGpuDeviceProgressStartError::ThreadSpawn)?;
         Ok(Self {
             command_sender: Some(command_sender),
             observation_receiver,
             join_handle: Some(join_handle),
+            #[cfg(any(test, feature = "validation"))]
+            exit_receiver,
             wake: health.wake.clone(),
             health,
             progress_state,
@@ -844,17 +876,76 @@ where
         })
     }
 
+    #[cfg(any(test, feature = "validation"))]
+    fn shutdown_and_wait(
+        &mut self,
+        retirement_requested: bool,
+        retirement_handoff_accepted: bool,
+        timeout: Duration,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let Some(join_handle) = self.join_handle.take() else {
+            return ViewerGpuDeviceProgressShutdownEvidence {
+                worker_started: false,
+                worker_terminated: false,
+                worker_panicked: false,
+                timed_out: false,
+                retirement_requested,
+                retirement_handoff_accepted,
+                retirement_completed: false,
+            };
+        };
+        drop(self.command_sender.take());
+        match self.exit_receiver.recv_timeout(timeout) {
+            Ok(retirement_completed) => {
+                let worker_panicked = join_handle.join().is_err();
+                ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: true,
+                    worker_panicked,
+                    timed_out: false,
+                    retirement_requested,
+                    retirement_handoff_accepted,
+                    retirement_completed,
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                drop(join_handle);
+                ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: false,
+                    worker_panicked: false,
+                    timed_out: true,
+                    retirement_requested,
+                    retirement_handoff_accepted,
+                    retirement_completed: false,
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let worker_panicked = join_handle.join().is_err();
+                ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: true,
+                    worker_panicked,
+                    timed_out: false,
+                    retirement_requested,
+                    retirement_handoff_accepted,
+                    retirement_completed: false,
+                }
+            }
+        }
+    }
+
     fn enqueue_generation_retirement(
         &mut self,
         retirement: Box<dyn ViewerGpuDeviceGenerationRetirement>,
-    ) {
+    ) -> bool {
         let Some(sender) = self.command_sender.take() else {
             tracing::error!(
                 label = retirement.label(),
                 "Viewer GPU generation retirement lost its progress admission authority; retaining resources indefinitely"
             );
             self.quarantine_disconnected_retirement(retirement);
-            return;
+            return false;
         };
         let command = ViewerGpuDeviceProgressCommand::RetireDeviceGeneration { retirement };
         if let Err(error) = sender.send(command) {
@@ -872,8 +963,10 @@ where
                 unreachable!("retirement handoff sent a non-retirement command")
             };
             self.quarantine_disconnected_retirement(retirement);
+            return false;
         }
         drop(sender);
+        true
     }
 
     fn quarantine_disconnected_retirement(
@@ -1413,6 +1506,15 @@ mod tests {
     };
     use std::collections::VecDeque;
     use std::sync::atomic::AtomicUsize;
+
+    fn progress_shutdown_complete(evidence: ViewerGpuDeviceProgressShutdownEvidence) -> bool {
+        evidence.worker_started
+            && evidence.worker_terminated
+            && !evidence.worker_panicked
+            && !evidence.timed_out
+            && (!evidence.retirement_requested
+                || (evidence.retirement_handoff_accepted && evidence.retirement_completed))
+    }
 
     #[test]
     fn empty_device_generation_member_reports_no_terminal_and_no_observations() {
@@ -1963,7 +2065,7 @@ mod tests {
         let polls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
         let handoff_started = Instant::now();
-        worker.enqueue_generation_retirement(Box::new(TestRetirement {
+        let handoff = worker.enqueue_generation_retirement(Box::new(TestRetirement {
             safe_to_release: Arc::clone(&safe_to_release),
             polls: Arc::clone(&polls),
             drops: Arc::clone(&drops),
@@ -1979,7 +2081,9 @@ mod tests {
         wait_for_atomic(&polls, 1);
         assert_eq!(drops.load(Ordering::Acquire), 0);
         safe_to_release.store(true, Ordering::Release);
-        worker.shutdown().expect("join reaped generation");
+        let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_secs(2));
+        assert!(progress_shutdown_complete(evidence));
+        assert!(evidence.retirement_completed);
         assert_eq!(drops.load(Ordering::Acquire), 1);
         assert_eq!(
             worker.progress_state.active_slots.load(Ordering::Acquire),
@@ -1994,7 +2098,7 @@ mod tests {
         let native_copy_ready = Arc::new(AtomicBool::new(false));
         let polls = Arc::new(AtomicUsize::new(0));
         let drops = Arc::new(AtomicUsize::new(0));
-        worker.enqueue_generation_retirement(Box::new(TestRetirement {
+        let handoff = worker.enqueue_generation_retirement(Box::new(TestRetirement {
             safe_to_release: Arc::clone(&native_copy_ready),
             polls: Arc::clone(&polls),
             drops: Arc::clone(&drops),
@@ -2004,8 +2108,31 @@ mod tests {
         assert_eq!(drops.load(Ordering::Acquire), 0);
 
         native_copy_ready.store(true, Ordering::Release);
-        worker.shutdown().expect("join native-safe retirement");
+        let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_secs(2));
+        assert!(progress_shutdown_complete(evidence));
         assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn bounded_shutdown_times_out_without_claiming_retirement() {
+        let (mut worker, _) = scripted_worker([]);
+        let safe_to_release = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let handoff = worker.enqueue_generation_retirement(Box::new(TestRetirement {
+            safe_to_release: Arc::clone(&safe_to_release),
+            polls: Arc::new(AtomicUsize::new(0)),
+            drops: Arc::clone(&drops),
+            require_device_lost: false,
+        }));
+
+        let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_millis(10));
+
+        assert!(evidence.timed_out);
+        assert!(!evidence.worker_terminated);
+        assert!(!evidence.retirement_completed);
+        assert!(!progress_shutdown_complete(evidence));
+        safe_to_release.store(true, Ordering::Release);
+        wait_for_atomic(&drops, 1);
     }
 
     #[test]
@@ -2037,10 +2164,12 @@ mod tests {
         let (command_sender, command_receiver) = mpsc::channel();
         drop(command_receiver);
         let (_observation_sender, observation_receiver) = mpsc::channel();
+        let (_exit_sender, exit_receiver) = mpsc::channel();
         let mut worker = ViewerGpuDeviceProgressWorker::<u64> {
             command_sender: Some(command_sender),
             observation_receiver,
             join_handle: None,
+            exit_receiver,
             wake,
             health,
             progress_state: Arc::new(ViewerGpuDeviceProgressState::new()),

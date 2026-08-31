@@ -90,6 +90,10 @@ foundation:
   Preview's receipt closes its complete media/visual/fallback/title/render-cache
   worker inventory rather than treating an empty decode queue as process
   quiescence.
+  The validation Headless owner group additionally consumes Audio lifetime
+  evidence and an explicitly bounded GPU device-generation retirement receipt;
+  timeout or incomplete handoff remains failed closure while the progress
+  worker retains safe-release authority.
   Visual Mask tracking is another instance-owned execution domain: its bounded
   dedicated worker freezes exact author/media input, decodes exact stills,
   delegates only image analysis to Effects, and returns through one

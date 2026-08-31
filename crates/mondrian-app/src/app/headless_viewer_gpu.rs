@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
 use std::time::Duration;
 use std::time::Instant;
 
@@ -18,6 +18,8 @@ use crate::app::preview_execution::{
     PreviewDecodeExecutionSummary, PreviewGpuFrame, PreviewGpuFrameStaging,
     PreviewGpuHeterogeneousExecution, PreviewGpuWorkingInput,
 };
+#[cfg(any(test, feature = "validation"))]
+use crate::app::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence;
 use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationMember, ViewerGpuDeviceGenerationRetirement,
     ViewerGpuDeviceGenerationTerminal, ViewerGpuDeviceProgressObservation,
@@ -516,32 +518,65 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
 
 impl Drop for HeadlessViewerGpuAdapter {
     fn drop(&mut self) {
-        let Some(progress) = self.device_progress.take() else {
-            return;
+        if let Some((progress, retirement)) = self.take_generation_retirement() {
+            progress.retire_device_generation(retirement);
+        }
+    }
+}
+
+impl HeadlessViewerGpuAdapter {
+    /// Retire all accepted GPU work and synchronously reclaim the progress domain.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn shutdown_and_wait(
+        mut self,
+        timeout: Duration,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let Some((progress, retirement)) = self.take_generation_retirement() else {
+            return ViewerGpuDeviceProgressShutdownEvidence {
+                worker_started: false,
+                worker_terminated: false,
+                worker_panicked: false,
+                timed_out: false,
+                retirement_requested: true,
+                retirement_handoff_accepted: false,
+                retirement_completed: false,
+            };
         };
+        progress.retire_device_generation_and_wait(retirement, timeout)
+    }
+
+    fn take_generation_retirement(
+        &mut self,
+    ) -> Option<(
+        ViewerGpuDeviceProgressOwner,
+        HeadlessViewerGpuGenerationRetirement,
+    )> {
+        let progress = self.device_progress.take()?;
         let Some(runtime) = self.runtime.take() else {
             tracing::error!(
                 "Headless Viewer GPU teardown lost its execution runtime; retaining progress authority indefinitely"
             );
             std::mem::forget(progress);
-            return;
+            return None;
         };
-        let retirement = HeadlessViewerGpuGenerationRetirement {
-            runtime,
-            lifecycle: std::mem::replace(
-                &mut self.submission_lifecycle,
-                ViewerGpuSubmissionLifecycle::new(),
-            ),
-            _device: self.device.clone(),
-            _queue: self.queue.clone(),
-            _timestamp_ring: self.timestamp_ring.take(),
-            _physical_outputs: std::mem::take(&mut self.physical_outputs),
-            _completed_submissions: Vec::new(),
-            _lost_submission_owners: Vec::new(),
-            native_retirement_error_logged: false,
-            native_device_removed_logged: false,
-        };
-        progress.retire_device_generation(retirement);
+        Some((
+            progress,
+            HeadlessViewerGpuGenerationRetirement {
+                runtime,
+                lifecycle: std::mem::replace(
+                    &mut self.submission_lifecycle,
+                    ViewerGpuSubmissionLifecycle::new(),
+                ),
+                _device: self.device.clone(),
+                _queue: self.queue.clone(),
+                _timestamp_ring: self.timestamp_ring.take(),
+                _physical_outputs: std::mem::take(&mut self.physical_outputs),
+                _completed_submissions: Vec::new(),
+                _lost_submission_owners: Vec::new(),
+                native_retirement_error_logged: false,
+                native_device_removed_logged: false,
+            },
+        ))
     }
 }
 

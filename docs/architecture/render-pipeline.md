@@ -790,6 +790,14 @@ pre-reserved before its worker is created and is held through retirement. The
 process admits at most four active-or-retiring Viewer device generations; a
 worker panic/disconnect quarantines both envelope and admission token, so
 repeated rebuilds cannot create an unbounded detached-worker or envelope leak.
+Ordinary product teardown keeps this non-blocking contract. The validation-only
+Headless consuming close uses the same retirement envelope and progress worker,
+then waits on a separate terminal channel within an explicit bound. Its receipt
+distinguishes accepted handoff, worker panic/disconnect, timeout, and exact
+resource retirement. A timeout drops only the join handle: the progress worker
+retains the envelope and admission token until safe release, while endurance
+qualification fails closed rather than converting an unfinished GPU lifetime
+into successful worker return.
 The Headless Adapter assigns every submission a unique resource key, retains
 the move-only `ViewerGpuPresentationOutputLease` in the submission owner, and
 moves it into a separate capacity-one current physical slot only after

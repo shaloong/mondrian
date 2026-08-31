@@ -56,6 +56,16 @@ worker started over its lifetime. Earlier unexpected exits remain visible in
 cumulative termination and panic evidence instead of disappearing once their
 handles have been consumed by normal polling.
 
+The validation-only `EnduranceExecutionOwners` group composes those production
+Preview and Audio owners with the production Headless Viewer GPU Adapter. Its
+consuming close stops Preview and Audio before transferring the complete GPU
+device-generation retirement envelope to the existing progress worker. GPU
+closure is bounded by an explicit timeout and records worker start/return,
+panic, timeout, retirement-handoff acceptance, and exact resource retirement.
+A timeout detaches the still-authoritative progress worker so that it can
+finish safe retirement, but it is terminal campaign failure evidence: it never
+claims that a GPU/native owner returned or that its admission slot was freed.
+
 ## Commercial profile
 
 `tests/validation/commercial-endurance-qualification.json` fixes three serial
@@ -166,7 +176,8 @@ It also rejects reparse-point ancestors and applies explicit JSON size bounds.
 ## Qualification boundary
 
 Fast synthetic tests prove schema, hashing, deterministic verdicts, accounting,
-leak detection, chunk tamper rejection, and worker retirement. They do not
+leak detection, chunk tamper rejection, synchronous Preview/Audio/GPU owner
+closure, bounded GPU-timeout failure, and worker retirement. They do not
 prove 8/24/72-hour stability, physical reference lock, DeckLink/AJA callback
 cadence, monitor behavior, or a platform/driver campaign. Those facts remain
 HITL and must be captured on the approved physical rig; `NotRun` can never be
