@@ -20,5 +20,6 @@ pub use identity::{
 };
 pub use service::{
     TimelineRenderCacheConfig, TimelineRenderCacheDiagnostics, TimelineRenderCacheLookup,
-    TimelineRenderCacheResult, TimelineRenderCacheService, TimelineRenderCacheSubmission,
+    TimelineRenderCacheResult, TimelineRenderCacheService, TimelineRenderCacheShutdownEvidence,
+    TimelineRenderCacheSubmission,
 };

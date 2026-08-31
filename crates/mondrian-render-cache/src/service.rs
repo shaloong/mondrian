@@ -212,6 +212,27 @@ pub struct TimelineRenderCacheService {
     worker: Option<JoinHandle<()>>,
 }
 
+/// Synchronous terminal evidence for the cache service's sole worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineRenderCacheShutdownEvidence {
+    /// Whether this service instance owned a worker when shutdown began.
+    pub worker_started: bool,
+    /// Whether the worker was synchronously joined by the caller.
+    pub worker_terminated: bool,
+    /// Whether joining observed a worker panic.
+    pub worker_panicked: bool,
+    /// Whether joining was impossible because shutdown ran on the worker itself.
+    pub current_thread_skipped: bool,
+}
+
+impl TimelineRenderCacheShutdownEvidence {
+    /// Whether every started worker returned without panic or detachment.
+    pub const fn all_workers_terminated(self) -> bool {
+        !self.worker_started
+            || (self.worker_terminated && !self.worker_panicked && !self.current_thread_skipped)
+    }
+}
+
 impl TimelineRenderCacheService {
     /// Start one cache worker. Filesystem scanning and all artifact work occur on it.
     pub fn start(config: TimelineRenderCacheConfig) -> Result<Self, std::io::Error> {
@@ -283,6 +304,40 @@ impl TimelineRenderCacheService {
         self.diagnostics.snapshot()
     }
 
+    /// Close admission and synchronously reclaim the cache worker.
+    pub fn shutdown_and_wait(mut self) -> TimelineRenderCacheShutdownEvidence {
+        self.stop_worker()
+    }
+
+    fn stop_worker(&mut self) -> TimelineRenderCacheShutdownEvidence {
+        self.commands.take();
+        self.results.take();
+        let Some(worker) = self.worker.take() else {
+            return TimelineRenderCacheShutdownEvidence {
+                worker_started: false,
+                worker_terminated: true,
+                worker_panicked: false,
+                current_thread_skipped: false,
+            };
+        };
+        if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            return TimelineRenderCacheShutdownEvidence {
+                worker_started: true,
+                worker_terminated: false,
+                worker_panicked: false,
+                current_thread_skipped: true,
+            };
+        }
+        let worker_panicked = worker.join().is_err();
+        TimelineRenderCacheShutdownEvidence {
+            worker_started: true,
+            worker_terminated: true,
+            worker_panicked,
+            current_thread_skipped: false,
+        }
+    }
+
     fn submit(
         &self,
         identity: TimelineRenderCacheIdentity,
@@ -324,12 +379,12 @@ impl TimelineRenderCacheService {
 
 impl Drop for TimelineRenderCacheService {
     fn drop(&mut self) {
-        self.commands.take();
-        self.results.take();
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
+        let evidence = self.stop_worker();
+        if evidence.worker_panicked {
             tracing::warn!("Timeline render-cache worker panicked during shutdown");
+        }
+        if evidence.current_thread_skipped {
+            tracing::warn!("Timeline render-cache shutdown detached its current worker thread");
         }
     }
 }
@@ -552,5 +607,17 @@ mod tests {
             TimelineRenderCacheSubmission::AlreadyPending
         );
         let _ = wait_result(&service);
+    }
+
+    #[test]
+    fn synchronous_shutdown_returns_worker_terminal_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let evidence = service(temp.path().to_path_buf()).shutdown_and_wait();
+
+        assert!(evidence.worker_started);
+        assert!(evidence.worker_terminated);
+        assert!(!evidence.worker_panicked);
+        assert!(!evidence.current_thread_skipped);
+        assert!(evidence.all_workers_terminated());
     }
 }

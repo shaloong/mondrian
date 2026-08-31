@@ -16,6 +16,7 @@ use mondrian_renderer::{
     BasicTitleRasterRequestIdentity, BasicTitleRasterizer,
 };
 
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_work_notification::PreviewWorkNotifier;
 
 const TITLE_JOB_QUEUE_CAPACITY: usize = 2;
@@ -306,16 +307,31 @@ impl PreviewTitleTask {
             }
         }
     }
+
+    pub(crate) fn shutdown_and_wait(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker()
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.stop.store(true, Ordering::Release);
+        self.jobs.take();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
+    }
 }
 
 impl Drop for PreviewTitleTask {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.jobs.take();
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("Basic Title Preview worker panicked during shutdown");
+        match self.stop_worker() {
+            PreviewOwnedWorkerShutdown::Panicked => {
+                tracing::warn!("Basic Title Preview worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("Basic Title Preview shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
     }
 }

@@ -43,6 +43,13 @@ then takes the final sample. A missing physical prerequisite is admitted only
 as `NotRun` before any sample; a started phase cannot later relabel itself as
 `NotRun`.
 
+Preview's consuming shutdown receipt inventories media decode, visual
+execution, CPU fallback, lazily-started Basic Title, and Timeline render-cache
+workers. It distinguishes never-started owners from joined termination, panic,
+same-thread detachment, and workers previously transferred to the ordinary UI
+asynchronous reaper; only an exact, panic-free, fully synchronous inventory
+closure may set the campaign's Playback/Preview worker-return fact.
+
 ## Commercial profile
 
 `tests/validation/commercial-endurance-qualification.json` fixes three serial

@@ -184,14 +184,46 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     /// Shut down preview workers for application exit.
     pub fn shutdown(&self) {
+        let already_shutdown = self.begin_shutdown();
+        if !already_shutdown {
+            self.reap_workers_async();
+        }
+    }
+
+    /// Stop admission and synchronously reclaim every Preview-owned worker.
+    pub fn shutdown_and_wait(mut self) -> PreviewRuntimeShutdownEvidence {
+        self.begin_shutdown();
+        let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();
+        let mut evidence = join_preview_workers(handles);
+        let unverified_async_reaps = self.unverified_async_worker_reaps.get();
+        evidence.workers_started = evidence.workers_started.saturating_add(unverified_async_reaps);
+        evidence.unverified_async_reaps = unverified_async_reaps;
+        evidence.record(
+            self.visual_execution
+                .take()
+                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                    task.shutdown_and_wait()
+                }),
+        );
+        evidence.record(
+            self.cpu_fallback_task
+                .take()
+                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                    task.shutdown_and_wait()
+                }),
+        );
+        evidence.record(self.title_task.borrow_mut().shutdown_and_wait());
+        evidence.record(self.timeline_render_cache.borrow_mut().shutdown_and_wait());
+        evidence
+    }
+
+    fn begin_shutdown(&self) -> bool {
         self.jobs.close();
         let already_shutdown = self.shutdown.request();
         self.future_media_window.borrow_mut().clear();
         self.retire_obsolete_transport_work();
         self.clear_all_preview_residency();
-        if !already_shutdown {
-            self.reap_workers_async();
-        }
+        already_shutdown
     }
 
     fn reap_workers_async(&self) {
@@ -199,10 +231,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         if handles.is_empty() {
             return;
         }
+        let reaped_workers = u32::try_from(handles.len()).unwrap_or(u32::MAX);
+        self.unverified_async_worker_reaps
+            .set(self.unverified_async_worker_reaps.get().saturating_add(reaped_workers));
 
         if let Err(err) = thread::Builder::new()
             .name("mondrian-ui-viewer-preview-reaper".to_owned())
-            .spawn(move || join_preview_workers(handles))
+            .spawn(move || {
+                let _ = join_preview_workers(handles);
+            })
         {
             tracing::warn!(
                 "failed to start production preview reaper; workers will finish detached: {err}"

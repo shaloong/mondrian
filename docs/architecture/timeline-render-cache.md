@@ -84,6 +84,12 @@ independently bounded. Lookup/publication admission is non-blocking and
 deduplicated by exact identity; Busy, Miss or cache failure always falls back
 to ordinary production rendering.
 
+The service also exposes a consuming `shutdown_and_wait` boundary. It closes
+both channels, synchronously joins the sole worker, and returns typed evidence
+distinguishing normal termination, panic, and an invalid same-thread detach.
+Preview endurance closure consumes that receipt instead of inferring worker
+return from an empty queue or object Drop.
+
 The App Adapter retains at most one verified working hit for immediate
 promotion and a bounded negative-identity set to prevent UI poll storms. A hit
 is uploaded as one identity working layer, then follows the ordinary Viewer

@@ -287,6 +287,74 @@ pub(crate) enum PreviewVisualGpuCompletionDisposition {
     TerminalCandidate(mondrian_playback::FrameDeliveryCandidate),
 }
 
+/// Outcome of synchronously reclaiming one Preview-owned worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreviewOwnedWorkerShutdown {
+    NotStarted,
+    Terminated,
+    Panicked,
+    CurrentThreadSkipped,
+}
+
+impl PreviewOwnedWorkerShutdown {
+    pub(crate) fn join(worker: JoinHandle<()>) -> Self {
+        if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            Self::CurrentThreadSkipped
+        } else if worker.join().is_err() {
+            Self::Panicked
+        } else {
+            Self::Terminated
+        }
+    }
+}
+
+/// Synchronous terminal evidence for every worker owned by Preview Runtime.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewRuntimeShutdownEvidence {
+    /// Evidence schema version.
+    pub schema_version: u32,
+    /// Workers that successfully started during this Runtime lifetime.
+    pub workers_started: u32,
+    /// Started workers synchronously joined by the shutdown caller.
+    pub workers_terminated: u32,
+    /// Joined workers whose thread body panicked.
+    pub worker_panics: u32,
+    /// Workers detached because shutdown ran on that same worker thread.
+    pub current_thread_detachments: u32,
+    /// Workers previously transferred to the ordinary asynchronous UI reaper.
+    pub unverified_async_reaps: u32,
+}
+
+impl PreviewRuntimeShutdownEvidence {
+    /// Whether every started worker returned synchronously and without panic.
+    pub const fn all_workers_terminated(self) -> bool {
+        self.workers_started == self.workers_terminated
+            && self.worker_panics == 0
+            && self.current_thread_detachments == 0
+            && self.unverified_async_reaps == 0
+    }
+
+    fn record(&mut self, outcome: PreviewOwnedWorkerShutdown) {
+        match outcome {
+            PreviewOwnedWorkerShutdown::NotStarted => {}
+            PreviewOwnedWorkerShutdown::Terminated => {
+                self.workers_started = self.workers_started.saturating_add(1);
+                self.workers_terminated = self.workers_terminated.saturating_add(1);
+            }
+            PreviewOwnedWorkerShutdown::Panicked => {
+                self.workers_started = self.workers_started.saturating_add(1);
+                self.workers_terminated = self.workers_terminated.saturating_add(1);
+                self.worker_panics = self.worker_panics.saturating_add(1);
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                self.workers_started = self.workers_started.saturating_add(1);
+                self.current_thread_detachments = self.current_thread_detachments.saturating_add(1);
+            }
+        }
+    }
+}
+
 /// Production Preview composition root shared by Window and Headless Adapters.
 ///
 /// `O` is the concrete usable GPU output published by the active presentation
@@ -298,6 +366,7 @@ pub struct PreviewProductionRuntime<O: Clone> {
     jobs: MediaPreviewJobQueueSender,
     results: RefCell<mpsc::Receiver<MediaPreviewResult>>,
     workers: RefCell<Vec<JoinHandle<()>>>,
+    unverified_async_worker_reaps: Cell<u32>,
     shutdown: Arc<PreviewShutdownSignal>,
     decode_residency: Arc<PreviewDecodeResidencyCoordinator>,
     observed_decode_residency_retry_revision: Cell<u64>,
@@ -714,6 +783,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             jobs: job_tx,
             results: RefCell::new(result_rx),
             workers: RefCell::new(workers),
+            unverified_async_worker_reaps: Cell::new(0),
             shutdown,
             decode_residency,
             observed_decode_residency_retry_revision: Cell::new(0),
@@ -2433,16 +2503,25 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 }
 
-fn join_preview_workers(handles: Vec<JoinHandle<()>>) {
-    let current_thread_id = thread::current().id();
+fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownEvidence {
+    let mut evidence = PreviewRuntimeShutdownEvidence {
+        schema_version: 1,
+        ..PreviewRuntimeShutdownEvidence::default()
+    };
     for handle in handles {
-        if handle.thread().id() == current_thread_id {
-            continue;
+        let outcome = PreviewOwnedWorkerShutdown::join(handle);
+        match outcome {
+            PreviewOwnedWorkerShutdown::Panicked => {
+                tracing::warn!("production preview worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("production preview shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
-        if handle.join().is_err() {
-            tracing::warn!("production preview worker panicked during shutdown");
-        }
+        evidence.record(outcome);
     }
+    evidence
 }
 
 /// Borrowed projection of a resolved evaluation consumed by the GPU producer.

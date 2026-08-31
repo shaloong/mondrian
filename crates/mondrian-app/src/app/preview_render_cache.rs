@@ -19,6 +19,7 @@ use mondrian_render_cache::{
 };
 use mondrian_renderer::CpuColorFrame;
 
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_work_notification::PreviewWorkNotifier;
 
 const NEGATIVE_IDENTITY_CAPACITY: usize = 256;
@@ -168,6 +169,22 @@ impl PreviewTimelineRenderCache {
 
     pub(crate) fn start_failure(&self) -> Option<&str> {
         self.start_failure.as_deref()
+    }
+
+    pub(crate) fn shutdown_and_wait(&mut self) -> PreviewOwnedWorkerShutdown {
+        let Some(service) = self.service.take() else {
+            return PreviewOwnedWorkerShutdown::NotStarted;
+        };
+        let evidence = service.shutdown_and_wait();
+        if evidence.current_thread_skipped {
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped
+        } else if evidence.worker_panicked {
+            PreviewOwnedWorkerShutdown::Panicked
+        } else if evidence.worker_started && evidence.worker_terminated {
+            PreviewOwnedWorkerShutdown::Terminated
+        } else {
+            PreviewOwnedWorkerShutdown::NotStarted
+        }
     }
 
     fn remember_negative(&mut self, identity: TimelineRenderCacheIdentity) {

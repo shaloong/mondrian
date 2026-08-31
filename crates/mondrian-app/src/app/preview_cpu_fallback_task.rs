@@ -26,6 +26,7 @@ use super::preview_execution::PreviewOutputKey;
 use super::preview_raster_frame::{
     preview_raster_presentation_contract, preview_raster_resource_key, PreviewRasterFrame,
 };
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_viewer_plan::ResolvedPreviewElement;
 use super::preview_work_notification::PreviewWorkNotifier;
 
@@ -121,18 +122,31 @@ impl PreviewCpuFallbackTask {
     pub(crate) fn try_poll(&self) -> Option<PreviewCpuFallbackResult> {
         self.results.as_ref()?.try_recv().ok()
     }
+
+    pub(crate) fn shutdown_and_wait(mut self) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker()
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.requests.take();
+        self.results.take();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
+    }
 }
 
 impl Drop for PreviewCpuFallbackTask {
     fn drop(&mut self) {
-        self.requests.take();
-        // Disconnect publication before joining: the bounded worker may be
-        // blocked publishing a second result while the first remains unread.
-        self.results.take();
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("Preview CPU fallback worker panicked during shutdown");
+        match self.stop_worker() {
+            PreviewOwnedWorkerShutdown::Panicked => {
+                tracing::warn!("Preview CPU fallback worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("Preview CPU fallback shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
     }
 }

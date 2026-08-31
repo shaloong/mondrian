@@ -32,6 +32,7 @@ use mondrian_renderer::{
     HeterogeneousGpuResourceGrant,
 };
 
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_work_notification::PreviewWorkNotifier;
 
 const DEFAULT_MAX_PENDING: usize = 2;
@@ -737,18 +738,31 @@ impl VisualExecutionTask {
     pub(crate) fn close_after_worker_disconnect(&self) {
         self.broker.close();
     }
+
+    pub(crate) fn shutdown_and_wait(mut self) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker()
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.results.take();
+        self.broker.close();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
+    }
 }
 
 impl Drop for VisualExecutionTask {
     fn drop(&mut self) {
-        // Disconnect publication first. Any queued or blocked result is then
-        // dropped, which releases its move-only lease before the join.
-        self.results.take();
-        self.broker.close();
-        if let Some(worker) = self.worker.take()
-            && worker.join().is_err()
-        {
-            tracing::warn!("Preview visual execution worker panicked during shutdown");
+        match self.stop_worker() {
+            PreviewOwnedWorkerShutdown::Panicked => {
+                tracing::warn!("Preview visual execution worker panicked during shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("Preview visual execution shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
     }
 }

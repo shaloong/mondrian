@@ -87,6 +87,9 @@ foundation:
   publication, and the shutdown-before-terminal-sample rule; concrete product
   runtimes remain responsible for real Playback, Reference Output, Export,
   recovery, and synchronous worker-closure receipts.
+  Preview's receipt closes its complete media/visual/fallback/title/render-cache
+  worker inventory rather than treating an empty decode queue as process
+  quiescence.
   Visual Mask tracking is another instance-owned execution domain: its bounded
   dedicated worker freezes exact author/media input, decodes exact stills,
   delegates only image analysis to Effects, and returns through one

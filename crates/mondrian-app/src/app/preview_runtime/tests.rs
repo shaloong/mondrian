@@ -13245,6 +13245,52 @@ fn preview_shutdown_signal_is_idempotent_without_timing_authority() {
 }
 
 #[test]
+fn synchronous_preview_shutdown_reclaims_complete_worker_inventory() {
+    let runtime = PreviewProductionRuntime::<()>::with_direct_worker_count_for_test(
+        preview_decode_cpu_budget(),
+        2,
+    );
+
+    let evidence = runtime.shutdown_and_wait();
+
+    assert_eq!(evidence.schema_version, 1);
+    assert_eq!(evidence.workers_started, 4);
+    assert_eq!(evidence.workers_terminated, 4);
+    assert_eq!(evidence.worker_panics, 0);
+    assert_eq!(evidence.current_thread_detachments, 0);
+    assert_eq!(evidence.unverified_async_reaps, 0);
+    assert!(evidence.all_workers_terminated());
+}
+
+#[test]
+fn synchronous_preview_shutdown_rejects_panicked_worker_as_complete() {
+    let worker = std::thread::spawn(|| panic!("intentional Preview shutdown test panic"));
+
+    let evidence = join_preview_workers(vec![worker]);
+
+    assert_eq!(evidence.workers_started, 1);
+    assert_eq!(evidence.workers_terminated, 1);
+    assert_eq!(evidence.worker_panics, 1);
+    assert!(!evidence.all_workers_terminated());
+}
+
+#[test]
+fn synchronous_preview_shutdown_rejects_prior_async_reap_as_unverified() {
+    let runtime = PreviewProductionRuntime::<()>::with_direct_worker_count_for_test(
+        preview_decode_cpu_budget(),
+        1,
+    );
+    runtime.shutdown();
+
+    let evidence = runtime.shutdown_and_wait();
+
+    assert_eq!(evidence.unverified_async_reaps, 1);
+    assert_eq!(evidence.workers_started, 3);
+    assert_eq!(evidence.workers_terminated, 2);
+    assert!(!evidence.all_workers_terminated());
+}
+
+#[test]
 fn media_preview_shutdown_observation_uses_broker_close_timestamp() {
     let scheduler = MediaPreviewScheduler::with_max_pending(1);
     let (sender, receiver) = scheduler.job_queue();
