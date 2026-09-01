@@ -10,7 +10,7 @@ use std::fmt;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
 use std::time::Duration;
 
 type PreviewWorkWaker = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -163,7 +163,7 @@ impl PreviewWorkWatch {
     /// The comparison occurs while holding the same gate used by publishers,
     /// so a publication immediately before or during the wait cannot be lost.
     /// Returning the unchanged revision means only that the timeout elapsed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn wait_for_change(
         &self,
         observed: PreviewWorkRevision,

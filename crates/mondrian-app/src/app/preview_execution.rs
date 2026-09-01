@@ -1011,7 +1011,7 @@ impl<G: PartialEq, K, O> PreviewExecutionCoordinator<G, K, O> {
     }
 
     /// Exact prepared alias that is already represented by the visible slot.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn already_visible_successor_key(
         &self,
         intent: PreviewPlaybackIntent,

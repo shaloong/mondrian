@@ -68,6 +68,19 @@ A timeout detaches the still-authoritative progress worker so that it can
 finish safe retirement, but it is terminal campaign failure evidence: it never
 claims that a GPU/native owner returned or that its admission slot was freed.
 
+The software owner group starts one paired Headless realtime session without
+admitting a phase or entering native playback scheduling. Inside that group,
+the session installs the Preview completion waker and binds renderer-qualified
+decode admission to the exact GPU device generation. A concrete realtime phase
+runtime must open one fresh private coordinator/scheduling residency and close
+it at the declared observation boundary. The shared coordinator is compiled
+into validation builds and preserves A/V Audio-before-Clock or video-only
+Clock/Preview/candidate/successor/lookahead/wait order used by performance
+gates; the concrete campaign runtime must call it rather than copying the
+former test harness loop. Consuming shutdown best-effort leaves any interrupted
+residency before synchronously joining Preview, the App State's actual Audio
+owner, and GPU retirement in that order.
+
 ## Commercial profile
 
 `tests/validation/commercial-endurance-qualification.json` fixes three serial

@@ -22,8 +22,7 @@ use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
 };
-use super::headless_preview_presentation::HeadlessPreviewRuntime;
-use super::headless_viewer_gpu::HeadlessViewerGpuAdapter;
+use super::headless_realtime_playback::HeadlessRealtimePlaybackSession;
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
 use super::AppState;
 
@@ -78,19 +77,15 @@ impl EnduranceExecutionOwnerClosure {
 
 /// Validation owner group using the production Headless Preview/GPU and Audio paths.
 pub struct EnduranceExecutionOwners {
-    preview: Option<HeadlessPreviewRuntime>,
-    gpu: Option<HeadlessViewerGpuAdapter>,
+    realtime: Option<HeadlessRealtimePlaybackSession>,
 }
 
 impl EnduranceExecutionOwners {
     /// Start real software execution owners without admitting a campaign phase.
     pub fn start() -> Result<Self, EnduranceCampaignError> {
-        let gpu = HeadlessViewerGpuAdapter::new()
+        let realtime = HeadlessRealtimePlaybackSession::new()
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
-        Ok(Self {
-            preview: Some(HeadlessPreviewRuntime::new()),
-            gpu: Some(gpu),
-        })
+        Ok(Self { realtime: Some(realtime) })
     }
 
     /// Stop Preview and the App State's actual Audio owner, then retire GPU.
@@ -99,17 +94,21 @@ impl EnduranceExecutionOwners {
         app: &mut AppState,
         gpu_timeout: Duration,
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
-        let preview = self
-            .preview
+        if app.is_playing() {
+            let _ = app.pause();
+        }
+        let (preview_owner, gpu_owner) = self
+            .realtime
             .take()
-            .ok_or_else(|| EnduranceCampaignError::Runtime("Preview owner is missing".to_owned()))?
-            .shutdown_and_wait();
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .into_shutdown_owners();
+        let preview = preview_owner.shutdown_and_wait();
         let audio = app.shutdown_audio_playback_and_wait();
-        let gpu = self
-            .gpu
-            .take()
-            .ok_or_else(|| EnduranceCampaignError::Runtime("GPU owner is missing".to_owned()))?
-            .shutdown_and_wait(gpu_timeout);
+        let gpu = gpu_owner.shutdown_and_wait(gpu_timeout);
         Ok(EnduranceExecutionOwnerClosure {
             preview,
             audio,
@@ -565,6 +564,32 @@ mod tests {
     use super::*;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    #[ignore = "requires a real Headless GPU Adapter and native scheduling admission"]
+    fn active_realtime_session_gates_raw_access_and_still_closes_all_owners() {
+        let mut state = AppState::new();
+        state.set_playback_frame_running(0);
+        assert!(state.is_playing());
+        let mut owners = EnduranceExecutionOwners::start().expect("start execution owners");
+        {
+            let realtime = owners.realtime.as_mut().expect("paired realtime session");
+            realtime.begin_realtime(&state, None).expect("begin realtime residency");
+            assert!(realtime.preview().is_err());
+            assert!(realtime.gpu().is_err());
+            assert!(realtime.gpu_mut().is_err());
+            assert!(realtime.bound_resources().is_err());
+        }
+
+        let closure = owners
+            .shutdown_and_wait(&mut state, std::time::Duration::from_secs(30))
+            .expect("close active execution owners");
+
+        assert!(closure.preview.all_workers_terminated());
+        assert!(closure.audio.all_workers_terminated());
+        assert!(closure.gpu.all_resources_retired());
+        assert!(closure.all_workers_terminated());
+    }
 
     #[derive(Default)]
     struct FakeClock(AtomicU64);

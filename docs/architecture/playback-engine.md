@@ -855,6 +855,32 @@ is covered only by the same satisfied epoch/quality/frame binding. It cannot
 cover a new demand, Epoch, quality revision, coordinate, or missing physical
 output.
 
+`app::headless_realtime_playback` is the single validation/test coordinator for
+realtime intervals and terminal-opportunity closure under that rule. Every
+interval preserves the fixed order Clock advance -> Preview pump -> exact
+candidate reconciliation -> bounded successor and lookahead ->
+revision/deadline wait; production A/V intervals prepend Audio pump, while
+video-only intervals record no Audio stage. It owns the candidate binding state
+machine, queue-visible versus callback-complete distinction, and the one-extra
+reconciliation after completion drain. Performance qualification observes
+completed executions through a narrow observer; it no longer owns another
+copy of the admitted realtime/terminal coordinator. Settled readiness,
+preflight, recovery, and drain helpers remain separate bounded phases that
+reuse its candidate transition and publication primitives. The Module is
+compiled for `validation` as well as tests, including the same successor,
+physical-output, work-watch, and retry seams.
+
+A `HeadlessRealtimePlaybackSession` creates one Preview Runtime, installs that
+Runtime's completion waker on the exact GPU Adapter, derives hardware-decode
+admission from the same device generation, and exposes no mutable paired
+resources while realtime execution is active. A fresh private driver enters
+native playback thread scheduling only from `begin_realtime` to
+`finish_realtime`; the session itself and all settled setup/diagnostic work are
+not native-scheduled. Endurance shutdown consumes that paired session and
+best-effort deactivates an interrupted driver before synchronous resource
+closure; separately constructed Preview/GPU/driver owners are not closure
+evidence.
+
 Every presentable Preview result carries the ticket captured by the same
 evaluation that produced it. This includes a new GPU output, a CPU raster, an
 already-current registered output, and the semantic transparent canvas.

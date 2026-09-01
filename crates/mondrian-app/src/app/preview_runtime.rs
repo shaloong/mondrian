@@ -1863,7 +1863,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     /// Exact successor output that was already visible before its boundary.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn already_visible_successor_output_key(
         &self,
         playback_intent: crate::app::preview_execution::PreviewPlaybackIntent,
@@ -1873,13 +1873,13 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     /// Whether the coordinator retains any physically usable GPU output,
     /// including a stale output that is not bound to the current intent.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_retained_gpu_output(&self) -> bool {
         self.execution.borrow().current_output().is_some()
     }
 
     /// Whether the sole registered output has this complete resolved identity.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_gpu_output_for_key(&self, key: &PreviewOutputKey) -> bool {
         self.execution
             .borrow()

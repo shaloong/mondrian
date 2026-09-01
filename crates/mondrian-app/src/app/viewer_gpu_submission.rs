@@ -224,7 +224,7 @@ where
     }
 
     /// Whether any bounded submitted owner satisfies an Adapter-local query.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn any_owner(&self, mut predicate: impl FnMut(&O) -> bool) -> bool {
         self.in_flight.iter().any(|in_flight| predicate(&in_flight.owner))
     }

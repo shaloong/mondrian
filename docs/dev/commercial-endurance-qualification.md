@@ -66,6 +66,22 @@ as quiescence. The detached progress worker remains the resource authority
 after a timeout, so the containing validation process must also remain inside
 the external process-tree supervision policy until it is reaped.
 
+The concrete endurance runtime inside `mondrian-app` must drive realtime
+software work through its crate-private `app::headless_realtime_playback`
+composition. Its paired session binds Preview completion wakes, GPU device
+generation, and renderer-qualified hardware-decode admission without raising
+thread priority. Open a fresh realtime residency only for an admitted
+observation window; this enters native playback scheduling and owns the shared
+interval coordinator until explicit finish. For realtime intervals and
+terminal-demand closure, that coordinator is the only allowed interpreter of
+exact candidate identity, queue-visible publication, callback retirement,
+successor preparation, lookahead, and bounded waiting. Qualification-specific
+counters belong in a `HeadlessGpuExecutionObserver`; do not copy the
+coordinator from a performance test or retain scheduling across setup,
+diagnostics, or blocking shutdown. The eventual standalone validation binary
+must invoke a public high-level App library runner; it must not expose or call
+these low-level crate-private owners directly.
+
 Construct `EnduranceRunCapture` from the exact profile, release identity, and
 capture-authority file. Start phases only through `begin_phase`; it verifies the
 raw checked-in workload contract bytes. Submit each owner observation through

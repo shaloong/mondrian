@@ -430,7 +430,7 @@ fn advance_headless_execution_resource_policy(
 /// The candidate carries no Frame Demand and cannot become visible here. Only
 /// a later current-frame resolution with the same complete output identity may
 /// promote both semantic and physical slots.
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn prepare_headless_preview_successor(
     preview: &HeadlessPreviewRuntime,
     state: &mut AppState,
@@ -495,7 +495,7 @@ pub(crate) fn prepare_headless_preview_successor(
 
 /// Warm a bounded CPU-complete horizon beyond the immediate successor without
 /// taking GPU submission or physical presentation capacity.
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn stage_headless_preview_lookahead(
     preview: &HeadlessPreviewRuntime,
     state: &AppState,

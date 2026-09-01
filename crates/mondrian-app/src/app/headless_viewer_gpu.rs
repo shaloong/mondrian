@@ -37,7 +37,7 @@ use crate::app::FramePresentationDisposition;
 use mondrian_renderer::profile::GpuTimestampSample;
 #[cfg(test)]
 use mondrian_renderer::NativeVideoImportGpuTimingDiagnostics;
-#[cfg(test)]
+#[cfg(any(test, feature = "validation"))]
 use mondrian_renderer::ViewerGpuExecutionError;
 use mondrian_renderer::{
     color::RenderColorStageDiagnostics,
@@ -718,7 +718,7 @@ impl HeadlessViewerGpuAdapter {
 
     /// Retain one CPU-complete ticketless frame without consuming GPU
     /// submission or presentation-output capacity.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn stage_successor(
         &mut self,
         frame: Box<PreviewGpuFrame>,
@@ -741,7 +741,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Whether the bounded CPU staging slot already owns this exact intent.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_staged_successor_for_intent(
         &self,
         intent: crate::app::preview_execution::PreviewPlaybackIntent,
@@ -750,7 +750,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Retire CPU-complete frames outside the current bounded horizon.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retain_staged_successor_intents(
         &mut self,
         intents: &[crate::app::preview_execution::PreviewPlaybackIntent],
@@ -1187,7 +1187,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Retain an ordinary ticketless successor without changing visible output.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retain_ordinary_successor(
         &mut self,
         submission_id: ViewerGpuSubmissionId,
@@ -1349,7 +1349,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Whether the visible physical slot has this exact semantic key.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_current_physical_output_for_key(
         &self,
         output_key: &crate::app::preview_execution::PreviewOutputKey,
@@ -1453,7 +1453,7 @@ impl HeadlessViewerGpuAdapter {
     }
 
     /// Whether an exact successor intent already owns a submitted GPU slot.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn has_successor_submission_for_intent(
         &self,
         intent: crate::app::preview_execution::PreviewPlaybackIntent,

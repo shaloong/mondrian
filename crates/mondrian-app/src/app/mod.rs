@@ -120,6 +120,8 @@ mod grade_authoring;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_realtime_playback;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_viewer_gpu;
 mod interchange;
 pub mod media_asset_mutation;
