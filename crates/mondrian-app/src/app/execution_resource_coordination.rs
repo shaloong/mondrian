@@ -6,6 +6,7 @@
 //! evidence. Preview, Proxy, Thumbnail, Waveform, Import, and Export remain
 //! independently scheduled execution Modules.
 
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -31,6 +32,8 @@ use mondrian_renderer::{
     RenderGpuOutputExecutionResourceGrant, TimelineCpuWorkingSetGrant,
     ViewerGpuExecutionResourceGrant, ViewerGpuExecutionRuntime,
 };
+
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use parking_lot::Mutex;
 
 use super::execution_resource_slots::{
@@ -465,10 +468,53 @@ struct ExecutionResourceCoordinationState {
     decision: Arc<ExecutionResourceDecisionSnapshot>,
 }
 
+/// Monotonic owner-derived native-memory observer facts sampled while the App
+/// is live. Queue and running gauges are derived from one atomic ownership
+/// state and therefore cannot describe the same request twice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct NativeMemoryEnduranceRuntimeFacts {
+    pub(crate) queue_depth: u64,
+    pub(crate) running_work: u64,
+    pub(crate) owned_resources: u64,
+    pub(crate) cumulative_failures: u64,
+    pub(crate) worker_health_failures: u64,
+    pub(crate) startup_attempted: bool,
+    pub(crate) worker_started: bool,
+    pub(crate) startup_failures: u64,
+    pub(crate) unexpected_worker_exits: u64,
+}
+
+const NATIVE_MEMORY_OWNER_IDLE: u8 = 0;
+const NATIVE_MEMORY_OWNER_QUEUED: u8 = 1;
+const NATIVE_MEMORY_OWNER_RUNNING: u8 = 2;
+
+#[derive(Default)]
+struct NativeMemoryObservationInventory {
+    ownership: AtomicU8,
+}
+
+impl NativeMemoryObservationInventory {
+    fn snapshot(&self) -> (usize, usize) {
+        match self.ownership.load(Ordering::Acquire) {
+            NATIVE_MEMORY_OWNER_QUEUED => (1, 0),
+            NATIVE_MEMORY_OWNER_RUNNING => (0, 1),
+            _ => (0, 0),
+        }
+    }
+}
+
 /// Thread-safe owner of the latest immutable product resource decision.
 pub(crate) struct ExecutionResourceCoordinator {
     state: Mutex<ExecutionResourceCoordinationState>,
     native_memory_runtime: Mutex<Option<NativeMemoryObservationRuntime>>,
+    native_memory_inventory: Arc<NativeMemoryObservationInventory>,
+    native_memory_admission_closed: AtomicBool,
+    native_memory_start_attempted: AtomicBool,
+    native_memory_worker_started: AtomicBool,
+    native_memory_start_failures: AtomicU64,
+    native_memory_unexpected_exit_recorded: AtomicBool,
+    native_memory_unexpected_exits: AtomicU64,
+    native_memory_supported_probe_failures: AtomicU64,
     observation_origin: Instant,
 }
 
@@ -487,30 +533,63 @@ struct NativeMemoryObservationRuntime {
     command_sender: mpsc::Sender<NativeMemoryObservationCommand>,
     observation_receiver: mpsc::Receiver<NativeMemoryObservation>,
     worker: Option<JoinHandle<()>>,
+    inventory: Arc<NativeMemoryObservationInventory>,
+}
+
+struct NativeMemoryRunningGuard {
+    inventory: Arc<NativeMemoryObservationInventory>,
+}
+
+impl Drop for NativeMemoryRunningGuard {
+    fn drop(&mut self) {
+        self.inventory.ownership.store(NATIVE_MEMORY_OWNER_IDLE, Ordering::Release);
+    }
 }
 
 impl NativeMemoryObservationRuntime {
-    fn start() -> std::io::Result<Self> {
-        Self::start_with_probe(SystemPlatformService)
+    fn start(inventory: Arc<NativeMemoryObservationInventory>) -> std::io::Result<Self> {
+        Self::start_with_probe_and_inventory(SystemPlatformService, inventory)
     }
 
+    #[cfg(test)]
     fn start_with_probe<P>(probe: P) -> std::io::Result<Self>
+    where
+        P: ExecutionMemoryProbe + 'static,
+    {
+        Self::start_with_probe_and_inventory(
+            probe,
+            Arc::new(NativeMemoryObservationInventory::default()),
+        )
+    }
+
+    fn start_with_probe_and_inventory<P>(
+        probe: P,
+        inventory: Arc<NativeMemoryObservationInventory>,
+    ) -> std::io::Result<Self>
     where
         P: ExecutionMemoryProbe + 'static,
     {
         let (command_sender, command_receiver) = mpsc::channel();
         let (observation_sender, observation_receiver) = mpsc::channel();
+        let worker_inventory = Arc::clone(&inventory);
         let worker = std::thread::Builder::new()
             .name("execution-memory-observer".to_owned())
             .spawn(move || {
                 while let Ok(command) = command_receiver.recv() {
                     match command {
                         NativeMemoryObservationCommand::Observe(observed_at) => {
+                            worker_inventory
+                                .ownership
+                                .store(NATIVE_MEMORY_OWNER_RUNNING, Ordering::Release);
+                            let running_guard = NativeMemoryRunningGuard {
+                                inventory: Arc::clone(&worker_inventory),
+                            };
                             let observation = NativeMemoryObservation {
                                 observed_at,
                                 product_process_tree: probe.product_process_tree_memory(),
                                 system: probe.current_system_memory(),
                             };
+                            drop(running_guard);
                             if observation_sender.send(observation).is_err() {
                                 break;
                             }
@@ -523,13 +602,34 @@ impl NativeMemoryObservationRuntime {
             command_sender,
             observation_receiver,
             worker: Some(worker),
+            inventory,
         })
     }
 
     fn request(&self, observed_at: Duration) -> bool {
-        self.command_sender
+        if self
+            .inventory
+            .ownership
+            .compare_exchange(
+                NATIVE_MEMORY_OWNER_IDLE,
+                NATIVE_MEMORY_OWNER_QUEUED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        if self
+            .command_sender
             .send(NativeMemoryObservationCommand::Observe(observed_at))
             .is_ok()
+        {
+            true
+        } else {
+            self.inventory.ownership.store(NATIVE_MEMORY_OWNER_IDLE, Ordering::Release);
+            false
+        }
     }
 
     fn drain_latest(&self) -> (Option<NativeMemoryObservation>, bool) {
@@ -543,6 +643,7 @@ impl NativeMemoryObservationRuntime {
         }
     }
 
+    #[cfg(test)]
     fn stop_worker(&mut self) {
         let Some(worker) = self.worker.take() else {
             return;
@@ -554,13 +655,25 @@ impl NativeMemoryObservationRuntime {
 
 impl Drop for NativeMemoryObservationRuntime {
     fn drop(&mut self) {
-        self.stop_worker();
+        let _ = self.command_sender.send(NativeMemoryObservationCommand::Stop);
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if worker.is_finished() {
+            let _ = worker.join();
+        } else {
+            // The system-memory probe is an external Adapter and may block.
+            // Qualification consumes it through the explicit deadline path;
+            // ordinary App teardown must leave the UI thread bounded.
+            drop(worker);
+        }
     }
 }
 
 impl ExecutionResourceCoordinator {
     pub(crate) fn new(profile: MachineResourceProfile) -> Arc<Self> {
         let observation_origin = Instant::now();
+        let native_memory_inventory = Arc::new(NativeMemoryObservationInventory::default());
         let pressure = ExecutionResourcePressure::Nominal;
         let pressure_source = ExecutionResourcePressureSource::Baseline;
         let demand = ExecutionResourceDemandSnapshot::default();
@@ -597,6 +710,14 @@ impl ExecutionResourceCoordinator {
                 decision,
             }),
             native_memory_runtime: Mutex::new(None),
+            native_memory_inventory,
+            native_memory_admission_closed: AtomicBool::new(false),
+            native_memory_start_attempted: AtomicBool::new(false),
+            native_memory_worker_started: AtomicBool::new(false),
+            native_memory_start_failures: AtomicU64::new(0),
+            native_memory_unexpected_exit_recorded: AtomicBool::new(false),
+            native_memory_unexpected_exits: AtomicU64::new(0),
+            native_memory_supported_probe_failures: AtomicU64::new(0),
             observation_origin,
         })
     }
@@ -697,6 +818,16 @@ impl ExecutionResourceCoordinator {
         product_process_tree: ProcessMemoryProbeResult,
         system: SystemMemoryProbeResult,
     ) {
+        let supported_probe_failures = u64::from(
+            product_process_tree.discovery_available && product_process_tree.error.is_some(),
+        )
+        .saturating_add(u64::from(
+            system.discovery_available && system.error.is_some(),
+        ));
+        saturating_atomic_add(
+            &self.native_memory_supported_probe_failures,
+            supported_probe_failures,
+        );
         let mut state = self.state.lock();
         state.last_pressure_observation_at = Some(observed_at);
         state.native_pressure_request_pending = false;
@@ -756,12 +887,24 @@ impl ExecutionResourceCoordinator {
     }
 
     fn poll_native_memory_observation(&self, observed_at: Duration) {
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return;
+        }
         let (completed, observer_disconnected) = {
             let mut runtime = self.native_memory_runtime.lock();
             if runtime.is_none() {
-                match NativeMemoryObservationRuntime::start() {
-                    Ok(started) => *runtime = Some(started),
+                if self.native_memory_start_attempted.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                match NativeMemoryObservationRuntime::start(Arc::clone(
+                    &self.native_memory_inventory,
+                )) {
+                    Ok(started) => {
+                        self.native_memory_worker_started.store(true, Ordering::Release);
+                        *runtime = Some(started);
+                    }
                     Err(error) => {
+                        saturating_atomic_add(&self.native_memory_start_failures, 1);
                         drop(runtime);
                         self.state.lock().last_pressure_request_at = Some(observed_at);
                         self.apply_native_memory_observation(
@@ -778,14 +921,15 @@ impl ExecutionResourceCoordinator {
                     }
                 }
             }
-            let result = runtime
+            let (completed, receiver_disconnected) = runtime
                 .as_ref()
                 .map(NativeMemoryObservationRuntime::drain_latest)
                 .unwrap_or((None, true));
-            if result.1 {
-                runtime.take();
-            }
-            result
+            let worker_finished = runtime
+                .as_ref()
+                .and_then(|runtime| runtime.worker.as_ref())
+                .is_some_and(JoinHandle::is_finished);
+            (completed, receiver_disconnected || worker_finished)
         };
         let completed_missing = completed.is_none();
         if let Some(completed) = completed {
@@ -795,18 +939,22 @@ impl ExecutionResourceCoordinator {
                 completed.system,
             );
         }
-        if observer_disconnected && completed_missing {
-            self.state.lock().last_pressure_request_at = Some(observed_at);
-            self.apply_native_memory_observation(
-                observed_at,
-                ProcessMemoryProbeResult::unsupported(
-                    ProcessMemoryScope::ProductProcessTree,
-                    "native memory observer stopped before publishing its requested sample",
-                ),
-                SystemMemoryProbeResult::unsupported(
-                    "native memory observer stopped before publishing its requested sample",
-                ),
-            );
+        if observer_disconnected {
+            let newly_recorded = self.record_native_memory_unexpected_exit();
+            let request_pending = self.state.lock().native_pressure_request_pending;
+            if completed_missing && (newly_recorded || request_pending) {
+                self.state.lock().last_pressure_request_at = Some(observed_at);
+                self.apply_native_memory_observation(
+                    observed_at,
+                    ProcessMemoryProbeResult::unsupported(
+                        ProcessMemoryScope::ProductProcessTree,
+                        "native memory observer stopped before publishing its requested sample",
+                    ),
+                    SystemMemoryProbeResult::unsupported(
+                        "native memory observer stopped before publishing its requested sample",
+                    ),
+                );
+            }
             return;
         }
 
@@ -845,6 +993,98 @@ impl ExecutionResourceCoordinator {
         }
     }
 
+    /// Snapshot native-observer ownership and monotonic failure/worker-health
+    /// facts without consuming the observer or changing admission.
+    pub(crate) fn endurance_runtime_facts(&self) -> NativeMemoryEnduranceRuntimeFacts {
+        self.observe_native_memory_unexpected_exit();
+        let (queued, running) = self.native_memory_inventory.snapshot();
+        let pending = usize::from(self.state.lock().native_pressure_request_pending);
+        let owned = pending.max(queued.saturating_add(running));
+        let startup_failures = self.native_memory_start_failures.load(Ordering::Acquire);
+        let unexpected_worker_exits = self.native_memory_unexpected_exits.load(Ordering::Acquire);
+        NativeMemoryEnduranceRuntimeFacts {
+            queue_depth: u64::try_from(queued).unwrap_or(u64::MAX),
+            running_work: u64::try_from(running).unwrap_or(u64::MAX),
+            owned_resources: u64::try_from(owned).unwrap_or(u64::MAX),
+            cumulative_failures: self
+                .native_memory_supported_probe_failures
+                .load(Ordering::Acquire),
+            worker_health_failures: startup_failures.saturating_add(unexpected_worker_exits),
+            startup_attempted: self.native_memory_start_attempted.load(Ordering::Acquire),
+            worker_started: self.native_memory_worker_started.load(Ordering::Acquire),
+            startup_failures,
+            unexpected_worker_exits,
+        }
+    }
+
+    fn observe_native_memory_unexpected_exit(&self) {
+        if self.native_memory_admission_closed.load(Ordering::Acquire) {
+            return;
+        }
+        let worker_finished = self
+            .native_memory_runtime
+            .lock()
+            .as_ref()
+            .and_then(|runtime| runtime.worker.as_ref())
+            .is_some_and(JoinHandle::is_finished);
+        if worker_finished {
+            let _ = self.record_native_memory_unexpected_exit();
+        }
+    }
+
+    fn record_native_memory_unexpected_exit(&self) -> bool {
+        let newly_recorded =
+            !self.native_memory_unexpected_exit_recorded.swap(true, Ordering::AcqRel);
+        if newly_recorded {
+            saturating_atomic_add(&self.native_memory_unexpected_exits, 1);
+        }
+        newly_recorded
+    }
+
+    pub(crate) fn finish_endurance_shutdown(
+        &self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut runtime = self.native_memory_runtime.lock().take();
+        let mut workers = Vec::new();
+        if let Some(runtime) = runtime.as_mut() {
+            let _ = runtime.command_sender.send(NativeMemoryObservationCommand::Stop);
+            workers.extend(runtime.worker.take());
+        }
+        let join = join_workers_until(&mut workers, deadline);
+        let mut state = self.state.lock();
+        if join.all_workers_returned_normally() {
+            state.native_pressure_request_pending = false;
+        }
+        let pending = usize::from(state.native_pressure_request_pending);
+        let (queued, running) = self.native_memory_inventory.snapshot();
+        let owned = pending.max(queued.saturating_add(running));
+        let unexpected_normal_exits = self
+            .native_memory_unexpected_exits
+            .load(Ordering::Acquire)
+            .saturating_sub(u64::from(join.panicked_workers()));
+        let unexpected_normal_exits = u32::try_from(unexpected_normal_exits).unwrap_or(u32::MAX);
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            self.native_memory_start_attempted.load(Ordering::Acquire),
+            join,
+            queued,
+            running,
+            owned,
+            self.native_memory_supported_probe_failures.load(Ordering::Acquire),
+        )
+        .with_unexpected_worker_exits(unexpected_normal_exits)
+    }
+
+    pub(crate) fn begin_endurance_shutdown(&self) {
+        self.observe_native_memory_unexpected_exit();
+        self.native_memory_admission_closed.store(true, Ordering::Release);
+        if let Some(runtime) = self.native_memory_runtime.lock().as_ref() {
+            let _ = runtime.command_sender.send(NativeMemoryObservationCommand::Stop);
+        }
+    }
+
     fn observation_now(&self) -> Duration {
         self.observation_origin.elapsed()
     }
@@ -868,6 +1108,7 @@ impl ExecutionResourceCoordinator {
 impl Default for ExecutionResourceCoordinator {
     fn default() -> Self {
         let observation_origin = Instant::now();
+        let native_memory_inventory = Arc::new(NativeMemoryObservationInventory::default());
         Self {
             state: {
                 let profile = MachineResourceProfile::default();
@@ -906,6 +1147,14 @@ impl Default for ExecutionResourceCoordinator {
                 })
             },
             native_memory_runtime: Mutex::new(None),
+            native_memory_inventory,
+            native_memory_admission_closed: AtomicBool::new(false),
+            native_memory_start_attempted: AtomicBool::new(false),
+            native_memory_worker_started: AtomicBool::new(false),
+            native_memory_start_failures: AtomicU64::new(0),
+            native_memory_unexpected_exit_recorded: AtomicBool::new(false),
+            native_memory_unexpected_exits: AtomicU64::new(0),
+            native_memory_supported_probe_failures: AtomicU64::new(0),
             observation_origin,
         }
     }
@@ -1950,6 +2199,12 @@ fn classify_memory_pressure(
     }
 }
 
+fn saturating_atomic_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2981,9 +3236,12 @@ mod tests {
         .expect("start native memory runtime");
 
         assert!(runtime.request(Duration::from_secs(7)));
+        let admitted = runtime.inventory.snapshot();
+        assert_eq!(admitted.0.saturating_add(admitted.1), 1);
         entered_receiver
             .recv_timeout(Duration::from_secs(1))
             .expect("worker entered blocking probe after caller returned");
+        assert_eq!(runtime.inventory.snapshot(), (0, 1));
         let (observation, disconnected) = runtime.drain_latest();
         assert!(observation.is_none());
         assert!(!disconnected);
@@ -3001,6 +3259,7 @@ mod tests {
         };
 
         assert_eq!(observation.observed_at, Duration::from_secs(7));
+        assert_eq!(runtime.inventory.snapshot(), (0, 0));
         runtime.stop_worker();
     }
 
@@ -3044,6 +3303,88 @@ mod tests {
             Some("query failed")
         );
         assert_eq!(evidence.system.error.as_deref(), Some("query failed"));
+
+        let runtime = coordinator.endurance_runtime_facts();
+        assert_eq!(runtime.queue_depth, 0);
+        assert_eq!(runtime.running_work, 0);
+        assert_eq!(runtime.owned_resources, 0);
+        assert_eq!(runtime.cumulative_failures, 2);
+        assert_eq!(runtime.worker_health_failures, 0);
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.cumulative_failures, runtime.cumulative_failures);
+        assert!(terminal.lifecycle_closed());
+    }
+
+    #[test]
+    fn observer_panic_retains_started_identity_and_unexpected_exit_health() {
+        struct PanickingMemoryProbe;
+
+        impl ProcessMemoryProbe for PanickingMemoryProbe {
+            fn process_memory(
+                &self,
+                _scope: ProcessMemoryScope,
+            ) -> mondrian_platform::ProcessMemoryProbeResult {
+                panic!("injected native memory probe panic");
+            }
+        }
+
+        impl SystemMemoryProbe for PanickingMemoryProbe {
+            fn current_system_memory(&self) -> mondrian_platform::SystemMemoryProbeResult {
+                unreachable!("process probe panics first")
+            }
+        }
+
+        let coordinator =
+            ExecutionResourceCoordinator::new(profile(MachineResourceClass::Standard));
+        let runtime = NativeMemoryObservationRuntime::start_with_probe_and_inventory(
+            PanickingMemoryProbe,
+            Arc::clone(&coordinator.native_memory_inventory),
+        )
+        .expect("start injected native memory observer");
+        assert!(runtime.request(Duration::ZERO));
+        coordinator.native_memory_start_attempted.store(true, Ordering::Release);
+        coordinator.native_memory_worker_started.store(true, Ordering::Release);
+        coordinator.state.lock().native_pressure_request_pending = true;
+        *coordinator.native_memory_runtime.lock() = Some(runtime);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let finished = coordinator
+                .native_memory_runtime
+                .lock()
+                .as_ref()
+                .and_then(|runtime| runtime.worker.as_ref())
+                .is_some_and(JoinHandle::is_finished);
+            if finished {
+                break;
+            }
+            assert!(Instant::now() < deadline, "observer did not panic in time");
+            std::thread::yield_now();
+        }
+
+        let before_poll = coordinator.endurance_runtime_facts();
+        assert!(before_poll.startup_attempted);
+        assert!(before_poll.worker_started);
+        assert_eq!(before_poll.startup_failures, 0);
+        assert_eq!(before_poll.unexpected_worker_exits, 1);
+        assert_eq!(before_poll.worker_health_failures, 1);
+        assert_eq!(before_poll.queue_depth, 0);
+        assert_eq!(before_poll.running_work, 0);
+        assert_eq!(before_poll.owned_resources, 1);
+
+        coordinator.poll_native_memory_observation(Duration::ZERO);
+        let after_poll = coordinator.endurance_runtime_facts();
+        assert_eq!(after_poll.owned_resources, 0);
+        assert_eq!(after_poll.unexpected_worker_exits, 1);
+        assert_eq!(after_poll.cumulative_failures, 0);
+
+        let terminal =
+            coordinator.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.started_workers, 1);
+        assert_eq!(terminal.panicked_workers, 1);
+        assert_eq!(terminal.unexpected_worker_exits, 0);
+        assert_eq!(terminal.cumulative_failures, after_poll.cumulative_failures);
     }
 
     #[test]

@@ -1,4 +1,8 @@
 use std::collections::VecDeque;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -6,7 +10,9 @@ use crate::{
     ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
     ReferenceOutputAdapterSession, ReferenceOutputBundle, ReferenceOutputDeviceDescriptor,
     ReferenceOutputDeviceId, ReferenceOutputHardwareTime, ReferenceOutputOpenRequest,
-    ReferenceOutputProviderEvidence, ReferenceOutputReferencePolicy,
+    ReferenceOutputProviderEvidence, ReferenceOutputProviderShutdownFailure,
+    ReferenceOutputReferencePolicy, ReferenceOutputSessionShutdownReceipt,
+    ReferenceOutputShutdownCoordinatorFacts,
 };
 
 /// Product-visible lifecycle of one Reference Output Module instance.
@@ -119,6 +125,38 @@ impl Default for ReferenceOutputDiagnostics {
     }
 }
 
+/// Consuming shutdown evidence for one Reference Output Module owner.
+///
+/// The receipt combines the provider Session's terminal resource facts with
+/// cumulative scheduler diagnostics and the queue depth observed before the
+/// Module relinquished its own scheduling authority. On schema 2 bounded
+/// shutdown, the nested coordinator facts cover consumption and destruction of
+/// the entire Module owner, including its Adapter/bridge, not only the Session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceOutputModuleShutdownReceipt {
+    /// Receipt schema version.
+    pub schema_version: u32,
+    /// Provider Session shutdown evidence, or a clean never-opened record.
+    pub session: ReferenceOutputSessionShutdownReceipt,
+    /// Cumulative diagnostics after shutdown accounting was finalized.
+    pub diagnostics: ReferenceOutputDiagnostics,
+    /// Module-owned scheduled frames observed when shutdown began.
+    pub outstanding_frames_before_shutdown: u64,
+    /// Module accounting failure encountered while finalizing shutdown.
+    pub module_failure: Option<String>,
+}
+
+impl ReferenceOutputModuleShutdownReceipt {
+    /// Whether both Module and provider facts prove complete resource release.
+    pub const fn all_resources_released(&self) -> bool {
+        self.schema_version == 2
+            && self.session.all_resources_released()
+            && self.diagnostics.outstanding_frames == 0
+            && self.module_failure.is_none()
+    }
+}
+
 /// Deep scheduler/lifecycle Module over one physical-provider Adapter.
 pub struct ReferenceOutputModule<A> {
     adapter: A,
@@ -127,6 +165,10 @@ pub struct ReferenceOutputModule<A> {
     scheduled: VecDeque<ScheduledBundleEvidence>,
     next_frame_index: u64,
     diagnostics: ReferenceOutputDiagnostics,
+    shutdown_request_attempted: bool,
+    shutdown_request_failure: Option<ReferenceOutputProviderShutdownFailure>,
+    shutdown_module_failure: Option<String>,
+    outstanding_frames_at_shutdown_request: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +190,10 @@ where
             scheduled: VecDeque::new(),
             next_frame_index: 0,
             diagnostics: ReferenceOutputDiagnostics::default(),
+            shutdown_request_attempted: false,
+            shutdown_request_failure: None,
+            shutdown_module_failure: None,
+            outstanding_frames_at_shutdown_request: None,
         }
     }
 
@@ -194,6 +240,10 @@ where
                 self.session = Some(session);
                 self.next_frame_index = first_frame_index;
                 self.scheduled.clear();
+                self.shutdown_request_attempted = false;
+                self.shutdown_request_failure = None;
+                self.shutdown_module_failure = None;
+                self.outstanding_frames_at_shutdown_request = None;
                 Ok(())
             }
             Err(error) => {
@@ -308,20 +358,242 @@ where
         Ok(processed)
     }
 
-    /// Stop and release the exact provider Session.
-    pub fn stop(&mut self) -> Result<(), ReferenceOutputError> {
-        if let Some(session) = self.session.as_mut()
-            && let Err(error) = session.stop()
-        {
-            self.record_failed(&error);
-            self.abort_outstanding()?;
-            return Err(error.into());
+    /// Signal Session shutdown without waiting for provider-owned termination.
+    ///
+    /// This closes Module scheduling authority immediately and records the
+    /// queue depth at the signal boundary. The Adapter Session contract
+    /// forbids [`ReferenceOutputAdapterSession::begin_shutdown`] from waiting
+    /// for callbacks or device release, so a caller can invoke this before
+    /// shutting down other owners that share one absolute deadline.
+    pub fn begin_shutdown(&mut self) -> Result<(), ReferenceOutputError> {
+        if self.shutdown_request_attempted {
+            return match &self.shutdown_request_failure {
+                Some(failure) => Err(ReferenceOutputError::SessionShutdownRequestFailed {
+                    detail: failure.detail.clone(),
+                }),
+                None => Ok(()),
+            };
         }
-        self.abort_outstanding()?;
-        self.session = None;
+
+        self.shutdown_request_attempted = true;
+        self.outstanding_frames_at_shutdown_request = match u64::try_from(self.scheduled.len()) {
+            Ok(count) => Some(count),
+            Err(_) => {
+                let detail =
+                    "Module outstanding-frame count exceeded the receipt representation".to_owned();
+                self.shutdown_module_failure = Some(detail);
+                None
+            }
+        };
         self.request = None;
+
+        let request_result = self.session.as_mut().map_or(Ok(()), |session| {
+            panic::catch_unwind(AssertUnwindSafe(|| session.begin_shutdown())).unwrap_or_else(
+                |_| {
+                    Err(ReferenceOutputAdapterError::Vendor {
+                        operation: "begin_shutdown",
+                        detail: "provider Session panicked while requesting shutdown".to_owned(),
+                    })
+                },
+            )
+        });
+        let accounting_result = self.abort_outstanding();
+        if let Err(error) = &accounting_result {
+            self.shutdown_module_failure = Some(error.to_string());
+        }
+
+        match request_result {
+            Ok(()) => accounting_result,
+            Err(error) => {
+                let detail = error.to_string();
+                self.shutdown_request_failure = Some(ReferenceOutputProviderShutdownFailure::new(
+                    "begin_shutdown",
+                    detail.clone(),
+                ));
+                self.record_failed_detail(detail.clone());
+                Err(ReferenceOutputError::SessionShutdownRequestFailed { detail })
+            }
+        }
+    }
+
+    /// Stop and release the exact provider Session.
+    ///
+    /// Success requires the provider's consuming shutdown receipt to prove
+    /// playback stop, callback termination, device release, and zero unresolved
+    /// resources. Call [`Self::shutdown`] when the caller must retain that
+    /// receipt as qualification evidence.
+    pub fn stop(&mut self) -> Result<(), ReferenceOutputError> {
+        let session_shutdown = self.session.take().map_or_else(
+            ReferenceOutputSessionShutdownReceipt::never_opened,
+            |session| session.shutdown(),
+        );
+        self.abort_outstanding()?;
+        self.request = None;
+        if !session_shutdown.all_resources_released() {
+            let detail = session_shutdown.provider_failure.as_ref().map_or_else(
+                || "provider Session shutdown did not prove complete release".to_owned(),
+                |failure| {
+                    format!(
+                        "provider {} failed during Session shutdown: {}",
+                        failure.operation, failure.detail
+                    )
+                },
+            );
+            self.record_failed_detail(detail);
+            return Err(ReferenceOutputError::SessionShutdownIncomplete {
+                receipt: session_shutdown,
+            });
+        }
         self.diagnostics.state = ReferenceOutputState::Stopped;
         Ok(())
+    }
+
+    /// Consume the Module and return complete scheduler/provider shutdown evidence.
+    ///
+    /// This operation never discards a provider failure behind an error return:
+    /// the Session owner is consumed exactly once and every terminal fact is
+    /// retained in the returned receipt.
+    pub fn shutdown(mut self) -> ReferenceOutputModuleShutdownReceipt {
+        let outstanding_frames_before_shutdown = self.shutdown_outstanding_count();
+        let session = self.session.take().map_or_else(
+            ReferenceOutputSessionShutdownReceipt::never_opened,
+            |session| session.shutdown(),
+        );
+        self.finalize_shutdown(session, outstanding_frames_before_shutdown)
+    }
+
+    /// Consume the Module and wait for provider shutdown only until `deadline`.
+    ///
+    /// The entire Module is moved to a dedicated coordinator after the
+    /// non-blocking shutdown request. A successful coordinator join therefore
+    /// covers provider Session consumption plus Adapter/bridge destruction;
+    /// no potentially blocking Module field is destroyed on the deadline
+    /// caller. Spawn failure, panic, timeout, and detachment are retained as
+    /// stable, fail-closed receipt facts.
+    pub fn shutdown_until(self, deadline: Instant) -> ReferenceOutputModuleShutdownReceipt
+    where
+        A: 'static,
+    {
+        shutdown_module_until(self, deadline)
+    }
+
+    fn shutdown_outstanding_count(&mut self) -> u64 {
+        if let Some(count) = self.outstanding_frames_at_shutdown_request {
+            return count;
+        }
+        match u64::try_from(self.scheduled.len()) {
+            Ok(count) => count,
+            Err(_) => {
+                append_shutdown_failure(
+                    &mut self.shutdown_module_failure,
+                    "Module outstanding-frame count exceeded the receipt representation".to_owned(),
+                );
+                u64::MAX
+            }
+        }
+    }
+
+    fn finalize_shutdown(
+        mut self,
+        mut session: ReferenceOutputSessionShutdownReceipt,
+        outstanding_frames_before_shutdown: u64,
+    ) -> ReferenceOutputModuleShutdownReceipt {
+        self.request = None;
+        if let Err(error) = self.abort_outstanding() {
+            append_shutdown_failure(&mut self.shutdown_module_failure, error.to_string());
+        }
+        if let Some(failure) = self.shutdown_request_failure.take() {
+            append_shutdown_failure(
+                &mut self.shutdown_module_failure,
+                format!(
+                    "provider {} failed during Session shutdown request: {}",
+                    failure.operation, failure.detail
+                ),
+            );
+            session.shutdown_request_completed = false;
+            if session.provider_failure.is_none() {
+                session.provider_failure = Some(failure);
+            }
+        }
+
+        let module_failure = self.shutdown_module_failure.take();
+        if module_failure.is_none() && session.all_resources_released() {
+            if session.session_present {
+                self.diagnostics.state = ReferenceOutputState::Stopped;
+            }
+        } else {
+            let detail = module_failure.clone().unwrap_or_else(|| {
+                session.provider_failure.as_ref().map_or_else(
+                    || "provider Session shutdown did not prove complete release".to_owned(),
+                    |failure| {
+                        format!(
+                            "provider {} failed during Session shutdown: {}",
+                            failure.operation, failure.detail
+                        )
+                    },
+                )
+            });
+            self.record_failed_detail(detail);
+        }
+
+        ReferenceOutputModuleShutdownReceipt {
+            schema_version: 2,
+            session,
+            diagnostics: self.diagnostics,
+            outstanding_frames_before_shutdown,
+            module_failure,
+        }
+    }
+
+    fn unresolved_shutdown_receipt(
+        &self,
+        outstanding_frames_before_shutdown: u64,
+        operation: impl Into<String>,
+        detail: impl Into<String>,
+        coordinator: ReferenceOutputShutdownCoordinatorFacts,
+    ) -> ReferenceOutputModuleShutdownReceipt {
+        let mut session = unresolved_session_shutdown(
+            self.session.is_some(),
+            self.shutdown_request_failure.is_none(),
+            outstanding_frames_before_shutdown,
+            operation,
+            detail,
+            coordinator,
+        );
+        let mut module_failure = self.shutdown_module_failure.clone();
+        if let Some(failure) = &self.shutdown_request_failure {
+            append_shutdown_failure(
+                &mut module_failure,
+                format!(
+                    "provider {} failed during Session shutdown request: {}",
+                    failure.operation, failure.detail
+                ),
+            );
+            session.shutdown_request_completed = false;
+        }
+
+        let mut diagnostics = self.diagnostics.clone();
+        let failure_detail = module_failure.clone().unwrap_or_else(|| {
+            session.provider_failure.as_ref().map_or_else(
+                || "bounded Module shutdown did not prove complete release".to_owned(),
+                |failure| {
+                    format!(
+                        "provider {} failed during Module shutdown: {}",
+                        failure.operation, failure.detail
+                    )
+                },
+            )
+        });
+        diagnostics.state = ReferenceOutputState::Failed;
+        diagnostics.last_error = Some(failure_detail);
+
+        ReferenceOutputModuleShutdownReceipt {
+            schema_version: 2,
+            session,
+            diagnostics,
+            outstanding_frames_before_shutdown,
+            module_failure,
+        }
     }
 
     /// Current immutable diagnostic snapshot.
@@ -539,6 +811,205 @@ where
     }
 }
 
+fn shutdown_module_until<A>(
+    module: ReferenceOutputModule<A>,
+    deadline: Instant,
+) -> ReferenceOutputModuleShutdownReceipt
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    shutdown_module_until_with_spawner(module, deadline, |work| {
+        thread::Builder::new()
+            .name("mondrian-reference-output-shutdown".to_owned())
+            .spawn(work)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn shutdown_module_until_with_spawner<A, F>(
+    mut module: ReferenceOutputModule<A>,
+    deadline: Instant,
+    spawn: F,
+) -> ReferenceOutputModuleShutdownReceipt
+where
+    A: ReferenceOutputAdapter + 'static,
+    F: FnOnce(
+        Box<dyn FnOnce() -> ReferenceOutputModuleShutdownReceipt + Send>,
+    ) -> Result<thread::JoinHandle<ReferenceOutputModuleShutdownReceipt>, String>,
+{
+    if !module.shutdown_request_attempted {
+        let _request_failed = module.begin_shutdown().is_err();
+    }
+    let outstanding_frames_before_shutdown = module.shutdown_outstanding_count();
+    let payload_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "coordinator_payload",
+        "coordinator could not acquire the Reference Output Module owner",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: true,
+            panicked: false,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: true,
+        },
+    );
+    let mut spawn_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "coordinator_spawn",
+        "coordinator thread could not be spawned",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: false,
+            joined: false,
+            panicked: false,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: true,
+        },
+    );
+    let panic_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "coordinator_panic",
+        "coordinator thread panicked while consuming the Reference Output Module",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: true,
+            panicked: true,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: false,
+        },
+    );
+    let timeout_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "coordinator_timeout",
+        "absolute shutdown deadline elapsed before coordinator completion was observed",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: false,
+            panicked: false,
+            timed_out: true,
+            detached: true,
+            owner_abandoned: false,
+        },
+    );
+
+    // Keep the whole Module outside the closure until the new thread has
+    // actually started. `Builder::spawn` drops an unstarted closure on error;
+    // moving the Module directly into that closure could therefore run an
+    // unbounded Session, Adapter, or bridge Drop on the caller. The explicit
+    // leak on spawn failure is fail-closed but deadline-safe, and the unresolved
+    // Module owner remains visible in the returned resource count.
+    let payload = Arc::new(Mutex::new(Some(module)));
+    let worker_payload = Arc::clone(&payload);
+    let work = Box::new(move || match take_shutdown_module(&worker_payload) {
+        Some(module) => module.shutdown(),
+        None => payload_failure,
+    });
+    let coordinator = spawn(work);
+    let handle = match coordinator {
+        Ok(handle) => handle,
+        Err(error) => {
+            if let Some(module) = take_shutdown_module(&payload) {
+                std::mem::forget(module);
+            }
+            if let Some(failure) = spawn_failure.session.provider_failure.as_mut() {
+                failure.detail = error.clone();
+            }
+            if spawn_failure.module_failure.is_none() {
+                spawn_failure.diagnostics.last_error = Some(format!(
+                    "provider coordinator_spawn failed during Module shutdown: {error}"
+                ));
+            }
+            return spawn_failure;
+        }
+    };
+
+    loop {
+        // Completion wins at the deadline boundary. Once `is_finished` is
+        // observable, joining is non-blocking and positively proves that the
+        // Module destructor already ran on the coordinator.
+        if handle.is_finished() {
+            return match handle.join() {
+                Ok(mut receipt) => {
+                    let provider_coordinator = receipt.session.coordinator;
+                    receipt.session.coordinator = ReferenceOutputShutdownCoordinatorFacts {
+                        required: true,
+                        spawned: true,
+                        joined: true,
+                        panicked: provider_coordinator.panicked,
+                        timed_out: provider_coordinator.timed_out,
+                        detached: provider_coordinator.detached,
+                        owner_abandoned: provider_coordinator.owner_abandoned,
+                    };
+                    receipt
+                }
+                Err(_) => panic_failure,
+            };
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            if handle.is_finished() {
+                continue;
+            }
+            return timeout_failure;
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(1)));
+    }
+}
+
+fn take_shutdown_module<A>(
+    payload: &Mutex<Option<ReferenceOutputModule<A>>>,
+) -> Option<ReferenceOutputModule<A>> {
+    match payload.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
+fn unresolved_session_shutdown(
+    session_present: bool,
+    shutdown_request_completed: bool,
+    outstanding_frames: u64,
+    operation: impl Into<String>,
+    detail: impl Into<String>,
+    coordinator: ReferenceOutputShutdownCoordinatorFacts,
+) -> ReferenceOutputSessionShutdownReceipt {
+    ReferenceOutputSessionShutdownReceipt {
+        schema_version: 2,
+        session_present,
+        shutdown_request_completed,
+        playback_stopped: !session_present,
+        callback_execution_terminated: !session_present,
+        device_released: !session_present,
+        outstanding_frames: if session_present {
+            outstanding_frames
+        } else {
+            0
+        },
+        // Even a never-opened Module still owns its Adapter/bridge until the
+        // coordinator joins. Schema 2 uses this resource fact plus coordinator
+        // lifecycle closure to cover the complete Module owner.
+        outstanding_resources: 1,
+        provider_failure: Some(ReferenceOutputProviderShutdownFailure::new(
+            operation, detail,
+        )),
+        coordinator,
+    }
+}
+
+fn append_shutdown_failure(target: &mut Option<String>, detail: String) {
+    *target = Some(match target.take() {
+        Some(previous) => format!("{previous}; {detail}"),
+        None => detail,
+    });
+}
+
 /// Reference Output Module failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ReferenceOutputError {
@@ -557,6 +1028,15 @@ pub enum ReferenceOutputError {
     /// Operation requires an open Session.
     #[error("reference output Session is not open")]
     NotOpen,
+    /// Consuming provider shutdown did not prove complete resource release.
+    #[error("reference output Session shutdown did not prove complete resource release")]
+    SessionShutdownIncomplete {
+        /// Provider receipt retaining every terminal lifetime fact and failure.
+        receipt: ReferenceOutputSessionShutdownReceipt,
+    },
+    /// A prior non-blocking shutdown request failed and cannot be retried.
+    #[error("reference output Session shutdown request already failed: {detail}")]
+    SessionShutdownRequestFailed { detail: String },
     /// Scheduling is disallowed in the current lifecycle state.
     #[error("reference output is not schedulable in state {state:?}")]
     NotSchedulable { state: ReferenceOutputState },
@@ -632,6 +1112,43 @@ mod tests {
         AncillaryPlacement, AncillarySpace, AncillaryValidationLevel,
     };
     use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropTrackedAdapter<A> {
+        inner: A,
+        dropped: Arc<AtomicBool>,
+        drop_delay: Duration,
+    }
+
+    impl<A> Drop for DropTrackedAdapter<A> {
+        fn drop(&mut self) {
+            thread::sleep(self.drop_delay);
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    impl<A> ReferenceOutputAdapter for DropTrackedAdapter<A>
+    where
+        A: ReferenceOutputAdapter,
+    {
+        fn evidence(&self) -> &ReferenceOutputProviderEvidence {
+            self.inner.evidence()
+        }
+
+        fn discover(
+            &mut self,
+        ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError> {
+            self.inner.discover()
+        }
+
+        fn open(
+            &mut self,
+            device: &ReferenceOutputDeviceDescriptor,
+            request: &ReferenceOutputOpenRequest,
+        ) -> Result<Box<dyn ReferenceOutputAdapterSession>, ReferenceOutputAdapterError> {
+            self.inner.open(device, request)
+        }
+    }
 
     fn request(reference_policy: ReferenceOutputReferencePolicy) -> ReferenceOutputOpenRequest {
         ReferenceOutputOpenRequest {
@@ -699,6 +1216,40 @@ mod tests {
         (module, device)
     }
 
+    fn drop_tracked_module(
+        request: &ReferenceOutputOpenRequest,
+    ) -> (
+        ReferenceOutputModule<DropTrackedAdapter<SimulatedReferenceOutputAdapter>>,
+        ReferenceOutputDeviceDescriptor,
+        Arc<AtomicBool>,
+    ) {
+        drop_tracked_module_with_delay(request, Duration::ZERO)
+    }
+
+    fn drop_tracked_module_with_delay(
+        request: &ReferenceOutputOpenRequest,
+        drop_delay: Duration,
+    ) -> (
+        ReferenceOutputModule<DropTrackedAdapter<SimulatedReferenceOutputAdapter>>,
+        ReferenceOutputDeviceDescriptor,
+        Arc<AtomicBool>,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let inner = SimulatedReferenceOutputAdapter::new(vec![mode]).expect("adapter");
+        let dropped = Arc::new(AtomicBool::new(false));
+        let adapter = DropTrackedAdapter { inner, dropped: Arc::clone(&dropped), drop_delay };
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device, dropped)
+    }
+
     fn module_with_stop_failure(
         request: &ReferenceOutputOpenRequest,
         events: impl IntoIterator<Item = ReferenceOutputAdapterEvent>,
@@ -718,6 +1269,95 @@ mod tests {
             .expect("adapter")
             .with_scripted_events(events)
             .with_stop_failure();
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device)
+    }
+
+    fn module_with_shutdown_panic(
+        request: &ReferenceOutputOpenRequest,
+    ) -> (
+        ReferenceOutputModule<SimulatedReferenceOutputAdapter>,
+        ReferenceOutputDeviceDescriptor,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
+            .expect("adapter")
+            .with_shutdown_panic();
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device)
+    }
+
+    fn module_with_begin_shutdown_panic(
+        request: &ReferenceOutputOpenRequest,
+    ) -> (
+        ReferenceOutputModule<SimulatedReferenceOutputAdapter>,
+        ReferenceOutputDeviceDescriptor,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
+            .expect("adapter")
+            .with_begin_shutdown_panic();
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device)
+    }
+
+    fn module_with_shutdown_delay(
+        request: &ReferenceOutputOpenRequest,
+        delay: Duration,
+    ) -> (
+        ReferenceOutputModule<SimulatedReferenceOutputAdapter>,
+        ReferenceOutputDeviceDescriptor,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
+            .expect("adapter")
+            .with_shutdown_delay(delay);
+        let mut module = ReferenceOutputModule::new(adapter);
+        let device = module.discover().expect("discover").remove(0);
+        (module, device)
+    }
+
+    fn module_with_stale_shutdown_schema(
+        request: &ReferenceOutputOpenRequest,
+    ) -> (
+        ReferenceOutputModule<SimulatedReferenceOutputAdapter>,
+        ReferenceOutputDeviceDescriptor,
+    ) {
+        let mode = ReferenceOutputMode {
+            signal: request.signal.clone(),
+            supports_hdr_signal: false,
+            supports_static_hdr_metadata: false,
+            supports_reference_status: true,
+            supports_ancillary: true,
+            supports_ancillary_readback: true,
+        };
+        let adapter = SimulatedReferenceOutputAdapter::new(vec![mode])
+            .expect("adapter")
+            .with_stale_shutdown_schema();
         let mut module = ReferenceOutputModule::new(adapter);
         let device = module.discover().expect("discover").remove(0);
         (module, device)
@@ -1004,5 +1644,276 @@ mod tests {
         assert_eq!(diagnostics.aborted_frames, 2);
         assert_eq!(diagnostics.outstanding_frames, 0);
         assert_eq!(diagnostics.scheduled_frames, diagnostics.aborted_frames);
+    }
+
+    #[test]
+    fn never_opened_module_shutdown_is_explicitly_clean() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (module, _device) = module(&request, []);
+
+        let receipt = module.shutdown();
+
+        assert!(!receipt.session.session_present);
+        assert!(receipt.session.playback_stopped);
+        assert!(receipt.session.callback_execution_terminated);
+        assert!(receipt.session.device_released);
+        assert_eq!(receipt.session.outstanding_frames, 0);
+        assert_eq!(receipt.session.outstanding_resources, 0);
+        assert!(receipt.session.provider_failure.is_none());
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 0);
+        assert_eq!(receipt.diagnostics.state, ReferenceOutputState::Disabled);
+        assert!(receipt.all_resources_released());
+
+        let mut stale_module_schema = receipt.clone();
+        stale_module_schema.schema_version = 1;
+        assert!(!stale_module_schema.all_resources_released());
+        let mut stale_session_schema = receipt;
+        stale_session_schema.session.schema_version = 1;
+        assert!(!stale_session_schema.all_resources_released());
+    }
+
+    #[test]
+    fn module_shutdown_consumes_session_and_preserves_queue_accounting() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module(&request, []);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+        module.schedule(bundle(&request, 1)).expect("frame 1");
+
+        let receipt = module.shutdown();
+
+        assert!(receipt.session.session_present);
+        assert!(receipt.session.playback_stopped);
+        assert!(receipt.session.callback_execution_terminated);
+        assert!(receipt.session.device_released);
+        assert_eq!(receipt.session.outstanding_frames, 0);
+        assert_eq!(receipt.session.outstanding_resources, 0);
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 2);
+        assert_eq!(receipt.diagnostics.scheduled_frames, 2);
+        assert_eq!(receipt.diagnostics.aborted_frames, 2);
+        assert_eq!(receipt.diagnostics.outstanding_frames, 0);
+        assert_eq!(receipt.diagnostics.state, ReferenceOutputState::Stopped);
+        assert!(receipt.all_resources_released());
+    }
+
+    #[test]
+    fn provider_shutdown_failure_remains_in_fail_closed_receipt() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_stop_failure(&request, []);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+
+        let receipt = module.shutdown();
+
+        assert!(receipt.session.session_present);
+        assert!(!receipt.session.playback_stopped);
+        assert!(!receipt.session.callback_execution_terminated);
+        assert!(!receipt.session.device_released);
+        assert_eq!(receipt.session.outstanding_frames, 1);
+        assert_eq!(receipt.session.outstanding_resources, 1);
+        assert!(receipt.session.provider_failure.is_some());
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 1);
+        assert_eq!(receipt.diagnostics.aborted_frames, 1);
+        assert_eq!(receipt.diagnostics.outstanding_frames, 0);
+        assert_eq!(receipt.diagnostics.state, ReferenceOutputState::Failed);
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_signals_first_and_joins_clean_coordinator() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+
+        module.begin_shutdown().expect("non-blocking signal");
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 1);
+        assert!(receipt.session.shutdown_request_completed);
+        assert!(receipt.session.coordinator.required);
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert!(!receipt.session.coordinator.panicked);
+        assert!(!receipt.session.coordinator.timed_out);
+        assert!(!receipt.session.coordinator.detached);
+        assert!(receipt.all_resources_released());
+        assert!(adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn bounded_shutdown_never_upgrades_a_stale_provider_receipt_schema() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_stale_shutdown_schema(&request);
+        module.open(&device, request, 0).expect("open");
+
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert_eq!(receipt.schema_version, 2);
+        assert_eq!(receipt.session.schema_version, 1);
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert_eq!(receipt.diagnostics.state, ReferenceOutputState::Failed);
+        assert!(!receipt.session.all_resources_released());
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_never_opened_module_still_coordinates_adapter_destruction() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (module, _device, adapter_dropped) = drop_tracked_module(&request);
+
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert!(!receipt.session.session_present);
+        assert!(receipt.session.coordinator.required);
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert_eq!(receipt.session.outstanding_resources, 0);
+        assert!(receipt.all_resources_released());
+        assert!(adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn bounded_provider_failure_remains_fail_closed_after_clean_join() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_stop_failure(&request, []);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+
+        assert!(module.begin_shutdown().is_err());
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert!(!receipt.session.shutdown_request_completed);
+        assert!(receipt.session.provider_failure.is_some());
+        assert!(receipt.module_failure.is_some());
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn begin_shutdown_provider_panic_is_latched_and_does_not_escape_signal_phase() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_begin_shutdown_panic(&request);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+
+        let signal = module.begin_shutdown();
+        assert!(matches!(
+            signal,
+            Err(ReferenceOutputError::SessionShutdownRequestFailed { .. })
+        ));
+
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 1);
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert!(!receipt.session.shutdown_request_completed);
+        assert_eq!(
+            receipt
+                .session
+                .provider_failure
+                .as_ref()
+                .map(|failure| failure.operation.as_str()),
+            Some("begin_shutdown")
+        );
+        assert!(receipt.module_failure.is_some());
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_records_coordinator_panic_without_unbounded_join() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_shutdown_panic(&request);
+        module.open(&device, request, 0).expect("open");
+
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert!(receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.joined);
+        assert!(receipt.session.coordinator.panicked);
+        assert!(!receipt.session.coordinator.detached);
+        assert_eq!(
+            receipt
+                .session
+                .provider_failure
+                .as_ref()
+                .map(|failure| failure.operation.as_str()),
+            Some("coordinator_panic")
+        );
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_times_out_and_detaches_at_absolute_deadline() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_shutdown_delay(&request, Duration::from_millis(100));
+        module.open(&device, request, 0).expect("open");
+
+        let deadline = Instant::now() + Duration::from_millis(5);
+        let receipt = module.shutdown_until(deadline);
+
+        assert!(receipt.session.coordinator.spawned);
+        assert!(!receipt.session.coordinator.joined);
+        assert!(receipt.session.coordinator.timed_out);
+        assert!(receipt.session.coordinator.detached);
+        assert_eq!(
+            receipt
+                .session
+                .provider_failure
+                .as_ref()
+                .map(|failure| failure.operation.as_str()),
+            Some("coordinator_timeout")
+        );
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_deadline_covers_blocking_adapter_destruction() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (module, _device, adapter_dropped) =
+            drop_tracked_module_with_delay(&request, Duration::from_millis(100));
+
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_millis(5));
+
+        assert!(receipt.session.coordinator.spawned);
+        assert!(!receipt.session.coordinator.joined);
+        assert!(receipt.session.coordinator.timed_out);
+        assert!(receipt.session.coordinator.detached);
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_spawn_failure_does_not_drop_provider_on_caller() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
+        module.open(&device, request.clone(), 0).expect("open");
+        module.schedule(bundle(&request, 0)).expect("frame 0");
+
+        let receipt = shutdown_module_until_with_spawner(
+            module,
+            Instant::now() + Duration::from_secs(1),
+            |_work| Err("synthetic coordinator spawn failure".to_owned()),
+        );
+
+        assert!(receipt.session.session_present);
+        assert!(!receipt.session.coordinator.spawned);
+        assert!(!receipt.session.coordinator.joined);
+        assert!(!receipt.session.coordinator.detached);
+        assert!(receipt.session.coordinator.owner_abandoned);
+        assert_eq!(receipt.session.outstanding_resources, 1);
+        assert_eq!(receipt.outstanding_frames_before_shutdown, 1);
+        assert_eq!(
+            receipt
+                .session
+                .provider_failure
+                .as_ref()
+                .map(|failure| failure.operation.as_str()),
+            Some("coordinator_spawn")
+        );
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+        assert!(!receipt.all_resources_released());
     }
 }

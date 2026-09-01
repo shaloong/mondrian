@@ -182,6 +182,20 @@ increment that count. This statement is deliberately scoped to Headless
 Preview: it does not claim that a Headless presentation call owns or dispatches
 every other background execution domain.
 
+The lazy native process-memory observer remains an App-owned worker, including
+the never-started case. Qualification first closes its request admission and
+then consumes a terminal receipt against the same absolute deadline used by the
+other `AppState` owners. The receipt distinguishes no startup attempt, failed or
+partial startup, normal join, panic, timeout/detach, queued/running work,
+retained resources, and cumulative failures; only exact lifecycle closure may
+support terminal quiescence. Ordinary `Drop` may request shutdown as bounded
+best-effort cleanup, but it is not worker-return evidence. Runtime endurance
+facts use one atomic mutually exclusive queued/running inventory, preserve
+started-versus-unexpected-exit identity, and monotonically count supported
+native-probe failures. The terminal receipt reuses that same failure ledger, so
+a failure discovered before or during shutdown cannot regress during merge;
+unsupported probes remain explicit capability evidence and do not increment it.
+
 Every bounded Headless candidate turn advances that complete resource cycle
 before it polls an in-flight GPU submission, promotes a Prepared Viewer
 Successor, reuses an exact-current alias, or requests new Preview work. Those

@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 /// Bounded physical policy for one Timeline render-cache service.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,13 +224,21 @@ pub struct TimelineRenderCacheShutdownEvidence {
     pub worker_panicked: bool,
     /// Whether joining was impossible because shutdown ran on the worker itself.
     pub current_thread_skipped: bool,
+    /// Whether the absolute shutdown deadline elapsed before worker return was observed.
+    pub timed_out: bool,
+    /// Whether the worker handle was detached without terminal join evidence.
+    pub detached: bool,
 }
 
 impl TimelineRenderCacheShutdownEvidence {
     /// Whether every started worker returned without panic or detachment.
     pub const fn all_workers_terminated(self) -> bool {
         !self.worker_started
-            || (self.worker_terminated && !self.worker_panicked && !self.current_thread_skipped)
+            || (self.worker_terminated
+                && !self.worker_panicked
+                && !self.current_thread_skipped
+                && !self.timed_out
+                && !self.detached)
     }
 }
 
@@ -304,21 +313,35 @@ impl TimelineRenderCacheService {
         self.diagnostics.snapshot()
     }
 
+    /// Close command admission and disconnect result delivery without waiting.
+    ///
+    /// Calling this more than once is harmless. The worker observes shutdown
+    /// after its current filesystem operation returns and the command channel
+    /// is drained or disconnected.
+    pub fn begin_shutdown(&mut self) {
+        self.commands.take();
+        self.results.take();
+    }
+
     /// Close admission and synchronously reclaim the cache worker.
     pub fn shutdown_and_wait(mut self) -> TimelineRenderCacheShutdownEvidence {
         self.stop_worker()
     }
 
+    /// Close admission and reclaim the cache worker only until `deadline`.
+    ///
+    /// The worker is joined only after [`JoinHandle::is_finished`] proves the
+    /// join cannot block. A worker still active at the absolute deadline is
+    /// detached and reported fail-closed in the returned evidence.
+    pub fn shutdown_until(mut self, deadline: Instant) -> TimelineRenderCacheShutdownEvidence {
+        self.begin_shutdown();
+        self.stop_worker_until(deadline)
+    }
+
     fn stop_worker(&mut self) -> TimelineRenderCacheShutdownEvidence {
-        self.commands.take();
-        self.results.take();
+        self.begin_shutdown();
         let Some(worker) = self.worker.take() else {
-            return TimelineRenderCacheShutdownEvidence {
-                worker_started: false,
-                worker_terminated: true,
-                worker_panicked: false,
-                current_thread_skipped: false,
-            };
+            return no_worker_shutdown_evidence();
         };
         if worker.thread().id() == thread::current().id() {
             drop(worker);
@@ -327,6 +350,8 @@ impl TimelineRenderCacheService {
                 worker_terminated: false,
                 worker_panicked: false,
                 current_thread_skipped: true,
+                timed_out: false,
+                detached: true,
             };
         }
         let worker_panicked = worker.join().is_err();
@@ -335,6 +360,52 @@ impl TimelineRenderCacheService {
             worker_terminated: true,
             worker_panicked,
             current_thread_skipped: false,
+            timed_out: false,
+            detached: false,
+        }
+    }
+
+    fn stop_worker_until(&mut self, deadline: Instant) -> TimelineRenderCacheShutdownEvidence {
+        let Some(worker) = self.worker.take() else {
+            return no_worker_shutdown_evidence();
+        };
+        if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            return TimelineRenderCacheShutdownEvidence {
+                worker_started: true,
+                worker_terminated: false,
+                worker_panicked: false,
+                current_thread_skipped: true,
+                timed_out: false,
+                detached: true,
+            };
+        }
+
+        loop {
+            if worker.is_finished() {
+                let worker_panicked = worker.join().is_err();
+                return TimelineRenderCacheShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: true,
+                    worker_panicked,
+                    current_thread_skipped: false,
+                    timed_out: false,
+                    detached: false,
+                };
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                drop(worker);
+                return TimelineRenderCacheShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: false,
+                    worker_panicked: false,
+                    current_thread_skipped: false,
+                    timed_out: true,
+                    detached: true,
+                };
+            }
+            thread::sleep((deadline - now).min(Duration::from_millis(1)));
         }
     }
 
@@ -377,14 +448,29 @@ impl TimelineRenderCacheService {
     }
 }
 
+const fn no_worker_shutdown_evidence() -> TimelineRenderCacheShutdownEvidence {
+    TimelineRenderCacheShutdownEvidence {
+        worker_started: false,
+        worker_terminated: true,
+        worker_panicked: false,
+        current_thread_skipped: false,
+        timed_out: false,
+        detached: false,
+    }
+}
+
 impl Drop for TimelineRenderCacheService {
     fn drop(&mut self) {
-        let evidence = self.stop_worker();
+        self.begin_shutdown();
+        let evidence = self.stop_worker_until(Instant::now());
         if evidence.worker_panicked {
             tracing::warn!("Timeline render-cache worker panicked during shutdown");
         }
         if evidence.current_thread_skipped {
             tracing::warn!("Timeline render-cache shutdown detached its current worker thread");
+        }
+        if evidence.timed_out || evidence.detached {
+            tracing::warn!("Timeline render-cache worker detached during ordinary shutdown");
         }
     }
 }
@@ -618,6 +704,78 @@ mod tests {
         assert!(evidence.worker_terminated);
         assert!(!evidence.worker_panicked);
         assert!(!evidence.current_thread_skipped);
+        assert!(!evidence.timed_out);
+        assert!(!evidence.detached);
         assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn bounded_shutdown_closes_admission_and_returns_clean_terminal_evidence() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut service = service(temp.path().to_path_buf());
+
+        service.begin_shutdown();
+        assert_eq!(
+            service.lookup(
+                TimelineRenderCacheIdentity::from_digest([7; 32]),
+                WorkingColorSpace::LinearRec709,
+            ),
+            TimelineRenderCacheSubmission::Disconnected
+        );
+        let evidence = service.shutdown_until(Instant::now() + Duration::from_secs(1));
+
+        assert!(evidence.worker_started);
+        assert!(evidence.worker_terminated);
+        assert!(!evidence.worker_panicked);
+        assert!(!evidence.current_thread_skipped);
+        assert!(!evidence.timed_out);
+        assert!(!evidence.detached);
+        assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn bounded_shutdown_times_out_and_detaches_a_blocked_worker() {
+        let (command_tx, command_rx) = mpsc::sync_channel(1);
+        let (_result_tx, result_rx) = mpsc::sync_channel(1);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(0);
+        let (release_tx, release_rx) = mpsc::sync_channel(0);
+        let (finished_tx, finished_rx) = mpsc::sync_channel(0);
+        let worker = thread::Builder::new()
+            .name("mondrian-render-cache-blocked-shutdown-test".to_owned())
+            .spawn(move || {
+                entered_tx.send(()).expect("report worker entry");
+                release_rx.recv().expect("release blocked worker");
+                let admission_closed =
+                    matches!(command_rx.try_recv(), Err(mpsc::TryRecvError::Disconnected));
+                finished_tx.send(admission_closed).expect("report worker finish");
+            })
+            .expect("blocked worker");
+        entered_rx.recv().expect("worker entered");
+        let service = TimelineRenderCacheService {
+            commands: Some(command_tx),
+            results: Some(result_rx),
+            pending: Arc::new(Mutex::new(HashSet::new())),
+            diagnostics: Arc::new(SharedDiagnostics::default()),
+            worker: Some(worker),
+        };
+
+        let deadline = Instant::now() + Duration::from_millis(5);
+        let evidence = service.shutdown_until(deadline);
+
+        assert!(evidence.worker_started);
+        assert!(!evidence.worker_terminated);
+        assert!(!evidence.worker_panicked);
+        assert!(!evidence.current_thread_skipped);
+        assert!(evidence.timed_out);
+        assert!(evidence.detached);
+        assert!(!evidence.all_workers_terminated());
+
+        release_tx.send(()).expect("release detached worker");
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("detached worker finished after release"),
+            "shutdown must close command admission before waiting"
+        );
     }
 }

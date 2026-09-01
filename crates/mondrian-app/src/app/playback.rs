@@ -78,6 +78,13 @@ impl AppAudioPlayback {
     }
 
     #[cfg(any(test, feature = "validation"))]
+    fn begin_endurance_shutdown(&mut self) {
+        if let Self::Available(playback) = self {
+            playback.begin_shutdown();
+        }
+    }
+
+    #[cfg(test)]
     fn shutdown_and_wait(
         &mut self,
         sample_rate: u32,
@@ -92,12 +99,31 @@ impl AppAudioPlayback {
         match retired {
             Self::Available(playback) => (*playback).shutdown_and_wait(),
             Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence {
-                schema_version: 1,
-                render_workers_started: 0,
-                render_workers_terminated: 0,
-                render_worker_panics: 0,
-                render_current_thread_detachments: 0,
-                output: Default::default(),
+                schema_version: 2,
+                ..mondrian_media::AudioPlaybackShutdownEvidence::default()
+            },
+        }
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn shutdown_until(
+        &mut self,
+        sample_rate: u32,
+        deadline: Instant,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let retired = std::mem::replace(
+            self,
+            Self::Unavailable {
+                sample_rate,
+                reason: "Audio Playback was synchronously retired".to_owned(),
+            },
+        );
+        match retired {
+            Self::Available(playback) => (*playback).shutdown_until(deadline),
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence {
+                schema_version: 2,
+                ..mondrian_media::AudioPlaybackShutdownEvidence::default()
             },
         }
     }
@@ -1351,11 +1377,24 @@ impl AppState {
     }
 
     /// Consume and synchronously close the Audio owner used by this App State.
-    #[cfg(any(test, feature = "validation"))]
+    #[cfg(test)]
     pub(crate) fn shutdown_audio_playback_and_wait(
         &mut self,
     ) -> mondrian_media::AudioPlaybackShutdownEvidence {
         self.audio_playback.shutdown_and_wait(self.audio_sample_rate)
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn begin_audio_playback_endurance_shutdown(&mut self) {
+        self.audio_playback.begin_endurance_shutdown();
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn shutdown_audio_playback_until(
+        &mut self,
+        deadline: Instant,
+    ) -> mondrian_media::AudioPlaybackShutdownEvidence {
+        self.audio_playback.shutdown_until(self.audio_sample_rate, deadline)
     }
 
     /// Latest successful CPAL host/device/configuration negotiation evidence.

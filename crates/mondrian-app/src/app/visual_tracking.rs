@@ -8,7 +8,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use mondrian_core::mask_data::{
     MaskShape, MaskTrackingDirection, MaskTrackingModel, MaskTrackingRecipe, MaskTrackingSettings,
@@ -30,6 +32,7 @@ use mondrian_media::{
 use mondrian_timeline::sequence::{InputColorResolutionSource, ResolvedInputColor};
 use sha2::{Digest, Sha256};
 
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
 const TRACKING_QUEUE_CAPACITY: usize = 4;
@@ -70,6 +73,71 @@ pub struct VisualTrackingStatus {
     pub total_pairs: usize,
     /// Bounded failure detail for product presentation.
     pub detail: Option<String>,
+}
+
+/// Coherent aggregate diagnostics for the instance-owned Mask tracking worker.
+///
+/// Gauges describe the exact transport/execution/publication ownership at the
+/// instant of the snapshot. Cumulative counters are monotonic for the lifetime
+/// of the service and are independent of the bounded per-target status view.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VisualTrackingDiagnostics {
+    /// Accepted jobs occupying the bounded worker transport.
+    pub transport_occupied: u64,
+    /// Accepted jobs still resident in the bounded worker transport.
+    pub queued_transport: u64,
+    /// Jobs currently owned by the analysis worker.
+    pub running: u64,
+    /// Terminal events sent by the worker but not yet consumed by the App.
+    pub terminal_results_pending: u64,
+    /// Successful outputs awaiting the App's revision-checked publication decision.
+    pub awaiting_publication: u64,
+    /// Accepted jobs whose terminal event has not yet been consumed.
+    pub logical_outstanding: u64,
+    /// Jobs successfully admitted to the bounded transport.
+    pub admissions: u64,
+    /// Successful analysis outputs delivered to the App event stream.
+    pub completions: u64,
+    /// Successful outputs served by the exact tracking-result cache.
+    pub cache_hits: u64,
+    /// Worker analysis or terminal-event delivery failures.
+    pub failures: u64,
+    /// Cooperative cancellations delivered to the App event stream.
+    pub cancellations: u64,
+    /// Active attempts displaced by a subsequently admitted request for the same target.
+    pub superseded: u64,
+    /// Successful outputs rejected by the App's publication-time revision checks.
+    pub stale: u64,
+    /// Requests rejected by the bounded transport or an unavailable worker.
+    pub rejections: u64,
+    /// Internal ownership-transition inconsistencies retained fail-closed.
+    pub accounting_anomalies: u64,
+    /// Whether construction attempted to create the dedicated worker.
+    pub worker_startup_attempted: bool,
+    /// Whether the operating-system worker thread was created.
+    pub worker_started: bool,
+    /// Whether the worker is currently eligible to accept transport work.
+    pub worker_available: bool,
+    /// Whether the created worker has exited.
+    pub worker_exited: bool,
+    /// Worker exits observed before an explicit service shutdown request.
+    pub worker_unexpected_exits: u64,
+    /// Whether any worker exit occurred before an explicit shutdown request.
+    pub worker_unexpectedly_exited: bool,
+}
+
+impl VisualTrackingDiagnostics {
+    /// Whether the four ownership gauges form one exact outstanding-work partition.
+    pub const fn ownership_is_consistent(self) -> bool {
+        self.transport_occupied == self.queued_transport
+            && self.logical_outstanding
+                == self
+                    .queued_transport
+                    .saturating_add(self.running)
+                    .saturating_add(self.terminal_results_pending)
+            && self.awaiting_publication <= self.terminal_results_pending
+            && self.accounting_anomalies == 0
+    }
 }
 
 /// Start/recompute admission failure.
@@ -180,6 +248,188 @@ enum TrackingWorkerEvent {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrackingTerminalOutcome {
+    Completed { cache_hit: bool },
+    Canceled,
+    Failed,
+}
+
+impl TrackingWorkerEvent {
+    fn terminal_outcome(&self) -> Option<TrackingTerminalOutcome> {
+        match self {
+            Self::Completed { cache_hit, .. } => {
+                Some(TrackingTerminalOutcome::Completed { cache_hit: *cache_hit })
+            }
+            Self::Canceled { .. } => Some(TrackingTerminalOutcome::Canceled),
+            Self::Failed { .. } => Some(TrackingTerminalOutcome::Failed),
+            Self::Started { .. } | Self::Progress { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct VisualTrackingInstrumentation {
+    diagnostics: VisualTrackingDiagnostics,
+    shutdown_requested: bool,
+    mutex_poison_observed: bool,
+}
+
+impl VisualTrackingInstrumentation {
+    fn snapshot(&self) -> VisualTrackingDiagnostics {
+        VisualTrackingDiagnostics {
+            transport_occupied: self.diagnostics.queued_transport,
+            worker_unexpectedly_exited: self.diagnostics.worker_unexpected_exits != 0,
+            ..self.diagnostics
+        }
+    }
+
+    fn record_startup_attempt(&mut self) {
+        self.diagnostics.worker_startup_attempted = true;
+    }
+
+    fn record_worker_started(&mut self) {
+        self.diagnostics.worker_started = true;
+        self.diagnostics.worker_available =
+            !self.diagnostics.worker_exited && !self.shutdown_requested;
+    }
+
+    fn record_shutdown_requested(&mut self) {
+        self.shutdown_requested = true;
+        self.diagnostics.worker_available = false;
+    }
+
+    fn record_worker_exit(&mut self) {
+        self.diagnostics.worker_exited = true;
+        self.diagnostics.worker_available = false;
+        if !self.shutdown_requested {
+            self.diagnostics.worker_unexpected_exits =
+                self.diagnostics.worker_unexpected_exits.saturating_add(1);
+        }
+    }
+
+    fn record_admission(&mut self) {
+        self.diagnostics.admissions = self.diagnostics.admissions.saturating_add(1);
+        self.diagnostics.queued_transport = self.diagnostics.queued_transport.saturating_add(1);
+        self.diagnostics.logical_outstanding =
+            self.diagnostics.logical_outstanding.saturating_add(1);
+    }
+
+    fn record_rejection(&mut self) {
+        self.diagnostics.rejections = self.diagnostics.rejections.saturating_add(1);
+    }
+
+    fn record_superseded(&mut self) {
+        self.diagnostics.superseded = self.diagnostics.superseded.saturating_add(1);
+    }
+
+    fn record_worker_received_job(&mut self) {
+        if self.diagnostics.queued_transport == 0 {
+            self.diagnostics.accounting_anomalies =
+                self.diagnostics.accounting_anomalies.saturating_add(1);
+        } else {
+            self.diagnostics.queued_transport -= 1;
+        }
+        self.diagnostics.running = self.diagnostics.running.saturating_add(1);
+    }
+
+    fn record_terminal_delivery(&mut self, outcome: TrackingTerminalOutcome, delivered: bool) {
+        if self.diagnostics.running == 0 {
+            self.diagnostics.accounting_anomalies =
+                self.diagnostics.accounting_anomalies.saturating_add(1);
+        } else {
+            self.diagnostics.running -= 1;
+        }
+        if delivered {
+            self.diagnostics.terminal_results_pending =
+                self.diagnostics.terminal_results_pending.saturating_add(1);
+            match outcome {
+                TrackingTerminalOutcome::Completed { cache_hit } => {
+                    self.diagnostics.completions = self.diagnostics.completions.saturating_add(1);
+                    self.diagnostics.awaiting_publication =
+                        self.diagnostics.awaiting_publication.saturating_add(1);
+                    if cache_hit {
+                        self.diagnostics.cache_hits = self.diagnostics.cache_hits.saturating_add(1);
+                    }
+                }
+                TrackingTerminalOutcome::Canceled => {
+                    self.diagnostics.cancellations =
+                        self.diagnostics.cancellations.saturating_add(1);
+                }
+                TrackingTerminalOutcome::Failed => {
+                    self.diagnostics.failures = self.diagnostics.failures.saturating_add(1);
+                }
+            }
+        } else {
+            self.diagnostics.failures = self.diagnostics.failures.saturating_add(1);
+            if self.diagnostics.logical_outstanding == 0 {
+                self.diagnostics.accounting_anomalies =
+                    self.diagnostics.accounting_anomalies.saturating_add(1);
+            } else {
+                self.diagnostics.logical_outstanding -= 1;
+            }
+        }
+    }
+
+    fn record_terminal_consumed(&mut self, outcome: TrackingTerminalOutcome) {
+        if self.diagnostics.terminal_results_pending == 0 {
+            self.diagnostics.accounting_anomalies =
+                self.diagnostics.accounting_anomalies.saturating_add(1);
+        } else {
+            self.diagnostics.terminal_results_pending -= 1;
+        }
+        if matches!(outcome, TrackingTerminalOutcome::Completed { .. }) {
+            if self.diagnostics.awaiting_publication == 0 {
+                self.diagnostics.accounting_anomalies =
+                    self.diagnostics.accounting_anomalies.saturating_add(1);
+            } else {
+                self.diagnostics.awaiting_publication -= 1;
+            }
+        }
+        if self.diagnostics.logical_outstanding == 0 {
+            self.diagnostics.accounting_anomalies =
+                self.diagnostics.accounting_anomalies.saturating_add(1);
+        } else {
+            self.diagnostics.logical_outstanding -= 1;
+        }
+    }
+
+    fn record_stale(&mut self) {
+        self.diagnostics.stale = self.diagnostics.stale.saturating_add(1);
+    }
+
+    fn record_publication_race_cancellation(&mut self) {
+        self.diagnostics.cancellations = self.diagnostics.cancellations.saturating_add(1);
+    }
+}
+
+fn lock_tracking_instrumentation(
+    instrumentation: &Arc<Mutex<VisualTrackingInstrumentation>>,
+) -> MutexGuard<'_, VisualTrackingInstrumentation> {
+    match instrumentation.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            if !guard.mutex_poison_observed {
+                guard.mutex_poison_observed = true;
+                guard.diagnostics.accounting_anomalies =
+                    guard.diagnostics.accounting_anomalies.saturating_add(1);
+            }
+            guard
+        }
+    }
+}
+
+struct TrackingWorkerLifecycleGuard {
+    instrumentation: Arc<Mutex<VisualTrackingInstrumentation>>,
+}
+
+impl Drop for TrackingWorkerLifecycleGuard {
+    fn drop(&mut self) {
+        lock_tracking_instrumentation(&self.instrumentation).record_worker_exit();
+    }
+}
+
 struct ActiveTrackingAttempt {
     tracking_id: TrackingId,
     cancellation: ExecutionCancellationToken,
@@ -191,38 +441,59 @@ pub(crate) struct VisualTrackingService {
     attempts: HashMap<TrackingTarget, ActiveTrackingAttempt>,
     statuses: HashMap<TrackingTarget, VisualTrackingStatus>,
     worker: Option<JoinHandle<()>>,
+    instrumentation: Arc<Mutex<VisualTrackingInstrumentation>>,
 }
 
 impl VisualTrackingService {
     pub(crate) fn new() -> Self {
         let (jobs_tx, jobs_rx) = mpsc::sync_channel(TRACKING_QUEUE_CAPACITY);
         let (events_tx, events_rx) = mpsc::channel();
+        let instrumentation = Arc::new(Mutex::new(VisualTrackingInstrumentation::default()));
+        lock_tracking_instrumentation(&instrumentation).record_startup_attempt();
+        let worker_instrumentation = Arc::clone(&instrumentation);
         let worker = std::thread::Builder::new()
             .name("mondrian-visual-tracking".to_owned())
-            .spawn(move || tracking_worker(jobs_rx, events_tx))
+            .spawn(move || tracking_worker(jobs_rx, events_tx, worker_instrumentation))
             .ok();
+        if worker.is_some() {
+            lock_tracking_instrumentation(&instrumentation).record_worker_started();
+        }
         Self {
             jobs: worker.as_ref().map(|_| jobs_tx),
             events: events_rx,
             attempts: HashMap::new(),
             statuses: HashMap::new(),
             worker,
+            instrumentation,
         }
     }
 
     fn request(&mut self, job: TrackingJob) -> Result<TrackingId, VisualTrackingRequestError> {
         let target = job.binding.target;
-        if let Some(active) = self.attempts.remove(&target) {
-            active.cancellation.cancel();
-        }
         let tracking_id = job.tracking_id;
         let cancellation = job.cancellation.clone();
         let total_pairs = job.frames.len().saturating_sub(1);
         let Some(sender) = self.jobs.as_ref() else {
+            lock_tracking_instrumentation(&self.instrumentation).record_rejection();
             return Err(VisualTrackingRequestError::WorkerUnavailable);
         };
-        match sender.try_send(job) {
+        let admission = {
+            // Holding the diagnostics lock across the non-blocking send prevents
+            // the worker from recording a receive before its admission exists.
+            let mut instrumentation = lock_tracking_instrumentation(&self.instrumentation);
+            let admission = sender.try_send(job);
+            match &admission {
+                Ok(()) => instrumentation.record_admission(),
+                Err(_) => instrumentation.record_rejection(),
+            }
+            admission
+        };
+        match admission {
             Ok(()) => {
+                if let Some(active) = self.attempts.remove(&target) {
+                    active.cancellation.cancel();
+                    lock_tracking_instrumentation(&self.instrumentation).record_superseded();
+                }
                 self.attempts
                     .insert(target, ActiveTrackingAttempt { tracking_id, cancellation });
                 self.statuses.insert(
@@ -262,6 +533,10 @@ impl VisualTrackingService {
     fn drain_events(&mut self) -> Vec<TrackingWorkerEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.events.try_recv() {
+            if let Some(outcome) = event.terminal_outcome() {
+                lock_tracking_instrumentation(&self.instrumentation)
+                    .record_terminal_consumed(outcome);
+            }
             events.push(event);
         }
         events
@@ -304,6 +579,65 @@ impl VisualTrackingService {
         self.attempts.clear();
         self.statuses.clear();
     }
+
+    pub(crate) fn diagnostics(&self) -> VisualTrackingDiagnostics {
+        lock_tracking_instrumentation(&self.instrumentation).snapshot()
+    }
+
+    pub(crate) fn begin_endurance_shutdown(&mut self) {
+        for active in self.attempts.values() {
+            active.cancellation.cancel();
+        }
+        lock_tracking_instrumentation(&self.instrumentation).record_shutdown_requested();
+        self.jobs.take();
+    }
+
+    pub(crate) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut workers = self.worker.take().into_iter().collect::<Vec<_>>();
+        let join = join_workers_until(&mut workers, deadline);
+        // Drain after the join regardless of its outcome. Terminal failures
+        // published during shutdown must enter the cumulative ledger, while
+        // unfinished worker ownership remains visible in the gauges below.
+        let _ = self.drain_events();
+        let diagnostics = self.diagnostics();
+        let gauges_closed = diagnostics.ownership_is_consistent()
+            && diagnostics.logical_outstanding == 0
+            && diagnostics.queued_transport == 0
+            && diagnostics.running == 0
+            && diagnostics.terminal_results_pending == 0
+            && diagnostics.awaiting_publication == 0;
+        if join.all_workers_returned_normally() && gauges_closed {
+            self.attempts.clear();
+            self.statuses.clear();
+        }
+        let lifecycle_anomaly = !join.all_workers_returned_normally()
+            || diagnostics.worker_unexpected_exits != 0
+            || diagnostics.accounting_anomalies != 0
+            || !gauges_closed;
+        let lifecycle_residual = if lifecycle_anomaly { 1 } else { 0 };
+        let owned_resources_remaining = diagnostics.logical_outstanding.max(lifecycle_residual);
+        let cumulative_failures = diagnostics
+            .failures
+            .saturating_add(diagnostics.rejections)
+            .saturating_add(diagnostics.accounting_anomalies);
+        let unexpected_normal_exits = diagnostics
+            .worker_unexpected_exits
+            .saturating_sub(u64::from(join.panicked_workers()));
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            true,
+            join,
+            saturating_u64_to_usize(diagnostics.queued_transport),
+            saturating_u64_to_usize(diagnostics.running),
+            saturating_u64_to_usize(owned_resources_remaining),
+            cumulative_failures,
+        )
+        .with_unexpected_worker_exits(saturating_u64_to_u32(unexpected_normal_exits))
+    }
 }
 
 impl Default for VisualTrackingService {
@@ -315,9 +649,15 @@ impl Default for VisualTrackingService {
 impl Drop for VisualTrackingService {
     fn drop(&mut self) {
         self.cancel_all();
-        self.jobs.take();
+        self.begin_endurance_shutdown();
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if worker.is_finished() {
+                let _ = worker.join();
+            } else {
+                // Qualification uses the explicit bounded receipt. Ordinary UI
+                // teardown must not hang on a foreign analysis Adapter.
+                drop(worker);
+            }
         }
     }
 }
@@ -373,6 +713,11 @@ impl AppState {
         mask_id: MaskId,
     ) -> Option<&VisualTrackingStatus> {
         self.visual_tracking.status(TrackingTarget { clip_id, mask_id })
+    }
+
+    /// Return one coherent aggregate snapshot of Mask tracking worker ownership.
+    pub fn visual_tracking_diagnostics(&self) -> VisualTrackingDiagnostics {
+        self.visual_tracking.diagnostics()
     }
 
     fn request_visual_tracking(
@@ -632,6 +977,8 @@ impl AppState {
                     // its completion event. This closes the otherwise possible publication
                     // race between Cancel and a queued Completed event.
                     if self.visual_tracking.attempt_was_canceled(binding.target, tracking_id) {
+                        lock_tracking_instrumentation(&self.visual_tracking.instrumentation)
+                            .record_publication_race_cancellation();
                         self.visual_tracking.finish(
                             binding.target,
                             tracking_id,
@@ -672,6 +1019,8 @@ impl AppState {
                             );
                         }
                         Err(detail) => {
+                            lock_tracking_instrumentation(&self.visual_tracking.instrumentation)
+                                .record_stale();
                             self.visual_tracking.finish(
                                 binding.target,
                                 tracking_id,
@@ -898,14 +1247,53 @@ fn tracking_cache_key(
     Ok(hasher.finalize().into())
 }
 
-fn tracking_worker(jobs: Receiver<TrackingJob>, events: mpsc::Sender<TrackingWorkerEvent>) {
+fn saturating_u64_to_usize(value: u64) -> usize {
+    match usize::try_from(value) {
+        Ok(value) => value,
+        Err(_) => usize::MAX,
+    }
+}
+
+fn saturating_u64_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn publish_tracking_terminal_event(
+    events: &mpsc::Sender<TrackingWorkerEvent>,
+    instrumentation: &Arc<Mutex<VisualTrackingInstrumentation>>,
+    event: TrackingWorkerEvent,
+) {
+    let Some(outcome) = event.terminal_outcome() else {
+        let mut instrumentation = lock_tracking_instrumentation(instrumentation);
+        instrumentation.diagnostics.accounting_anomalies =
+            instrumentation.diagnostics.accounting_anomalies.saturating_add(1);
+        return;
+    };
+    // The unbounded event send cannot wait on the App. Keeping the ownership
+    // lock across it orders terminal publication before any receiver-side
+    // consumption can update the same aggregate gauges.
+    let mut instrumentation = lock_tracking_instrumentation(instrumentation);
+    let delivered = events.send(event).is_ok();
+    instrumentation.record_terminal_delivery(outcome, delivered);
+}
+
+fn tracking_worker(
+    jobs: Receiver<TrackingJob>,
+    events: mpsc::Sender<TrackingWorkerEvent>,
+    instrumentation: Arc<Mutex<VisualTrackingInstrumentation>>,
+) {
+    let _lifecycle = TrackingWorkerLifecycleGuard { instrumentation: Arc::clone(&instrumentation) };
     let mut decode_context = PreviewDecodeSessionContext::new();
     let mut cache: VecDeque<([u8; 32], TrackingAnalysisOutput)> = VecDeque::new();
     while let Ok(job) = jobs.recv() {
+        lock_tracking_instrumentation(&instrumentation).record_worker_received_job();
         let target = job.binding.target;
         if job.cancellation.is_canceled() {
-            let _ =
-                events.send(TrackingWorkerEvent::Canceled { tracking_id: job.tracking_id, target });
+            publish_tracking_terminal_event(
+                &events,
+                &instrumentation,
+                TrackingWorkerEvent::Canceled { tracking_id: job.tracking_id, target },
+            );
             continue;
         }
         let total_pairs = job.frames.len().saturating_sub(1);
@@ -917,16 +1305,20 @@ fn tracking_worker(jobs: Receiver<TrackingJob>, events: mpsc::Sender<TrackingWor
         if !job.bypass_cache
             && let Some((_, output)) = cache.iter().find(|(key, _)| *key == job.cache_key)
         {
-            let _ = events.send(TrackingWorkerEvent::Completed {
-                tracking_id: job.tracking_id,
-                binding: job.binding,
-                model: job.model,
-                direction: job.direction,
-                settings: job.settings,
-                video_stream_index: job.video_stream_index,
-                output: output.clone(),
-                cache_hit: true,
-            });
+            publish_tracking_terminal_event(
+                &events,
+                &instrumentation,
+                TrackingWorkerEvent::Completed {
+                    tracking_id: job.tracking_id,
+                    binding: job.binding,
+                    model: job.model,
+                    direction: job.direction,
+                    settings: job.settings,
+                    video_stream_index: job.video_stream_index,
+                    output: output.clone(),
+                    cache_hit: true,
+                },
+            );
             continue;
         }
         match analyze_tracking_job(&job, &mut decode_context, &events) {
@@ -936,27 +1328,34 @@ fn tracking_worker(jobs: Receiver<TrackingJob>, events: mpsc::Sender<TrackingWor
                 while cache.len() > TRACKING_RESULT_CACHE_CAPACITY {
                     cache.pop_front();
                 }
-                let _ = events.send(TrackingWorkerEvent::Completed {
-                    tracking_id: job.tracking_id,
-                    binding: job.binding,
-                    model: job.model,
-                    direction: job.direction,
-                    settings: job.settings,
-                    video_stream_index: job.video_stream_index,
-                    output,
-                    cache_hit: false,
-                });
+                publish_tracking_terminal_event(
+                    &events,
+                    &instrumentation,
+                    TrackingWorkerEvent::Completed {
+                        tracking_id: job.tracking_id,
+                        binding: job.binding,
+                        model: job.model,
+                        direction: job.direction,
+                        settings: job.settings,
+                        video_stream_index: job.video_stream_index,
+                        output,
+                        cache_hit: false,
+                    },
+                );
             }
             Err(_detail) if job.cancellation.is_canceled() => {
-                let _ = events
-                    .send(TrackingWorkerEvent::Canceled { tracking_id: job.tracking_id, target });
+                publish_tracking_terminal_event(
+                    &events,
+                    &instrumentation,
+                    TrackingWorkerEvent::Canceled { tracking_id: job.tracking_id, target },
+                );
             }
             Err(detail) => {
-                let _ = events.send(TrackingWorkerEvent::Failed {
-                    tracking_id: job.tracking_id,
-                    target,
-                    detail,
-                });
+                publish_tracking_terminal_event(
+                    &events,
+                    &instrumentation,
+                    TrackingWorkerEvent::Failed { tracking_id: job.tracking_id, target, detail },
+                );
             }
         }
     }
@@ -1119,6 +1518,7 @@ fn decode_tracking_frame(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
     use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate};
@@ -1207,6 +1607,273 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn started_instrumentation() -> Arc<Mutex<VisualTrackingInstrumentation>> {
+        let instrumentation = Arc::new(Mutex::new(VisualTrackingInstrumentation::default()));
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_startup_attempt();
+            state.record_worker_started();
+        }
+        instrumentation
+    }
+
+    #[test]
+    fn aggregate_diagnostics_partition_idle_queue_running_terminal_and_consumed() {
+        let instrumentation = started_instrumentation();
+        let idle = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert!(idle.worker_startup_attempted);
+        assert!(idle.worker_started);
+        assert!(idle.worker_available);
+        assert!(idle.ownership_is_consistent());
+        assert_eq!(idle.logical_outstanding, 0);
+
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_admission();
+        }
+        let queued = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(queued.transport_occupied, 1);
+        assert_eq!(queued.queued_transport, 1);
+        assert_eq!(queued.running, 0);
+        assert_eq!(queued.logical_outstanding, 1);
+        assert_eq!(queued.admissions, 1);
+        assert!(queued.ownership_is_consistent());
+
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_worker_received_job();
+        }
+        let running = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(running.transport_occupied, 0);
+        assert_eq!(running.running, 1);
+        assert_eq!(running.logical_outstanding, 1);
+        assert!(running.ownership_is_consistent());
+
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_terminal_delivery(
+                TrackingTerminalOutcome::Completed { cache_hit: true },
+                true,
+            );
+        }
+        let terminal = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(terminal.running, 0);
+        assert_eq!(terminal.terminal_results_pending, 1);
+        assert_eq!(terminal.awaiting_publication, 1);
+        assert_eq!(terminal.logical_outstanding, 1);
+        assert_eq!(terminal.completions, 1);
+        assert_eq!(terminal.cache_hits, 1);
+        assert!(terminal.ownership_is_consistent());
+
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_terminal_consumed(TrackingTerminalOutcome::Completed { cache_hit: true });
+        }
+        let consumed = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(consumed.logical_outstanding, 0);
+        assert_eq!(consumed.terminal_results_pending, 0);
+        assert_eq!(consumed.awaiting_publication, 0);
+        assert_eq!(consumed.completions, 1);
+        assert_eq!(consumed.cache_hits, 1);
+        assert!(consumed.ownership_is_consistent());
+    }
+
+    #[test]
+    fn cumulative_diagnostics_do_not_depend_on_status_or_cache_retention() {
+        let instrumentation = started_instrumentation();
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_admission();
+            state.record_worker_received_job();
+            state.record_terminal_delivery(TrackingTerminalOutcome::Failed, true);
+            state.record_terminal_consumed(TrackingTerminalOutcome::Failed);
+            state.record_rejection();
+            state.record_superseded();
+            state.record_stale();
+        }
+        let first = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(first.admissions, 1);
+        assert_eq!(first.failures, 1);
+        assert_eq!(first.rejections, 1);
+        assert_eq!(first.superseded, 1);
+        assert_eq!(first.stale, 1);
+        assert_eq!(first.logical_outstanding, 0);
+        assert!(first.ownership_is_consistent());
+
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_admission();
+            state.record_worker_received_job();
+            state.record_terminal_delivery(TrackingTerminalOutcome::Canceled, true);
+            state.record_terminal_consumed(TrackingTerminalOutcome::Canceled);
+        }
+        let second = lock_tracking_instrumentation(&instrumentation).snapshot();
+        assert_eq!(second.admissions, 2);
+        assert_eq!(second.failures, 1);
+        assert_eq!(second.cancellations, 1);
+        assert_eq!(second.rejections, 1);
+        assert_eq!(second.superseded, 1);
+        assert_eq!(second.stale, 1);
+        assert!(second.ownership_is_consistent());
+    }
+
+    #[test]
+    fn endurance_shutdown_drains_terminal_failure_and_preserves_its_ledger() {
+        let instrumentation = started_instrumentation();
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.record_admission();
+            state.record_worker_received_job();
+        }
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<TrackingJob>(1);
+        let (events_tx, events_rx) = mpsc::channel();
+        let worker_instrumentation = Arc::clone(&instrumentation);
+        let worker = std::thread::spawn(move || {
+            let _lifecycle = TrackingWorkerLifecycleGuard {
+                instrumentation: Arc::clone(&worker_instrumentation),
+            };
+            let _ = jobs_rx.recv();
+            publish_tracking_terminal_event(
+                &events_tx,
+                &worker_instrumentation,
+                TrackingWorkerEvent::Failed {
+                    tracking_id: TrackingId::new(),
+                    target: TrackingTarget { clip_id: ClipId::new(), mask_id: MaskId::new() },
+                    detail: "injected shutdown failure".to_owned(),
+                },
+            );
+        });
+        let mut service = VisualTrackingService {
+            jobs: Some(jobs_tx),
+            events: events_rx,
+            attempts: HashMap::new(),
+            statuses: HashMap::new(),
+            worker: Some(worker),
+            instrumentation,
+        };
+
+        let evidence = service.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        let diagnostics = service.diagnostics();
+        assert_eq!(evidence.terminated_workers, 1);
+        assert_eq!(evidence.cumulative_failures, 1);
+        assert_eq!(evidence.queued_work_remaining, 0);
+        assert_eq!(evidence.running_work_remaining, 0);
+        assert_eq!(evidence.owned_resources_remaining, 0);
+        assert_eq!(diagnostics.failures, 1);
+        assert_eq!(diagnostics.logical_outstanding, 0);
+        assert_eq!(diagnostics.terminal_results_pending, 0);
+        assert!(!diagnostics.worker_available);
+        assert!(diagnostics.worker_exited);
+        assert!(!diagnostics.worker_unexpectedly_exited);
+        assert!(diagnostics.ownership_is_consistent());
+    }
+
+    #[test]
+    fn endurance_shutdown_receipt_keeps_rejections_in_the_cumulative_ledger() {
+        let instrumentation = started_instrumentation();
+        {
+            let mut state = lock_tracking_instrumentation(&instrumentation);
+            state.diagnostics.failures = 2;
+            state.diagnostics.rejections = 3;
+            state.diagnostics.accounting_anomalies = 4;
+        }
+        let (jobs_tx, jobs_rx) = mpsc::sync_channel::<TrackingJob>(1);
+        let (_events_tx, events_rx) = mpsc::channel();
+        let worker_instrumentation = Arc::clone(&instrumentation);
+        let worker = std::thread::spawn(move || {
+            let _lifecycle =
+                TrackingWorkerLifecycleGuard { instrumentation: worker_instrumentation };
+            let _ = jobs_rx.recv();
+        });
+        let mut service = VisualTrackingService {
+            jobs: Some(jobs_tx),
+            events: events_rx,
+            attempts: HashMap::new(),
+            statuses: HashMap::new(),
+            worker: Some(worker),
+            instrumentation,
+        };
+
+        let evidence = service.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+
+        assert_eq!(evidence.cumulative_failures, 9);
+    }
+
+    #[test]
+    fn panic_and_timeout_shutdowns_retain_outstanding_worker_ownership() {
+        let panic_instrumentation = started_instrumentation();
+        {
+            let mut state = lock_tracking_instrumentation(&panic_instrumentation);
+            state.record_admission();
+            state.record_worker_received_job();
+        }
+        let (panic_jobs_tx, panic_jobs_rx) = mpsc::sync_channel::<TrackingJob>(1);
+        let (_panic_events_tx, panic_events_rx) = mpsc::channel();
+        let panic_worker_instrumentation = Arc::clone(&panic_instrumentation);
+        let panic_worker = std::thread::spawn(move || {
+            let _lifecycle =
+                TrackingWorkerLifecycleGuard { instrumentation: panic_worker_instrumentation };
+            let _ = panic_jobs_rx.recv();
+            panic!("injected tracking worker panic");
+        });
+        let mut panic_service = VisualTrackingService {
+            jobs: Some(panic_jobs_tx),
+            events: panic_events_rx,
+            attempts: HashMap::new(),
+            statuses: HashMap::new(),
+            worker: Some(panic_worker),
+            instrumentation: panic_instrumentation,
+        };
+        let panic_evidence =
+            panic_service.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(panic_evidence.panicked_workers, 1);
+        assert_eq!(panic_evidence.running_work_remaining, 1);
+        assert_eq!(panic_evidence.owned_resources_remaining, 1);
+        assert!(!panic_evidence.all_workers_terminated());
+
+        let timeout_instrumentation = started_instrumentation();
+        {
+            let mut state = lock_tracking_instrumentation(&timeout_instrumentation);
+            state.record_admission();
+            state.record_worker_received_job();
+        }
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let (timeout_jobs_tx, timeout_jobs_rx) = mpsc::sync_channel::<TrackingJob>(1);
+        let (_timeout_events_tx, timeout_events_rx) = mpsc::channel();
+        let timeout_worker_instrumentation = Arc::clone(&timeout_instrumentation);
+        let timeout_worker = std::thread::spawn(move || {
+            let _lifecycle =
+                TrackingWorkerLifecycleGuard { instrumentation: timeout_worker_instrumentation };
+            let _ = timeout_jobs_rx.recv();
+            while !worker_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        });
+        let mut timeout_service = VisualTrackingService {
+            jobs: Some(timeout_jobs_tx),
+            events: timeout_events_rx,
+            attempts: HashMap::new(),
+            statuses: HashMap::new(),
+            worker: Some(timeout_worker),
+            instrumentation: Arc::clone(&timeout_instrumentation),
+        };
+        let timeout_evidence = timeout_service.finish_endurance_shutdown(Instant::now());
+        assert_eq!(timeout_evidence.timed_out_workers, 1);
+        assert_eq!(timeout_evidence.detached_workers, 1);
+        assert_eq!(timeout_evidence.running_work_remaining, 1);
+        assert_eq!(timeout_evidence.owned_resources_remaining, 1);
+        assert!(!timeout_evidence.all_workers_terminated());
+        release.store(true, Ordering::Release);
+        let exit_deadline = Instant::now() + Duration::from_secs(1);
+        while !lock_tracking_instrumentation(&timeout_instrumentation).snapshot().worker_exited
+            && Instant::now() < exit_deadline
+        {
+            std::thread::yield_now();
+        }
+        assert!(lock_tracking_instrumentation(&timeout_instrumentation).snapshot().worker_exited);
     }
 
     #[test]

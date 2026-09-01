@@ -22,6 +22,10 @@ use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
 };
+pub use super::endurance_shutdown::{
+    AppAudioSourceCacheShutdownEvidence, AppEnduranceShutdownEvidence, AppProjectShutdownEvidence,
+    EnduranceWorkerShutdownEvidence,
+};
 use super::headless_realtime_playback::{
     capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
     HeadlessEnduranceShutdownProjection, HeadlessRealtimePlaybackSession,
@@ -63,29 +67,53 @@ impl EnduranceGpuShutdownEvidence {
     }
 }
 
-/// Synchronous closure across the headless Preview, Audio, and GPU owners.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Synchronous closure across Headless and every AppState execution owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnduranceExecutionOwnerClosure {
     /// Complete Preview worker inventory.
     pub preview: PreviewRuntimeShutdownEvidence,
-    /// Realtime PCM render and device-lifecycle inventory.
-    pub audio: mondrian_media::AudioPlaybackShutdownEvidence,
+    /// Complete consuming inventory for every owner embedded in AppState.
+    pub app: AppEnduranceShutdownEvidence,
     /// Bounded GPU progress and generation-retirement evidence.
     pub gpu: EnduranceGpuShutdownEvidence,
+    /// Owner snapshot failure retained after consuming cleanup completed.
+    pub owner_snapshot_failure: Option<String>,
+    /// Terminal projection failure retained without discarding consuming receipts.
+    pub terminal_projection_failure: Option<String>,
     terminal_owner_snapshot: HeadlessEnduranceOwnerSnapshot,
 }
 
 impl EnduranceExecutionOwnerClosure {
     /// Whether every software execution owner returned without panic or detach.
-    pub const fn all_workers_terminated(self) -> bool {
+    pub fn all_workers_terminated(&self) -> bool {
         self.preview.all_workers_terminated()
-            && self.audio.all_workers_terminated()
+            && self.app.all_resources_released()
             && self.gpu.all_resources_retired()
     }
 
     /// Seal terminal gauges while retaining cumulative pre-shutdown failures.
-    pub fn capture_facts(self) -> EnduranceCaptureFacts {
+    pub fn capture_facts(&self) -> EnduranceCaptureFacts {
         EnduranceCaptureFacts::from_headless_owner_snapshot(self.terminal_owner_snapshot)
+    }
+}
+
+fn retain_terminal_owner_projection(
+    owner_snapshot: HeadlessEnduranceOwnerSnapshot,
+    projection: HeadlessEnduranceShutdownProjection,
+    prior_failure: Option<String>,
+) -> (HeadlessEnduranceOwnerSnapshot, Option<String>) {
+    if let Some(failure) = prior_failure {
+        return (
+            owner_snapshot.fail_closed_after_shutdown(projection),
+            Some(failure),
+        );
+    }
+    match owner_snapshot.after_shutdown(projection) {
+        Ok(snapshot) => (snapshot, None),
+        Err(error) => (
+            owner_snapshot.fail_closed_after_shutdown(projection),
+            Some(format!("project Headless terminal owner snapshot: {error}")),
+        ),
     }
 }
 
@@ -155,8 +183,9 @@ impl EnduranceExecutionOwners {
         mut app: AppState,
         gpu_timeout: Duration,
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
+        let deadline = Instant::now().checked_add(gpu_timeout).unwrap_or_else(Instant::now);
         let transport_shutdown_failed = app.is_playing() && app.pause().is_err();
-        let (preview_owner, gpu_owner) = self
+        let (mut preview_owner, gpu_owner) = self
             .realtime
             .take()
             .ok_or_else(|| {
@@ -165,12 +194,19 @@ impl EnduranceExecutionOwners {
                 )
             })?
             .into_shutdown_owners();
-        let owner_snapshot =
-            capture_headless_endurance_owner_snapshot(&preview_owner, &gpu_owner, &app);
-        let preview = preview_owner.shutdown_and_wait();
-        let audio = app.shutdown_audio_playback_and_wait();
-        let gpu = gpu_owner.shutdown_and_wait(gpu_timeout);
-        drop(app);
+        let (owner_snapshot, owner_snapshot_failure) =
+            match capture_headless_endurance_owner_snapshot(&preview_owner, &gpu_owner, &app) {
+                Ok(snapshot) => (snapshot, None),
+                Err(error) => (
+                    HeadlessEnduranceOwnerSnapshot::failed_capture(),
+                    Some(error.to_string()),
+                ),
+            };
+        preview_owner.begin_endurance_shutdown();
+        app.begin_endurance_shutdown();
+        let gpu = gpu_owner.shutdown_and_wait(deadline.saturating_duration_since(Instant::now()));
+        let preview = preview_owner.shutdown_until(deadline);
+        let app = app.shutdown_for_endurance(deadline);
         let device_loss_count = u64::from(
             gpu.generation_terminal_kind == Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost),
         );
@@ -188,17 +224,38 @@ impl EnduranceExecutionOwners {
             device_loss_count,
             fatal_error_count,
         };
-        let terminal_owner_snapshot =
-            owner_snapshot.after_shutdown(HeadlessEnduranceShutdownProjection {
-                playback_owner_consumed: true,
-                preview_closed: preview.all_workers_terminated(),
-                audio_closed: audio.all_workers_terminated(),
-                gpu_closed: gpu.all_resources_retired(),
-                gpu_device_losses: gpu.device_loss_count,
-                gpu_fatal_errors: gpu.fatal_error_count,
-                transport_shutdown_failed,
-            });
-        Ok(EnduranceExecutionOwnerClosure { preview, audio, gpu, terminal_owner_snapshot })
+        let (app_background, background_projection_failure) =
+            match app.background_terminal_snapshot() {
+                Ok(snapshot) => (Some(snapshot), None),
+                Err(error) => (
+                    None,
+                    Some(format!("capture App background terminal snapshot: {error}")),
+                ),
+            };
+        let (terminal_owner_snapshot, terminal_projection_failure) =
+            retain_terminal_owner_projection(
+                owner_snapshot,
+                HeadlessEnduranceShutdownProjection {
+                    playback_owner_consumed: true,
+                    preview_closed: preview.all_workers_terminated(),
+                    audio_closed: app.audio.all_workers_terminated(),
+                    app_residual_owners_closed: app.all_residual_owner_resources_released(),
+                    app_background,
+                    gpu_closed: gpu.all_resources_retired(),
+                    gpu_device_losses: gpu.device_loss_count,
+                    gpu_fatal_errors: gpu.fatal_error_count,
+                    transport_shutdown_failed,
+                },
+                background_projection_failure,
+            );
+        Ok(EnduranceExecutionOwnerClosure {
+            preview,
+            app,
+            gpu,
+            owner_snapshot_failure,
+            terminal_projection_failure,
+            terminal_owner_snapshot,
+        })
     }
 }
 
@@ -364,9 +421,7 @@ impl EnduranceRuntimeClosure {
         self.status != EndurancePhaseTerminalStatus::NotRun
             && self.playback_workers_terminated
             && self.supervised_child_processes_remaining == 0
-            && self.export.worker_terminated
-            && self.export.pending_jobs == 0
-            && self.export.active_jobs == 0
+            && self.export.all_resources_released()
     }
 
     fn incomplete_cleanup_error(self) -> EnduranceCampaignError {
@@ -815,6 +870,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_projection_failure_is_retained_without_discarding_owner_facts() {
+        let running = HeadlessEnduranceOwnerSnapshot::test_fixture(0, 5, 7, 2, 3);
+        let projection = HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: true,
+            preview_closed: true,
+            audio_closed: true,
+            app_residual_owners_closed: true,
+            app_background: None,
+            gpu_closed: true,
+            gpu_device_losses: 2,
+            gpu_fatal_errors: 0,
+            transport_shutdown_failed: false,
+        };
+
+        let (terminal, failure) = retain_terminal_owner_projection(
+            running,
+            projection,
+            Some("capture App background terminal snapshot: overflow".to_owned()),
+        );
+
+        assert_eq!(
+            failure.as_deref(),
+            Some("capture App background terminal snapshot: overflow")
+        );
+        assert_eq!(terminal.playback_pending(), 1);
+        assert_eq!(terminal.other_queue_depth(), 5);
+        assert_eq!(terminal.owned_resource_units(), 7);
+        assert_eq!(terminal.gpu_device_losses(), 2);
+        assert_eq!(terminal.fatal_errors(), 4);
+    }
+
+    #[test]
     #[ignore = "requires a real Headless GPU Adapter and native scheduling admission"]
     fn active_realtime_session_gates_raw_access_and_still_closes_all_owners() {
         let mut state = AppState::new();
@@ -835,7 +922,8 @@ mod tests {
             .expect("close active execution owners");
 
         assert!(closure.preview.all_workers_terminated());
-        assert!(closure.audio.all_workers_terminated());
+        assert!(closure.app.audio.all_workers_terminated());
+        assert!(closure.app.all_resources_released());
         assert!(closure.gpu.all_resources_retired());
         assert!(closure.all_workers_terminated());
     }
@@ -983,8 +1071,10 @@ mod tests {
                     playback_workers_terminated: true,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 1,
+                        schema_version: 2,
+                        worker_started: true,
                         worker_terminated: true,
+                        worker_start_failed: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: self.phase_elapsed_us() / 60_000_000,
@@ -1035,8 +1125,10 @@ mod tests {
                     playback_workers_terminated: !self.cleanup_incomplete,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 1,
+                        schema_version: 2,
+                        worker_started: true,
                         worker_terminated: true,
+                        worker_start_failed: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,
@@ -1251,8 +1343,10 @@ mod tests {
                     ),
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 1,
+                        schema_version: 2,
+                        worker_started: true,
                         worker_terminated: true,
+                        worker_start_failed: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,

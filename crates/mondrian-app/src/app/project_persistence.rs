@@ -18,10 +18,13 @@ use mondrian_project::{
 use mondrian_storage::{ensure_durable_directory_chain, DirectoryPublicationFailure};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 
 pub(super) const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
 const MAX_COMPLETIONS_PER_POLL: usize = 8;
@@ -510,18 +513,33 @@ struct ProjectPersistenceBarrierAcknowledgement {
 enum ProjectPersistenceWorkerMessage {
     Request(Box<ProjectPersistenceRequest>),
     Barrier(ProjectPersistenceBarrier),
+    Shutdown,
+}
+
+/// Monotonic owner-derived persistence facts sampled while the App is live.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct ProjectPersistenceEnduranceRuntimeFacts {
+    pub(super) queue_depth: u64,
+    pub(super) running_work: u64,
+    pub(super) owned_resources: u64,
+    pub(super) cumulative_failures: u64,
+    pub(super) worker_health_failures: u64,
 }
 
 /// Bounded, single-writer durable persistence Module.
 pub struct ProjectPersistenceService {
     service_id: ProjectPersistenceServiceId,
     worker_tx: mpsc::Sender<ProjectPersistenceWorkerMessage>,
+    worker: Option<JoinHandle<()>>,
     completion_rx: Receiver<ProjectPersistenceCompletion>,
     queued: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
+    cumulative_worker_failures: Arc<AtomicU64>,
+    worker_unexpected_exit_recorded: AtomicBool,
     session_admission: HashMap<AuthoringSessionId, SessionAdmission>,
     next_request_id: u64,
     startup_error: Option<String>,
+    shutdown_requested: bool,
     #[cfg(test)]
     next_request_gate: Option<TestPersistenceWorkerGate>,
     #[cfg(test)]
@@ -539,30 +557,48 @@ impl ProjectPersistenceService {
         let (completion_tx, completion_rx) = mpsc::channel();
         let queued = Arc::new(AtomicUsize::new(0));
         let pending = Arc::new(AtomicUsize::new(0));
+        let cumulative_worker_failures = Arc::new(AtomicU64::new(0));
         let worker_queued = Arc::clone(&queued);
         let worker_pending = Arc::clone(&pending);
-        let (service_id, startup_error) = match next_persistence_service_id() {
+        let worker_cumulative_failures = Arc::clone(&cumulative_worker_failures);
+        let (service_id, worker, startup_error) = match next_persistence_service_id() {
             Ok(service_id) => {
-                let startup_error = std::thread::Builder::new()
+                match std::thread::Builder::new()
                     .name("mondrian-project-persistence".to_owned())
                     .spawn(move || {
-                        persistence_worker(worker_rx, completion_tx, worker_queued, worker_pending)
-                    })
-                    .err()
-                    .map(|error| format!("project persistence worker failed to start: {error}"));
-                (service_id, startup_error)
+                        persistence_worker(
+                            worker_rx,
+                            completion_tx,
+                            worker_queued,
+                            worker_pending,
+                            worker_cumulative_failures,
+                        )
+                    }) {
+                    Ok(worker) => (service_id, Some(worker), None),
+                    Err(error) => (
+                        service_id,
+                        None,
+                        Some(format!(
+                            "project persistence worker failed to start: {error}"
+                        )),
+                    ),
+                }
             }
-            Err(error) => (ProjectPersistenceServiceId(0), Some(error)),
+            Err(error) => (ProjectPersistenceServiceId(0), None, Some(error)),
         };
         Self {
             service_id,
             worker_tx,
+            worker,
             completion_rx,
             queued,
             pending,
+            cumulative_worker_failures,
+            worker_unexpected_exit_recorded: AtomicBool::new(false),
             session_admission: HashMap::new(),
             next_request_id: 1,
             startup_error,
+            shutdown_requested: false,
             #[cfg(test)]
             next_request_gate: None,
             #[cfg(test)]
@@ -897,6 +933,65 @@ impl ProjectPersistenceService {
         self.completion_rx.try_iter().take(MAX_COMPLETIONS_PER_POLL).collect()
     }
 
+    /// Snapshot mutually exclusive queued/running ownership and monotonic
+    /// failure/worker-health facts without consuming the persistence owner.
+    pub(super) fn endurance_runtime_facts(&self) -> ProjectPersistenceEnduranceRuntimeFacts {
+        self.observe_unexpected_worker_exit();
+        let queued = self.queued.load(Ordering::Acquire);
+        let pending = self.pending.load(Ordering::Acquire);
+        let running = pending.saturating_sub(queued);
+        let startup_failures = u64::from(self.startup_error.is_some());
+        let unexpected_exits =
+            u64::from(self.worker_unexpected_exit_recorded.load(Ordering::Acquire));
+        ProjectPersistenceEnduranceRuntimeFacts {
+            queue_depth: saturating_usize_to_u64(queued),
+            running_work: saturating_usize_to_u64(running),
+            owned_resources: saturating_usize_to_u64(pending),
+            cumulative_failures: self.cumulative_worker_failures.load(Ordering::Acquire),
+            worker_health_failures: startup_failures.saturating_add(unexpected_exits),
+        }
+    }
+
+    fn observe_unexpected_worker_exit(&self) {
+        if !self.shutdown_requested && self.worker.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.worker_unexpected_exit_recorded.store(true, Ordering::Release);
+        }
+    }
+
+    pub(super) fn begin_endurance_shutdown(&mut self) {
+        self.observe_unexpected_worker_exit();
+        if self.shutdown_requested {
+            return;
+        }
+        self.shutdown_requested = true;
+        let _ = self.worker_tx.send(ProjectPersistenceWorkerMessage::Shutdown);
+    }
+
+    pub(super) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut workers = self.worker.take().into_iter().collect::<Vec<_>>();
+        let join = join_workers_until(&mut workers, deadline);
+        let queued = self.queued.load(Ordering::Acquire);
+        let pending = self.pending.load(Ordering::Acquire);
+        let running = pending.saturating_sub(queued);
+        let unexpected_exits =
+            u32::from(self.worker_unexpected_exit_recorded.load(Ordering::Acquire))
+                .saturating_sub(join.panicked_workers());
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            true,
+            join,
+            queued,
+            running,
+            pending,
+            self.cumulative_worker_failures.load(Ordering::Acquire),
+        )
+        .with_unexpected_worker_exits(unexpected_exits)
+    }
+
     /// Whether a completion still belongs to the exact admitted Session lifetime.
     ///
     /// A FIFO barrier removes every earlier worker request, but this check also
@@ -1093,6 +1188,18 @@ pub(super) struct TestPersistenceWorkerGateControl {
     release_tx: SyncSender<()>,
 }
 
+impl Drop for ProjectPersistenceService {
+    fn drop(&mut self) {
+        self.begin_endurance_shutdown();
+        let Some(worker) = self.worker.take() else {
+            return;
+        };
+        if worker.is_finished() && worker.join().is_err() {
+            tracing::error!("Project persistence worker panicked during shutdown");
+        }
+    }
+}
+
 #[cfg(test)]
 impl TestPersistenceWorkerGateControl {
     pub(super) fn wait_until_running(&self) {
@@ -1111,6 +1218,7 @@ fn persistence_worker(
     completion_tx: mpsc::Sender<ProjectPersistenceCompletion>,
     queued: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
+    cumulative_failures: Arc<AtomicU64>,
 ) {
     let mut create_bindings = HashMap::new();
     let mut last_successful_manual_revision = HashMap::new();
@@ -1168,6 +1276,9 @@ fn persistence_worker(
                     requested_create_binding,
                     &completion,
                 );
+                if completion.result.is_err() {
+                    saturating_atomic_add(&cumulative_failures, 1);
+                }
                 pending.fetch_sub(1, Ordering::AcqRel);
                 let _ = completion_tx.send(completion);
             }
@@ -1178,8 +1289,19 @@ fn persistence_worker(
                 };
                 let _ = barrier.acknowledgement_tx.send(acknowledgement);
             }
+            ProjectPersistenceWorkerMessage::Shutdown => break,
         }
     }
+}
+
+fn saturating_atomic_add(counter: &AtomicU64, amount: u64) {
+    let _ = counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        Some(current.saturating_add(amount))
+    });
+}
+
+fn saturating_usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 fn update_worker_publication_state(
@@ -1922,6 +2044,52 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    fn endurance_facts_separate_running_ownership_and_retain_worker_failures() {
+        let root = unique_root("endurance-runtime-facts");
+        std::fs::create_dir_all(&root).expect("create root");
+        let (authoring, lease) = session(&root);
+        let snapshot = authoring.snapshot().expect("authoring snapshot");
+        let destination = ManualProjectFileDestination::initial(
+            snapshot.session_id,
+            root.join("failed-publication.mdp"),
+        )
+        .expect("manual destination");
+        let mut service = ProjectPersistenceService::new();
+        let gate = service.gate_next_request();
+        service.fail_next_worker_io_for_test(std::io::ErrorKind::StorageFull);
+
+        let request = service
+            .submit(
+                snapshot,
+                ProjectPersistencePurpose::Manual { destination },
+                lease,
+            )
+            .expect("submit gated failure");
+        gate.wait_until_running();
+
+        let running = service.endurance_runtime_facts();
+        assert_eq!(running.queue_depth, 0);
+        assert_eq!(running.running_work, 1);
+        assert_eq!(running.owned_resources, 1);
+        assert_eq!(running.cumulative_failures, 0);
+        assert_eq!(running.worker_health_failures, 0);
+
+        gate.release();
+        assert!(wait_for(&service, request).result.is_err());
+        let completed = service.endurance_runtime_facts();
+        assert_eq!(completed.queue_depth, 0);
+        assert_eq!(completed.running_work, 0);
+        assert_eq!(completed.owned_resources, 0);
+        assert_eq!(completed.cumulative_failures, 1);
+        assert_eq!(completed.worker_health_failures, 0);
+
+        let terminal = service.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+        assert_eq!(terminal.cumulative_failures, completed.cumulative_failures);
+        assert!(terminal.lifecycle_closed());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

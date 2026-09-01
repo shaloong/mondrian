@@ -13253,7 +13253,7 @@ fn synchronous_preview_shutdown_reclaims_complete_worker_inventory() {
 
     let evidence = runtime.shutdown_and_wait();
 
-    assert_eq!(evidence.schema_version, 1);
+    assert_eq!(evidence.schema_version, 2);
     assert_eq!(evidence.workers_started, 4);
     assert_eq!(evidence.workers_terminated, 4);
     assert_eq!(evidence.worker_panics, 0);
@@ -13272,6 +13272,27 @@ fn synchronous_preview_shutdown_rejects_panicked_worker_as_complete() {
     assert_eq!(evidence.workers_terminated, 1);
     assert_eq!(evidence.worker_panics, 1);
     assert!(!evidence.all_workers_terminated());
+}
+
+#[test]
+fn bounded_preview_shutdown_detaches_a_worker_at_the_absolute_deadline() {
+    let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_release = Arc::clone(&release);
+    let worker = std::thread::spawn(move || {
+        while !worker_release.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+    });
+
+    let evidence = join_preview_workers_until(vec![worker], Instant::now());
+
+    assert_eq!(evidence.schema_version, 2);
+    assert_eq!(evidence.workers_started, 1);
+    assert_eq!(evidence.workers_terminated, 0);
+    assert_eq!(evidence.worker_timeouts, 1);
+    assert_eq!(evidence.worker_deadline_detachments, 1);
+    assert!(!evidence.all_workers_terminated());
+    release.store(true, std::sync::atomic::Ordering::Release);
 }
 
 #[test]

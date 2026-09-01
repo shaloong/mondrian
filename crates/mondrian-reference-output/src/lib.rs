@@ -16,9 +16,11 @@ pub use adapter::{
     ReferenceOutputAdapter, ReferenceOutputAdapterError, ReferenceOutputAdapterEvent,
     ReferenceOutputAdapterSession, ReferenceOutputDeviceDescriptor, ReferenceOutputDeviceId,
     ReferenceOutputHardwareTime, ReferenceOutputProvider, ReferenceOutputProviderEvidence,
-    ReferenceOutputRoutingPreferences, ReferenceOutputRuntimeAvailability,
-    SimulatedReferenceOutputAdapter, UnavailableVendorReferenceOutputBridge,
-    VendorReferenceOutputAdapter, VendorReferenceOutputBridge,
+    ReferenceOutputProviderShutdownFailure, ReferenceOutputRoutingPreferences,
+    ReferenceOutputRuntimeAvailability, ReferenceOutputSessionShutdownReceipt,
+    ReferenceOutputShutdownCoordinatorFacts, SimulatedReferenceOutputAdapter,
+    UnavailableVendorReferenceOutputBridge, VendorReferenceOutputAdapter,
+    VendorReferenceOutputBridge,
 };
 pub use frame::{
     pack_encoded_rgb_to_rgb12, pack_encoded_rgb_to_v210, pack_f32_audio_to_s24,
@@ -26,7 +28,8 @@ pub use frame::{
     ReferenceOutputPayloadError, ReferenceVideoFrame, ReferenceVideoPackingError,
 };
 pub use module::{
-    ReferenceOutputDiagnostics, ReferenceOutputError, ReferenceOutputModule, ReferenceOutputState,
+    ReferenceOutputDiagnostics, ReferenceOutputError, ReferenceOutputModule,
+    ReferenceOutputModuleShutdownReceipt, ReferenceOutputState,
 };
 pub use signal::{
     ReferenceAudioCadence, ReferenceAudioCadenceError, ReferenceHdrSignal,

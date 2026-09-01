@@ -110,6 +110,7 @@ mod dynamic_hdr_authoring;
 pub mod endurance_campaign;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_qualification;
+mod endurance_shutdown;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;

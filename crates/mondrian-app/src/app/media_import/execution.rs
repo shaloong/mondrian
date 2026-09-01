@@ -20,6 +20,7 @@ use mondrian_core::{
 };
 use parking_lot::{Condvar, Mutex};
 
+use super::super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::asset_adapter::{AssetLibraryMediaImportBackend, MediaImportPreparedCandidate};
 use super::{
     MediaImportBatchId, MediaImportDiagnostics, MediaImportFailureReason, MediaImportTerminalRecord,
@@ -129,6 +130,8 @@ struct MediaImportCounters {
     rejections: u64,
     imported_files: u64,
     failed_files: u64,
+    preparation_failures: u64,
+    publication_failures: u64,
     canceled_files: u64,
     superseded_files: u64,
 }
@@ -222,6 +225,7 @@ pub(in super::super) struct MediaImportExecution {
     /// lock across SQLite I/O.
     publication_gate: Mutex<()>,
     results: Mutex<mpsc::Receiver<MediaImportWorkerResult>>,
+    requested_worker_count: usize,
     worker_handles: Vec<JoinHandle<()>>,
     observed_model_revision: AtomicU64,
 }
@@ -275,6 +279,7 @@ impl MediaImportExecution {
             committer,
             publication_gate: Mutex::new(()),
             results: Mutex::new(result_rx),
+            requested_worker_count: worker_count,
             worker_handles,
             observed_model_revision: AtomicU64::new(0),
         }
@@ -518,6 +523,8 @@ impl MediaImportExecution {
                             MediaImportPublicationOutcome::Failed(error) => {
                                 state.counters.failed_files =
                                     state.counters.failed_files.saturating_add(1);
+                                state.counters.publication_failures =
+                                    state.counters.publication_failures.saturating_add(1);
                                 (
                                     MediaImportPublicationOutcome::Failed(error),
                                     ExecutionTerminalDisposition::Failed,
@@ -605,6 +612,10 @@ impl MediaImportExecution {
             generation: state.generation,
             dispatch_enabled: state.dispatch_enabled,
             dispatch_parallelism: state.dispatch_parallelism,
+            requested_workers: self.requested_worker_count,
+            started_workers: self.worker_handles.len(),
+            worker_unexpectedly_exited: self.worker_handles.iter().any(JoinHandle::is_finished)
+                && !self.inner.shutdown.load(Ordering::Acquire),
             active_batches: state.batches.len(),
             active_batch_ids,
             queued_files: state.queue.len(),
@@ -615,10 +626,56 @@ impl MediaImportExecution {
             rejections: state.counters.rejections,
             imported_files: state.counters.imported_files,
             failed_files: state.counters.failed_files,
+            preparation_failures: state.counters.preparation_failures,
+            publication_failures: state.counters.publication_failures,
             canceled_files: state.counters.canceled_files,
             superseded_files: state.counters.superseded_files,
             terminal_records: state.terminal_records.iter().cloned().collect(),
         }
+    }
+
+    pub(in super::super) fn begin_endurance_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        let mut state = self.inner.state.lock();
+        for batch in state.batches.values() {
+            batch.cancellation.cancel();
+        }
+        state.queue.clear();
+        drop(state);
+        self.inner.available.notify_all();
+    }
+
+    pub(in super::super) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let join = join_workers_until(&mut self.worker_handles, deadline);
+        let mut state = self.inner.state.lock();
+        let cumulative_failures = state
+            .counters
+            .preparation_failures
+            .saturating_add(state.counters.publication_failures)
+            .saturating_add(state.counters.rejections);
+        if join.all_workers_returned_normally() {
+            let _ = self.results.get_mut().try_iter().count();
+            state.queue.clear();
+            state.batches.clear();
+            state.running_files = 0;
+            state.outstanding_files = 0;
+        }
+        let queued = state.queue.len();
+        let running = state.running_files;
+        let owned = state.outstanding_files;
+        EnduranceWorkerShutdownEvidence::from_join(
+            self.requested_worker_count,
+            true,
+            join,
+            queued,
+            running,
+            owned,
+            cumulative_failures,
+        )
     }
 }
 
@@ -630,14 +687,7 @@ impl Default for MediaImportExecution {
 
 impl Drop for MediaImportExecution {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        let mut state = self.inner.state.lock();
-        for batch in state.batches.values() {
-            batch.cancellation.cancel();
-        }
-        state.queue.clear();
-        drop(state);
-        self.inner.available.notify_all();
+        self.begin_endurance_shutdown();
         let deadline = Instant::now() + MEDIA_IMPORT_SHUTDOWN_GRACE;
         let mut handles = self.worker_handles.drain(..).collect::<Vec<_>>();
         while !handles.is_empty() && Instant::now() < deadline {
@@ -709,6 +759,11 @@ fn media_import_worker(inner: Arc<MediaImportExecutionInner>) {
         } else {
             inner.preparer.prepare(&job.path, job.folder_id.as_deref(), &job.cancellation)
         };
+        if matches!(&outcome, MediaImportWorkerOutcome::Failed { .. }) {
+            let mut state = inner.state.lock();
+            state.counters.preparation_failures =
+                state.counters.preparation_failures.saturating_add(1);
+        }
         let result = MediaImportWorkerResult {
             batch_id: job.batch_id,
             generation: job.generation,

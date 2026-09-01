@@ -257,15 +257,39 @@ impl RealtimeAudioOutputManager {
         self.stop_worker()
     }
 
-    fn stop_worker(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+    /// Close device admission and request worker exit without joining it.
+    pub(crate) fn begin_shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Release);
         self.handle = None;
         self.event_rx = None;
         self.command_tx = None;
+    }
+
+    fn stop_worker(&mut self) -> RealtimeAudioOutputShutdownEvidence {
+        self.begin_shutdown();
         if let Some(worker) = self.worker.take() {
             self.join_worker(worker);
         }
         self.shutdown_evidence
+    }
+
+    /// Request ordinary-drop shutdown without waiting for foreign device code.
+    ///
+    /// Returns `true` when a still-running worker was detached. Its started
+    /// count deliberately remains unmatched by a terminated count, so this
+    /// path can never manufacture clean lifetime evidence.
+    fn stop_worker_without_waiting(&mut self) -> bool {
+        self.begin_shutdown();
+        let Some(worker) = self.worker.take() else {
+            return false;
+        };
+        if worker.is_finished() {
+            self.join_worker(worker);
+            false
+        } else {
+            drop(worker);
+            true
+        }
     }
 
     fn join_worker(&mut self, worker: JoinHandle<()>) -> DeviceWorkerJoinOutcome {
@@ -414,12 +438,17 @@ fn validate_controlled_recycle_generation(
 
 impl Drop for RealtimeAudioOutputManager {
     fn drop(&mut self) {
-        let evidence = self.stop_worker();
-        if evidence.worker_panics > 0 {
+        let worker_detached = self.stop_worker_without_waiting();
+        if self.shutdown_evidence.worker_panics > 0 {
             tracing::error!("realtime audio device worker panicked during shutdown");
         }
-        if evidence.current_thread_detachments > 0 {
+        if self.shutdown_evidence.current_thread_detachments > 0 {
             tracing::error!("realtime audio device worker could not synchronously join itself");
+        }
+        if worker_detached {
+            tracing::warn!(
+                "realtime audio device worker was still running and detached during ordinary drop"
+            );
         }
     }
 }
@@ -683,6 +712,50 @@ mod tests {
         assert_eq!(evidence.workers_terminated, 1);
         assert_eq!(evidence.worker_panics, 0);
         assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn ordinary_drop_detaches_a_device_worker_that_has_not_finished() {
+        let mut manager = RealtimeAudioOutputManager::new(48_000, AudioChannelLayout::Stereo);
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = Arc::clone(&exited);
+        manager
+            .ensure_worker_started_with(move |_, _, _, shutdown, _, _| {
+                thread::Builder::new().name("mondrian-audio-device-drop-test".to_owned()).spawn(
+                    move || {
+                        while !shutdown.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        while !worker_release.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        worker_exited.store(true, Ordering::Release);
+                    },
+                )
+            })
+            .expect("spawn injected device worker");
+
+        let (drop_complete_tx, drop_complete_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(manager);
+            drop_complete_tx.send(()).expect("publish drop completion");
+        });
+        let returned_without_worker_exit =
+            drop_complete_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release.store(true, Ordering::Release);
+        dropper.join().expect("ordinary manager drop must not panic");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !exited.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            returned_without_worker_exit,
+            "ordinary drop blocked on the device worker"
+        );
+        assert!(exited.load(Ordering::Acquire));
     }
 
     #[test]

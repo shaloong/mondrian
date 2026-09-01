@@ -3,6 +3,7 @@
 use super::{
     audio_frame_timestamp, canceled_audio_decode, mapping::identity_pan_filter,
     AudioSourceIdentity, AudioWindowDecoder, AudioWindowDecoderDiagnostics,
+    AudioWindowDecoderShutdownEvidence,
 };
 use crate::audio::AudioBuffer;
 use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
@@ -49,6 +50,7 @@ struct DecoderState {
     cold_window_max_duration_us: u64,
     sequential_window_max_duration_us: u64,
     random_seek_window_max_duration_us: u64,
+    retired_shutdown: AudioWindowDecoderShutdownEvidence,
 }
 
 impl DecoderState {
@@ -67,6 +69,7 @@ impl DecoderState {
             cold_window_max_duration_us: 0,
             sequential_window_max_duration_us: 0,
             random_seek_window_max_duration_us: 0,
+            retired_shutdown: AudioWindowDecoderShutdownEvidence::default(),
         }
     }
 }
@@ -121,7 +124,8 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         if kind == WindowKind::RandomSeek
             && let Some(mut previous) = session.take()
         {
-            previous.terminate();
+            let shutdown = previous.terminate();
+            self.record_session_shutdown(shutdown);
         }
 
         let started = Instant::now();
@@ -132,11 +136,12 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
                     *session = Some(created);
                     opened = true;
                 }
-                Err(error) => {
+                Err(failure) => {
                     drop(session);
                     self.remove_slot(&slot);
+                    self.record_session_shutdown(failure.shutdown);
                     self.record_window(kind, false, started.elapsed(), cancellation.is_canceled());
-                    return Err(error);
+                    return Err(*failure.error);
                 }
             }
         }
@@ -152,7 +157,8 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
         }
         let failed = result.is_err();
         if failed && let Some(mut failed) = session.take() {
-            failed.terminate();
+            let shutdown = failed.terminate();
+            self.record_session_shutdown(shutdown);
         }
         drop(session);
         if failed {
@@ -197,7 +203,22 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
                 trim_idle_sessions_to_capacity(&mut state)
             }
         };
-        terminate_entries(evicted);
+        self.record_session_shutdown(terminate_entries(evicted));
+    }
+
+    fn shutdown_sessions(&self) -> AudioWindowDecoderShutdownEvidence {
+        let (sessions_before, entries, mut evidence) = {
+            let mut state = self.state.lock();
+            let sessions_before = state.entries.len();
+            let entries = std::mem::take(&mut state.entries);
+            let retired = std::mem::take(&mut state.retired_shutdown);
+            (sessions_before, entries, retired)
+        };
+        evidence.sessions_before = evidence.sessions_before.saturating_add(sessions_before);
+        for entry in entries {
+            evidence.merge(shutdown_entry(entry));
+        }
+        evidence
     }
 }
 
@@ -210,7 +231,11 @@ impl PersistentFfmpegAudioWindowDecoder {
 
     fn converge_capacity(&self) {
         let evicted = trim_decoder_capacity(&self.state);
-        terminate_entries(evicted);
+        self.record_session_shutdown(terminate_entries(evicted));
+    }
+
+    fn record_session_shutdown(&self, evidence: AudioWindowDecoderShutdownEvidence) {
+        self.state.lock().retired_shutdown.merge(evidence);
     }
 
     fn record_window(&self, kind: WindowKind, opened: bool, duration: Duration, canceled: bool) {
@@ -300,7 +325,7 @@ impl PersistentFfmpegAudioWindowDecoder {
             };
 
             if let Some(entries) = evicted {
-                terminate_entries(entries);
+                self.record_session_shutdown(terminate_entries(entries));
             }
             if let Some(slot) = selected {
                 return Ok(slot);
@@ -353,20 +378,43 @@ fn trim_idle_sessions_to_capacity(state: &mut DecoderState) -> VecDeque<DecoderE
 impl Drop for PersistentFfmpegAudioWindowDecoder {
     fn drop(&mut self) {
         let entries = std::mem::take(&mut self.state.get_mut().entries);
-        terminate_entries(entries);
+        let _ = terminate_entries(entries);
     }
 }
 
-fn terminate_entries(entries: VecDeque<DecoderEntry>) {
+fn terminate_entries(entries: VecDeque<DecoderEntry>) -> AudioWindowDecoderShutdownEvidence {
+    let mut evidence = AudioWindowDecoderShutdownEvidence::default();
     for entry in entries {
-        terminate_entry(entry);
+        evidence.merge(terminate_entry(entry));
+    }
+    evidence
+}
+
+fn terminate_entry(entry: DecoderEntry) -> AudioWindowDecoderShutdownEvidence {
+    if let Some(mut session) = entry.slot.lock().take() {
+        session.terminate()
+    } else {
+        AudioWindowDecoderShutdownEvidence::default()
     }
 }
 
-fn terminate_entry(entry: DecoderEntry) {
-    if let Some(mut session) = entry.slot.lock().take() {
-        session.terminate();
-    }
+fn shutdown_entry(entry: DecoderEntry) -> AudioWindowDecoderShutdownEvidence {
+    let external_references = Arc::strong_count(&entry.slot).saturating_sub(1);
+    let Some(mut slot) = entry.slot.try_lock() else {
+        return AudioWindowDecoderShutdownEvidence {
+            sessions_remaining: 1,
+            external_session_slot_references: external_references,
+            resource_handles_remaining: 1,
+            ..AudioWindowDecoderShutdownEvidence::default()
+        };
+    };
+    let mut evidence = match slot.take() {
+        Some(mut session) => session.terminate(),
+        None => AudioWindowDecoderShutdownEvidence::default(),
+    };
+    evidence.external_session_slot_references =
+        evidence.external_session_slot_references.saturating_add(external_references);
+    evidence
 }
 
 enum StdoutMessage {
@@ -389,10 +437,19 @@ struct DecodeSession {
     pending: Vec<u8>,
     pending_offset: usize,
     ended: bool,
+    shutdown_evidence: AudioWindowDecoderShutdownEvidence,
+}
+
+struct DecodeSessionSpawnFailure {
+    error: Box<MondrianError>,
+    shutdown: AudioWindowDecoderShutdownEvidence,
 }
 
 impl DecodeSession {
-    fn spawn(key: &SessionKey, start_frame: i64) -> Result<Self> {
+    fn spawn(
+        key: &SessionKey,
+        start_frame: i64,
+    ) -> std::result::Result<Self, DecodeSessionSpawnFailure> {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
         let pan_filter = identity_pan_filter(key.channel_layout);
@@ -430,27 +487,38 @@ impl DecodeSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_child_window(&mut command);
-        let mut child = command.spawn().map_err(|error| MondrianError::DecodeFailed {
-            asset_id: key.source.path.display().to_string(),
-            reason: format!("启动持久音频解码 Session 失败: {error}"),
+        let mut child = command.spawn().map_err(|error| DecodeSessionSpawnFailure {
+            error: Box::new(MondrianError::DecodeFailed {
+                asset_id: key.source.path.display().to_string(),
+                reason: format!("启动持久音频解码 Session 失败: {error}"),
+            }),
+            shutdown: AudioWindowDecoderShutdownEvidence::default(),
         })?;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
             None => {
-                terminate_child(&mut child);
-                return Err(MondrianError::DecodeFailed {
-                    asset_id: key.source.path.display().to_string(),
-                    reason: "ffmpeg persistent session did not expose stdout".to_owned(),
+                let mut shutdown = AudioWindowDecoderShutdownEvidence::default();
+                terminate_child_with_evidence(child, &mut shutdown);
+                return Err(DecodeSessionSpawnFailure {
+                    error: Box::new(MondrianError::DecodeFailed {
+                        asset_id: key.source.path.display().to_string(),
+                        reason: "ffmpeg persistent session did not expose stdout".to_owned(),
+                    }),
+                    shutdown,
                 });
             }
         };
         let stderr = match child.stderr.take() {
             Some(stderr) => stderr,
             None => {
-                terminate_child(&mut child);
-                return Err(MondrianError::DecodeFailed {
-                    asset_id: key.source.path.display().to_string(),
-                    reason: "ffmpeg persistent session did not expose stderr".to_owned(),
+                let mut shutdown = AudioWindowDecoderShutdownEvidence::default();
+                terminate_child_with_evidence(child, &mut shutdown);
+                return Err(DecodeSessionSpawnFailure {
+                    error: Box::new(MondrianError::DecodeFailed {
+                        asset_id: key.source.path.display().to_string(),
+                        reason: "ffmpeg persistent session did not expose stderr".to_owned(),
+                    }),
+                    shutdown,
                 });
             }
         };
@@ -462,10 +530,14 @@ impl DecodeSession {
         {
             Ok(thread) => thread,
             Err(error) => {
-                terminate_child(&mut child);
-                return Err(MondrianError::DecodeFailed {
-                    asset_id: key.source.path.display().to_string(),
-                    reason: format!("启动音频 stdout pump 失败: {error}"),
+                let mut shutdown = AudioWindowDecoderShutdownEvidence::default();
+                terminate_child_with_evidence(child, &mut shutdown);
+                return Err(DecodeSessionSpawnFailure {
+                    error: Box::new(MondrianError::DecodeFailed {
+                        asset_id: key.source.path.display().to_string(),
+                        reason: format!("启动音频 stdout pump 失败: {error}"),
+                    }),
+                    shutdown,
                 });
             }
         };
@@ -476,12 +548,15 @@ impl DecodeSession {
             Ok(thread) => thread,
             Err(error) => {
                 drop(stdout_rx);
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_thread.join();
-                return Err(MondrianError::DecodeFailed {
-                    asset_id: key.source.path.display().to_string(),
-                    reason: format!("启动音频 stderr pump 失败: {error}"),
+                let mut shutdown = AudioWindowDecoderShutdownEvidence::default();
+                terminate_child_with_evidence(child, &mut shutdown);
+                join_pump_thread(Some(stdout_thread), PumpKind::Stdout, &mut shutdown);
+                return Err(DecodeSessionSpawnFailure {
+                    error: Box::new(MondrianError::DecodeFailed {
+                        asset_id: key.source.path.display().to_string(),
+                        reason: format!("启动音频 stderr pump 失败: {error}"),
+                    }),
+                    shutdown,
                 });
             }
         };
@@ -500,6 +575,7 @@ impl DecodeSession {
             pending: Vec::new(),
             pending_offset: 0,
             ended: false,
+            shutdown_evidence: AudioWindowDecoderShutdownEvidence::default(),
         })
     }
 
@@ -517,7 +593,7 @@ impl DecodeSession {
 
         while bytes.len() < target_bytes {
             if cancellation.is_canceled() {
-                self.terminate();
+                self.terminate_resources();
                 return Err(canceled_audio_decode(&self.source_path));
             }
             self.consume_pending(&mut bytes, target_bytes);
@@ -537,7 +613,7 @@ impl DecodeSession {
                     self.finish_after_stdout()?;
                 }
                 Ok(StdoutMessage::Error(reason)) => {
-                    self.terminate();
+                    self.terminate_resources();
                     return Err(MondrianError::DecodeFailed {
                         asset_id: self.source_path.display().to_string(),
                         reason,
@@ -549,7 +625,7 @@ impl DecodeSession {
         self.capture_exit_status()?;
 
         if bytes.len() % frame_bytes != 0 {
-            self.terminate();
+            self.terminate_resources();
             return Err(MondrianError::DecodeFailed {
                 asset_id: self.source_path.display().to_string(),
                 reason: "ffmpeg returned a truncated interleaved f32le audio frame".to_owned(),
@@ -586,19 +662,42 @@ impl DecodeSession {
     fn finish_after_stdout(&mut self) -> Result<()> {
         self.ended = true;
         self.stdout_rx.take();
-        let status = match self.terminal_status.take() {
-            Some(status) => status,
-            None => match self.child.as_mut() {
-                Some(child) => child.wait().map_err(|error| MondrianError::DecodeFailed {
-                    asset_id: self.source_path.display().to_string(),
-                    reason: format!("等待持久音频解码 Session 失败: {error}"),
-                })?,
-                None => return Ok(()),
-            },
-        };
+        let status =
+            match self.terminal_status.take() {
+                Some(status) => status,
+                None => match self.child.take() {
+                    Some(child) => wait_for_child_exit(child, &mut self.shutdown_evidence)
+                        .map_err(|error| MondrianError::DecodeFailed {
+                            asset_id: self.source_path.display().to_string(),
+                            reason: format!("等待持久音频解码 Session 失败: {error}"),
+                        })?,
+                    None => {
+                        join_pump_thread(
+                            self.stdout_thread.take(),
+                            PumpKind::Stdout,
+                            &mut self.shutdown_evidence,
+                        );
+                        join_pump_thread(
+                            self.stderr_thread.take(),
+                            PumpKind::Stderr,
+                            &mut self.shutdown_evidence,
+                        );
+                        self.take_stderr_tail();
+                        return Ok(());
+                    }
+                },
+            };
         self.child.take();
-        join_thread(self.stdout_thread.take());
-        join_thread(self.stderr_thread.take());
+        join_pump_thread(
+            self.stdout_thread.take(),
+            PumpKind::Stdout,
+            &mut self.shutdown_evidence,
+        );
+        join_pump_thread(
+            self.stderr_thread.take(),
+            PumpKind::Stderr,
+            &mut self.shutdown_evidence,
+        );
         let stderr = self.take_stderr_tail();
         if !status.success() {
             return Err(MondrianError::DecodeFailed {
@@ -617,14 +716,25 @@ impl DecodeSession {
             return Ok(());
         }
         let status = match self.child.as_mut() {
-            Some(child) => child.try_wait().map_err(|error| MondrianError::DecodeFailed {
-                asset_id: self.source_path.display().to_string(),
-                reason: format!("检查持久音频解码 Session 状态失败: {error}"),
-            })?,
+            Some(child) => match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    self.shutdown_evidence.child_process_termination_failures =
+                        self.shutdown_evidence.child_process_termination_failures.saturating_add(1);
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: self.source_path.display().to_string(),
+                        reason: format!("检查持久音频解码 Session 状态失败: {error}"),
+                    });
+                }
+            },
             None => None,
         };
         if let Some(status) = status {
             self.child.take();
+            self.shutdown_evidence.child_processes_observed =
+                self.shutdown_evidence.child_processes_observed.saturating_add(1);
+            self.shutdown_evidence.child_processes_terminated =
+                self.shutdown_evidence.child_processes_terminated.saturating_add(1);
             let failed = !status.success();
             self.terminal_status = Some(status);
             if failed {
@@ -641,20 +751,31 @@ impl DecodeSession {
             .unwrap_or_default()
     }
 
-    fn terminate(&mut self) {
+    fn terminate_resources(&mut self) {
         self.ended = true;
         self.stdout_rx.take();
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        self.stderr_rx.take();
+        if let Some(child) = self.child.take() {
+            terminate_child_with_evidence(child, &mut self.shutdown_evidence);
         }
-        self.child.take();
         self.terminal_status.take();
-        join_thread(self.stdout_thread.take());
-        join_thread(self.stderr_thread.take());
-        self.take_stderr_tail();
+        join_pump_thread(
+            self.stdout_thread.take(),
+            PumpKind::Stdout,
+            &mut self.shutdown_evidence,
+        );
+        join_pump_thread(
+            self.stderr_thread.take(),
+            PumpKind::Stderr,
+            &mut self.shutdown_evidence,
+        );
         self.pending.clear();
         self.pending_offset = 0;
+    }
+
+    fn terminate(&mut self) -> AudioWindowDecoderShutdownEvidence {
+        self.terminate_resources();
+        std::mem::take(&mut self.shutdown_evidence)
     }
 }
 
@@ -664,7 +785,7 @@ fn ffmpeg_stream_map(stream_index: u32) -> String {
 
 impl Drop for DecodeSession {
     fn drop(&mut self) {
-        self.terminate();
+        let _ = self.terminate();
     }
 }
 
@@ -726,15 +847,113 @@ fn exact_seek_partition(start_frame: i64, sample_rate: u32) -> (i64, i64) {
     )
 }
 
-fn join_thread(thread: Option<JoinHandle<()>>) {
-    if let Some(thread) = thread {
-        let _ = thread.join();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PumpKind {
+    Stdout,
+    Stderr,
+}
+
+fn join_pump_thread(
+    thread: Option<JoinHandle<()>>,
+    kind: PumpKind,
+    evidence: &mut AudioWindowDecoderShutdownEvidence,
+) {
+    let Some(thread) = thread else {
+        return;
+    };
+    let panicked = thread.join().is_err();
+    match kind {
+        PumpKind::Stdout => {
+            evidence.stdout_pump_threads_observed =
+                evidence.stdout_pump_threads_observed.saturating_add(1);
+            if panicked {
+                evidence.stdout_pump_threads_panicked =
+                    evidence.stdout_pump_threads_panicked.saturating_add(1);
+            } else {
+                evidence.stdout_pump_threads_joined =
+                    evidence.stdout_pump_threads_joined.saturating_add(1);
+            }
+        }
+        PumpKind::Stderr => {
+            evidence.stderr_pump_threads_observed =
+                evidence.stderr_pump_threads_observed.saturating_add(1);
+            if panicked {
+                evidence.stderr_pump_threads_panicked =
+                    evidence.stderr_pump_threads_panicked.saturating_add(1);
+            } else {
+                evidence.stderr_pump_threads_joined =
+                    evidence.stderr_pump_threads_joined.saturating_add(1);
+            }
+        }
     }
 }
 
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn wait_for_child_exit(
+    mut child: Child,
+    evidence: &mut AudioWindowDecoderShutdownEvidence,
+) -> std::io::Result<ExitStatus> {
+    evidence.child_processes_observed = evidence.child_processes_observed.saturating_add(1);
+    match child.wait() {
+        Ok(status) => {
+            evidence.child_processes_terminated =
+                evidence.child_processes_terminated.saturating_add(1);
+            Ok(status)
+        }
+        Err(first_error) => {
+            let _ = child.kill();
+            match child.wait() {
+                Ok(_) => {
+                    evidence.child_processes_terminated =
+                        evidence.child_processes_terminated.saturating_add(1);
+                }
+                Err(_) => {
+                    evidence.resource_handles_remaining =
+                        evidence.resource_handles_remaining.saturating_add(1);
+                }
+            }
+            evidence.child_process_termination_failures =
+                evidence.child_process_termination_failures.saturating_add(1);
+            Err(first_error)
+        }
+    }
+}
+
+fn terminate_child_with_evidence(
+    mut child: Child,
+    evidence: &mut AudioWindowDecoderShutdownEvidence,
+) {
+    evidence.child_processes_observed = evidence.child_processes_observed.saturating_add(1);
+    let mut failed = false;
+    let already_exited = match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(_) => {
+            failed = true;
+            false
+        }
+    };
+    if already_exited {
+        evidence.child_processes_terminated = evidence.child_processes_terminated.saturating_add(1);
+    } else {
+        if child.kill().is_err() {
+            failed = true;
+        }
+        match child.wait() {
+            Ok(_) => {
+                evidence.child_processes_terminated =
+                    evidence.child_processes_terminated.saturating_add(1);
+            }
+            Err(_) => {
+                failed = true;
+                evidence.resource_handles_remaining =
+                    evidence.resource_handles_remaining.saturating_add(1);
+            }
+        }
+    }
+    if failed {
+        evidence.child_process_termination_failures =
+            evidence.child_process_termination_failures.saturating_add(1);
+    }
 }
 
 #[cfg(windows)]
@@ -783,6 +1002,39 @@ mod tests {
         }
         state.peak_sessions = count;
         PersistentFfmpegAudioWindowDecoder { state: Mutex::new(state) }
+    }
+
+    fn decoder_with_session(session: DecodeSession) -> PersistentFfmpegAudioWindowDecoder {
+        let mut state = DecoderState::new(1);
+        state.entries.push_back(DecoderEntry {
+            key: test_session_key(0),
+            slot: Arc::new(Mutex::new(Some(session))),
+        });
+        state.peak_sessions = 1;
+        PersistentFfmpegAudioWindowDecoder { state: Mutex::new(state) }
+    }
+
+    fn test_decode_session(
+        child: Option<Child>,
+        stdout_thread: Option<JoinHandle<()>>,
+        stderr_thread: Option<JoinHandle<()>>,
+    ) -> DecodeSession {
+        DecodeSession {
+            source_path: PathBuf::from("shutdown-session.wav"),
+            sample_rate: 48_000,
+            channel_layout: AudioChannelLayout::Stereo,
+            next_frame: 0,
+            child,
+            terminal_status: None,
+            stdout_rx: None,
+            stderr_rx: None,
+            stdout_thread,
+            stderr_thread,
+            pending: Vec::new(),
+            pending_offset: 0,
+            ended: false,
+            shutdown_evidence: AudioWindowDecoderShutdownEvidence::default(),
+        }
     }
 
     #[test]
@@ -861,5 +1113,86 @@ mod tests {
         assert_eq!(converged.capacity_trim_evictions, 2);
         assert_eq!(decoder.state.lock().entries[0].key, test_session_key(0));
         drop(first_busy);
+    }
+
+    #[test]
+    fn consuming_decoder_shutdown_reclaims_all_idle_session_slots() {
+        let decoder = decoder_with_empty_sessions(3);
+
+        let evidence = decoder.shutdown_sessions();
+
+        assert_eq!(evidence.sessions_before, 3);
+        assert_eq!(evidence.sessions_remaining, 0);
+        assert!(evidence.all_resources_released());
+        assert_eq!(decoder.diagnostics().sessions, 0);
+    }
+
+    #[test]
+    fn consuming_decoder_shutdown_reaps_child_and_joins_both_pumps() {
+        let child = std::process::Command::new(
+            std::env::current_exe().expect("current test executable path"),
+        )
+        .arg("shutdown_child_fixture")
+        .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn disposable child process");
+        let decoder = decoder_with_session(test_decode_session(
+            Some(child),
+            Some(std::thread::spawn(|| {})),
+            Some(std::thread::spawn(|| {})),
+        ));
+
+        let evidence = decoder.shutdown_sessions();
+
+        assert_eq!(evidence.sessions_before, 1);
+        assert_eq!(evidence.child_processes_observed, 1);
+        assert_eq!(evidence.child_processes_terminated, 1);
+        assert_eq!(evidence.stdout_pump_threads_observed, 1);
+        assert_eq!(evidence.stdout_pump_threads_joined, 1);
+        assert_eq!(evidence.stderr_pump_threads_observed, 1);
+        assert_eq!(evidence.stderr_pump_threads_joined, 1);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn shutdown_child_fixture() {
+        if std::env::var_os("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE").is_some() {
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn consuming_decoder_shutdown_preserves_pump_panics() {
+        let decoder = decoder_with_session(test_decode_session(
+            None,
+            Some(std::thread::spawn(|| panic!("stdout pump panic"))),
+            Some(std::thread::spawn(|| {})),
+        ));
+
+        let evidence = decoder.shutdown_sessions();
+
+        assert_eq!(evidence.stdout_pump_threads_observed, 1);
+        assert_eq!(evidence.stdout_pump_threads_joined, 0);
+        assert_eq!(evidence.stdout_pump_threads_panicked, 1);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn consuming_decoder_shutdown_reports_external_session_slot_references() {
+        let decoder = decoder_with_empty_sessions(1);
+        let retained_slot = Arc::clone(&decoder.state.lock().entries[0].slot);
+        let retained_guard = retained_slot.lock();
+
+        let evidence = decoder.shutdown_sessions();
+
+        assert_eq!(evidence.sessions_remaining, 1);
+        assert_eq!(evidence.external_session_slot_references, 1);
+        assert_eq!(evidence.resource_handles_remaining, 1);
+        assert!(!evidence.all_resources_released());
+        drop(retained_guard);
+        drop(retained_slot);
     }
 }

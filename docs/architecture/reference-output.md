@@ -31,8 +31,11 @@ owns exact signal admission, packed video, embedded-audio, and ancillary
 payloads, bounded
 scheduled playback, provider events, lifecycle diagnostics, and the Adapter
 Seam. It has no Timeline, Renderer, App, UI, wgpu, FFmpeg, COM, or C++
-dependency. Vendor handles, callback threads, profile ownership, and ABI details
-remain behind `VendorReferenceOutputBridge` Implementations.
+dependency. SDK ABI details remain behind `VendorReferenceOutputBridge`
+Implementations, while every vendor handle, callback thread, and profile-
+restoration guard transfers into the returned provider Session. The bridge and
+Adapter are discovery/factory roots only and must have non-blocking Drop paths;
+they cannot retain a second provider lifetime owner after `open` returns.
 
 Renderer is the only owner of picture lowering. `ReferenceOutputProgram`
 starts with one canonical full-resolution working composite, resolves the
@@ -112,7 +115,30 @@ controlling Module owns ordering and accounting. Required external-reference
 playout cannot start until a positive lock event is observed; subsequent lock
 loss, device removal, or profile change stops the Session and enters `Blocked`;
 provider execution failure enters `Failed`. Stop clears queued authority and
-releases ownership.
+requests playback cessation, but does not by itself prove callback-thread or
+device lifetime closure. Every provider Session must implement the object-safe
+consuming shutdown seam and return a `ReferenceOutputSessionShutdownReceipt`
+that independently proves playback stopped, callback execution terminated,
+device ownership released, zero outstanding frames/resources, and no provider
+failure. There is intentionally no default implementation that promotes
+`stop(&mut self)` into release evidence.
+
+`ReferenceOutputModule::shutdown` consumes the sole Module owner and returns a
+`ReferenceOutputModuleShutdownReceipt`. A never-opened Module has an explicit
+clean no-Session receipt. An opened Module preserves the queue depth observed
+at shutdown, final cumulative diagnostics, provider lifetime facts, and any
+provider or accounting failure. `all_resources_released()` is fail closed: a
+missing callback/device proof, any unresolved resource, or any captured failure
+rejects phase isolation even though Rust subsequently drops the consumed
+object. The reusable `stop` operation also consumes its active Session and
+returns success only when the same provider receipt proves complete release.
+
+Qualification first calls the non-blocking Session shutdown request, then
+moves the entire Module—not only the Session—onto one deadline coordinator.
+The coordinator therefore owns Session consumption plus Adapter/bridge
+destruction. Only a joined coordinator can produce clean schema-2 evidence;
+spawn failure abandons the owner fail-closed, while panic, timeout, or detach
+retains nonzero resource and coordinator facts without blocking the caller.
 
 The deterministic simulated Adapter qualifies Module semantics and fault
 injection only. Its evidence permanently has `hardware_backed = false`, so it

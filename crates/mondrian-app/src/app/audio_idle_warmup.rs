@@ -26,6 +26,7 @@ use mondrian_timeline::Sequence;
 use parking_lot::{Condvar, Mutex};
 
 use super::audio_rendering::TimelineAudioPcmRenderer;
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 
 const TERMINAL_RETENTION: usize = 32;
 const FAILED_RETRY_DELAY: Duration = Duration::from_millis(900);
@@ -83,6 +84,8 @@ pub struct AudioIdleWarmupDiagnostics {
     pub latest_terminal: Option<AudioIdleWarmupTerminal>,
     /// Whether the worker thread was created successfully.
     pub worker_available: bool,
+    /// Whether the worker returned before service shutdown was requested.
+    pub worker_unexpectedly_exited: bool,
 }
 
 /// Exact authoring lifetime accepted by the speculative worker.
@@ -516,6 +519,8 @@ impl AudioIdleWarmupService {
             terminal_count: state.terminal_count,
             latest_terminal: state.terminals.back().cloned(),
             worker_available: state.worker_available,
+            worker_unexpectedly_exited: self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+                && !state.shutdown,
         }
     }
 
@@ -536,7 +541,7 @@ impl AudioIdleWarmupService {
         }
     }
 
-    fn shutdown(&mut self) {
+    pub(super) fn begin_endurance_shutdown(&mut self) {
         {
             let mut state = self.shared.state.lock();
             if !state.shutdown {
@@ -547,6 +552,31 @@ impl AudioIdleWarmupService {
             }
             self.shared.wake.notify_all();
         }
+    }
+
+    pub(super) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut workers = self.worker.take().into_iter().collect::<Vec<_>>();
+        let join = join_workers_until(&mut workers, deadline);
+        let state = self.shared.state.lock();
+        let queued = usize::from(state.pending.is_some());
+        let running = usize::from(state.running.is_some());
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            true,
+            join,
+            queued,
+            running,
+            queued.saturating_add(running),
+            state.failures.saturating_add(state.rejections),
+        )
+    }
+
+    fn shutdown(&mut self) {
+        self.begin_endurance_shutdown();
         if let Some(worker) = self.worker.take() {
             if worker.is_finished() {
                 if worker.join().is_err() {
@@ -973,6 +1003,21 @@ mod tests {
         );
         assert!(!service.diagnostics().worker_available);
         release.store(true, Ordering::Release);
+    }
+
+    #[test]
+    fn endurance_shutdown_receipt_keeps_failures_and_rejections_in_one_cumulative_ledger() {
+        let mut service = AudioIdleWarmupService::new();
+        {
+            let mut state = service.shared.state.lock();
+            state.failures = 2;
+            state.rejections = 3;
+        }
+
+        let evidence = service.finish_endurance_shutdown(Instant::now() + Duration::from_secs(1));
+
+        assert_eq!(evidence.cumulative_failures, 5);
+        assert!(evidence.lifecycle_closed());
     }
 
     #[test]

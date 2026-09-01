@@ -294,6 +294,7 @@ pub(crate) enum PreviewOwnedWorkerShutdown {
     Terminated,
     Panicked,
     CurrentThreadSkipped,
+    TimedOutDetached,
 }
 
 impl PreviewOwnedWorkerShutdown {
@@ -302,6 +303,25 @@ impl PreviewOwnedWorkerShutdown {
             drop(worker);
             Self::CurrentThreadSkipped
         } else if worker.join().is_err() {
+            Self::Panicked
+        } else {
+            Self::Terminated
+        }
+    }
+
+    pub(crate) fn join_until(worker: JoinHandle<()>, deadline: Instant) -> Self {
+        if worker.thread().id() == thread::current().id() {
+            drop(worker);
+            return Self::CurrentThreadSkipped;
+        }
+        while !worker.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if !worker.is_finished() {
+            drop(worker);
+            return Self::TimedOutDetached;
+        }
+        if worker.join().is_err() {
             Self::Panicked
         } else {
             Self::Terminated
@@ -324,15 +344,22 @@ pub struct PreviewRuntimeShutdownEvidence {
     pub current_thread_detachments: u32,
     /// Workers previously transferred to the ordinary asynchronous UI reaper.
     pub unverified_async_reaps: u32,
+    /// Workers still running at the shared qualification deadline.
+    pub worker_timeouts: u32,
+    /// Worker handles detached after the shared qualification deadline.
+    pub worker_deadline_detachments: u32,
 }
 
 impl PreviewRuntimeShutdownEvidence {
     /// Whether every started worker returned synchronously and without panic.
     pub const fn all_workers_terminated(self) -> bool {
-        self.workers_started == self.workers_terminated
+        self.schema_version == 2
+            && self.workers_started == self.workers_terminated
             && self.worker_panics == 0
             && self.current_thread_detachments == 0
             && self.unverified_async_reaps == 0
+            && self.worker_timeouts == 0
+            && self.worker_deadline_detachments == 0
     }
 
     fn record(&mut self, outcome: PreviewOwnedWorkerShutdown) {
@@ -350,6 +377,12 @@ impl PreviewRuntimeShutdownEvidence {
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
                 self.workers_started = self.workers_started.saturating_add(1);
                 self.current_thread_detachments = self.current_thread_detachments.saturating_add(1);
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                self.workers_started = self.workers_started.saturating_add(1);
+                self.worker_timeouts = self.worker_timeouts.saturating_add(1);
+                self.worker_deadline_detachments =
+                    self.worker_deadline_detachments.saturating_add(1);
             }
         }
     }
@@ -2505,7 +2538,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
 fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownEvidence {
     let mut evidence = PreviewRuntimeShutdownEvidence {
-        schema_version: 1,
+        schema_version: 2,
         ..PreviewRuntimeShutdownEvidence::default()
     };
     for handle in handles {
@@ -2516,6 +2549,36 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownE
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
                 tracing::warn!("production preview shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("production preview worker exceeded its shutdown deadline");
+            }
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
+        }
+        evidence.record(outcome);
+    }
+    evidence
+}
+
+fn join_preview_workers_until(
+    handles: Vec<JoinHandle<()>>,
+    deadline: Instant,
+) -> PreviewRuntimeShutdownEvidence {
+    let mut evidence = PreviewRuntimeShutdownEvidence {
+        schema_version: 2,
+        ..PreviewRuntimeShutdownEvidence::default()
+    };
+    for handle in handles {
+        let outcome = PreviewOwnedWorkerShutdown::join_until(handle, deadline);
+        match outcome {
+            PreviewOwnedWorkerShutdown::Panicked => {
+                tracing::warn!("production preview worker panicked during bounded shutdown");
+            }
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
+                tracing::warn!("production preview bounded shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("production preview worker exceeded its shutdown deadline");
             }
             PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }

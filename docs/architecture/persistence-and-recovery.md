@@ -104,6 +104,14 @@ immutable document and that database. It never copies a live WAL database as a
 set of ordinary files. UI, playback, and rendering remain independent of ZIP
 compression and filesystem latency.
 
+Commercial endurance observes the same service rather than a parallel save
+counter. One shared saturating ledger increments once for each real failed
+worker completion, including archive or recovery-publication failures. Runtime
+facts partition queued and physically running requests, retain total owned
+payloads, and keep startup/unexpected worker exits in a separate health bucket.
+Consuming shutdown reuses the identical failure ledger and one absolute App
+deadline, so terminal merge cannot erase a failure completed during shutdown.
+
 Before allocating the SQLite snapshot, the same worker validates the archive's
 direct parent. If a Save As or Headless target contains a missing directory
 suffix, it selects the nearest existing direct ancestor and establishes every

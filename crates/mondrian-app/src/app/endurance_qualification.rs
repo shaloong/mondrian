@@ -760,8 +760,8 @@ impl EndurancePhaseCapture {
             )
             || export.pending_jobs != 0
             || export.active_jobs != 0
-            || export.schema_version != 1
-            || !export.worker_terminated
+            || export.schema_version != 2
+            || !export.all_resources_released()
             || !last.export_shutdown_requested
             || last.export_worker_running
             || !last.export_worker_terminated
@@ -800,7 +800,7 @@ impl EndurancePhaseCapture {
                 status,
                 counters: terminal_counters,
                 gauges: terminal_gauges,
-                workers_terminated: playback_workers_terminated && export.worker_terminated,
+                workers_terminated: playback_workers_terminated && export.all_resources_released(),
                 child_processes_reaped: supervised_child_processes_remaining == 0,
             },
         })
@@ -1461,8 +1461,10 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 1,
+                    schema_version: 2,
+                    worker_started: true,
                     worker_terminated: true,
+                    worker_start_failed: false,
                     pending_jobs: 0,
                     active_jobs: 0,
                     activity_events: 1,

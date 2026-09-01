@@ -9,7 +9,8 @@ use mondrian_core::timeline_data::FieldOrder;
 use mondrian_core::types::{SequenceId, SequenceRevision};
 use mondrian_reference_output::{
     ReferenceOutputAdapter, ReferenceOutputBundle, ReferenceOutputDeviceDescriptor,
-    ReferenceOutputDiagnostics, ReferenceOutputModule, ReferenceOutputOpenRequest,
+    ReferenceOutputDiagnostics, ReferenceOutputModule, ReferenceOutputModuleShutdownReceipt,
+    ReferenceOutputOpenRequest, ReferenceOutputSessionShutdownReceipt,
 };
 
 use super::AppState;
@@ -119,6 +120,33 @@ impl AppReferenceOutputService {
             return Ok(());
         };
         output.stop().map_err(Into::into)
+    }
+
+    pub(super) fn begin_endurance_shutdown(&mut self) {
+        self.binding = None;
+        if let Some(output) = self.output.as_mut() {
+            // The Module retains any provider request failure for the consuming
+            // receipt; signaling every owner must continue without early exit.
+            let _ = output.begin_shutdown();
+        }
+    }
+
+    pub(super) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> ReferenceOutputModuleShutdownReceipt {
+        self.begin_endurance_shutdown();
+        self.binding = None;
+        self.output.take().map_or_else(
+            || ReferenceOutputModuleShutdownReceipt {
+                schema_version: 2,
+                session: ReferenceOutputSessionShutdownReceipt::never_opened(),
+                diagnostics: ReferenceOutputDiagnostics::default(),
+                outstanding_frames_before_shutdown: 0,
+                module_failure: None,
+            },
+            |output| output.shutdown_until(deadline),
+        )
     }
 
     fn validate_binding(

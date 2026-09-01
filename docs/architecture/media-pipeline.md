@@ -102,6 +102,14 @@ The worker then opens a distinct checked stream generation. The validation seam
 is feature-gated and reachable publicly only through `AudioPlayback`; normal
 builds cannot synthesize lifecycle events.
 
+Qualification closes Audio in two phases: `begin_shutdown` signals both render
+and device workers before any owner wait, and consuming `shutdown_until` moves
+potentially blocking teardown behind deadline coordinators while retaining
+started, terminated, panic, timeout, detachment, and residual-work facts.
+Ordinary `AudioPlayback` and output-manager `Drop` signal shutdown, join only an
+already-finished handle, and otherwise detach immediately. That best-effort path
+keeps the UI bounded but is never accepted as terminal evidence.
+
 Output selection uses CPAL's cross-process stable `DeviceId`, not display name
 or enumeration index. `SystemDefault` and `Specific(DeviceId)` are distinct
 runtime intents. A specific identity that is absent fails closed and remains
@@ -170,6 +178,29 @@ converge after releasing the slot. Effective capacity, trim count, and temporary
 over-capacity residency are diagnostic facts. This is an intentionally isolated
 process Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may
 replace it behind the same Interface without changing cache or sample semantics.
+
+An execution owner that must prove phase isolation first obtains unique
+`AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
+through `shutdown_until` using the App's shared absolute deadline. The
+potentially blocking decoder close runs on a coordinator; timeout or spawn
+failure retains unresolved ownership and fails closed rather than blocking the
+qualification caller. `shutdown_and_wait` remains an explicit unbounded seam
+for callers that deliberately require it.
+The resulting `AudioSourceCacheShutdownEvidence` records any decode leaders
+seen at the boundary, releases PCM/failure residency, removes every decoder
+Session, kills and waits each remaining FFmpeg child, and joins its stdout and
+stderr pumps. Child wait/kill failures, pump panics, externally retained PCM,
+decoder, or Session-slot `Arc`s, and inaccessible resource handles remain
+explicit terminal facts; `all_resources_released()` accepts none of them.
+Non-product decoder implementations inherit a fail-closed shutdown default:
+only diagnostics that already report zero Sessions can produce clean closure
+without implementing the explicit Session shutdown Seam.
+
+The persistent FFmpeg decoder's ordinary `Drop` still performs synchronous
+child termination and pipe-thread join. It is not part of the bounded ordinary
+App teardown claim and remains a software-hardening follow-up. The consuming
+Audio Source Cache coordinator above is the only deadline-bounded qualification
+authority for those resources.
 
 The cache, reader, and every returned `AudioBuffer` carry the selected stream's
 validated native `AudioChannelLayout`, not an independent channel count. Mono, canonical named

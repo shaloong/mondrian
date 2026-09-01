@@ -217,6 +217,55 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         evidence
     }
 
+    /// Close Preview admission without waiting for worker or cache teardown.
+    ///
+    /// Qualification calls this before waiting on any execution owner so every
+    /// cooperative cancellation observes the same absolute shutdown window.
+    pub(crate) fn begin_endurance_shutdown(&mut self) {
+        self.begin_shutdown();
+        if let Some(task) = self.visual_execution.as_mut() {
+            task.begin_shutdown();
+        }
+        if let Some(task) = self.cpu_fallback_task.as_mut() {
+            task.begin_shutdown();
+        }
+        self.title_task.borrow_mut().begin_shutdown();
+        self.timeline_render_cache.borrow_mut().begin_shutdown();
+    }
+
+    /// Consume Preview while bounding every owned worker by one absolute deadline.
+    ///
+    /// Preview contains thread-affine OCIO processor sessions and therefore
+    /// cannot be moved wholesale to a shutdown coordinator. Admission closes on
+    /// the owner thread, then each movable worker handle is polled and joined
+    /// only when it has completed. Any worker still running at `deadline` is
+    /// detached and recorded fail-closed.
+    pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewRuntimeShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();
+        let mut evidence = join_preview_workers_until(handles, deadline);
+        let unverified_async_reaps = self.unverified_async_worker_reaps.get();
+        evidence.workers_started = evidence.workers_started.saturating_add(unverified_async_reaps);
+        evidence.unverified_async_reaps = unverified_async_reaps;
+        evidence.record(
+            self.visual_execution
+                .take()
+                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                    task.shutdown_until(deadline)
+                }),
+        );
+        evidence.record(
+            self.cpu_fallback_task
+                .take()
+                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                    task.shutdown_until(deadline)
+                }),
+        );
+        evidence.record(self.title_task.borrow_mut().shutdown_until(deadline));
+        evidence.record(self.timeline_render_cache.borrow_mut().shutdown_until(deadline));
+        evidence
+    }
+
     fn begin_shutdown(&self) -> bool {
         self.jobs.close();
         let already_shutdown = self.shutdown.request();

@@ -8,6 +8,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use mondrian_playback::PlaybackEpoch;
 use mondrian_render_cache::{TimelineRenderCacheFrame, TimelineRenderCacheIdentity};
@@ -127,24 +128,42 @@ impl PreviewCpuFallbackTask {
         self.stop_worker()
     }
 
-    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+    pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker_until(deadline)
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) {
         self.requests.take();
         self.results.take();
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
         self.worker.take().map_or(
             PreviewOwnedWorkerShutdown::NotStarted,
             PreviewOwnedWorkerShutdown::join,
         )
     }
+
+    fn stop_worker_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(PreviewOwnedWorkerShutdown::NotStarted, |worker| {
+            PreviewOwnedWorkerShutdown::join_until(worker, deadline)
+        })
+    }
 }
 
 impl Drop for PreviewCpuFallbackTask {
     fn drop(&mut self) {
-        match self.stop_worker() {
+        match self.stop_worker_until(Instant::now()) {
             PreviewOwnedWorkerShutdown::Panicked => {
                 tracing::warn!("Preview CPU fallback worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
                 tracing::warn!("Preview CPU fallback shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("Preview CPU fallback Drop detached its active worker");
             }
             PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }

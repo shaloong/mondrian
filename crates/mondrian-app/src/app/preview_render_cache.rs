@@ -10,6 +10,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 #[cfg(not(test))]
 use std::sync::Arc;
+use std::time::Instant;
 
 use mondrian_core::WorkingColorSpace;
 use mondrian_render_cache::{
@@ -180,6 +181,30 @@ impl PreviewTimelineRenderCache {
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped
         } else if evidence.worker_panicked {
             PreviewOwnedWorkerShutdown::Panicked
+        } else if evidence.worker_started && evidence.worker_terminated {
+            PreviewOwnedWorkerShutdown::Terminated
+        } else {
+            PreviewOwnedWorkerShutdown::NotStarted
+        }
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) {
+        if let Some(service) = self.service.as_mut() {
+            service.begin_shutdown();
+        }
+    }
+
+    pub(crate) fn shutdown_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        let Some(service) = self.service.take() else {
+            return PreviewOwnedWorkerShutdown::NotStarted;
+        };
+        let evidence = service.shutdown_until(deadline);
+        if evidence.current_thread_skipped {
+            PreviewOwnedWorkerShutdown::CurrentThreadSkipped
+        } else if evidence.worker_panicked {
+            PreviewOwnedWorkerShutdown::Panicked
+        } else if evidence.timed_out || evidence.detached {
+            PreviewOwnedWorkerShutdown::TimedOutDetached
         } else if evidence.worker_started && evidence.worker_terminated {
             PreviewOwnedWorkerShutdown::Terminated
         } else {

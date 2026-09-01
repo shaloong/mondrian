@@ -84,11 +84,20 @@ independently bounded. Lookup/publication admission is non-blocking and
 deduplicated by exact identity; Busy, Miss or cache failure always falls back
 to ordinary production rendering.
 
-The service also exposes a consuming `shutdown_and_wait` boundary. It closes
-both channels, synchronously joins the sole worker, and returns typed evidence
-distinguishing normal termination, panic, and an invalid same-thread detach.
+The service exposes both ordinary and deadline-bounded consuming shutdown
+boundaries. `shutdown_and_wait` closes both channels and synchronously joins the
+sole worker only for an explicit caller that accepts an unbounded wait. Qualification first calls the
+repeat-safe, non-blocking `begin_shutdown`, then consumes the owner through
+`shutdown_until` with the campaign's shared absolute `Instant`. That bounded
+path polls `JoinHandle::is_finished` and joins only after completion is proven;
+it never enters an unbounded join. A worker still active at the deadline is
+detached and the typed receipt records both timeout and detachment, so
+`all_workers_terminated` fails closed. The same receipt distinguishes clean
+termination, panic, invalid same-thread shutdown, timeout, and detachment.
 Preview endurance closure consumes that receipt instead of inferring worker
-return from an empty queue or object Drop.
+return from an empty queue or object Drop. Ordinary `Drop` closes both channels,
+joins only an already-finished handle, and otherwise detaches immediately; it
+cannot freeze the UI thread or provide qualification evidence.
 
 The App Adapter retains at most one verified working hit for immediate
 promotion and a bounded negative-identity set to prevent UI poll storms. A hit

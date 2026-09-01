@@ -23,6 +23,7 @@ use mondrian_core::{
 };
 use parking_lot::{Condvar, Mutex};
 
+use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
 const MEDIA_ASSET_MUTATION_CAPACITY: usize = 64;
@@ -97,6 +98,24 @@ pub struct MediaAssetMutationDiagnostics {
     pub running: usize,
     /// Admitted requests without a drained terminal result.
     pub outstanding: usize,
+    /// Physical queue, running worker, and unpublished-result occupancy.
+    pub transport_occupied: usize,
+    /// Whether the configured worker thread was created.
+    pub worker_available: bool,
+    /// Whether the worker exited before shutdown was requested.
+    pub worker_unexpectedly_exited: bool,
+    /// Successfully admitted operations.
+    pub admissions: u64,
+    /// Admission failures.
+    pub rejections: u64,
+    /// Successfully completed mutations.
+    pub completions: u64,
+    /// Failed preparation or publication operations.
+    pub failures: u64,
+    /// Cooperatively canceled operations.
+    pub cancellations: u64,
+    /// Operations retired by a newer Project generation.
+    pub superseded: u64,
     /// Bounded terminal evidence in publication order.
     pub terminals: Vec<MediaAssetMutationTerminalRecord>,
 }
@@ -167,9 +186,21 @@ struct MediaAssetMutationState {
     dispatch_enabled: bool,
     queue: VecDeque<MediaAssetMutationRequest>,
     active: HashMap<u64, ActiveMediaAssetMutation>,
+    transport_occupied: usize,
     running_operation_id: Option<u64>,
     retired_worker_operations: VecDeque<u64>,
     terminals: VecDeque<MediaAssetMutationTerminalRecord>,
+    counters: MediaAssetMutationCounters,
+}
+
+#[derive(Default)]
+struct MediaAssetMutationCounters {
+    admissions: u64,
+    rejections: u64,
+    completions: u64,
+    failures: u64,
+    cancellations: u64,
+    superseded: u64,
 }
 
 impl Default for MediaAssetMutationState {
@@ -183,9 +214,11 @@ impl Default for MediaAssetMutationState {
             dispatch_enabled: true,
             queue: VecDeque::new(),
             active: HashMap::new(),
+            transport_occupied: 0,
             running_operation_id: None,
             retired_worker_operations: VecDeque::new(),
             terminals: VecDeque::new(),
+            counters: MediaAssetMutationCounters::default(),
         }
     }
 }
@@ -279,6 +312,7 @@ impl MediaAssetMutationExecution {
                 state.retired_worker_operations.pop_front();
             }
         }
+        state.transport_occupied = state.transport_occupied.saturating_sub(state.queue.len());
         state.queue.clear();
         state.active.clear();
         mark_operation_changed(&mut state);
@@ -318,19 +352,25 @@ impl MediaAssetMutationExecution {
     ) -> Result<u64> {
         let mut state = self.inner.state.lock();
         if state.project_id.is_none() {
-            return Err(workflow_error(kind, "素材库未连接"));
+            return Err(reject_admission(&mut state, kind, "素材库未连接"));
         }
         if self.worker.is_none() {
-            return Err(workflow_error(kind, "媒体素材任务 worker 不可用"));
+            return Err(reject_admission(
+                &mut state,
+                kind,
+                "媒体素材任务 worker 不可用",
+            ));
         }
         if state.active.values().any(|active| active.asset_id == asset_id) {
-            return Err(workflow_error(
+            return Err(reject_admission(
+                &mut state,
                 kind,
                 format!("素材 {asset_id} 已有一个尚未提交的媒体任务"),
             ));
         }
         if state.active.len() >= MEDIA_ASSET_MUTATION_CAPACITY {
-            return Err(workflow_error(
+            return Err(reject_admission(
+                &mut state,
                 kind,
                 format!("媒体素材任务队列已满（上限 {MEDIA_ASSET_MUTATION_CAPACITY}）"),
             ));
@@ -353,6 +393,8 @@ impl MediaAssetMutationExecution {
             ActiveMediaAssetMutation { generation, asset_id, kind, cancellation },
         );
         state.queue.push_back(request);
+        state.transport_occupied = state.transport_occupied.saturating_add(1);
+        state.counters.admissions = state.counters.admissions.saturating_add(1);
         mark_operation_changed(&mut state);
         drop(state);
         self.inner.available.notify_one();
@@ -373,6 +415,7 @@ impl MediaAssetMutationExecution {
             };
             let request = result.outcome.request().clone();
             let mut state = self.inner.state.lock();
+            state.transport_occupied = state.transport_occupied.saturating_sub(1);
             let current = state.active.get(&request.operation_id).is_some_and(|active| {
                 active.generation == request.generation
                     && request.generation == state.generation
@@ -476,8 +519,91 @@ impl MediaAssetMutationExecution {
             queued: state.queue.len(),
             running: usize::from(state.running_operation_id.is_some()),
             outstanding: state.active.len(),
+            transport_occupied: state.transport_occupied,
+            worker_available: self.worker.is_some(),
+            worker_unexpectedly_exited: self.worker.as_ref().is_some_and(JoinHandle::is_finished)
+                && !self.inner.shutdown.load(Ordering::Acquire),
+            admissions: state.counters.admissions,
+            rejections: state.counters.rejections,
+            completions: state.counters.completions,
+            failures: state.counters.failures,
+            cancellations: state.counters.cancellations,
+            superseded: state.counters.superseded,
             terminals: state.terminals.iter().cloned().collect(),
         }
+    }
+
+    pub(crate) fn begin_endurance_shutdown(&self) {
+        self.inner.shutdown.store(true, Ordering::Release);
+        let mut state = self.inner.state.lock();
+        for active in state.active.values() {
+            active.cancellation.cancel();
+        }
+        state.transport_occupied = state.transport_occupied.saturating_sub(state.queue.len());
+        state.queue.clear();
+        drop(state);
+        self.inner.available.notify_all();
+    }
+
+    pub(crate) fn finish_endurance_shutdown(
+        &mut self,
+        deadline: Instant,
+    ) -> EnduranceWorkerShutdownEvidence {
+        self.begin_endurance_shutdown();
+        let mut workers = self.worker.take().into_iter().collect::<Vec<_>>();
+        let join = join_workers_until(&mut workers, deadline);
+        let mut state = self.inner.state.lock();
+        if join.all_workers_returned_normally() {
+            for result in self.results.get_mut().try_iter() {
+                let request = result.outcome.request().clone();
+                let (disposition, detail) = match result.outcome {
+                    MediaAssetMutationWorkerOutcome::Prepared(_) => (
+                        ExecutionTerminalDisposition::Canceled,
+                        Some("App shutdown consumed an unpublished prepared mutation".to_owned()),
+                    ),
+                    MediaAssetMutationWorkerOutcome::Failed { reason, .. } => {
+                        (ExecutionTerminalDisposition::Failed, Some(reason))
+                    }
+                    MediaAssetMutationWorkerOutcome::Canceled(_) => {
+                        (ExecutionTerminalDisposition::Canceled, None)
+                    }
+                };
+                push_terminal(
+                    &mut state,
+                    MediaAssetMutationTerminalRecord {
+                        operation_id: request.operation_id,
+                        asset_id: request.asset_id,
+                        kind: request.kind,
+                        evidence: ExecutionTerminalEvidence {
+                            generation: request.generation,
+                            priority: ExecutionPriority::UserInitiated,
+                            disposition,
+                            deadline: ExecutionDeadlineStatus::NotApplicable,
+                        },
+                        elapsed: result.elapsed,
+                        detail,
+                    },
+                );
+            }
+            state.queue.clear();
+            state.active.clear();
+            state.running_operation_id = None;
+            state.retired_worker_operations.clear();
+            state.transport_occupied = 0;
+        }
+        let cumulative_failures = state.counters.failures.saturating_add(state.counters.rejections);
+        let queued = state.queue.len();
+        let running = usize::from(state.running_operation_id.is_some());
+        let owned = state.active.len();
+        EnduranceWorkerShutdownEvidence::from_join(
+            1,
+            true,
+            join,
+            queued,
+            running,
+            owned,
+            cumulative_failures,
+        )
     }
 }
 
@@ -489,14 +615,7 @@ impl Default for MediaAssetMutationExecution {
 
 impl Drop for MediaAssetMutationExecution {
     fn drop(&mut self) {
-        self.inner.shutdown.store(true, Ordering::Release);
-        let mut state = self.inner.state.lock();
-        for active in state.active.values() {
-            active.cancellation.cancel();
-        }
-        state.queue.clear();
-        drop(state);
-        self.inner.available.notify_all();
+        self.begin_endurance_shutdown();
 
         let Some(worker) = self.worker.take() else {
             return;
@@ -553,6 +672,8 @@ fn media_asset_mutation_worker(inner: Arc<MediaAssetMutationInner>) {
             }
         }
         if disconnected {
+            let mut state = inner.state.lock();
+            state.transport_occupied = state.transport_occupied.saturating_sub(1);
             return;
         }
     }
@@ -638,10 +759,33 @@ fn commit_prepared_mutation(
 }
 
 fn push_terminal(state: &mut MediaAssetMutationState, terminal: MediaAssetMutationTerminalRecord) {
+    match terminal.evidence.disposition {
+        ExecutionTerminalDisposition::Completed => {
+            state.counters.completions = state.counters.completions.saturating_add(1);
+        }
+        ExecutionTerminalDisposition::Failed | ExecutionTerminalDisposition::Rejected => {
+            state.counters.failures = state.counters.failures.saturating_add(1);
+        }
+        ExecutionTerminalDisposition::Canceled => {
+            state.counters.cancellations = state.counters.cancellations.saturating_add(1);
+        }
+        ExecutionTerminalDisposition::Superseded => {
+            state.counters.superseded = state.counters.superseded.saturating_add(1);
+        }
+    }
     state.terminals.push_back(terminal);
     while state.terminals.len() > MEDIA_ASSET_MUTATION_TERMINAL_CAPACITY {
         state.terminals.pop_front();
     }
+}
+
+fn reject_admission(
+    state: &mut MediaAssetMutationState,
+    kind: MediaAssetMutationKind,
+    reason: impl Into<String>,
+) -> MondrianError {
+    state.counters.rejections = state.counters.rejections.saturating_add(1);
+    workflow_error(kind, reason)
 }
 
 fn workflow_error(kind: MediaAssetMutationKind, reason: impl Into<String>) -> MondrianError {

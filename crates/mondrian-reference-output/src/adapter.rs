@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 use std::fmt;
+#[cfg(test)]
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -183,7 +185,142 @@ pub enum ReferenceOutputAdapterEvent {
     ProfileChanged,
 }
 
-/// Open provider Session after exact capability admission.
+/// Stable provider failure captured while consuming a Reference Output Session.
+///
+/// Shutdown cannot return the Session owner to the caller, so provider failure
+/// is retained as evidence instead of being returned as an error that could
+/// discard the only resource-lifetime record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceOutputProviderShutdownFailure {
+    /// Provider operation that failed.
+    pub operation: String,
+    /// Stable provider-supplied failure detail.
+    pub detail: String,
+}
+
+/// Lifecycle facts for the coordinator used by a deadline-bounded Session shutdown.
+///
+/// Direct, unbounded shutdown does not require a coordinator. Once
+/// `required` is true, complete release requires positive proof that the
+/// coordinator was spawned and joined without panic, timeout, or detachment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceOutputShutdownCoordinatorFacts {
+    /// Whether the selected shutdown path required a coordinator.
+    pub required: bool,
+    /// Whether the coordinator thread was created successfully.
+    pub spawned: bool,
+    /// Whether the caller observed and joined coordinator completion.
+    pub joined: bool,
+    /// Whether coordinator execution panicked.
+    pub panicked: bool,
+    /// Whether the absolute deadline elapsed before completion was observed.
+    pub timed_out: bool,
+    /// Whether a still-running coordinator had to be detached at the deadline.
+    pub detached: bool,
+    /// Whether the provider owner had to be intentionally abandoned to keep
+    /// its potentially blocking destructor off the deadline caller.
+    pub owner_abandoned: bool,
+}
+
+impl ReferenceOutputShutdownCoordinatorFacts {
+    /// Facts for direct shutdown or a Module that never opened a Session.
+    pub const fn not_required() -> Self {
+        Self {
+            required: false,
+            spawned: false,
+            joined: false,
+            panicked: false,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: false,
+        }
+    }
+
+    /// Whether coordinator ownership is positively closed.
+    pub const fn lifecycle_closed(&self) -> bool {
+        !self.panicked
+            && !self.timed_out
+            && !self.detached
+            && !self.owner_abandoned
+            && (!self.required || (self.spawned && self.joined))
+    }
+}
+
+impl ReferenceOutputProviderShutdownFailure {
+    /// Construct one provider shutdown failure record.
+    pub fn new(operation: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self { operation: operation.into(), detail: detail.into() }
+    }
+}
+
+/// Consuming provider Session shutdown evidence.
+///
+/// A provider must populate every lifetime fact after consuming its Session.
+/// A successful playback-stop request alone is deliberately insufficient:
+/// callback execution and device ownership require separate positive proof.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReferenceOutputSessionShutdownReceipt {
+    /// Receipt schema version.
+    pub schema_version: u32,
+    /// Whether a live Session owner existed at the shutdown seam.
+    pub session_present: bool,
+    /// Whether the provider accepted the non-blocking shutdown request.
+    pub shutdown_request_completed: bool,
+    /// Whether scheduled playback is proven stopped.
+    pub playback_stopped: bool,
+    /// Whether every provider callback execution context is proven terminated.
+    pub callback_execution_terminated: bool,
+    /// Whether provider device/profile ownership is proven released.
+    pub device_released: bool,
+    /// Provider frames still unresolved after shutdown.
+    pub outstanding_frames: u64,
+    /// Non-frame provider resources still unresolved after shutdown.
+    pub outstanding_resources: u64,
+    /// Provider failure observed during consuming shutdown.
+    pub provider_failure: Option<ReferenceOutputProviderShutdownFailure>,
+    /// Deadline-coordinator lifecycle facts, when bounded shutdown was used.
+    pub coordinator: ReferenceOutputShutdownCoordinatorFacts,
+}
+
+impl ReferenceOutputSessionShutdownReceipt {
+    /// Produce clean evidence for a Module that never owned a Session.
+    pub const fn never_opened() -> Self {
+        Self {
+            schema_version: 2,
+            session_present: false,
+            shutdown_request_completed: true,
+            playback_stopped: true,
+            callback_execution_terminated: true,
+            device_released: true,
+            outstanding_frames: 0,
+            outstanding_resources: 0,
+            provider_failure: None,
+            coordinator: ReferenceOutputShutdownCoordinatorFacts::not_required(),
+        }
+    }
+
+    /// Whether the receipt positively proves complete Session resource release.
+    pub const fn all_resources_released(&self) -> bool {
+        self.schema_version == 2
+            && (!self.session_present || self.shutdown_request_completed)
+            && self.playback_stopped
+            && self.callback_execution_terminated
+            && self.device_released
+            && self.outstanding_frames == 0
+            && self.outstanding_resources == 0
+            && self.provider_failure.is_none()
+            && self.coordinator.lifecycle_closed()
+    }
+}
+
+/// Provider Session owning every resource transferred by exact open admission.
+///
+/// Every device handle, callback thread, configuration-restoration guard, and
+/// other blocking teardown obligation acquired for one open lifetime belongs
+/// to this object and must be covered by its consuming shutdown receipt.
 pub trait ReferenceOutputAdapterSession: Send {
     /// Immutable provider/runtime evidence for this Session.
     fn evidence(&self) -> &ReferenceOutputProviderEvidence;
@@ -200,12 +337,36 @@ pub trait ReferenceOutputAdapterSession: Send {
     fn start(&mut self) -> Result<(), ReferenceOutputAdapterError>;
     /// Poll one bounded callback/status event.
     fn poll(&mut self) -> Result<Option<ReferenceOutputAdapterEvent>, ReferenceOutputAdapterError>;
-    /// Stop playback and release the provider's device ownership.
+    /// Request shutdown without waiting for callback or device termination.
+    ///
+    /// Implementations may stop new scheduling, signal their provider callback
+    /// loop, and request playback stop, but this method **must not wait** for a
+    /// callback thread, device/profile release, or any other terminal owner.
+    /// Those waits belong exclusively to consuming [`Self::shutdown`], which a
+    /// caller may move onto a deadline coordinator.
+    fn begin_shutdown(&mut self) -> Result<(), ReferenceOutputAdapterError>;
+    /// Request playback stop and scheduled-queue flush.
+    ///
+    /// This mutable operation is not proof that callback execution terminated
+    /// or device ownership was released. Only [`Self::shutdown`] can provide
+    /// those consuming lifetime facts.
     fn stop(&mut self) -> Result<(), ReferenceOutputAdapterError>;
+    /// Consume the Session and return provider-owned lifetime evidence.
+    ///
+    /// Implementations must explicitly terminate callbacks, release device
+    /// ownership, and report unresolved resources or provider failure. There is
+    /// intentionally no default implementation that upgrades [`Self::stop`]
+    /// into release evidence.
+    fn shutdown(self: Box<Self>) -> ReferenceOutputSessionShutdownReceipt;
 }
 
 /// Provider Adapter Interface. Discovery and open are never performed on a
 /// realtime callback thread.
+///
+/// Implementations may retain immutable runtime evidence and discovery data,
+/// but must not retain a provider resource whose release can block after
+/// [`Self::open`] returns. All such ownership transfers into the returned
+/// [`ReferenceOutputAdapterSession`], and Adapter Drop must be non-blocking.
 pub trait ReferenceOutputAdapter: Send {
     /// Provider/runtime evidence from the most recent discovery.
     fn evidence(&self) -> &ReferenceOutputProviderEvidence;
@@ -246,8 +407,10 @@ where
 
 /// Narrow bridge implemented by DeckLink COM or AJA NTV2 C++ integration.
 ///
-/// The bridge owns vendor handles, callback threading, device configuration
-/// restoration, and SDK ABI details. Rust product code retains only typed
+/// The bridge encapsulates SDK ABI details and creates the Session that owns
+/// vendor handles, callback threading, and device-configuration restoration.
+/// After `open` returns, the bridge must retain no blocking provider lifetime
+/// owner; its Drop is non-blocking. Rust product code retains only typed
 /// signal, lifecycle, and evidence semantics.
 pub trait VendorReferenceOutputBridge: Send {
     /// Immutable runtime evidence.
@@ -436,6 +599,19 @@ pub struct SimulatedReferenceOutputAdapter {
     scripted_events: VecDeque<ReferenceOutputAdapterEvent>,
     #[cfg(test)]
     fail_stop: bool,
+    #[cfg(test)]
+    panic_begin_shutdown: bool,
+    #[cfg(test)]
+    shutdown_behavior: SimulatedShutdownBehavior,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy)]
+enum SimulatedShutdownBehavior {
+    Normal,
+    Panic,
+    Delay(Duration),
+    StaleSchema,
 }
 
 impl SimulatedReferenceOutputAdapter {
@@ -461,6 +637,10 @@ impl SimulatedReferenceOutputAdapter {
             scripted_events: VecDeque::new(),
             #[cfg(test)]
             fail_stop: false,
+            #[cfg(test)]
+            panic_begin_shutdown: false,
+            #[cfg(test)]
+            shutdown_behavior: SimulatedShutdownBehavior::Normal,
         })
     }
 
@@ -476,6 +656,30 @@ impl SimulatedReferenceOutputAdapter {
     #[cfg(test)]
     pub(crate) fn with_stop_failure(mut self) -> Self {
         self.fail_stop = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_begin_shutdown_panic(mut self) -> Self {
+        self.panic_begin_shutdown = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_shutdown_panic(mut self) -> Self {
+        self.shutdown_behavior = SimulatedShutdownBehavior::Panic;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_shutdown_delay(mut self, delay: Duration) -> Self {
+        self.shutdown_behavior = SimulatedShutdownBehavior::Delay(delay);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_stale_shutdown_schema(mut self) -> Self {
+        self.shutdown_behavior = SimulatedShutdownBehavior::StaleSchema;
         self
     }
 }
@@ -514,6 +718,10 @@ impl ReferenceOutputAdapter for SimulatedReferenceOutputAdapter {
             stopped: false,
             #[cfg(test)]
             fail_stop: self.fail_stop,
+            #[cfg(test)]
+            panic_begin_shutdown: self.panic_begin_shutdown,
+            #[cfg(test)]
+            shutdown_behavior: self.shutdown_behavior,
         }))
     }
 }
@@ -528,6 +736,10 @@ struct SimulatedSession {
     stopped: bool,
     #[cfg(test)]
     fail_stop: bool,
+    #[cfg(test)]
+    panic_begin_shutdown: bool,
+    #[cfg(test)]
+    shutdown_behavior: SimulatedShutdownBehavior,
 }
 
 impl ReferenceOutputAdapterSession for SimulatedSession {
@@ -611,6 +823,69 @@ impl ReferenceOutputAdapterSession for SimulatedSession {
         self.stopped = true;
         self.scheduled.clear();
         Ok(())
+    }
+
+    fn begin_shutdown(&mut self) -> Result<(), ReferenceOutputAdapterError> {
+        #[cfg(test)]
+        if self.panic_begin_shutdown {
+            panic!("synthetic provider begin-shutdown panic");
+        }
+        // The simulator has no callback thread or physical device. Mutating
+        // these in-memory flags therefore satisfies the non-blocking contract.
+        self.stop()
+    }
+
+    fn shutdown(mut self: Box<Self>) -> ReferenceOutputSessionShutdownReceipt {
+        #[cfg(test)]
+        match self.shutdown_behavior {
+            SimulatedShutdownBehavior::Normal | SimulatedShutdownBehavior::StaleSchema => {}
+            SimulatedShutdownBehavior::Panic => {
+                panic!("synthetic provider shutdown panic");
+            }
+            SimulatedShutdownBehavior::Delay(delay) => std::thread::sleep(delay),
+        }
+        let outstanding_frames = u64::try_from(self.scheduled.len()).unwrap_or(u64::MAX);
+        let receipt = match self.stop() {
+            Ok(()) => ReferenceOutputSessionShutdownReceipt {
+                schema_version: 2,
+                session_present: true,
+                shutdown_request_completed: true,
+                playback_stopped: true,
+                callback_execution_terminated: true,
+                device_released: true,
+                outstanding_frames: 0,
+                outstanding_resources: 0,
+                provider_failure: None,
+                coordinator: ReferenceOutputShutdownCoordinatorFacts::not_required(),
+            },
+            Err(error) => ReferenceOutputSessionShutdownReceipt {
+                schema_version: 2,
+                session_present: true,
+                shutdown_request_completed: false,
+                playback_stopped: false,
+                callback_execution_terminated: false,
+                device_released: false,
+                outstanding_frames,
+                // A failed consuming provider call leaves at least the Session
+                // or device ownership unproven even when no frames were queued.
+                outstanding_resources: 1,
+                provider_failure: Some(ReferenceOutputProviderShutdownFailure::new(
+                    "shutdown",
+                    error.to_string(),
+                )),
+                coordinator: ReferenceOutputShutdownCoordinatorFacts::not_required(),
+            },
+        };
+        #[cfg(test)]
+        let receipt = if matches!(
+            self.shutdown_behavior,
+            SimulatedShutdownBehavior::StaleSchema
+        ) {
+            ReferenceOutputSessionShutdownReceipt { schema_version: 1, ..receipt }
+        } else {
+            receipt
+        };
+        receipt
     }
 }
 

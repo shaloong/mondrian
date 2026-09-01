@@ -24,7 +24,7 @@ use std::collections::VecDeque;
 use std::io;
 use std::sync::{mpsc, Arc};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // One poll consumes at most one output lifecycle event. That event can rotate
@@ -131,7 +131,7 @@ pub enum AudioPlaybackShutdownError {
 }
 
 /// Synchronous lifetime closure evidence for Audio Playback workers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AudioPlaybackShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,
@@ -145,15 +145,33 @@ pub struct AudioPlaybackShutdownEvidence {
     pub render_current_thread_detachments: u32,
     /// Concrete output-device lifecycle closure evidence.
     pub output: RealtimeAudioOutputShutdownEvidence,
+    /// Deadline-bounded shutdown coordinators successfully created.
+    pub shutdown_coordinators_started: u32,
+    /// Deadline-bounded shutdown coordinators observed returned.
+    pub shutdown_coordinators_terminated: u32,
+    /// Shutdown coordinator creation failures.
+    pub shutdown_coordinator_start_failures: u32,
+    /// Shutdown coordinators that panicked before publishing a receipt.
+    pub shutdown_coordinator_panics: u32,
+    /// Shutdown coordinators still running at the shared deadline.
+    pub shutdown_coordinator_timeouts: u32,
+    /// Shutdown coordinators detached after the shared deadline.
+    pub shutdown_coordinator_detachments: u32,
 }
 
 impl AudioPlaybackShutdownEvidence {
     /// Whether both render and concrete-device workers closed exactly.
     pub const fn all_workers_terminated(self) -> bool {
-        self.render_workers_started == self.render_workers_terminated
+        self.schema_version == 2
+            && self.render_workers_started == self.render_workers_terminated
             && self.render_worker_panics == 0
             && self.render_current_thread_detachments == 0
             && self.output.all_workers_terminated()
+            && self.shutdown_coordinators_started == self.shutdown_coordinators_terminated
+            && self.shutdown_coordinator_start_failures == 0
+            && self.shutdown_coordinator_panics == 0
+            && self.shutdown_coordinator_timeouts == 0
+            && self.shutdown_coordinator_detachments == 0
     }
 }
 
@@ -638,7 +656,7 @@ impl RenderWorkQueue {
     }
 }
 
-trait AudioOutputAdapter {
+trait AudioOutputAdapter: Send {
     fn poll(&mut self) -> Option<RealtimeAudioOutputEvent>;
     fn enqueue(&mut self, buffer: &AudioBuffer) -> Result<(), RealtimeAudioOutputEnqueueError>;
     fn clear(&self);
@@ -658,6 +676,8 @@ trait AudioOutputAdapter {
     fn buffered_frames(&self) -> usize;
     fn capacity_frames(&self) -> Option<usize>;
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot>;
+
+    fn begin_shutdown(&mut self) {}
 
     fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
         RealtimeAudioOutputShutdownEvidence::default()
@@ -723,6 +743,10 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
 
     fn snapshot(&self) -> Option<RealtimeAudioOutputSnapshot> {
         RealtimeAudioOutputManager::snapshot(self)
+    }
+
+    fn begin_shutdown(&mut self) {
+        RealtimeAudioOutputManager::begin_shutdown(self);
     }
 
     fn shutdown_and_wait(&mut self) -> RealtimeAudioOutputShutdownEvidence {
@@ -916,25 +940,121 @@ impl AudioPlayback {
 
     /// Stop PCM production and synchronously reclaim render and device workers.
     pub fn shutdown_and_wait(mut self) -> AudioPlaybackShutdownEvidence {
+        self.begin_shutdown();
         self.stop_render_worker();
         let output = self.output.shutdown_and_wait();
         AudioPlaybackShutdownEvidence {
-            schema_version: 1,
+            schema_version: 2,
             render_workers_started: self.render_workers_started,
             render_workers_terminated: self.render_workers_terminated,
             render_worker_panics: self.render_worker_panics,
             render_current_thread_detachments: self.render_current_thread_detachments,
             output,
+            shutdown_coordinators_started: 0,
+            shutdown_coordinators_terminated: 0,
+            shutdown_coordinator_start_failures: 0,
+            shutdown_coordinator_panics: 0,
+            shutdown_coordinator_timeouts: 0,
+            shutdown_coordinator_detachments: 0,
+        }
+    }
+
+    /// Close Audio admission and cooperatively stop render/device workers.
+    pub fn begin_shutdown(&mut self) {
+        self.generation_cancellation.cancel();
+        self.render_queue.stop();
+        self.output.begin_shutdown();
+    }
+
+    /// Consume Audio Playback through one absolute qualification deadline.
+    ///
+    /// Foreign device teardown is isolated in a tracked coordinator so a
+    /// broken Adapter produces timeout/detach evidence instead of hanging the
+    /// caller past the campaign-wide deadline.
+    pub fn shutdown_until(mut self, deadline: Instant) -> AudioPlaybackShutdownEvidence {
+        self.begin_shutdown();
+        let owner = Arc::new(Mutex::new(Some(self)));
+        let coordinator_owner = Arc::clone(&owner);
+        let coordinator = thread::Builder::new()
+            .name("mondrian-audio-endurance-shutdown".to_owned())
+            .spawn(move || {
+                let Some(owner) = coordinator_owner.lock().take() else {
+                    return AudioPlayback::coordinator_failure(1, 0, 0, 0, 1);
+                };
+                owner.shutdown_and_wait()
+            });
+        let Ok(coordinator) = coordinator else {
+            // Spawning a closure normally drops its captures on failure. Keep
+            // the already-signaled foreign owner intentionally leaked instead
+            // of re-entering an unbounded device-worker Drop path.
+            if let Some(owner) = owner.lock().take() {
+                std::mem::forget(owner);
+            }
+            return AudioPlayback::coordinator_failure(0, 1, 0, 0, 1);
+        };
+
+        while !coordinator.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if !coordinator.is_finished() {
+            drop(coordinator);
+            return AudioPlayback::coordinator_failure(1, 0, 0, 1, 1);
+        }
+
+        match coordinator.join() {
+            Ok(mut evidence) => {
+                evidence.shutdown_coordinators_started = 1;
+                evidence.shutdown_coordinators_terminated = 1;
+                evidence
+            }
+            Err(_) => AudioPlayback::coordinator_failure(1, 0, 1, 0, 0),
+        }
+    }
+
+    fn coordinator_failure(
+        started: u32,
+        start_failures: u32,
+        panics: u32,
+        timeouts: u32,
+        detachments: u32,
+    ) -> AudioPlaybackShutdownEvidence {
+        AudioPlaybackShutdownEvidence {
+            schema_version: 2,
+            shutdown_coordinators_started: started,
+            shutdown_coordinators_terminated: u32::from(started != 0 && timeouts == 0),
+            shutdown_coordinator_start_failures: start_failures,
+            shutdown_coordinator_panics: panics,
+            shutdown_coordinator_timeouts: timeouts,
+            shutdown_coordinator_detachments: detachments,
+            ..AudioPlaybackShutdownEvidence::default()
         }
     }
 
     fn stop_render_worker(&mut self) {
-        self.generation_cancellation.cancel();
-        self.render_queue.stop();
+        self.begin_shutdown();
         let Some(worker) = self.render_worker.take() else {
             return;
         };
         self.join_render_worker(worker);
+    }
+
+    /// Request ordinary-drop shutdown without waiting for renderer code.
+    ///
+    /// Returns `true` when a still-running worker was detached. In that case
+    /// the started worker intentionally remains absent from the terminated
+    /// count, preventing this path from looking like qualified clean closure.
+    fn stop_render_worker_without_waiting(&mut self) -> bool {
+        self.begin_shutdown();
+        let Some(worker) = self.render_worker.take() else {
+            return false;
+        };
+        if worker.is_finished() {
+            self.join_render_worker(worker);
+            false
+        } else {
+            drop(worker);
+            true
+        }
     }
 
     fn join_render_worker(&mut self, worker: JoinHandle<()>) -> RenderWorkerJoinOutcome {
@@ -1693,20 +1813,16 @@ impl AudioPlayback {
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
-        self.stop_render_worker();
-        let output = self.output.shutdown_and_wait();
+        let render_worker_detached = self.stop_render_worker_without_waiting();
         if self.render_worker_panics > 0 {
             tracing::error!("Audio Playback render worker panicked during shutdown");
         }
         if self.render_current_thread_detachments > 0 {
             tracing::error!("Audio Playback render worker could not synchronously join itself");
         }
-        if output.worker_panics > 0 {
-            tracing::error!("Audio Playback output-device worker panicked during shutdown");
-        }
-        if output.current_thread_detachments > 0 {
-            tracing::error!(
-                "Audio Playback output-device worker could not synchronously join itself"
+        if render_worker_detached {
+            tracing::warn!(
+                "Audio Playback render worker was still running and detached during ordinary drop"
             );
         }
     }
@@ -2798,12 +2914,57 @@ mod tests {
 
         let evidence = playback.shutdown_and_wait();
 
-        assert_eq!(evidence.schema_version, 1);
+        assert_eq!(evidence.schema_version, 2);
         assert_eq!(evidence.render_workers_started, 1);
         assert_eq!(evidence.render_workers_terminated, 1);
         assert_eq!(evidence.render_worker_panics, 0);
         assert_eq!(evidence.output.workers_started, 0);
         assert!(evidence.all_workers_terminated());
+    }
+
+    #[test]
+    fn ordinary_drop_detaches_a_render_worker_that_has_not_finished() {
+        let (output, _) = fake_output();
+        let release = Arc::new(AtomicBool::new(false));
+        let worker_release = Arc::clone(&release);
+        let exited = Arc::new(AtomicBool::new(false));
+        let worker_exited = Arc::clone(&exited);
+        let playback = AudioPlayback::with_output_and_spawner(
+            test_config(),
+            output,
+            move |render_queue, _| {
+                thread::Builder::new().name("mondrian-audio-render-drop-test".to_owned()).spawn(
+                    move || {
+                        assert!(render_queue.pop().is_none());
+                        while !worker_release.load(Ordering::Acquire) {
+                            thread::yield_now();
+                        }
+                        worker_exited.store(true, Ordering::Release);
+                    },
+                )
+            },
+        )
+        .expect("spawn injected render worker");
+
+        let (drop_complete_tx, drop_complete_rx) = mpsc::channel();
+        let dropper = thread::spawn(move || {
+            drop(playback);
+            drop_complete_tx.send(()).expect("publish drop completion");
+        });
+        let returned_without_worker_exit =
+            drop_complete_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        release.store(true, Ordering::Release);
+        dropper.join().expect("ordinary Audio Playback drop must not panic");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !exited.load(Ordering::Acquire) && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            returned_without_worker_exit,
+            "ordinary drop blocked on the render worker"
+        );
+        assert!(exited.load(Ordering::Acquire));
     }
 
     #[test]

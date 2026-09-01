@@ -700,6 +700,10 @@ pub struct ExportEnduranceSnapshot {
 pub struct ExportQueueShutdownEvidence {
     /// Shutdown evidence schema version.
     pub schema_version: u32,
+    /// Whether the dedicated worker entered its owned execution closure.
+    pub worker_started: bool,
+    /// Whether creating the dedicated worker failed before it could start.
+    pub worker_start_failed: bool,
     /// Whether the bounded wait observed worker-loop return.
     pub worker_terminated: bool,
     /// Pending jobs remaining after the wait.
@@ -708,6 +712,22 @@ pub struct ExportQueueShutdownEvidence {
     pub active_jobs: u64,
     /// Final activity-event count.
     pub activity_events: u64,
+}
+
+impl ExportQueueShutdownEvidence {
+    /// Whether the queue proved that its worker and all admitted work were retired.
+    ///
+    /// A failed or never-observed worker start is deliberately not equivalent to
+    /// normal worker termination, even when no jobs were admitted.
+    #[must_use]
+    pub const fn all_resources_released(&self) -> bool {
+        self.schema_version == 2
+            && self.worker_started
+            && !self.worker_start_failed
+            && self.worker_terminated
+            && self.pending_jobs == 0
+            && self.active_jobs == 0
+    }
 }
 
 #[derive(Debug, Default)]
@@ -741,6 +761,8 @@ struct ExportQueueState {
     counters: ExportQueueCounters,
     activity_events: u64,
     shutdown_requested: bool,
+    worker_started: bool,
+    worker_start_failed: bool,
     worker_running: bool,
     worker_terminated: bool,
 }
@@ -763,6 +785,34 @@ impl RenderQueueInner {
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.jobs_revision.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+fn mark_export_worker_started(inner: &RenderQueueInner) {
+    let mut state = inner.state.lock();
+    state.worker_started = true;
+    state.worker_running = true;
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_terminated(inner: &RenderQueueInner) {
+    let mut state = inner.state.lock();
+    state.worker_running = false;
+    state.worker_terminated = true;
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_start_failed(inner: &RenderQueueInner, detail: String) {
+    let mut state = inner.state.lock();
+    state.worker_running = false;
+    state.worker_start_failed = true;
+    state.worker_failure = Some(detail);
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
 }
 
 /// Queue-owned cooperative execution authority for one exact export attempt.
@@ -930,7 +980,6 @@ impl RenderQueue {
                     next_generation: 1,
                     dispatch_enabled: true,
                     resource_policy: ExportExecutionResourcePolicy::default(),
-                    worker_running: true,
                     ..ExportQueueState::default()
                 }),
                 wake: Condvar::new(),
@@ -948,23 +997,15 @@ impl RenderQueue {
         if let Err(error) = std::thread::Builder::new()
             .name("mondrian-export-worker".to_owned())
             .spawn(move || {
+                mark_export_worker_started(&inner);
                 export_worker_loop(Arc::clone(&inner), executor);
-                let mut state = inner.state.lock();
-                state.worker_running = false;
-                state.worker_terminated = true;
-                inner.mark_diagnostics_changed_locked(&state);
-                drop(state);
-                inner.wake.notify_all();
+                mark_export_worker_terminated(&inner);
             })
         {
-            let mut state = self.inner.state.lock();
-            state.worker_running = false;
-            state.worker_terminated = true;
-            state.worker_failure = Some(bounded_detail(format!(
-                "failed to start export worker: {error}"
-            )));
-            self.inner.mark_diagnostics_changed_locked(&state);
-            drop(state);
+            mark_export_worker_start_failed(
+                &self.inner,
+                bounded_detail(format!("failed to start export worker: {error}")),
+            );
         }
     }
 
@@ -1412,10 +1453,10 @@ impl RenderQueue {
     /// Publication that already crossed the irreversible namespace boundary is
     /// allowed to finish; every other live attempt receives cancellation.
     pub fn shutdown_and_wait(&self, timeout: Duration) -> ExportQueueShutdownEvidence {
-        self.request_shutdown();
+        self.begin_shutdown();
         let deadline = Instant::now().checked_add(timeout);
         let mut state = self.inner.state.lock();
-        while !state.worker_terminated {
+        while !state.worker_terminated && !state.worker_start_failed {
             let Some(deadline) = deadline else {
                 break;
             };
@@ -1441,7 +1482,9 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportQueueShutdownEvidence {
-            schema_version: 1,
+            schema_version: 2,
+            worker_started: state.worker_started,
+            worker_start_failed: state.worker_start_failed,
             worker_terminated: state.worker_terminated,
             pending_jobs,
             active_jobs,
@@ -1449,7 +1492,12 @@ impl RenderQueue {
         }
     }
 
-    fn request_shutdown(&self) {
+    /// Close queue admission and cooperatively cancel every reversible attempt.
+    ///
+    /// This is the non-waiting half of [`Self::shutdown_and_wait`]. A caller
+    /// coordinating several owners can signal all of them before spending one
+    /// shared absolute shutdown deadline on terminal receipts.
+    pub fn begin_shutdown(&self) {
         let mut state = self.inner.state.lock();
         let first_request = !self.inner.shutdown.swap(true, Ordering::AcqRel);
         state.shutdown_requested = true;
@@ -1499,7 +1547,7 @@ impl RenderQueue {
 
 impl Drop for RenderQueue {
     fn drop(&mut self) {
-        self.request_shutdown();
+        self.begin_shutdown();
     }
 }
 
@@ -1900,6 +1948,108 @@ fn bounded_detail(detail: String) -> String {
         format!("{bounded}…")
     } else {
         bounded
+    }
+}
+
+#[cfg(test)]
+mod shutdown_evidence_contract_tests {
+    use super::*;
+
+    fn queue_without_worker() -> RenderQueue {
+        RenderQueue {
+            inner: Arc::new(RenderQueueInner {
+                state: Mutex::new(ExportQueueState {
+                    next_generation: 1,
+                    dispatch_enabled: true,
+                    resource_policy: ExportExecutionResourcePolicy::default(),
+                    ..ExportQueueState::default()
+                }),
+                wake: Condvar::new(),
+                shutdown: AtomicBool::new(false),
+                revision: AtomicU64::new(0),
+                jobs_revision: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    #[test]
+    fn worker_exit_before_spawn_returns_preserves_clean_shutdown_proof() {
+        let queue = queue_without_worker();
+        mark_export_worker_started(&queue.inner);
+        mark_export_worker_terminated(&queue.inner);
+
+        let evidence = queue.shutdown_and_wait(Duration::ZERO);
+
+        assert!(evidence.worker_started);
+        assert!(!evidence.worker_start_failed);
+        assert!(evidence.worker_terminated);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn worker_spawn_failure_is_not_normal_termination_or_clean_shutdown() {
+        let queue = queue_without_worker();
+        mark_export_worker_start_failed(&queue.inner, "synthetic spawn failure".to_owned());
+
+        let evidence = queue.shutdown_and_wait(Duration::ZERO);
+
+        assert!(!evidence.worker_started);
+        assert!(evidence.worker_start_failed);
+        assert!(!evidence.worker_terminated);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn shutdown_evidence_requires_started_terminated_worker_and_empty_workset() {
+        let clean = ExportQueueShutdownEvidence {
+            schema_version: 2,
+            worker_started: true,
+            worker_start_failed: false,
+            worker_terminated: true,
+            pending_jobs: 0,
+            active_jobs: 0,
+            activity_events: 0,
+        };
+
+        assert!(clean.all_resources_released());
+        assert!(
+            !ExportQueueShutdownEvidence { schema_version: 1, ..clean }.all_resources_released()
+        );
+        assert!(!ExportQueueShutdownEvidence { pending_jobs: 1, ..clean }.all_resources_released());
+        assert!(!ExportQueueShutdownEvidence { active_jobs: 1, ..clean }.all_resources_released());
+        assert!(
+            !ExportQueueShutdownEvidence { worker_started: false, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_start_failed: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_terminated: false, ..clean }
+                .all_resources_released()
+        );
+    }
+
+    #[test]
+    fn shutdown_evidence_schema_two_round_trips_worker_start_facts() {
+        let evidence = ExportQueueShutdownEvidence {
+            schema_version: 2,
+            worker_started: false,
+            worker_start_failed: true,
+            worker_terminated: false,
+            pending_jobs: 0,
+            active_jobs: 0,
+            activity_events: 7,
+        };
+
+        let encoded = serde_json::to_string(&evidence).expect("serialize shutdown evidence");
+        let decoded = serde_json::from_str::<ExportQueueShutdownEvidence>(&encoded)
+            .expect("deserialize shutdown evidence");
+
+        assert_eq!(decoded, evidence);
+        assert!(encoded.contains("\"worker_started\":false"));
+        assert!(encoded.contains("\"worker_start_failed\":true"));
     }
 }
 

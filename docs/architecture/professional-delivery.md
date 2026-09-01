@@ -17,6 +17,15 @@ from the independent artifact re-open/content verification required by
 commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+Qualification separates the signal from the wait. `RenderQueue::begin_shutdown`
+atomically closes admission and requests cancellation before the App starts
+joining any owner. The later consuming `shutdown_and_wait` call spends only the
+time remaining before the App-wide absolute deadline and returns the Queue-owned
+worker, pending-job, and active-job receipt. This lets sibling App domains begin
+cooperative shutdown together without granting Export a private renewed timeout.
+Ordinary Queue `Drop` reuses the shutdown signal as best-effort cleanup but is
+not a consuming qualification receipt and cannot prove worker return.
+
 `mondrian-export` also owns an independent single-file artifact verifier for
 that post-publication boundary. It accepts only a direct regular file within an
 explicit byte limit, hashes the encoded bytes, derives the ordinary typed

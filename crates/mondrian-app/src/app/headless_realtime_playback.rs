@@ -17,6 +17,7 @@ use serde::Serialize;
 
 #[cfg(all(test, feature = "validation"))]
 use super::audio_playback_acceptance::ProfessionalVideoCoordinatorObservation;
+use super::endurance_shutdown::{AppBackgroundDomainSnapshot, AppBackgroundEnduranceSnapshot};
 use super::headless_preview_presentation::{
     prepare_headless_preview_successor, present_headless_preview_candidate,
     present_headless_preview_candidate_at, stage_headless_preview_lookahead,
@@ -577,6 +578,9 @@ pub(crate) struct HeadlessEnduranceOwnerSnapshot {
     gpu_device_losses: u64,
     gpu_fatal_errors: u64,
     other_fatal_errors: u64,
+    app_background: AppBackgroundEnduranceSnapshot,
+    fatal_error_total: u64,
+    owner_capture_failed: bool,
 }
 
 /// Consuming closure facts that can only be produced after the owner group ran
@@ -586,6 +590,8 @@ pub(crate) struct HeadlessEnduranceShutdownProjection {
     pub(crate) playback_owner_consumed: bool,
     pub(crate) preview_closed: bool,
     pub(crate) audio_closed: bool,
+    pub(crate) app_residual_owners_closed: bool,
+    pub(crate) app_background: Option<AppBackgroundEnduranceSnapshot>,
     pub(crate) gpu_closed: bool,
     pub(crate) gpu_device_losses: u64,
     pub(crate) gpu_fatal_errors: u64,
@@ -610,7 +616,7 @@ impl HeadlessEnduranceOwnerSnapshot {
     }
 
     pub(crate) const fn fatal_errors(self) -> u64 {
-        self.gpu_fatal_errors.saturating_add(self.other_fatal_errors)
+        self.fatal_error_total
     }
 
     #[cfg(test)]
@@ -628,17 +634,105 @@ impl HeadlessEnduranceOwnerSnapshot {
             gpu_device_losses,
             gpu_fatal_errors: 0,
             other_fatal_errors: fatal_errors,
+            app_background: AppBackgroundEnduranceSnapshot {
+                audio_idle_warmup: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+                media_import: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+                media_asset_mutation: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+                visual_tracking: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+                proxy_generation: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+                infrastructure: super::endurance_shutdown::AppBackgroundDomainSnapshot {
+                    queue_depth: 0,
+                    owned_resource_units: 0,
+                    cumulative_failures: 0,
+                    worker_health_failures: 0,
+                },
+            },
+            fatal_error_total: fatal_errors,
+            owner_capture_failed: false,
+        }
+    }
+
+    pub(crate) fn failed_capture() -> Self {
+        Self {
+            playback_pending: 1,
+            other_queue_depth: 1,
+            owned_resource_units: 1,
+            gpu_device_losses: 0,
+            gpu_fatal_errors: 0,
+            other_fatal_errors: 0,
+            app_background: AppBackgroundEnduranceSnapshot::default(),
+            fatal_error_total: 0,
+            owner_capture_failed: true,
         }
     }
 
     /// Project a consuming owner closure without losing pre-shutdown counters.
-    pub(crate) fn after_shutdown(self, closure: HeadlessEnduranceShutdownProjection) -> Self {
-        let unclosed_domains = u64::from(!closure.playback_owner_consumed)
-            .saturating_add(u64::from(!closure.preview_closed))
-            .saturating_add(u64::from(!closure.audio_closed))
-            .saturating_add(u64::from(!closure.gpu_closed));
-        let all_closed = unclosed_domains == 0;
-        Self {
+    pub(crate) fn after_shutdown(
+        self,
+        closure: HeadlessEnduranceShutdownProjection,
+    ) -> Result<Self, String> {
+        let terminal_app_background = closure
+            .app_background
+            .ok_or_else(|| "App background terminal snapshot is unavailable".to_owned())?;
+        let app_background = self.app_background.merge_terminal(terminal_app_background);
+        let background_totals = app_background.totals()?;
+        let app_background_fatal_errors = background_totals
+            .cumulative_failures
+            .checked_add(background_totals.worker_health_failures)
+            .ok_or_else(|| "App background terminal failure count overflowed u64".to_owned())?;
+        let closure_failures = [
+            !closure.playback_owner_consumed,
+            !closure.preview_closed,
+            !closure.audio_closed,
+            !closure.app_residual_owners_closed,
+            !closure.gpu_closed,
+            self.owner_capture_failed,
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, failed| total.checked_add(u64::from(failed)))
+        .ok_or_else(|| "Headless closure failure count overflowed u64".to_owned())?;
+        let background_owners_open =
+            background_totals.queue_depth != 0 || background_totals.owned_resource_units != 0;
+        let unclosed_resource_domains = closure_failures
+            .checked_add(u64::from(background_owners_open))
+            .ok_or_else(|| "Headless open-domain count overflowed u64".to_owned())?;
+        let all_closed = unclosed_resource_domains == 0;
+        let other_fatal_errors = self
+            .other_fatal_errors
+            .checked_add(closure_failures)
+            .and_then(|value| value.checked_add(u64::from(closure.transport_shutdown_failed)))
+            .ok_or_else(|| "Headless terminal failure count overflowed u64".to_owned())?;
+        let gpu_fatal_errors = self.gpu_fatal_errors.max(closure.gpu_fatal_errors);
+        let fatal_error_total = gpu_fatal_errors
+            .checked_add(other_fatal_errors)
+            .and_then(|value| value.checked_add(app_background_fatal_errors))
+            .ok_or_else(|| "Headless total terminal failure count overflowed u64".to_owned())?;
+        Ok(Self {
             playback_pending: if all_closed {
                 0
             } else {
@@ -652,16 +746,126 @@ impl HeadlessEnduranceOwnerSnapshot {
             owned_resource_units: if all_closed {
                 0
             } else {
-                self.owned_resource_units.max(unclosed_domains)
+                self.owned_resource_units.max(unclosed_resource_domains)
             },
             gpu_device_losses: self.gpu_device_losses.max(closure.gpu_device_losses),
-            gpu_fatal_errors: self.gpu_fatal_errors.max(closure.gpu_fatal_errors),
-            other_fatal_errors: self
-                .other_fatal_errors
-                .saturating_add(unclosed_domains)
-                .saturating_add(u64::from(closure.transport_shutdown_failed)),
+            gpu_fatal_errors,
+            other_fatal_errors,
+            app_background,
+            fatal_error_total,
+            owner_capture_failed: self.owner_capture_failed,
+        })
+    }
+
+    /// Retain every known counter and fail closed when terminal projection
+    /// cannot be completed after the execution owners have been consumed.
+    pub(crate) fn fail_closed_after_shutdown(
+        self,
+        closure: HeadlessEnduranceShutdownProjection,
+    ) -> Self {
+        let app_background = closure.app_background.map_or(self.app_background, |terminal| {
+            merge_background_fail_closed(self.app_background, terminal)
+        });
+        let closure_failures = [
+            !closure.playback_owner_consumed,
+            !closure.preview_closed,
+            !closure.audio_closed,
+            !closure.app_residual_owners_closed,
+            !closure.gpu_closed,
+            self.owner_capture_failed,
+        ]
+        .into_iter()
+        .fold(0_u64, |total, failed| {
+            total.saturating_add(u64::from(failed))
+        });
+        let other_fatal_errors = self
+            .other_fatal_errors
+            .saturating_add(closure_failures)
+            .saturating_add(u64::from(closure.transport_shutdown_failed))
+            .saturating_add(1);
+        let gpu_fatal_errors = self.gpu_fatal_errors.max(closure.gpu_fatal_errors);
+        let fatal_error_total = self
+            .fatal_error_total
+            .max(
+                gpu_fatal_errors
+                    .saturating_add(other_fatal_errors)
+                    .saturating_add(saturating_background_failure_total(app_background)),
+            )
+            .max(1);
+        let minimum_open_resources = closure_failures.saturating_add(1);
+        Self {
+            playback_pending: self.playback_pending.max(1),
+            other_queue_depth: self.other_queue_depth.max(1),
+            owned_resource_units: self.owned_resource_units.max(minimum_open_resources),
+            gpu_device_losses: self.gpu_device_losses.max(closure.gpu_device_losses),
+            gpu_fatal_errors,
+            other_fatal_errors,
+            app_background,
+            fatal_error_total,
+            owner_capture_failed: self.owner_capture_failed,
         }
     }
+}
+
+fn merge_background_fail_closed(
+    running: AppBackgroundEnduranceSnapshot,
+    terminal: AppBackgroundEnduranceSnapshot,
+) -> AppBackgroundEnduranceSnapshot {
+    AppBackgroundEnduranceSnapshot {
+        audio_idle_warmup: merge_background_domain_fail_closed(
+            running.audio_idle_warmup,
+            terminal.audio_idle_warmup,
+        ),
+        media_import: merge_background_domain_fail_closed(
+            running.media_import,
+            terminal.media_import,
+        ),
+        media_asset_mutation: merge_background_domain_fail_closed(
+            running.media_asset_mutation,
+            terminal.media_asset_mutation,
+        ),
+        visual_tracking: merge_background_domain_fail_closed(
+            running.visual_tracking,
+            terminal.visual_tracking,
+        ),
+        proxy_generation: merge_background_domain_fail_closed(
+            running.proxy_generation,
+            terminal.proxy_generation,
+        ),
+        infrastructure: merge_background_domain_fail_closed(
+            running.infrastructure,
+            terminal.infrastructure,
+        ),
+    }
+}
+
+fn merge_background_domain_fail_closed(
+    running: AppBackgroundDomainSnapshot,
+    terminal: AppBackgroundDomainSnapshot,
+) -> AppBackgroundDomainSnapshot {
+    AppBackgroundDomainSnapshot {
+        queue_depth: running.queue_depth.max(terminal.queue_depth),
+        owned_resource_units: running.owned_resource_units.max(terminal.owned_resource_units),
+        cumulative_failures: running.cumulative_failures.max(terminal.cumulative_failures),
+        worker_health_failures: running.worker_health_failures.max(terminal.worker_health_failures),
+    }
+}
+
+fn saturating_background_failure_total(snapshot: AppBackgroundEnduranceSnapshot) -> u64 {
+    [
+        snapshot.audio_idle_warmup,
+        snapshot.media_import,
+        snapshot.media_asset_mutation,
+        snapshot.visual_tracking,
+        snapshot.proxy_generation,
+        snapshot.infrastructure,
+    ]
+    .into_iter()
+    .fold(0_u64, |total, domain| {
+        total
+            .saturating_add(domain.cumulative_failures)
+            .saturating_add(domain.worker_health_failures)
+    })
 }
 
 /// One correctly paired Preview/GPU/driver lifetime for Headless realtime work.
@@ -737,11 +941,7 @@ impl HeadlessRealtimePlaybackSession {
             self.driver.is_none(),
             "Headless endurance owner snapshots require a settled realtime boundary"
         );
-        Ok(capture_headless_endurance_owner_snapshot(
-            &self.preview,
-            &self.gpu,
-            state,
-        ))
+        capture_headless_endurance_owner_snapshot(&self.preview, &self.gpu, state)
     }
 
     /// Enter one fresh realtime residency after the transport starts Playing.
@@ -936,12 +1136,13 @@ pub(crate) fn capture_headless_endurance_owner_snapshot(
     preview_owner: &HeadlessPreviewRuntime,
     gpu_owner: &HeadlessViewerGpuAdapter,
     state: &AppState,
-) -> HeadlessEnduranceOwnerSnapshot {
+) -> anyhow::Result<HeadlessEnduranceOwnerSnapshot> {
     project_headless_endurance_owner_snapshot(
         preview_owner.diagnostics(),
         gpu_owner.endurance_snapshot(),
         state.audio_endurance_snapshot(),
         state.pending_playback_frame_demand_identity().is_some(),
+        state.background_endurance_snapshot().map_err(anyhow::Error::msg)?,
     )
 }
 
@@ -950,53 +1151,92 @@ fn project_headless_endurance_owner_snapshot(
     gpu: HeadlessViewerGpuEnduranceSnapshot,
     audio: mondrian_media::AudioPlaybackSnapshot,
     playback_pending: bool,
-) -> HeadlessEnduranceOwnerSnapshot {
+    app_background: AppBackgroundEnduranceSnapshot,
+) -> anyhow::Result<HeadlessEnduranceOwnerSnapshot> {
     let audio_buffer_owner =
         usize::from(audio.output.as_ref().is_some_and(|output| output.buffered_frames > 0));
     let pinned_viewer_owner = usize::from(preview.frame_store.pinned_viewer_bytes > 0);
-    let owned_resource_units = preview
-        .frame_store
-        .media_aggregate_entries
-        .saturating_add(preview.frame_store.media_aggregate_resource_units)
-        .saturating_add(preview.frame_store.viewer_entries)
-        .saturating_add(pinned_viewer_owner)
-        .saturating_add(preview.visual_program_cache.entries)
-        .saturating_add(gpu.submission_owners())
-        .saturating_add(gpu.physical_output_owners())
-        .saturating_add(gpu.staged_successor_owners())
-        .saturating_add(audio.in_flight)
-        .saturating_add(audio_buffer_owner);
-    let preview_fatal_errors = u64::from(preview.visual_execution_health_failed)
-        .saturating_add(u64::from(preview.media_worker_health_failed))
-        .saturating_add(preview.worker_disconnected_drops)
-        .saturating_add(u64::from(preview.timeline_render_cache_start_failed));
-    let audio_fatal_errors = u64::from(matches!(
-        audio.state,
-        mondrian_media::AudioPlaybackState::ExecutionUnavailable
-    ))
-    .saturating_add(audio.render_substitution_count)
-    .saturating_add(audio.render_generation_recovery_count)
-    .saturating_add(audio.underrun_recovery_count)
-    .saturating_add(audio.output_lifecycle.backend_loss_count)
-    .saturating_add(audio.output_lifecycle.deactivation_failed_count);
-    let other_queue_depth = preview
-        .scheduler
-        .pending_requests
-        .saturating_add(preview.worker_queue.queued_jobs)
-        .saturating_add(preview.worker_queue.in_flight_jobs)
-        .saturating_add(audio.in_flight);
-    HeadlessEnduranceOwnerSnapshot {
+    let owned_resource_units = [
+        preview.frame_store.media_aggregate_entries,
+        preview.frame_store.media_aggregate_resource_units,
+        preview.frame_store.viewer_entries,
+        pinned_viewer_owner,
+        preview.visual_program_cache.entries,
+        gpu.submission_owners(),
+        gpu.physical_output_owners(),
+        gpu.staged_successor_owners(),
+        audio.in_flight,
+        audio_buffer_owner,
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or_else(|| anyhow::anyhow!("Headless owned-resource inventory overflowed usize"))?;
+    let preview_fatal_errors = [
+        u64::from(preview.visual_execution_health_failed),
+        u64::from(preview.media_worker_health_failed),
+        preview.worker_disconnected_drops,
+        u64::from(preview.timeline_render_cache_start_failed),
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, value| total.checked_add(value))
+    .ok_or_else(|| anyhow::anyhow!("Preview failure count overflowed u64"))?;
+    let audio_fatal_errors = [
+        u64::from(matches!(
+            audio.state,
+            mondrian_media::AudioPlaybackState::ExecutionUnavailable
+        )),
+        audio.render_substitution_count,
+        audio.render_generation_recovery_count,
+        audio.underrun_recovery_count,
+        audio.output_lifecycle.backend_loss_count,
+        audio.output_lifecycle.deactivation_failed_count,
+    ]
+    .into_iter()
+    .try_fold(0_u64, |total, value| total.checked_add(value))
+    .ok_or_else(|| anyhow::anyhow!("Audio failure count overflowed u64"))?;
+    let other_queue_depth = [
+        preview.scheduler.pending_requests,
+        preview.worker_queue.queued_jobs,
+        preview.worker_queue.in_flight_jobs,
+        audio.in_flight,
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or_else(|| anyhow::anyhow!("Headless queue inventory overflowed usize"))?;
+    let background = app_background.totals().map_err(anyhow::Error::msg)?;
+    let other_queue_depth = usize_to_u64(other_queue_depth)?
+        .checked_add(background.queue_depth)
+        .ok_or_else(|| anyhow::anyhow!("Headless total queue inventory overflowed u64"))?;
+    let owned_resource_units = usize_to_u64(owned_resource_units)?
+        .checked_add(background.owned_resource_units)
+        .ok_or_else(|| anyhow::anyhow!("Headless total resource inventory overflowed u64"))?;
+    let other_fatal_errors = preview_fatal_errors
+        .checked_add(audio_fatal_errors)
+        .ok_or_else(|| anyhow::anyhow!("Headless non-GPU failure count overflowed u64"))?;
+    let app_background_fatal_errors = background
+        .cumulative_failures
+        .checked_add(background.worker_health_failures)
+        .ok_or_else(|| anyhow::anyhow!("App background failure count overflowed u64"))?;
+    let gpu_fatal_errors = gpu.fatal_error_count();
+    let fatal_error_total = gpu_fatal_errors
+        .checked_add(other_fatal_errors)
+        .and_then(|value| value.checked_add(app_background_fatal_errors))
+        .ok_or_else(|| anyhow::anyhow!("Headless total failure count overflowed u64"))?;
+    Ok(HeadlessEnduranceOwnerSnapshot {
         playback_pending: u64::from(playback_pending),
-        other_queue_depth: saturating_usize_to_u64(other_queue_depth),
-        owned_resource_units: saturating_usize_to_u64(owned_resource_units),
+        other_queue_depth,
+        owned_resource_units,
         gpu_device_losses: gpu.device_loss_count(),
-        gpu_fatal_errors: gpu.fatal_error_count(),
-        other_fatal_errors: preview_fatal_errors.saturating_add(audio_fatal_errors),
-    }
+        gpu_fatal_errors,
+        other_fatal_errors,
+        app_background,
+        fatal_error_total,
+        owner_capture_failed: false,
+    })
 }
 
-fn saturating_usize_to_u64(value: usize) -> u64 {
-    u64::try_from(value).unwrap_or(u64::MAX)
+fn usize_to_u64(value: usize) -> anyhow::Result<u64> {
+    u64::try_from(value).map_err(|_| anyhow::anyhow!("usize inventory exceeded u64"))
 }
 
 pub(crate) fn headless_terminal_observation_may_retarget_quality(
@@ -1504,51 +1744,154 @@ mod tests {
             gpu_device_losses: 2,
             gpu_fatal_errors: 1,
             other_fatal_errors: 2,
+            app_background: AppBackgroundEnduranceSnapshot::default(),
+            fatal_error_total: 3,
+            owner_capture_failed: false,
         };
 
-        let closed = running.after_shutdown(HeadlessEnduranceShutdownProjection {
-            playback_owner_consumed: true,
-            preview_closed: true,
-            audio_closed: true,
-            gpu_closed: true,
-            gpu_device_losses: 2,
-            gpu_fatal_errors: 1,
-            transport_shutdown_failed: false,
-        });
+        let closed = running
+            .after_shutdown(HeadlessEnduranceShutdownProjection {
+                playback_owner_consumed: true,
+                preview_closed: true,
+                audio_closed: true,
+                app_residual_owners_closed: true,
+                app_background: Some(AppBackgroundEnduranceSnapshot::default()),
+                gpu_closed: true,
+                gpu_device_losses: 2,
+                gpu_fatal_errors: 1,
+                transport_shutdown_failed: false,
+            })
+            .expect("clean terminal projection");
         assert_eq!(closed.playback_pending, 0);
         assert_eq!(closed.other_queue_depth, 0);
         assert_eq!(closed.owned_resource_units, 0);
         assert_eq!(closed.gpu_device_losses, 2);
         assert_eq!(closed.fatal_errors(), 3);
 
-        let playback_retained = running.after_shutdown(HeadlessEnduranceShutdownProjection {
-            playback_owner_consumed: false,
-            preview_closed: true,
-            audio_closed: true,
-            gpu_closed: true,
-            gpu_device_losses: 2,
-            gpu_fatal_errors: 1,
-            transport_shutdown_failed: false,
-        });
+        let playback_retained = running
+            .after_shutdown(HeadlessEnduranceShutdownProjection {
+                playback_owner_consumed: false,
+                preview_closed: true,
+                audio_closed: true,
+                app_residual_owners_closed: true,
+                app_background: Some(AppBackgroundEnduranceSnapshot::default()),
+                gpu_closed: true,
+                gpu_device_losses: 2,
+                gpu_fatal_errors: 1,
+                transport_shutdown_failed: false,
+            })
+            .expect("retained terminal projection");
         assert_eq!(playback_retained.playback_pending, 1);
         assert_eq!(playback_retained.other_queue_depth, 4);
         assert_eq!(playback_retained.owned_resource_units, 9);
         assert_eq!(playback_retained.fatal_errors(), 4);
 
-        let incomplete = running.after_shutdown(HeadlessEnduranceShutdownProjection {
-            playback_owner_consumed: true,
-            preview_closed: false,
-            audio_closed: true,
-            gpu_closed: false,
-            gpu_device_losses: 4,
-            gpu_fatal_errors: 2,
-            transport_shutdown_failed: true,
-        });
+        let incomplete = running
+            .after_shutdown(HeadlessEnduranceShutdownProjection {
+                playback_owner_consumed: true,
+                preview_closed: false,
+                audio_closed: true,
+                app_residual_owners_closed: false,
+                app_background: Some(AppBackgroundEnduranceSnapshot::default()),
+                gpu_closed: false,
+                gpu_device_losses: 4,
+                gpu_fatal_errors: 2,
+                transport_shutdown_failed: true,
+            })
+            .expect("incomplete terminal projection");
         assert_eq!(incomplete.playback_pending, 1);
         assert_eq!(incomplete.other_queue_depth, 4);
         assert_eq!(incomplete.owned_resource_units, 9);
         assert_eq!(incomplete.gpu_device_losses, 4);
-        assert_eq!(incomplete.fatal_errors(), 7);
+        assert_eq!(incomplete.fatal_errors(), 8);
+    }
+
+    #[test]
+    fn failed_terminal_projection_preserves_running_counters_and_fails_closed() {
+        let running_background = AppBackgroundEnduranceSnapshot {
+            media_import: AppBackgroundDomainSnapshot {
+                queue_depth: 5,
+                owned_resource_units: 6,
+                cumulative_failures: 7,
+                worker_health_failures: 8,
+            },
+            ..AppBackgroundEnduranceSnapshot::default()
+        };
+        let running = HeadlessEnduranceOwnerSnapshot {
+            playback_pending: 0,
+            other_queue_depth: 4,
+            owned_resource_units: 9,
+            gpu_device_losses: 2,
+            gpu_fatal_errors: 1,
+            other_fatal_errors: 2,
+            app_background: running_background,
+            fatal_error_total: 18,
+            owner_capture_failed: false,
+        };
+
+        let failed = running.fail_closed_after_shutdown(HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: true,
+            preview_closed: true,
+            audio_closed: true,
+            app_residual_owners_closed: true,
+            app_background: None,
+            gpu_closed: true,
+            gpu_device_losses: 3,
+            gpu_fatal_errors: 1,
+            transport_shutdown_failed: false,
+        });
+
+        assert_eq!(failed.playback_pending, 1);
+        assert_eq!(failed.other_queue_depth, 4);
+        assert_eq!(failed.owned_resource_units, 9);
+        assert_eq!(failed.gpu_device_losses, 3);
+        assert_eq!(failed.app_background, running_background);
+        assert_eq!(failed.fatal_error_total, 19);
+    }
+
+    #[test]
+    fn failed_terminal_projection_saturates_when_exact_projection_overflows() {
+        let running_background = AppBackgroundEnduranceSnapshot {
+            audio_idle_warmup: AppBackgroundDomainSnapshot {
+                cumulative_failures: u64::MAX,
+                ..AppBackgroundDomainSnapshot::default()
+            },
+            media_import: AppBackgroundDomainSnapshot {
+                worker_health_failures: 1,
+                ..AppBackgroundDomainSnapshot::default()
+            },
+            ..AppBackgroundEnduranceSnapshot::default()
+        };
+        let running = HeadlessEnduranceOwnerSnapshot {
+            playback_pending: 0,
+            other_queue_depth: 0,
+            owned_resource_units: 0,
+            gpu_device_losses: 0,
+            gpu_fatal_errors: 0,
+            other_fatal_errors: 0,
+            app_background: running_background,
+            fatal_error_total: u64::MAX,
+            owner_capture_failed: false,
+        };
+        let projection = HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: true,
+            preview_closed: true,
+            audio_closed: true,
+            app_residual_owners_closed: true,
+            app_background: Some(AppBackgroundEnduranceSnapshot::default()),
+            gpu_closed: true,
+            gpu_device_losses: 0,
+            gpu_fatal_errors: 0,
+            transport_shutdown_failed: false,
+        };
+
+        assert!(running.after_shutdown(projection).is_err());
+        let failed = running.fail_closed_after_shutdown(projection);
+        assert_eq!(failed.playback_pending, 1);
+        assert_eq!(failed.other_queue_depth, 1);
+        assert_eq!(failed.owned_resource_units, 1);
+        assert_eq!(failed.fatal_error_total, u64::MAX);
+        assert_eq!(failed.app_background, running_background);
     }
 
     #[test]
@@ -1577,7 +1920,9 @@ mod tests {
             HeadlessViewerGpuEnduranceSnapshot::test_fixture(1, 2, 3, 4, 5),
             audio,
             true,
-        );
+            AppBackgroundEnduranceSnapshot::default(),
+        )
+        .expect("valid owner projection");
 
         assert_eq!(projected.playback_pending(), 1);
         assert_eq!(projected.other_queue_depth(), 15);

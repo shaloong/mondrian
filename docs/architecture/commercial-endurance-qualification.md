@@ -26,8 +26,9 @@ The implementation is split at existing authority boundaries:
   publishes chunks and the run manifest create-only with file fsync, and
   derives terminal software/Export closure from typed owner receipts and the
   final Reference Output accounting snapshot. It does not execute workloads or
-  reinterpret gates. A consuming vendor-session Reference Output receipt is
-  still a required follow-on boundary.
+  reinterpret gates. Reference Output now has the consuming Module/Session
+  receipt boundary; a real DeckLink/AJA provider implementation and physical
+  HITL evidence remain required before that receipt can qualify hardware.
 - `mondrian-app::app::endurance_campaign` owns exact serial phase admission,
   monotonic cadence, native process-tree sampling, final-sample order, and
   shutdown-before-terminal capture. It consumes an `EnduranceCampaignRuntime`;
@@ -88,13 +89,24 @@ current counts, preventing counter regression at the replacement boundary.
 The validation-only `EnduranceExecutionOwners` group composes the production
 Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
 the phase's `AppState`. It never starts a sidecar Audio instance. Its consuming
-close takes the complete `AppState`, so the Playback binding itself cannot
-survive a nominally clean terminal projection; a transport pause failure is
-latched as fatal evidence while cleanup continues. It synchronously retires the
-same PCM/device workers pumped by Playback before transferring the complete GPU
-device-generation retirement envelope to the existing progress worker. GPU
-closure is bounded by an explicit timeout and records worker start/return,
-panic, timeout, retirement-handoff acceptance, and exact resource retirement.
+close takes the complete `AppState`, so the Playback binding or an App-owned
+auxiliary worker cannot survive a nominally clean terminal projection; a
+transport pause failure is latched as fatal evidence while cleanup continues.
+The App first closes admission/cancellation seams, then consumes Project and
+persistence ownership, Reference Output, Export, Audio playback, the shared
+Audio Source Cache (including persistent FFmpeg children and stdout/stderr pump
+threads), paused-Audio warmup, Media Import, ordered asset mutation, visual
+tracking, Proxy generation, and the lazy native-memory observer. Every join
+spends from one App-wide absolute deadline rather than receiving a fresh timeout
+after an earlier owner used the budget. The final receipt records configured and
+started workers, normal returns, panics, timeouts/detaches, residual queue/work
+and resource ownership, cumulative failures, Project Session/library/runtime
+lease release, and whether the sole `AppState` owner itself was consumed.
+It synchronously retires the same PCM/device workers pumped by Playback before
+transferring the complete GPU device-generation retirement envelope to the
+existing progress worker. GPU closure is bounded by the same terminal budget
+and records worker start/return, panic, timeout, retirement-handoff acceptance,
+and exact resource retirement.
 A device-loss or progress-failure terminal observed through the final bounded
 join is merged into the terminal counters rather than being frozen only before
 teardown. A timeout detaches the still-authoritative progress worker so that it can
@@ -121,17 +133,45 @@ Frame Store aggregate residency and non-evictable Viewer pins, prepared visual
 programs, GPU submission/current/prepared/staged owners, Audio render/buffer
 ownership, and monotonic worker/device failure counters. The capture does not
 claim to enumerate durable Timeline cache files. Clean consuming closure clears
-gauges only after the Playback owner is consumed and Preview, Audio, and GPU all
-close; incomplete closure leaves nonzero ownership and fatal evidence.
+gauges only after the Playback owner is consumed and Preview, the complete App,
+and GPU all close; incomplete closure leaves nonzero ownership and fatal
+evidence.
+
+The App portion adds fixed-shape projections for six background execution
+domains: paused-Audio warmup, Media Import, ordered asset mutation, visual
+tracking, Proxy generation, and an Infrastructure aggregate over Project
+persistence plus the native-memory observer. Each domain supplies exact transport/queue and
+physically owned-resource gauges plus monotonic operation-failure and
+worker-health counters; conversions and aggregation are checked rather than
+wrapped or truncated. Terminal shutdown evidence is merged back into each
+corresponding domain independently: terminal gauges replace live gauges, while
+cumulative and worker-health failures take the per-domain maximum. This keeps a
+failure discovered during shutdown and prevents one domain's terminal count
+from masking or double-counting another domain. Persistence uses one shared
+monotonic ledger for real worker completion/publication failures. The native
+observer retains mutually exclusive queued/running ownership, supported-probe
+failures, startup identity, and unexpected exits; unsupported platform probes
+remain capability facts rather than fabricated operation failures.
+
+Ordinary `Drop` for the App/Preview/cache/background worker owners covered by
+this checkpoint is bounded best-effort cleanup. It may send cancellation or
+shutdown and relinquish a still-running handle, so it is never accepted as
+worker-return or resource-release evidence. Persistent FFmpeg decoder-session
+destructors remain outside that ordinary-Drop guarantee and are a follow-on
+software hardening slice. The explicit consuming Audio Source Cache
+coordinator is deadline-bounded and fail-closed; only consuming qualification
+paths and typed receipts can close a phase.
 
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, and deterministic software tests. It does **not** yet
 supply the concrete three-phase `EnduranceCampaignRuntime`: repeated frozen
 Export plus independent verification, persistent Timeline clean-feed/audio
-pumping, a consuming vendor Reference Output shutdown receipt, typed recovery
-receipts, and the high-level validation executable remain explicit local
-follow-on work. Until those owners exist, physical phases must be admitted as
-`NotRun`; profile prose is not evidence that a runnable 72-hour producer exists.
+pumping, the real vendor Reference Output bridge and hardware validation, typed
+recovery receipts, and the high-level validation executable remain explicit
+follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
+execution or hardware HITL evidence. Until those owners exist, physical phases
+must be admitted as `NotRun`; profile prose is not evidence that a runnable
+72-hour producer exists.
 
 ## Commercial profile
 
@@ -204,11 +244,13 @@ scheduled = completed + late + dropped + flushed + aborted + outstanding
 Stop, block, and post-consume ANC/hardware-time failure classify every remaining
 frame instead of silently clearing it.
 
-The present terminal contract proves final Reference Output diagnostics and
-accounting closure, not vendor callback-thread join, device release, profile
-restore, or session consumption. Those claims require the forthcoming typed
-DeckLink/AJA shutdown receipt and cannot be inferred from `Stopped` plus zero
-outstanding frames.
+The terminal contract now consumes the Reference Output Module and provider
+Session and independently records playback stop, callback-execution
+termination, device/profile ownership release, unresolved resources, accounting
+closure, and provider/module failure. `Stopped` plus zero outstanding frames is
+still insufficient. The simulated provider validates this fail-closed contract;
+a real DeckLink/AJA bridge must produce the same receipt before physical closure
+can be qualified.
 
 Export publishes a constant-size `ExportEnduranceSnapshot` with cumulative
 admissions, failures, cancellations, rendered frames, durable artifacts,

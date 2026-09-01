@@ -12,7 +12,9 @@ use session::PersistentFfmpegAudioWindowDecoder;
 use std::collections::VecDeque;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 const AUDIO_SOURCE_WINDOW_SECONDS: usize = 10;
@@ -69,6 +71,7 @@ pub struct AudioSourceCache {
     state: Mutex<AudioSourceCacheState>,
     window_ready: Condvar,
     decoder: Arc<dyn AudioWindowDecoder>,
+    shutdown_requested: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -221,6 +224,70 @@ pub(super) struct AudioWindowDecoderDiagnostics {
     pub(super) random_seek_window_max_duration_us: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct AudioWindowDecoderShutdownEvidence {
+    pub(super) sessions_before: usize,
+    pub(super) sessions_remaining: usize,
+    pub(super) child_processes_observed: usize,
+    pub(super) child_processes_terminated: usize,
+    pub(super) child_process_termination_failures: usize,
+    pub(super) stdout_pump_threads_observed: usize,
+    pub(super) stdout_pump_threads_joined: usize,
+    pub(super) stdout_pump_threads_panicked: usize,
+    pub(super) stderr_pump_threads_observed: usize,
+    pub(super) stderr_pump_threads_joined: usize,
+    pub(super) stderr_pump_threads_panicked: usize,
+    pub(super) external_session_slot_references: usize,
+    pub(super) resource_handles_remaining: usize,
+}
+
+impl AudioWindowDecoderShutdownEvidence {
+    pub(super) const fn all_resources_released(self) -> bool {
+        self.sessions_remaining == 0
+            && self.child_processes_observed == self.child_processes_terminated
+            && self.child_process_termination_failures == 0
+            && self.stdout_pump_threads_observed == self.stdout_pump_threads_joined
+            && self.stdout_pump_threads_panicked == 0
+            && self.stderr_pump_threads_observed == self.stderr_pump_threads_joined
+            && self.stderr_pump_threads_panicked == 0
+            && self.external_session_slot_references == 0
+            && self.resource_handles_remaining == 0
+    }
+
+    pub(super) fn merge(&mut self, other: Self) {
+        self.sessions_before = self.sessions_before.saturating_add(other.sessions_before);
+        self.sessions_remaining = self.sessions_remaining.saturating_add(other.sessions_remaining);
+        self.child_processes_observed =
+            self.child_processes_observed.saturating_add(other.child_processes_observed);
+        self.child_processes_terminated =
+            self.child_processes_terminated.saturating_add(other.child_processes_terminated);
+        self.child_process_termination_failures = self
+            .child_process_termination_failures
+            .saturating_add(other.child_process_termination_failures);
+        self.stdout_pump_threads_observed = self
+            .stdout_pump_threads_observed
+            .saturating_add(other.stdout_pump_threads_observed);
+        self.stdout_pump_threads_joined =
+            self.stdout_pump_threads_joined.saturating_add(other.stdout_pump_threads_joined);
+        self.stdout_pump_threads_panicked = self
+            .stdout_pump_threads_panicked
+            .saturating_add(other.stdout_pump_threads_panicked);
+        self.stderr_pump_threads_observed = self
+            .stderr_pump_threads_observed
+            .saturating_add(other.stderr_pump_threads_observed);
+        self.stderr_pump_threads_joined =
+            self.stderr_pump_threads_joined.saturating_add(other.stderr_pump_threads_joined);
+        self.stderr_pump_threads_panicked = self
+            .stderr_pump_threads_panicked
+            .saturating_add(other.stderr_pump_threads_panicked);
+        self.external_session_slot_references = self
+            .external_session_slot_references
+            .saturating_add(other.external_session_slot_references);
+        self.resource_handles_remaining =
+            self.resource_handles_remaining.saturating_add(other.resource_handles_remaining);
+    }
+}
+
 pub(super) trait AudioWindowDecoder: Send + Sync {
     fn decode_window(
         &self,
@@ -237,6 +304,16 @@ pub(super) trait AudioWindowDecoder: Send + Sync {
     }
 
     fn reconfigure_session_capacity(&self, _session_capacity: usize) {}
+
+    fn shutdown_sessions(&self) -> AudioWindowDecoderShutdownEvidence {
+        let diagnostics = self.diagnostics();
+        AudioWindowDecoderShutdownEvidence {
+            sessions_before: diagnostics.sessions,
+            sessions_remaining: diagnostics.sessions,
+            resource_handles_remaining: diagnostics.sessions,
+            ..AudioWindowDecoderShutdownEvidence::default()
+        }
+    }
 }
 
 /// Stable reader for one fingerprinted media source in its exact native layout.
@@ -321,6 +398,109 @@ pub struct AudioSourceCacheDiagnostics {
     pub decoder_sequential_window_max_duration_us: u64,
     /// Slowest first window after a random-seek session restart.
     pub decoder_random_seek_window_max_duration_us: u64,
+}
+
+/// Consuming closure evidence for one decoded-audio source cache.
+///
+/// A clean receipt proves that the cache was not decoding while ownership was
+/// consumed, retained PCM and terminal failures were released, every
+/// persistent decoder child was reaped, and both pipe-pump threads were joined.
+/// Any externally retained decoder/session or PCM `Arc` is reported and makes
+/// [`Self::all_resources_released`] fail closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct AudioSourceCacheShutdownEvidence {
+    /// Evidence schema version.
+    pub schema_version: u32,
+    /// Decode leaders present before consuming cleanup began.
+    pub in_flight_decodes_before: usize,
+    /// Resident PCM windows before cleanup.
+    pub pcm_entries_before: usize,
+    /// Resident PCM bytes before cleanup.
+    pub pcm_bytes_before: usize,
+    /// Terminal decode failures before cleanup.
+    pub failure_entries_before: usize,
+    /// PCM window `Arc` references retained outside the cache at cleanup time.
+    pub external_pcm_buffer_references: usize,
+    /// PCM windows still retained by the cache after cleanup.
+    pub pcm_entries_remaining: usize,
+    /// PCM bytes still retained by the cache after cleanup.
+    pub pcm_bytes_remaining: usize,
+    /// Terminal failures still retained by the cache after cleanup.
+    pub failure_entries_remaining: usize,
+    /// Decoder Session slots present before explicit decoder shutdown.
+    pub decoder_sessions_before: usize,
+    /// Decoder Session slots whose resources could not be reclaimed.
+    pub decoder_sessions_remaining: usize,
+    /// Persistent decoder child processes encountered by lifetime cleanup.
+    pub child_processes_observed: usize,
+    /// Persistent decoder child processes synchronously reaped.
+    pub child_processes_terminated: usize,
+    /// Child-process kill, status, or wait failures retained by cleanup.
+    pub child_process_termination_failures: usize,
+    /// Decoder stdout pump threads encountered by lifetime cleanup.
+    pub stdout_pump_threads_observed: usize,
+    /// Decoder stdout pump threads synchronously joined without panic.
+    pub stdout_pump_threads_joined: usize,
+    /// Joined decoder stdout pump threads that panicked.
+    pub stdout_pump_threads_panicked: usize,
+    /// Decoder stderr pump threads encountered by lifetime cleanup.
+    pub stderr_pump_threads_observed: usize,
+    /// Decoder stderr pump threads synchronously joined without panic.
+    pub stderr_pump_threads_joined: usize,
+    /// Joined decoder stderr pump threads that panicked.
+    pub stderr_pump_threads_panicked: usize,
+    /// Session-slot `Arc` references retained outside decoder ownership.
+    pub external_decoder_session_references: usize,
+    /// Decoder child/thread/resource handles not proven reclaimed.
+    pub decoder_resource_handles_remaining: usize,
+    /// Decoder-owner `Arc` references retained outside the consumed cache.
+    pub external_decoder_references: usize,
+    /// Deadline-bounded shutdown coordinators successfully created.
+    pub shutdown_coordinators_started: u32,
+    /// Deadline-bounded shutdown coordinators observed returned.
+    pub shutdown_coordinators_terminated: u32,
+    /// Shutdown coordinator creation failures.
+    pub shutdown_coordinator_start_failures: u32,
+    /// Shutdown coordinators that panicked before publishing a receipt.
+    pub shutdown_coordinator_panics: u32,
+    /// Shutdown coordinators still running at the shared deadline.
+    pub shutdown_coordinator_timeouts: u32,
+    /// Shutdown coordinators detached after the shared deadline.
+    pub shutdown_coordinator_detachments: u32,
+}
+
+impl AudioSourceCacheShutdownEvidence {
+    /// Whether every cache, child-process, pump-thread, and ownership fact closed exactly.
+    pub const fn all_resources_released(self) -> bool {
+        self.schema_version == 2
+            && self.in_flight_decodes_before == 0
+            && self.external_pcm_buffer_references == 0
+            && self.pcm_entries_remaining == 0
+            && self.pcm_bytes_remaining == 0
+            && self.failure_entries_remaining == 0
+            && self.external_decoder_references == 0
+            && self.shutdown_coordinators_started == self.shutdown_coordinators_terminated
+            && self.shutdown_coordinator_start_failures == 0
+            && self.shutdown_coordinator_panics == 0
+            && self.shutdown_coordinator_timeouts == 0
+            && self.shutdown_coordinator_detachments == 0
+            && AudioWindowDecoderShutdownEvidence {
+                sessions_before: self.decoder_sessions_before,
+                sessions_remaining: self.decoder_sessions_remaining,
+                child_processes_observed: self.child_processes_observed,
+                child_processes_terminated: self.child_processes_terminated,
+                child_process_termination_failures: self.child_process_termination_failures,
+                stdout_pump_threads_observed: self.stdout_pump_threads_observed,
+                stdout_pump_threads_joined: self.stdout_pump_threads_joined,
+                stdout_pump_threads_panicked: self.stdout_pump_threads_panicked,
+                stderr_pump_threads_observed: self.stderr_pump_threads_observed,
+                stderr_pump_threads_joined: self.stderr_pump_threads_joined,
+                stderr_pump_threads_panicked: self.stderr_pump_threads_panicked,
+                external_session_slot_references: self.external_decoder_session_references,
+                resource_handles_remaining: self.decoder_resource_handles_remaining,
+            }
+            .all_resources_released()
+    }
 }
 
 impl AudioSourceCache {
@@ -408,6 +588,7 @@ impl AudioSourceCache {
             state: Mutex::new(AudioSourceCacheState::new(config)),
             window_ready: Condvar::new(),
             decoder,
+            shutdown_requested: AtomicBool::new(false),
         }
     }
 
@@ -501,11 +682,166 @@ impl AudioSourceCache {
         }
     }
 
+    /// Consume this cache and synchronously reclaim its retained decoder resources.
+    ///
+    /// Callers that share the cache through an `Arc` must first prove unique
+    /// ownership with `Arc::try_unwrap`. This method does not wait for an active
+    /// decode leader: observing one is a shutdown contract violation recorded
+    /// in the returned fail-closed evidence.
+    pub fn shutdown_and_wait(self) -> AudioSourceCacheShutdownEvidence {
+        self.begin_shutdown();
+        let external_decoder_references = Arc::strong_count(&self.decoder).saturating_sub(1);
+        let (
+            in_flight_decodes_before,
+            pcm_entries_before,
+            pcm_bytes_before,
+            failure_entries_before,
+            external_pcm_buffer_references,
+            pcm_entries_remaining,
+            pcm_bytes_remaining,
+            failure_entries_remaining,
+        ) = {
+            let _configuration = self.configuration.lock();
+            let mut state = self.state.lock();
+            let in_flight_decodes_before = state.in_flight.len();
+            let pcm_entries_before = state.entries.len();
+            let pcm_bytes_before = state.reserved_bytes;
+            let failure_entries_before = state.failures.len();
+            let external_pcm_buffer_references = state
+                .entries
+                .iter()
+                .map(|entry| Arc::strong_count(&entry.buffer).saturating_sub(1))
+                .sum();
+            state.entries.clear();
+            state.failures.clear();
+            state.reserved_bytes = 0;
+            state.in_flight.clear();
+            self.window_ready.notify_all();
+            (
+                in_flight_decodes_before,
+                pcm_entries_before,
+                pcm_bytes_before,
+                failure_entries_before,
+                external_pcm_buffer_references,
+                state.entries.len(),
+                state.reserved_bytes,
+                state.failures.len(),
+            )
+        };
+        let decoder = self.decoder.shutdown_sessions();
+        AudioSourceCacheShutdownEvidence {
+            schema_version: 2,
+            in_flight_decodes_before,
+            pcm_entries_before,
+            pcm_bytes_before,
+            failure_entries_before,
+            external_pcm_buffer_references,
+            pcm_entries_remaining,
+            pcm_bytes_remaining,
+            failure_entries_remaining,
+            decoder_sessions_before: decoder.sessions_before,
+            decoder_sessions_remaining: decoder.sessions_remaining,
+            child_processes_observed: decoder.child_processes_observed,
+            child_processes_terminated: decoder.child_processes_terminated,
+            child_process_termination_failures: decoder.child_process_termination_failures,
+            stdout_pump_threads_observed: decoder.stdout_pump_threads_observed,
+            stdout_pump_threads_joined: decoder.stdout_pump_threads_joined,
+            stdout_pump_threads_panicked: decoder.stdout_pump_threads_panicked,
+            stderr_pump_threads_observed: decoder.stderr_pump_threads_observed,
+            stderr_pump_threads_joined: decoder.stderr_pump_threads_joined,
+            stderr_pump_threads_panicked: decoder.stderr_pump_threads_panicked,
+            external_decoder_session_references: decoder.external_session_slot_references,
+            decoder_resource_handles_remaining: decoder.resource_handles_remaining,
+            external_decoder_references,
+            shutdown_coordinators_started: 0,
+            shutdown_coordinators_terminated: 0,
+            shutdown_coordinator_start_failures: 0,
+            shutdown_coordinator_panics: 0,
+            shutdown_coordinator_timeouts: 0,
+            shutdown_coordinator_detachments: 0,
+        }
+    }
+
+    /// Close cache admission and wake readers without waiting for decoder teardown.
+    pub fn begin_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Release);
+        self.window_ready.notify_all();
+    }
+
+    /// Consume cache/decoder ownership through one absolute qualification deadline.
+    pub fn shutdown_until(self, deadline: Instant) -> AudioSourceCacheShutdownEvidence {
+        self.begin_shutdown();
+        let owner = Arc::new(Mutex::new(Some(self)));
+        let coordinator_owner = Arc::clone(&owner);
+        let coordinator = thread::Builder::new()
+            .name("mondrian-audio-source-endurance-shutdown".to_owned())
+            .spawn(move || {
+                let Some(owner) = coordinator_owner.lock().take() else {
+                    return AudioSourceCache::coordinator_failure(1, 0, 0, 0, 1);
+                };
+                owner.shutdown_and_wait()
+            });
+        let Ok(coordinator) = coordinator else {
+            // Preserve bounded caller behavior even when the operating system
+            // cannot create the coordinator. Dropping the foreign decoder owner
+            // here could synchronously wait on child/pump resources.
+            if let Some(owner) = owner.lock().take() {
+                std::mem::forget(owner);
+            }
+            return Self::coordinator_failure(0, 1, 0, 0, 1);
+        };
+
+        while !coordinator.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        if !coordinator.is_finished() {
+            drop(coordinator);
+            return Self::coordinator_failure(1, 0, 0, 1, 1);
+        }
+
+        match coordinator.join() {
+            Ok(mut evidence) => {
+                evidence.shutdown_coordinators_started = 1;
+                evidence.shutdown_coordinators_terminated = 1;
+                evidence
+            }
+            Err(_) => Self::coordinator_failure(1, 0, 1, 0, 0),
+        }
+    }
+
+    fn coordinator_failure(
+        started: u32,
+        start_failures: u32,
+        panics: u32,
+        timeouts: u32,
+        detachments: u32,
+    ) -> AudioSourceCacheShutdownEvidence {
+        AudioSourceCacheShutdownEvidence {
+            schema_version: 2,
+            // The coordinator owns an unobservable cache/decoder lifetime.
+            // Retain a conservative resource floor instead of claiming zero.
+            decoder_resource_handles_remaining: 1,
+            shutdown_coordinators_started: started,
+            shutdown_coordinators_terminated: u32::from(started != 0 && timeouts == 0),
+            shutdown_coordinator_start_failures: start_failures,
+            shutdown_coordinator_panics: panics,
+            shutdown_coordinator_timeouts: timeouts,
+            shutdown_coordinator_detachments: detachments,
+            ..AudioSourceCacheShutdownEvidence::default()
+        }
+    }
+
     fn window(
         &self,
         key: AudioSourceWindowKey,
         cancellation: &ExecutionCancellationToken,
     ) -> Result<Arc<AudioBuffer>> {
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: key.source.path.display().to_string(),
+                reason: "audio source cache is shutting down".to_owned(),
+            });
+        }
         if cancellation.is_canceled() {
             return Err(canceled_audio_decode(&key.source.path));
         }
@@ -528,6 +864,12 @@ impl AudioSourceCache {
             if state.in_flight.iter().any(|in_flight| in_flight == &key) {
                 self.window_ready.wait_for(&mut state, Duration::from_millis(5));
                 drop(state);
+                if self.shutdown_requested.load(Ordering::Acquire) {
+                    return Err(MondrianError::DecodeFailed {
+                        asset_id: key.source.path.display().to_string(),
+                        reason: "audio source cache is shutting down".to_owned(),
+                    });
+                }
                 if cancellation.is_canceled() {
                     return Err(canceled_audio_decode(&key.source.path));
                 }
@@ -828,6 +1170,8 @@ mod tests {
         release: AtomicBool,
     }
 
+    struct ResidualWindowDecoder;
+
     impl AudioWindowDecoder for MalformedWindowDecoder {
         fn decode_window(
             &self,
@@ -888,6 +1232,29 @@ mod tests {
         }
     }
 
+    impl AudioWindowDecoder for ResidualWindowDecoder {
+        fn decode_window(
+            &self,
+            _source: &AudioSourceIdentity,
+            _start_frame: i64,
+            _frame_count: usize,
+            _sample_rate: u32,
+            _channel_layout: AudioChannelLayout,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<AudioBuffer> {
+            Err(MondrianError::Other(anyhow::anyhow!(
+                "residual decoder must not decode"
+            )))
+        }
+
+        fn diagnostics(&self) -> AudioWindowDecoderDiagnostics {
+            AudioWindowDecoderDiagnostics {
+                sessions: 1,
+                ..AudioWindowDecoderDiagnostics::default()
+            }
+        }
+    }
+
     fn test_audio_source(
         decoder: Arc<RampWindowDecoder>,
         entry_capacity: usize,
@@ -910,6 +1277,130 @@ mod tests {
         let reader =
             cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
         (file, cache, reader)
+    }
+
+    #[test]
+    fn consuming_shutdown_of_never_opened_cache_proves_complete_release() {
+        assert!(!AudioSourceCacheShutdownEvidence::default().all_resources_released());
+        let evidence = AudioSourceCache::new(48_000).shutdown_and_wait();
+
+        assert_eq!(evidence.schema_version, 2);
+        assert_eq!(
+            evidence,
+            AudioSourceCacheShutdownEvidence {
+                schema_version: 2,
+                ..AudioSourceCacheShutdownEvidence::default()
+            }
+        );
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn consuming_shutdown_clears_pcm_residency() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            8_000,
+            1,
+            2,
+            128 * 1024,
+            1,
+            Arc::new(RampWindowDecoder::new()),
+        ));
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
+        let mut destination = [0.0; 2];
+        reader.read_interleaved(0, 1, &mut destination).expect("decode resident window");
+        drop(reader);
+        let cache = Arc::try_unwrap(cache).ok().expect("unique cache owner");
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.pcm_entries_before, 1);
+        assert!(evidence.pcm_bytes_before > 0);
+        assert_eq!(evidence.pcm_entries_remaining, 0);
+        assert_eq!(evidence.pcm_bytes_remaining, 0);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn consuming_shutdown_clears_terminal_failure_residency() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            8_000,
+            1,
+            2,
+            128 * 1024,
+            1,
+            Arc::new(MalformedWindowDecoder { calls: AtomicU64::new(0) }),
+        ));
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
+        let mut destination = [0.0; 4];
+        reader
+            .read_interleaved(0, 2, &mut destination)
+            .expect_err("malformed decoder result fails closed");
+        drop(reader);
+        let cache = Arc::try_unwrap(cache).ok().expect("unique cache owner");
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.failure_entries_before, 1);
+        assert_eq!(evidence.failure_entries_remaining, 0);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn default_decoder_shutdown_cannot_claim_unreleased_sessions() {
+        let cache =
+            AudioSourceCache::with_decoder(48_000, 1, 1, 1, 1, Arc::new(ResidualWindowDecoder));
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.decoder_sessions_before, 1);
+        assert_eq!(evidence.decoder_sessions_remaining, 1);
+        assert_eq!(evidence.decoder_resource_handles_remaining, 1);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn consuming_shutdown_rejects_an_externally_retained_decoder_owner() {
+        let decoder = Arc::new(RampWindowDecoder::new());
+        let cache = AudioSourceCache::with_decoder(48_000, 1, 1, 1, 1, decoder.clone());
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.external_decoder_references, 1);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn consuming_shutdown_records_in_flight_decode_state_fail_closed() {
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            48_000,
+            1,
+            1,
+            1,
+            1,
+            Arc::new(RampWindowDecoder::new()),
+        ));
+        let reader =
+            cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
+        cache
+            .state
+            .lock()
+            .in_flight
+            .push(AudioSourceWindowKey { source: reader.source.clone(), start_frame: 0 });
+        drop(reader);
+        let cache = Arc::try_unwrap(cache).ok().expect("unique cache owner");
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.in_flight_decodes_before, 1);
+        assert!(!evidence.all_resources_released());
     }
 
     #[test]

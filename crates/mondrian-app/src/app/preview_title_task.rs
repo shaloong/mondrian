@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use mondrian_core::{EvaluatedBasicTitle, Resolution, WorkingColorSpace};
 use mondrian_renderer::{
@@ -312,24 +313,44 @@ impl PreviewTitleTask {
         self.stop_worker()
     }
 
-    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+    pub(crate) fn shutdown_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.stop_worker_until(deadline)
+    }
+
+    pub(crate) fn begin_shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.jobs.take();
+        self.worker_jobs.take();
+        self.result_sender.take();
+    }
+
+    fn stop_worker(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
         self.worker.take().map_or(
             PreviewOwnedWorkerShutdown::NotStarted,
             PreviewOwnedWorkerShutdown::join,
         )
     }
+
+    fn stop_worker_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(PreviewOwnedWorkerShutdown::NotStarted, |worker| {
+            PreviewOwnedWorkerShutdown::join_until(worker, deadline)
+        })
+    }
 }
 
 impl Drop for PreviewTitleTask {
     fn drop(&mut self) {
-        match self.stop_worker() {
+        match self.stop_worker_until(Instant::now()) {
             PreviewOwnedWorkerShutdown::Panicked => {
                 tracing::warn!("Basic Title Preview worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
                 tracing::warn!("Basic Title Preview shutdown detached its current worker");
+            }
+            PreviewOwnedWorkerShutdown::TimedOutDetached => {
+                tracing::warn!("Basic Title Preview Drop detached its active worker");
             }
             PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
         }
