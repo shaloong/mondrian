@@ -1083,6 +1083,14 @@ terminated/panic counts; an absent handle therefore cannot be reinterpreted as
 "never started." Same-thread detachment and any panic fail the aggregate
 closure used by commercial endurance qualification.
 
+The validation App also retains a small App-lifetime Audio failure ledger at
+the terminal owner-replacement seam. Before an unexpectedly stopped render
+owner becomes `ExecutionUnavailable`, the Adapter absorbs its cumulative
+substitution, render-generation recovery, underrun recovery, backend-loss, and
+deactivation-failure counts. Commercial endurance snapshots add that retired
+history to the current owner so counters remain monotonic even though the
+move-only execution owner has been dropped.
+
 The output queue has one non-cloneable Manager-owned producer handle and one
 callback consumer. Enqueue validates exact sample rate, semantic channel
 layout, complete interleaved-frame shape, and remaining sample capacity before

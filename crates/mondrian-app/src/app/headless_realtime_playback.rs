@@ -24,7 +24,8 @@ use super::headless_preview_presentation::{
     HeadlessPreviewRuntime,
 };
 use super::headless_viewer_gpu::{
-    HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuExecution,
+    HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuEnduranceSnapshot,
+    HeadlessViewerGpuExecution,
 };
 use super::native_video_import::resolve_playback_hardware_decode_admission;
 use super::playback_preview::{pump_playback_preview, PlaybackPreviewPumpOutcome};
@@ -567,6 +568,102 @@ impl HeadlessRealtimePlaybackDriver {
     }
 }
 
+/// Fixed-size owner-derived facts captured only outside realtime residency.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadlessEnduranceOwnerSnapshot {
+    playback_pending: u64,
+    other_queue_depth: u64,
+    owned_resource_units: u64,
+    gpu_device_losses: u64,
+    gpu_fatal_errors: u64,
+    other_fatal_errors: u64,
+}
+
+/// Consuming closure facts that can only be produced after the owner group ran
+/// every synchronous shutdown path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadlessEnduranceShutdownProjection {
+    pub(crate) playback_owner_consumed: bool,
+    pub(crate) preview_closed: bool,
+    pub(crate) audio_closed: bool,
+    pub(crate) gpu_closed: bool,
+    pub(crate) gpu_device_losses: u64,
+    pub(crate) gpu_fatal_errors: u64,
+    pub(crate) transport_shutdown_failed: bool,
+}
+
+impl HeadlessEnduranceOwnerSnapshot {
+    pub(crate) const fn playback_pending(self) -> u64 {
+        self.playback_pending
+    }
+
+    pub(crate) const fn other_queue_depth(self) -> u64 {
+        self.other_queue_depth
+    }
+
+    pub(crate) const fn owned_resource_units(self) -> u64 {
+        self.owned_resource_units
+    }
+
+    pub(crate) const fn gpu_device_losses(self) -> u64 {
+        self.gpu_device_losses
+    }
+
+    pub(crate) const fn fatal_errors(self) -> u64 {
+        self.gpu_fatal_errors.saturating_add(self.other_fatal_errors)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_fixture(
+        playback_pending: u64,
+        other_queue_depth: u64,
+        owned_resource_units: u64,
+        gpu_device_losses: u64,
+        fatal_errors: u64,
+    ) -> Self {
+        Self {
+            playback_pending,
+            other_queue_depth,
+            owned_resource_units,
+            gpu_device_losses,
+            gpu_fatal_errors: 0,
+            other_fatal_errors: fatal_errors,
+        }
+    }
+
+    /// Project a consuming owner closure without losing pre-shutdown counters.
+    pub(crate) fn after_shutdown(self, closure: HeadlessEnduranceShutdownProjection) -> Self {
+        let unclosed_domains = u64::from(!closure.playback_owner_consumed)
+            .saturating_add(u64::from(!closure.preview_closed))
+            .saturating_add(u64::from(!closure.audio_closed))
+            .saturating_add(u64::from(!closure.gpu_closed));
+        let all_closed = unclosed_domains == 0;
+        Self {
+            playback_pending: if all_closed {
+                0
+            } else {
+                self.playback_pending.max(1)
+            },
+            other_queue_depth: if all_closed {
+                0
+            } else {
+                self.other_queue_depth.max(1)
+            },
+            owned_resource_units: if all_closed {
+                0
+            } else {
+                self.owned_resource_units.max(unclosed_domains)
+            },
+            gpu_device_losses: self.gpu_device_losses.max(closure.gpu_device_losses),
+            gpu_fatal_errors: self.gpu_fatal_errors.max(closure.gpu_fatal_errors),
+            other_fatal_errors: self
+                .other_fatal_errors
+                .saturating_add(unclosed_domains)
+                .saturating_add(u64::from(closure.transport_shutdown_failed)),
+        }
+    }
+}
+
 /// One correctly paired Preview/GPU/driver lifetime for Headless realtime work.
 pub(crate) struct HeadlessRealtimePlaybackSession {
     preview: HeadlessPreviewRuntime,
@@ -624,6 +721,27 @@ impl HeadlessRealtimePlaybackSession {
             "Headless Preview/GPU setup access is unavailable during realtime residency"
         );
         Ok((&self.preview, &mut self.gpu))
+    }
+
+    /// Capture the paired execution inventory at a declared settled boundary.
+    ///
+    /// This is one coordinator-owned capture envelope, not a claim that the
+    /// independent Preview, Audio, and GPU threads share a global linearization
+    /// instant. This path does not schedule, pump, or poll phase work; a domain
+    /// snapshot may still refresh its own bounded diagnostic cache.
+    pub(crate) fn endurance_owner_snapshot(
+        &self,
+        state: &AppState,
+    ) -> anyhow::Result<HeadlessEnduranceOwnerSnapshot> {
+        anyhow::ensure!(
+            self.driver.is_none(),
+            "Headless endurance owner snapshots require a settled realtime boundary"
+        );
+        Ok(capture_headless_endurance_owner_snapshot(
+            &self.preview,
+            &self.gpu,
+            state,
+        ))
     }
 
     /// Enter one fresh realtime residency after the transport starts Playing.
@@ -812,6 +930,73 @@ impl HeadlessRealtimePlaybackSession {
         }
         (self.preview, self.gpu)
     }
+}
+
+pub(crate) fn capture_headless_endurance_owner_snapshot(
+    preview_owner: &HeadlessPreviewRuntime,
+    gpu_owner: &HeadlessViewerGpuAdapter,
+    state: &AppState,
+) -> HeadlessEnduranceOwnerSnapshot {
+    project_headless_endurance_owner_snapshot(
+        preview_owner.diagnostics(),
+        gpu_owner.endurance_snapshot(),
+        state.audio_endurance_snapshot(),
+        state.pending_playback_frame_demand_identity().is_some(),
+    )
+}
+
+fn project_headless_endurance_owner_snapshot(
+    preview: super::preview_runtime::PreviewDiagnostics,
+    gpu: HeadlessViewerGpuEnduranceSnapshot,
+    audio: mondrian_media::AudioPlaybackSnapshot,
+    playback_pending: bool,
+) -> HeadlessEnduranceOwnerSnapshot {
+    let audio_buffer_owner =
+        usize::from(audio.output.as_ref().is_some_and(|output| output.buffered_frames > 0));
+    let pinned_viewer_owner = usize::from(preview.frame_store.pinned_viewer_bytes > 0);
+    let owned_resource_units = preview
+        .frame_store
+        .media_aggregate_entries
+        .saturating_add(preview.frame_store.media_aggregate_resource_units)
+        .saturating_add(preview.frame_store.viewer_entries)
+        .saturating_add(pinned_viewer_owner)
+        .saturating_add(preview.visual_program_cache.entries)
+        .saturating_add(gpu.submission_owners())
+        .saturating_add(gpu.physical_output_owners())
+        .saturating_add(gpu.staged_successor_owners())
+        .saturating_add(audio.in_flight)
+        .saturating_add(audio_buffer_owner);
+    let preview_fatal_errors = u64::from(preview.visual_execution_health_failed)
+        .saturating_add(u64::from(preview.media_worker_health_failed))
+        .saturating_add(preview.worker_disconnected_drops)
+        .saturating_add(u64::from(preview.timeline_render_cache_start_failed));
+    let audio_fatal_errors = u64::from(matches!(
+        audio.state,
+        mondrian_media::AudioPlaybackState::ExecutionUnavailable
+    ))
+    .saturating_add(audio.render_substitution_count)
+    .saturating_add(audio.render_generation_recovery_count)
+    .saturating_add(audio.underrun_recovery_count)
+    .saturating_add(audio.output_lifecycle.backend_loss_count)
+    .saturating_add(audio.output_lifecycle.deactivation_failed_count);
+    let other_queue_depth = preview
+        .scheduler
+        .pending_requests
+        .saturating_add(preview.worker_queue.queued_jobs)
+        .saturating_add(preview.worker_queue.in_flight_jobs)
+        .saturating_add(audio.in_flight);
+    HeadlessEnduranceOwnerSnapshot {
+        playback_pending: u64::from(playback_pending),
+        other_queue_depth: saturating_usize_to_u64(other_queue_depth),
+        owned_resource_units: saturating_usize_to_u64(owned_resource_units),
+        gpu_device_losses: gpu.device_loss_count(),
+        gpu_fatal_errors: gpu.fatal_error_count(),
+        other_fatal_errors: preview_fatal_errors.saturating_add(audio_fatal_errors),
+    }
+}
+
+fn saturating_usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
 }
 
 pub(crate) fn headless_terminal_observation_may_retarget_quality(
@@ -1308,5 +1493,96 @@ mod tests {
             .expect("video-only pre-clock stage");
 
         assert_eq!(timing.audio_pump.observations, 0);
+    }
+
+    #[test]
+    fn terminal_owner_projection_clears_only_proven_closed_domains() {
+        let running = HeadlessEnduranceOwnerSnapshot {
+            playback_pending: 1,
+            other_queue_depth: 4,
+            owned_resource_units: 9,
+            gpu_device_losses: 2,
+            gpu_fatal_errors: 1,
+            other_fatal_errors: 2,
+        };
+
+        let closed = running.after_shutdown(HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: true,
+            preview_closed: true,
+            audio_closed: true,
+            gpu_closed: true,
+            gpu_device_losses: 2,
+            gpu_fatal_errors: 1,
+            transport_shutdown_failed: false,
+        });
+        assert_eq!(closed.playback_pending, 0);
+        assert_eq!(closed.other_queue_depth, 0);
+        assert_eq!(closed.owned_resource_units, 0);
+        assert_eq!(closed.gpu_device_losses, 2);
+        assert_eq!(closed.fatal_errors(), 3);
+
+        let playback_retained = running.after_shutdown(HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: false,
+            preview_closed: true,
+            audio_closed: true,
+            gpu_closed: true,
+            gpu_device_losses: 2,
+            gpu_fatal_errors: 1,
+            transport_shutdown_failed: false,
+        });
+        assert_eq!(playback_retained.playback_pending, 1);
+        assert_eq!(playback_retained.other_queue_depth, 4);
+        assert_eq!(playback_retained.owned_resource_units, 9);
+        assert_eq!(playback_retained.fatal_errors(), 4);
+
+        let incomplete = running.after_shutdown(HeadlessEnduranceShutdownProjection {
+            playback_owner_consumed: true,
+            preview_closed: false,
+            audio_closed: true,
+            gpu_closed: false,
+            gpu_device_losses: 4,
+            gpu_fatal_errors: 2,
+            transport_shutdown_failed: true,
+        });
+        assert_eq!(incomplete.playback_pending, 1);
+        assert_eq!(incomplete.other_queue_depth, 4);
+        assert_eq!(incomplete.owned_resource_units, 9);
+        assert_eq!(incomplete.gpu_device_losses, 4);
+        assert_eq!(incomplete.fatal_errors(), 7);
+    }
+
+    #[test]
+    fn owner_projection_counts_worker_backlog_pins_and_monotonic_failures() {
+        let mut preview = crate::app::preview_runtime::PreviewDiagnostics::default();
+        preview.scheduler.pending_requests = 1;
+        preview.worker_queue.queued_jobs = 2;
+        preview.worker_queue.in_flight_jobs = 3;
+        preview.frame_store.media_aggregate_entries = 4;
+        preview.frame_store.media_aggregate_resource_units = 5;
+        preview.frame_store.viewer_entries = 6;
+        preview.frame_store.pinned_viewer_bytes = 1;
+        preview.visual_program_cache.entries = 7;
+        preview.worker_disconnected_drops = 8;
+
+        let mut audio = mondrian_media::AudioPlaybackSnapshot::execution_unavailable();
+        audio.in_flight = 9;
+        audio.render_substitution_count = 1;
+        audio.render_generation_recovery_count = 2;
+        audio.underrun_recovery_count = 3;
+        audio.output_lifecycle.backend_loss_count = 4;
+        audio.output_lifecycle.deactivation_failed_count = 5;
+
+        let projected = project_headless_endurance_owner_snapshot(
+            preview,
+            HeadlessViewerGpuEnduranceSnapshot::test_fixture(1, 2, 3, 4, 5),
+            audio,
+            true,
+        );
+
+        assert_eq!(projected.playback_pending(), 1);
+        assert_eq!(projected.other_queue_depth(), 15);
+        assert_eq!(projected.owned_resource_units(), 38);
+        assert_eq!(projected.gpu_device_losses(), 4);
+        assert_eq!(projected.fatal_errors(), 29);
     }
 }

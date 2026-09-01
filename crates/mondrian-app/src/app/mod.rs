@@ -451,6 +451,9 @@ pub struct AppState {
     // 音频时钟与 A/V 同步
     pub audio_sample_rate: u32,
     audio_playback: playback::AppAudioPlayback,
+    /// Cumulative Audio failure facts retained when a terminal owner is replaced.
+    #[cfg(any(test, feature = "validation"))]
+    audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger,
     /// Open-Session audition intent and observations from the exact prepared Runtime.
     audio_monitoring: audio_monitoring::AudioMonitoringState,
     pub audio_source_cache: Arc<AudioSourceCache>,
@@ -512,6 +515,8 @@ impl AppState {
             proxy_terminal_observed_sequence: 0,
             audio_sample_rate,
             audio_playback: playback::AppAudioPlayback::product_default(audio_sample_rate),
+            #[cfg(any(test, feature = "validation"))]
+            audio_endurance_failure_ledger: playback::AudioEnduranceFailureLedger::default(),
             audio_monitoring: audio_monitoring::AudioMonitoringState::default(),
             audio_source_cache,
             audio_idle_warmup: AudioIdleWarmupService::new(),

@@ -289,6 +289,8 @@ pub(crate) struct ViewerGpuDeviceProgressShutdownEvidence {
     pub(crate) retirement_requested: bool,
     pub(crate) retirement_handoff_accepted: bool,
     pub(crate) retirement_completed: bool,
+    /// Terminal observed through the final bounded progress-worker join.
+    pub(crate) generation_terminal_kind: Option<ViewerGpuDeviceGenerationTerminalKind>,
 }
 
 /// Clone captured by the exact queue callback.
@@ -892,6 +894,7 @@ where
                 retirement_requested,
                 retirement_handoff_accepted,
                 retirement_completed: false,
+                generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
             };
         };
         drop(self.command_sender.take());
@@ -906,6 +909,7 @@ where
                     retirement_requested,
                     retirement_handoff_accepted,
                     retirement_completed,
+                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -918,6 +922,7 @@ where
                     retirement_requested,
                     retirement_handoff_accepted,
                     retirement_completed: false,
+                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -930,6 +935,7 @@ where
                     retirement_requested,
                     retirement_handoff_accepted,
                     retirement_completed: false,
+                    generation_terminal_kind: self.health.terminal().map(|terminal| terminal.kind),
                 }
             }
         }
@@ -2110,6 +2116,10 @@ mod tests {
         native_copy_ready.store(true, Ordering::Release);
         let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_secs(2));
         assert!(progress_shutdown_complete(evidence));
+        assert_eq!(
+            evidence.generation_terminal_kind,
+            Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost)
+        );
         assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 

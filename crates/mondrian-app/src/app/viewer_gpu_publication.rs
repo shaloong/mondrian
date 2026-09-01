@@ -141,6 +141,12 @@ impl<K: PartialEq, O, L> ViewerGpuPublicationSlots<K, O, L> {
         self.current.as_ref()
     }
 
+    /// Number of move-only physical output leases retained by this Adapter.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn active_count(&self) -> usize {
+        usize::from(self.current.is_some()) + usize::from(self.prepared.is_some())
+    }
+
     /// Consume the retained prepared owner, if any.
     ///
     /// The caller is responsible for dropping the returned publication, which
@@ -354,6 +360,7 @@ mod tests {
         let mut slots = ViewerGpuPublicationSlots::default();
         publish(&mut slots, false, 5, "current", "a", &drops);
         publish(&mut slots, true, 6, "prepared", "b", &drops);
+        assert_eq!(slots.active_count(), 2);
 
         let retired = slots.drain();
         assert_eq!(
@@ -366,6 +373,7 @@ mod tests {
         );
         assert_eq!(drops.load(Ordering::Relaxed), 2);
         assert!(slots.current().is_none());
+        assert_eq!(slots.active_count(), 0);
     }
 
     #[test]

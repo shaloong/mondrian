@@ -849,6 +849,86 @@ fn endurance_snapshot_retains_cumulative_frames_and_durable_artifacts() {
 }
 
 #[test]
+fn endurance_snapshot_linearizes_pending_committing_terminal_and_shutdown_states() {
+    let backend = GateExecutor::committed([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue.set_dispatch_enabled(false);
+    let initial = queue.endurance_snapshot(0);
+    let job_id = queue
+        .enqueue(RenderJob::new(dummy_config("endurance-linearized.mp4")))
+        .expect("enqueue pending export");
+    let pending = queue.endurance_snapshot(1);
+    assert_eq!(pending.admissions, 1);
+    assert_eq!(pending.pending_jobs, 1);
+    assert_eq!(pending.active_jobs, 0);
+    assert!(pending.activity_events > initial.activity_events);
+
+    queue.set_dispatch_enabled(true);
+    backend.wait_started(1);
+    let committing = queue.endurance_snapshot(2);
+    assert_eq!(committing.pending_jobs, 0);
+    assert_eq!(committing.active_jobs, 1);
+    assert_eq!(committing.completions, 0);
+    assert!(committing.activity_events > pending.activity_events);
+    assert_eq!(queue.cancel(job_id), ExportCancelOutcome::TooLateCommitting);
+    let after_late_cancel = queue.endurance_snapshot(3);
+    assert_eq!(after_late_cancel.active_jobs, 1);
+    assert_eq!(after_late_cancel.cancellations, 0);
+    assert_eq!(
+        after_late_cancel.activity_events,
+        committing.activity_events
+    );
+
+    backend.release(1);
+    wait_diagnostics(&queue, |diagnostics| diagnostics.completions == 1);
+    let terminal = queue.endurance_snapshot(4);
+    assert_eq!(terminal.pending_jobs, 0);
+    assert_eq!(terminal.active_jobs, 0);
+    assert_eq!(terminal.completions, 1);
+    assert_eq!(terminal.durable_artifacts, 1);
+    assert!(terminal.activity_events > after_late_cancel.activity_events);
+
+    let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+    let closed = queue.endurance_snapshot(5);
+    assert!(shutdown.worker_terminated);
+    assert!(closed.shutdown_requested);
+    assert!(!closed.worker_running);
+    assert!(closed.worker_terminated);
+    assert_eq!(closed.pending_jobs, 0);
+    assert_eq!(closed.active_jobs, 0);
+    assert_eq!(closed.activity_events, shutdown.activity_events);
+}
+
+#[test]
+fn endurance_shutdown_timeout_remains_non_quiescent_until_worker_returns() {
+    let backend = GateExecutor::committed([GateOutcome::Complete]);
+    let queue = RenderQueue::new_with_executor(backend.clone());
+    queue
+        .enqueue(RenderJob::new(dummy_config("endurance-timeout.mp4")))
+        .expect("enqueue export");
+    backend.wait_started(1);
+
+    let timed_out = queue.shutdown_and_wait(Duration::from_millis(1));
+    let retained = queue.endurance_snapshot(10);
+    assert!(!timed_out.worker_terminated);
+    assert_eq!(timed_out.active_jobs, 1);
+    assert!(retained.shutdown_requested);
+    assert!(retained.worker_running);
+    assert!(!retained.worker_terminated);
+    assert_eq!(retained.active_jobs, 1);
+
+    backend.release(1);
+    backend.wait_finished(1);
+    let closed = queue.shutdown_and_wait(Duration::from_secs(2));
+    let terminal = queue.endurance_snapshot(11);
+    assert!(closed.worker_terminated);
+    assert_eq!(closed.active_jobs, 0);
+    assert!(!terminal.worker_running);
+    assert!(terminal.worker_terminated);
+    assert_eq!(terminal.active_jobs, 0);
+}
+
+#[test]
 fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
     let backend = GateExecutor::new([]);
     let queue = RenderQueue::new_with_executor(backend);
@@ -865,6 +945,7 @@ fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
     assert!(snapshot.shutdown_requested);
     assert!(!snapshot.worker_running);
     assert!(snapshot.worker_terminated);
+    assert_eq!(snapshot.activity_events, evidence.activity_events);
     assert_eq!(snapshot.cancellations, 1);
     assert!(matches!(
         queue

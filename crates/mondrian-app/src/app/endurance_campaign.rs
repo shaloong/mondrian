@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
 use mondrian_platform::{
-    EndurancePhaseRequirement, EndurancePhaseTerminalStatus, EnduranceQualificationProfile,
-    EnduranceRunManifest, ProcessMemoryProbe, ProcessMemoryScope,
+    EndurancePhaseKind, EndurancePhaseRequirement, EndurancePhaseTerminalStatus,
+    EnduranceQualificationProfile, EnduranceRunManifest, ProcessMemoryProbe, ProcessMemoryScope,
 };
 use mondrian_playback::PlaybackEvidenceReport;
 use mondrian_reference_output::ReferenceOutputDiagnostics;
@@ -22,8 +22,12 @@ use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
 };
-use super::headless_realtime_playback::HeadlessRealtimePlaybackSession;
+use super::headless_realtime_playback::{
+    capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
+    HeadlessEnduranceShutdownProjection, HeadlessRealtimePlaybackSession,
+};
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
+use super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
 use super::AppState;
 
 /// Public projection of bounded Headless GPU retirement evidence.
@@ -41,6 +45,10 @@ pub struct EnduranceGpuShutdownEvidence {
     pub retirement_handoff_accepted: bool,
     /// Whether every accepted GPU/native resource became safe to release.
     pub retirement_completed: bool,
+    /// Unexpected device losses observed through final retirement.
+    pub device_loss_count: u64,
+    /// Progress-domain failures observed through final retirement.
+    pub fatal_error_count: u64,
 }
 
 impl EnduranceGpuShutdownEvidence {
@@ -64,6 +72,7 @@ pub struct EnduranceExecutionOwnerClosure {
     pub audio: mondrian_media::AudioPlaybackShutdownEvidence,
     /// Bounded GPU progress and generation-retirement evidence.
     pub gpu: EnduranceGpuShutdownEvidence,
+    terminal_owner_snapshot: HeadlessEnduranceOwnerSnapshot,
 }
 
 impl EnduranceExecutionOwnerClosure {
@@ -72,6 +81,11 @@ impl EnduranceExecutionOwnerClosure {
         self.preview.all_workers_terminated()
             && self.audio.all_workers_terminated()
             && self.gpu.all_resources_retired()
+    }
+
+    /// Seal terminal gauges while retaining cumulative pre-shutdown failures.
+    pub fn capture_facts(self) -> EnduranceCaptureFacts {
+        EnduranceCaptureFacts::from_headless_owner_snapshot(self.terminal_owner_snapshot)
     }
 }
 
@@ -88,15 +102,60 @@ impl EnduranceExecutionOwners {
         Ok(Self { realtime: Some(realtime) })
     }
 
+    /// Capture owner-derived gauges and terminal counters at a settled boundary.
+    pub fn capture_facts(
+        &self,
+        app: &AppState,
+    ) -> Result<EnduranceCaptureFacts, EnduranceCampaignError> {
+        let realtime = self.realtime.as_ref().ok_or_else(|| {
+            EnduranceCampaignError::Runtime(
+                "Headless realtime execution session is missing".to_owned(),
+            )
+        })?;
+        let snapshot = realtime
+            .endurance_owner_snapshot(app)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        Ok(EnduranceCaptureFacts::from_headless_owner_snapshot(
+            snapshot,
+        ))
+    }
+
+    /// Capture the selected realtime-phase owner projection without exposing raw owners.
+    pub fn runtime_snapshot(
+        &self,
+        app: &AppState,
+        phase_kind: EndurancePhaseKind,
+    ) -> Result<EnduranceRuntimeSnapshot, EnduranceCampaignError> {
+        let reference_output = match phase_kind {
+            EndurancePhaseKind::ContinuousExport => {
+                return Err(EnduranceCampaignError::Runtime(
+                    "continuous Export phases do not own Headless realtime execution".to_owned(),
+                ));
+            }
+            EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery => {
+                app.reference_output_diagnostics().cloned().ok_or_else(|| {
+                    EnduranceCampaignError::Runtime(
+                        "required Reference Output owner is missing".to_owned(),
+                    )
+                })?
+            }
+        };
+        Ok(EnduranceRuntimeSnapshot {
+            phase_kind,
+            playback: app.playback_evidence_report(),
+            reference_output,
+            export: app.export_endurance_snapshot(0),
+            capture_facts: self.capture_facts(app)?,
+        })
+    }
+
     /// Stop Preview and the App State's actual Audio owner, then retire GPU.
     pub fn shutdown_and_wait(
         mut self,
-        app: &mut AppState,
+        mut app: AppState,
         gpu_timeout: Duration,
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
-        if app.is_playing() {
-            let _ = app.pause();
-        }
+        let transport_shutdown_failed = app.is_playing() && app.pause().is_err();
         let (preview_owner, gpu_owner) = self
             .realtime
             .take()
@@ -106,21 +165,40 @@ impl EnduranceExecutionOwners {
                 )
             })?
             .into_shutdown_owners();
+        let owner_snapshot =
+            capture_headless_endurance_owner_snapshot(&preview_owner, &gpu_owner, &app);
         let preview = preview_owner.shutdown_and_wait();
         let audio = app.shutdown_audio_playback_and_wait();
         let gpu = gpu_owner.shutdown_and_wait(gpu_timeout);
-        Ok(EnduranceExecutionOwnerClosure {
-            preview,
-            audio,
-            gpu: EnduranceGpuShutdownEvidence {
-                worker_started: gpu.worker_started,
-                worker_terminated: gpu.worker_terminated,
-                worker_panicked: gpu.worker_panicked,
-                timed_out: gpu.timed_out,
-                retirement_handoff_accepted: gpu.retirement_handoff_accepted,
-                retirement_completed: gpu.retirement_completed,
-            },
-        })
+        drop(app);
+        let device_loss_count = u64::from(
+            gpu.generation_terminal_kind == Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost),
+        );
+        let fatal_error_count = u64::from(
+            gpu.generation_terminal_kind
+                == Some(ViewerGpuDeviceGenerationTerminalKind::ProgressFailure),
+        );
+        let gpu = EnduranceGpuShutdownEvidence {
+            worker_started: gpu.worker_started,
+            worker_terminated: gpu.worker_terminated,
+            worker_panicked: gpu.worker_panicked,
+            timed_out: gpu.timed_out,
+            retirement_handoff_accepted: gpu.retirement_handoff_accepted,
+            retirement_completed: gpu.retirement_completed,
+            device_loss_count,
+            fatal_error_count,
+        };
+        let terminal_owner_snapshot =
+            owner_snapshot.after_shutdown(HeadlessEnduranceShutdownProjection {
+                playback_owner_consumed: true,
+                preview_closed: preview.all_workers_terminated(),
+                audio_closed: audio.all_workers_terminated(),
+                gpu_closed: gpu.all_resources_retired(),
+                gpu_device_losses: gpu.device_loss_count,
+                gpu_fatal_errors: gpu.fatal_error_count,
+                transport_shutdown_failed,
+            });
+        Ok(EnduranceExecutionOwnerClosure { preview, audio, gpu, terminal_owner_snapshot })
     }
 }
 
@@ -161,16 +239,7 @@ pub enum EnduranceCampaignEvent {
     /// Independent re-open/content verification of a published Export artifact.
     ExportArtifactVerified(VerifiedExportArtifactEvent),
     /// One exact operation in a controlled recovery cycle.
-    RecoveryStepCompleted {
-        /// Phase-local completion instant.
-        completed_at_us: u64,
-        /// Zero-based recovery cycle.
-        cycle_index: u32,
-        /// Exact ordered recovery step.
-        step: EnduranceRecoveryStep,
-        /// SHA-256 of the production owner's before/after operation receipt.
-        operation_receipt_sha256: String,
-    },
+    RecoveryStepCompleted(VerifiedRecoveryStepEvent),
 }
 
 /// Sealed App projection of one independently verified Export artifact.
@@ -181,6 +250,18 @@ pub struct VerifiedExportArtifactEvent {
     artifact_sha256: String,
     validator_id: String,
     validation_report_sha256: String,
+}
+
+/// Sealed placeholder for the forthcoming owner-derived recovery receipt.
+///
+/// No production constructor exists until the four recovery operations expose
+/// independently recomputable before/after receipts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedRecoveryStepEvent {
+    completed_at_us: u64,
+    cycle_index: u32,
+    step: EnduranceRecoveryStep,
+    operation_receipt_sha256: String,
 }
 
 impl EnduranceCampaignEvent {
@@ -225,20 +306,47 @@ pub enum EndurancePhaseAdmission {
     NotRun,
 }
 
-/// Atomic projection of product-owned runtime diagnostics at one cadence.
+/// Coordinator-bound projection of product-owned diagnostics at one cadence.
+///
+/// Each domain snapshot is internally consistent. The surrounding sample's
+/// start/completion interval is the cross-domain capture envelope; independent
+/// execution threads do not claim one global linearization instant.
 #[derive(Debug, Clone)]
 pub struct EnduranceRuntimeSnapshot {
+    /// Phase provenance sealed by the concrete owner adapter.
+    phase_kind: EndurancePhaseKind,
     /// Playback-owned evidence.
-    pub playback: PlaybackEvidenceReport,
+    playback: PlaybackEvidenceReport,
     /// Reference Output-owned diagnostics.
-    pub reference_output: ReferenceOutputDiagnostics,
+    reference_output: ReferenceOutputDiagnostics,
     /// Export-owned bounded diagnostics. The coordinator stamps publication time.
-    pub export: ExportEnduranceSnapshot,
+    export: ExportEnduranceSnapshot,
     /// Remaining App/runtime facts derived by the concrete product coordinator.
-    pub capture_facts: EnduranceCaptureFacts,
+    capture_facts: EnduranceCaptureFacts,
 }
 
-/// Typed synchronous terminal closure returned before the final sample.
+impl EnduranceRuntimeSnapshot {
+    /// Seal an Export-only phase without inventing realtime execution owners.
+    pub fn continuous_export(
+        playback: PlaybackEvidenceReport,
+        reference_output: ReferenceOutputDiagnostics,
+        export: ExportEnduranceSnapshot,
+    ) -> Self {
+        Self {
+            phase_kind: EndurancePhaseKind::ContinuousExport,
+            playback,
+            reference_output,
+            export,
+            capture_facts: EnduranceCaptureFacts::for_continuous_export(),
+        }
+    }
+}
+
+/// Typed terminal closure for the currently evidenced software and Export owners.
+///
+/// Reference Output contributes its final accounting snapshot separately. A
+/// consuming vendor thread/device shutdown receipt remains a qualification
+/// follow-on and is not implied by this projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnduranceRuntimeClosure {
     /// Completed or failed; `NotRun` is only legal at admission.
@@ -251,9 +359,35 @@ pub struct EnduranceRuntimeClosure {
     pub export: ExportQueueShutdownEvidence,
 }
 
+impl EnduranceRuntimeClosure {
+    fn proves_consuming_cleanup(self) -> bool {
+        self.status != EndurancePhaseTerminalStatus::NotRun
+            && self.playback_workers_terminated
+            && self.supervised_child_processes_remaining == 0
+            && self.export.worker_terminated
+            && self.export.pending_jobs == 0
+            && self.export.active_jobs == 0
+    }
+
+    fn incomplete_cleanup_error(self) -> EnduranceCampaignError {
+        EnduranceCampaignError::IncompletePhaseCleanup {
+            status: self.status,
+            playback_workers_terminated: self.playback_workers_terminated,
+            supervised_child_processes_remaining: self.supervised_child_processes_remaining,
+            export_worker_terminated: self.export.worker_terminated,
+            export_pending_jobs: self.export.pending_jobs,
+            export_active_jobs: self.export.active_jobs,
+        }
+    }
+}
+
 /// Product-owned execution surface consumed by the serial supervisor.
 pub trait EnduranceCampaignRuntime {
     /// Admit and start one exact checked-in workload.
+    ///
+    /// An error may follow partial owner creation. The supervisor will invoke
+    /// `shutdown_phase` exactly once, so implementations must retain enough
+    /// state to make that call consuming and idempotent for the failed start.
     fn begin_phase(
         &mut self,
         requirement: &EndurancePhaseRequirement,
@@ -266,10 +400,18 @@ pub trait EnduranceCampaignRuntime {
         deadline_run_us: u64,
     ) -> Result<Vec<EnduranceCampaignEvent>, EnduranceCampaignError>;
 
-    /// Atomically snapshot all product owners after the native memory probe.
+    /// Snapshot all product owners inside one coordinator-bounded envelope.
+    /// Snapshot adapters may refresh bounded diagnostic caches, but must not
+    /// schedule, pump, or poll phase work through this call.
     fn snapshot(&mut self) -> Result<EnduranceRuntimeSnapshot, EnduranceCampaignError>;
 
-    /// Stop work and synchronously return all phase-owned workers/resources.
+    /// Stop work and synchronously return the currently evidenced software and
+    /// Export workers/resources.
+    ///
+    /// Once called, this operation is consuming even if it returns an error;
+    /// the implementation must still exhaust its in-scope cleanup path.
+    /// Reference Output vendor-thread/device consumption is not yet represented
+    /// by `EnduranceRuntimeClosure`.
     fn shutdown_phase(
         &mut self,
     ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>;
@@ -324,7 +466,11 @@ where
             &request.evidence_directory,
             workload_path,
         )?;
-        match runtime.begin_phase(requirement, workload_path)? {
+        let admission = match runtime.begin_phase(requirement, workload_path) {
+            Ok(admission) => admission,
+            Err(primary) => return Err(cleanup_started_phase(runtime, primary)),
+        };
+        match admission {
             EndurancePhaseAdmission::NotRun => {
                 capture.commit_phase(phase.finish_not_run()?)?;
             }
@@ -360,35 +506,48 @@ where
     P: ProcessMemoryProbe,
     C: EnduranceCampaignClock,
 {
-    let mut sequence = 0_u64;
-    let mut scheduled_at_us = 0_u64;
-    while scheduled_at_us < requirement.minimum_duration_us {
-        pump_and_record(runtime, &mut phase, started_at_run_us, scheduled_at_us)?;
-        capture_one_sample(
+    let running = (|| {
+        let mut sequence = 0_u64;
+        let mut scheduled_at_us = 0_u64;
+        while scheduled_at_us < requirement.minimum_duration_us {
+            pump_and_record(runtime, &mut phase, started_at_run_us, scheduled_at_us)?;
+            capture_one_sample(
+                runtime,
+                &mut phase,
+                process_memory,
+                clock,
+                requirement.kind,
+                started_at_run_us,
+                sequence,
+                scheduled_at_us,
+            )?;
+            sequence = sequence.checked_add(1).ok_or(EnduranceCampaignError::TimeOverflow)?;
+            scheduled_at_us = scheduled_at_us
+                .checked_add(sample_interval_us)
+                .ok_or(EnduranceCampaignError::TimeOverflow)?;
+        }
+
+        let final_scheduled_at_us = requirement.minimum_duration_us;
+        pump_and_record(
             runtime,
             &mut phase,
-            process_memory,
-            clock,
             started_at_run_us,
-            sequence,
-            scheduled_at_us,
+            final_scheduled_at_us,
         )?;
-        sequence = sequence.checked_add(1).ok_or(EnduranceCampaignError::TimeOverflow)?;
-        scheduled_at_us = scheduled_at_us
-            .checked_add(sample_interval_us)
-            .ok_or(EnduranceCampaignError::TimeOverflow)?;
-    }
-
-    let final_scheduled_at_us = requirement.minimum_duration_us;
-    pump_and_record(
-        runtime,
-        &mut phase,
-        started_at_run_us,
-        final_scheduled_at_us,
-    )?;
+        Ok::<_, EnduranceCampaignError>((sequence, final_scheduled_at_us))
+    })();
+    let (sequence, final_scheduled_at_us) = match running {
+        Ok(boundary) => boundary,
+        Err(primary) => {
+            return Err(cleanup_started_phase(runtime, primary));
+        }
+    };
     let (closure, events) = runtime.shutdown_phase()?;
     if closure.status == EndurancePhaseTerminalStatus::NotRun {
         return Err(EnduranceCampaignError::InvalidTerminalStatus);
+    }
+    if !closure.proves_consuming_cleanup() {
+        return Err(closure.incomplete_cleanup_error());
     }
     record_events(&mut phase, events)?;
     let final_snapshot = capture_one_sample(
@@ -396,6 +555,7 @@ where
         &mut phase,
         process_memory,
         clock,
+        requirement.kind,
         started_at_run_us,
         sequence,
         final_scheduled_at_us,
@@ -413,6 +573,23 @@ where
             closure.export,
         )
         .map_err(Into::into)
+}
+
+fn cleanup_started_phase<R: EnduranceCampaignRuntime>(
+    runtime: &mut R,
+    primary: EnduranceCampaignError,
+) -> EnduranceCampaignError {
+    match runtime.shutdown_phase() {
+        Ok((closure, _)) if closure.proves_consuming_cleanup() => primary,
+        Ok((closure, _)) => EnduranceCampaignError::StartedPhaseCleanup {
+            primary: Box::new(primary),
+            cleanup: Box::new(closure.incomplete_cleanup_error()),
+        },
+        Err(cleanup) => EnduranceCampaignError::StartedPhaseCleanup {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
+        },
+    }
 }
 
 fn pump_and_record<R: EnduranceCampaignRuntime>(
@@ -446,17 +623,13 @@ fn record_events(
                 &validator_id,
                 &validation_report_sha256,
             )?,
-            EnduranceCampaignEvent::RecoveryStepCompleted {
-                completed_at_us,
-                cycle_index,
-                step,
-                operation_receipt_sha256,
-            } => phase.record_recovery_step_completed(
-                completed_at_us,
-                cycle_index,
-                step,
-                &operation_receipt_sha256,
-            )?,
+            EnduranceCampaignEvent::RecoveryStepCompleted(event) => phase
+                .record_recovery_step_completed(
+                    event.completed_at_us,
+                    event.cycle_index,
+                    event.step,
+                    &event.operation_receipt_sha256,
+                )?,
         }
     }
     Ok(())
@@ -468,6 +641,7 @@ fn capture_one_sample<R, P, C>(
     phase: &mut EndurancePhaseCapture,
     process_memory: &P,
     clock: &C,
+    expected_phase_kind: EndurancePhaseKind,
     started_at_run_us: u64,
     sequence: u64,
     scheduled_at_us: u64,
@@ -483,12 +657,18 @@ where
         .ok_or(EnduranceCampaignError::TimeRegression)?;
     let memory = process_memory.process_memory(ProcessMemoryScope::ProductProcessTree);
     let mut snapshot = runtime.snapshot()?;
+    if snapshot.phase_kind != expected_phase_kind {
+        return Err(EnduranceCampaignError::SnapshotPhaseMismatch {
+            expected: expected_phase_kind,
+            actual: snapshot.phase_kind,
+        });
+    }
     let completed_at_us = clock
         .elapsed_us()
         .checked_sub(started_at_run_us)
         .ok_or(EnduranceCampaignError::TimeRegression)?;
     snapshot.export.observed_at_us = completed_at_us;
-    snapshot.capture_facts.observed_at_us = completed_at_us;
+    snapshot.capture_facts.stamp_observed_at_us(completed_at_us);
     phase.capture_and_push(
         EnduranceSampleTiming {
             sequence,
@@ -546,9 +726,43 @@ pub enum EnduranceCampaignError {
     /// Campaign clock regressed relative to the phase origin.
     #[error("endurance campaign monotonic clock regressed")]
     TimeRegression,
+    /// A started phase failed and its consuming cleanup also failed.
+    #[error("started endurance phase failed ({primary}) and cleanup failed ({cleanup})")]
+    StartedPhaseCleanup {
+        /// Original execution or capture failure.
+        primary: Box<EnduranceCampaignError>,
+        /// Failure returned by the consuming shutdown path.
+        cleanup: Box<EnduranceCampaignError>,
+    },
+    /// A nominally successful cleanup receipt still retained owned execution.
+    #[error(
+        "endurance phase cleanup was incomplete: status={status:?}, playback_workers_terminated={playback_workers_terminated}, supervised_children={supervised_child_processes_remaining}, export_worker_terminated={export_worker_terminated}, export_pending={export_pending_jobs}, export_active={export_active_jobs}"
+    )]
+    IncompletePhaseCleanup {
+        /// Terminal status returned by the runtime.
+        status: EndurancePhaseTerminalStatus,
+        /// Playback/Preview/Audio/GPU closure projection.
+        playback_workers_terminated: bool,
+        /// Supervised descendants still retained.
+        supervised_child_processes_remaining: u32,
+        /// Export worker closure projection.
+        export_worker_terminated: bool,
+        /// Pending Export jobs retained by cleanup.
+        export_pending_jobs: u64,
+        /// Active Export jobs retained by cleanup.
+        export_active_jobs: u64,
+    },
     /// A started runtime attempted to terminate as NotRun.
     #[error("a started endurance phase cannot terminate as not-run")]
     InvalidTerminalStatus,
+    /// A runtime returned owner facts sealed for a different phase kind.
+    #[error("endurance snapshot phase mismatch: expected {expected:?}, got {actual:?}")]
+    SnapshotPhaseMismatch {
+        /// Kind required by the active phase.
+        expected: EndurancePhaseKind,
+        /// Kind sealed into the returned snapshot.
+        actual: EndurancePhaseKind,
+    },
 }
 
 #[cfg(test)]
@@ -564,6 +778,41 @@ mod tests {
     use super::*;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn empty_export_snapshot() -> ExportEnduranceSnapshot {
+        ExportEnduranceSnapshot {
+            schema_version: 1,
+            observed_at_us: 0,
+            shutdown_requested: false,
+            worker_running: true,
+            worker_terminated: false,
+            activity_events: 0,
+            admissions: 0,
+            rejections: 0,
+            completions: 0,
+            failures: 0,
+            cancellations: 0,
+            rendered_frames: 0,
+            durable_artifacts: 0,
+            pending_jobs: 0,
+            active_jobs: 0,
+            worker_failed: false,
+        }
+    }
+
+    #[test]
+    fn continuous_export_snapshot_seals_zero_realtime_owner_facts() {
+        let playback = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig::default())
+            .expect("playback collector")
+            .report();
+        let snapshot = EnduranceRuntimeSnapshot::continuous_export(
+            playback,
+            ReferenceOutputDiagnostics::default(),
+            empty_export_snapshot(),
+        );
+
+        assert_eq!(snapshot.capture_facts, EnduranceCaptureFacts::default());
+    }
 
     #[test]
     #[ignore = "requires a real Headless GPU Adapter and native scheduling admission"]
@@ -582,7 +831,7 @@ mod tests {
         }
 
         let closure = owners
-            .shutdown_and_wait(&mut state, std::time::Duration::from_secs(30))
+            .shutdown_and_wait(state, std::time::Duration::from_secs(30))
             .expect("close active execution owners");
 
         assert!(closure.preview.all_workers_terminated());
@@ -688,6 +937,7 @@ mod tests {
             let is_export =
                 self.kind == Some(mondrian_platform::EndurancePhaseKind::ContinuousExport);
             Ok(EnduranceRuntimeSnapshot {
+                phase_kind: self.kind.expect("started phase kind"),
                 playback: PlaybackEvidenceCollector::new(PlaybackEvidenceConfig::default())
                     .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?
                     .report(),
@@ -745,8 +995,115 @@ mod tests {
         }
     }
 
+    struct CleanupRuntime {
+        shutdown_calls: u32,
+        cleanup_fails: bool,
+        cleanup_incomplete: bool,
+    }
+
+    impl EnduranceCampaignRuntime for CleanupRuntime {
+        fn begin_phase(
+            &mut self,
+            _requirement: &EndurancePhaseRequirement,
+            _workload_contract_path: &Path,
+        ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
+            unreachable!("cleanup test never admits a phase")
+        }
+
+        fn pump_until(
+            &mut self,
+            _deadline_run_us: u64,
+        ) -> Result<Vec<EnduranceCampaignEvent>, EnduranceCampaignError> {
+            unreachable!("cleanup test never pumps")
+        }
+
+        fn snapshot(&mut self) -> Result<EnduranceRuntimeSnapshot, EnduranceCampaignError> {
+            unreachable!("cleanup test never snapshots")
+        }
+
+        fn shutdown_phase(
+            &mut self,
+        ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>
+        {
+            self.shutdown_calls += 1;
+            if self.cleanup_fails {
+                return Err(EnduranceCampaignError::Runtime("cleanup".to_owned()));
+            }
+            Ok((
+                EnduranceRuntimeClosure {
+                    status: EndurancePhaseTerminalStatus::Failed,
+                    playback_workers_terminated: !self.cleanup_incomplete,
+                    supervised_child_processes_remaining: 0,
+                    export: ExportQueueShutdownEvidence {
+                        schema_version: 1,
+                        worker_terminated: true,
+                        pending_jobs: 0,
+                        active_jobs: 0,
+                        activity_events: 0,
+                    },
+                },
+                Vec::new(),
+            ))
+        }
+    }
+
     #[test]
-    fn coordinator_runs_serial_cadence_and_seals_not_run_hardware_phases() {
+    fn started_phase_failure_always_consumes_runtime_cleanup() {
+        let mut runtime = CleanupRuntime {
+            shutdown_calls: 0,
+            cleanup_fails: false,
+            cleanup_incomplete: false,
+        };
+        let error = cleanup_started_phase(
+            &mut runtime,
+            EnduranceCampaignError::Runtime("primary".to_owned()),
+        );
+        assert_eq!(runtime.shutdown_calls, 1);
+        assert!(matches!(error, EnduranceCampaignError::Runtime(detail) if detail == "primary"));
+
+        let mut runtime = CleanupRuntime {
+            shutdown_calls: 0,
+            cleanup_fails: true,
+            cleanup_incomplete: false,
+        };
+        let error = cleanup_started_phase(
+            &mut runtime,
+            EnduranceCampaignError::Runtime("primary".to_owned()),
+        );
+        assert_eq!(runtime.shutdown_calls, 1);
+        assert!(matches!(
+            error,
+            EnduranceCampaignError::StartedPhaseCleanup { primary, cleanup }
+                if matches!(*primary, EnduranceCampaignError::Runtime(ref detail) if detail == "primary")
+                    && matches!(*cleanup, EnduranceCampaignError::Runtime(ref detail) if detail == "cleanup")
+        ));
+
+        let mut runtime = CleanupRuntime {
+            shutdown_calls: 0,
+            cleanup_fails: false,
+            cleanup_incomplete: true,
+        };
+        let error = cleanup_started_phase(
+            &mut runtime,
+            EnduranceCampaignError::Runtime("primary".to_owned()),
+        );
+        assert_eq!(runtime.shutdown_calls, 1);
+        assert!(matches!(
+            error,
+            EnduranceCampaignError::StartedPhaseCleanup { cleanup, .. }
+                if matches!(*cleanup, EnduranceCampaignError::IncompletePhaseCleanup {
+                    playback_workers_terminated: false,
+                    ..
+                })
+        ));
+    }
+
+    fn campaign_fixture() -> (
+        tempfile::TempDir,
+        EnduranceCampaignRequest,
+        EnduranceQualificationProfile,
+        PathBuf,
+    ) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .and_then(Path::parent)
@@ -770,15 +1127,9 @@ mod tests {
             .iter()
             .map(|phase| {
                 let file_name = match phase.kind {
-                    mondrian_platform::EndurancePhaseKind::PlaybackReference => {
-                        "playback-reference-v1.json"
-                    }
-                    mondrian_platform::EndurancePhaseKind::ContinuousExport => {
-                        "continuous-export-v1.json"
-                    }
-                    mondrian_platform::EndurancePhaseKind::ConcurrentRecovery => {
-                        "concurrent-recovery-v1.json"
-                    }
+                    EndurancePhaseKind::PlaybackReference => "playback-reference-v1.json",
+                    EndurancePhaseKind::ContinuousExport => "continuous-export-v1.json",
+                    EndurancePhaseKind::ConcurrentRecovery => "concurrent-recovery-v1.json",
                 };
                 (
                     phase.phase_id.clone(),
@@ -786,7 +1137,6 @@ mod tests {
                 )
             })
             .collect();
-        let manifest_path = temporary.path().join("run.json");
         let request = EnduranceCampaignRequest {
             profile: profile.clone(),
             identity: EnduranceRunIdentity {
@@ -803,9 +1153,194 @@ mod tests {
             },
             capture_authority_manifest_path: authority,
             evidence_directory: evidence.clone(),
-            output_manifest_path: manifest_path,
+            output_manifest_path: temporary.path().join("run.json"),
             workload_contracts: workloads,
         };
+        (temporary, request, profile, evidence)
+    }
+
+    #[derive(Clone, Copy)]
+    enum CampaignFailpoint {
+        Begin,
+        Pump,
+        Event,
+        Snapshot,
+        PhaseProvenance,
+        Memory,
+        IncompleteShutdown,
+    }
+
+    struct FailpointRuntime<'a> {
+        clock: &'a FakeClock,
+        failpoint: CampaignFailpoint,
+        begin_calls: u32,
+        shutdown_calls: u32,
+        snapshot_calls: u32,
+        snapshots_at_shutdown: Option<u32>,
+    }
+
+    impl EnduranceCampaignRuntime for FailpointRuntime<'_> {
+        fn begin_phase(
+            &mut self,
+            _requirement: &EndurancePhaseRequirement,
+            _workload_contract_path: &Path,
+        ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
+            self.begin_calls += 1;
+            if matches!(self.failpoint, CampaignFailpoint::Begin) {
+                return Err(EnduranceCampaignError::Runtime("begin".to_owned()));
+            }
+            Ok(EndurancePhaseAdmission::Started)
+        }
+
+        fn pump_until(
+            &mut self,
+            deadline_run_us: u64,
+        ) -> Result<Vec<EnduranceCampaignEvent>, EnduranceCampaignError> {
+            self.clock.0.store(deadline_run_us, Ordering::Relaxed);
+            match self.failpoint {
+                CampaignFailpoint::Pump => Err(EnduranceCampaignError::Runtime("pump".to_owned())),
+                CampaignFailpoint::Event => {
+                    Ok(vec![EnduranceCampaignEvent::test_export_artifact_verified(
+                        0,
+                        "wrong-phase-artifact",
+                        SHA,
+                        "independent-validator-v1",
+                        SHA,
+                    )])
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+
+        fn snapshot(&mut self) -> Result<EnduranceRuntimeSnapshot, EnduranceCampaignError> {
+            self.snapshot_calls += 1;
+            if matches!(self.failpoint, CampaignFailpoint::Snapshot) {
+                return Err(EnduranceCampaignError::Runtime("snapshot".to_owned()));
+            }
+            let playback = PlaybackEvidenceCollector::new(PlaybackEvidenceConfig::default())
+                .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?
+                .report();
+            if matches!(self.failpoint, CampaignFailpoint::PhaseProvenance) {
+                return Ok(EnduranceRuntimeSnapshot::continuous_export(
+                    playback,
+                    ReferenceOutputDiagnostics::default(),
+                    empty_export_snapshot(),
+                ));
+            }
+            Ok(EnduranceRuntimeSnapshot {
+                phase_kind: EndurancePhaseKind::PlaybackReference,
+                playback,
+                reference_output: ReferenceOutputDiagnostics::default(),
+                export: empty_export_snapshot(),
+                capture_facts: EnduranceCaptureFacts::default(),
+            })
+        }
+
+        fn shutdown_phase(
+            &mut self,
+        ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>
+        {
+            self.shutdown_calls += 1;
+            self.snapshots_at_shutdown = Some(self.snapshot_calls);
+            Ok((
+                EnduranceRuntimeClosure {
+                    status: EndurancePhaseTerminalStatus::Failed,
+                    playback_workers_terminated: !matches!(
+                        self.failpoint,
+                        CampaignFailpoint::IncompleteShutdown
+                    ),
+                    supervised_child_processes_remaining: 0,
+                    export: ExportQueueShutdownEvidence {
+                        schema_version: 1,
+                        worker_terminated: true,
+                        pending_jobs: 0,
+                        active_jobs: 0,
+                        activity_events: 0,
+                    },
+                },
+                Vec::new(),
+            ))
+        }
+    }
+
+    struct FailedMemory;
+
+    impl ProcessMemoryProbe for FailedMemory {
+        fn process_memory(&self, scope: ProcessMemoryScope) -> ProcessMemoryProbeResult {
+            ProcessMemoryProbeResult::failed(
+                scope,
+                ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                0,
+                1,
+                "memory probe failed",
+            )
+        }
+    }
+
+    #[test]
+    fn coordinator_consumes_begin_pump_event_snapshot_and_probe_failures_once() {
+        for failpoint in [
+            CampaignFailpoint::Begin,
+            CampaignFailpoint::Pump,
+            CampaignFailpoint::Event,
+            CampaignFailpoint::Snapshot,
+            CampaignFailpoint::PhaseProvenance,
+            CampaignFailpoint::Memory,
+            CampaignFailpoint::IncompleteShutdown,
+        ] {
+            let (_temporary, request, _profile, _evidence) = campaign_fixture();
+            let clock = FakeClock::default();
+            let mut runtime = FailpointRuntime {
+                clock: &clock,
+                failpoint,
+                begin_calls: 0,
+                shutdown_calls: 0,
+                snapshot_calls: 0,
+                snapshots_at_shutdown: None,
+            };
+            let result = if matches!(failpoint, CampaignFailpoint::Memory) {
+                run_endurance_campaign(request, &mut runtime, &FailedMemory, &clock)
+            } else {
+                run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock)
+            };
+            assert!(result.is_err());
+            assert_eq!(runtime.shutdown_calls, 1);
+            if matches!(failpoint, CampaignFailpoint::Memory) {
+                assert_eq!(runtime.snapshot_calls, 1);
+            }
+            if matches!(failpoint, CampaignFailpoint::IncompleteShutdown) {
+                assert_eq!(
+                    runtime.begin_calls, 1,
+                    "must not admit the next serial phase"
+                );
+                assert_eq!(
+                    runtime.snapshots_at_shutdown,
+                    Some(runtime.snapshot_calls),
+                    "must not capture a final sample after incomplete shutdown"
+                );
+                assert!(matches!(
+                    &result,
+                    Err(EnduranceCampaignError::IncompletePhaseCleanup {
+                        playback_workers_terminated: false,
+                        ..
+                    })
+                ));
+            }
+            if matches!(failpoint, CampaignFailpoint::PhaseProvenance) {
+                assert!(matches!(
+                    &result,
+                    Err(EnduranceCampaignError::SnapshotPhaseMismatch {
+                        expected: EndurancePhaseKind::PlaybackReference,
+                        actual: EndurancePhaseKind::ContinuousExport,
+                    })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn coordinator_runs_serial_cadence_and_seals_not_run_hardware_phases() {
+        let (_temporary, request, profile, evidence) = campaign_fixture();
         let clock = FakeClock::default();
         let mut runtime = FakeRuntime::new(&clock);
         let manifest = run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock)

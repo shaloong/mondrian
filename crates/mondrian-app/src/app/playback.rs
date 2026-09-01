@@ -18,6 +18,53 @@ pub(super) enum AppAudioPlayback {
     Unavailable { sample_rate: u32, reason: String },
 }
 
+/// App-lifetime carry-forward for cumulative Audio failures when an execution
+/// owner is terminally replaced.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AudioEnduranceFailureLedger {
+    render_substitutions: u64,
+    render_generation_recoveries: u64,
+    underrun_recoveries: u64,
+    backend_losses: u64,
+    deactivation_failures: u64,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl AudioEnduranceFailureLedger {
+    fn absorb(&mut self, retired: AudioPlaybackSnapshot) {
+        self.render_substitutions =
+            self.render_substitutions.saturating_add(retired.render_substitution_count);
+        self.render_generation_recoveries = self
+            .render_generation_recoveries
+            .saturating_add(retired.render_generation_recovery_count);
+        self.underrun_recoveries =
+            self.underrun_recoveries.saturating_add(retired.underrun_recovery_count);
+        self.backend_losses =
+            self.backend_losses.saturating_add(retired.output_lifecycle.backend_loss_count);
+        self.deactivation_failures = self
+            .deactivation_failures
+            .saturating_add(retired.output_lifecycle.deactivation_failed_count);
+    }
+
+    fn project(self, mut current: AudioPlaybackSnapshot) -> AudioPlaybackSnapshot {
+        current.render_substitution_count =
+            current.render_substitution_count.saturating_add(self.render_substitutions);
+        current.render_generation_recovery_count = current
+            .render_generation_recovery_count
+            .saturating_add(self.render_generation_recoveries);
+        current.underrun_recovery_count =
+            current.underrun_recovery_count.saturating_add(self.underrun_recoveries);
+        current.output_lifecycle.backend_loss_count =
+            current.output_lifecycle.backend_loss_count.saturating_add(self.backend_losses);
+        current.output_lifecycle.deactivation_failed_count = current
+            .output_lifecycle
+            .deactivation_failed_count
+            .saturating_add(self.deactivation_failures);
+        current
+    }
+}
+
 impl AppAudioPlayback {
     pub(super) fn product_default(sample_rate: u32) -> Self {
         match AudioPlayback::product_default() {
@@ -696,6 +743,8 @@ impl AppState {
             AudioPlaybackEvent::RenderWorkerStoppedUnexpectedly { reason } => {
                 let unavailable_reason =
                     format!("audio render worker stopped unexpectedly: {reason}");
+                #[cfg(any(test, feature = "validation"))]
+                self.absorb_audio_endurance_failures();
                 let unavailable = AppAudioPlayback::Unavailable {
                     sample_rate: self.audio_sample_rate,
                     reason: unavailable_reason.clone(),
@@ -1286,6 +1335,19 @@ impl AppState {
     /// Return the current production Audio Playback lifecycle and CPAL callback evidence.
     pub fn audio_playback_snapshot(&self) -> AudioPlaybackSnapshot {
         self.audio_playback.snapshot(self.audio_playback_mode())
+    }
+
+    /// Return current Audio ownership with cumulative failures from any
+    /// terminally replaced execution owner carried forward.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn audio_endurance_snapshot(&self) -> AudioPlaybackSnapshot {
+        self.audio_endurance_failure_ledger.project(self.audio_playback_snapshot())
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn absorb_audio_endurance_failures(&mut self) {
+        let retired = self.audio_playback_snapshot();
+        self.audio_endurance_failure_ledger.absorb(retired);
     }
 
     /// Consume and synchronously close the Audio owner used by this App State.
@@ -2685,6 +2747,32 @@ mod tests {
             state.audio_playback_unavailable_reason(),
             Some("audio render worker stopped unexpectedly: injected early exit")
         );
+    }
+
+    #[test]
+    fn endurance_audio_failure_ledger_survives_terminal_owner_replacement() {
+        let mut retired = AudioPlaybackSnapshot::execution_unavailable();
+        retired.render_substitution_count = 2;
+        retired.render_generation_recovery_count = 3;
+        retired.underrun_recovery_count = 5;
+        retired.output_lifecycle.backend_loss_count = 7;
+        retired.output_lifecycle.deactivation_failed_count = 11;
+        let mut ledger = AudioEnduranceFailureLedger::default();
+        ledger.absorb(retired);
+
+        let mut replacement = AudioPlaybackSnapshot::execution_unavailable();
+        replacement.render_substitution_count = 13;
+        replacement.render_generation_recovery_count = 17;
+        replacement.underrun_recovery_count = 19;
+        replacement.output_lifecycle.backend_loss_count = 23;
+        replacement.output_lifecycle.deactivation_failed_count = 29;
+        let projected = ledger.project(replacement);
+
+        assert_eq!(projected.render_substitution_count, 15);
+        assert_eq!(projected.render_generation_recovery_count, 20);
+        assert_eq!(projected.underrun_recovery_count, 24);
+        assert_eq!(projected.output_lifecycle.backend_loss_count, 30);
+        assert_eq!(projected.output_lifecycle.deactivation_failed_count, 40);
     }
 
     #[test]

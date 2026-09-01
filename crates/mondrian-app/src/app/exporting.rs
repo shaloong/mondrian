@@ -283,6 +283,15 @@ impl AppState {
         self.render_queue.diagnostics()
     }
 
+    /// Capture the phase-owned Export queue in its linearized endurance form.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn export_endurance_snapshot(
+        &self,
+        observed_at_us: u64,
+    ) -> mondrian_export::ExportEnduranceSnapshot {
+        self.render_queue.endurance_snapshot(observed_at_us)
+    }
+
     /// Observe retained job-snapshot changes without consuming shared evidence.
     ///
     /// Queue policy and execution-yield diagnostics are intentionally excluded:
@@ -464,6 +473,34 @@ fn export_error(step_id: &'static str, reason: String) -> MondrianError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_export_endurance_projection_matches_queue_owned_counters_and_gauges() {
+        let state = AppState::new();
+        let diagnostics = state.export_queue_diagnostics();
+        let endurance = state.export_endurance_snapshot(17);
+
+        assert_eq!(endurance.observed_at_us, 17);
+        assert_eq!(endurance.admissions, diagnostics.admissions);
+        assert_eq!(endurance.rejections, diagnostics.rejections);
+        assert_eq!(endurance.completions, diagnostics.completions);
+        assert_eq!(endurance.failures, diagnostics.failures);
+        assert_eq!(endurance.cancellations, diagnostics.cancellations);
+        assert_eq!(endurance.rendered_frames, diagnostics.rendered_frames);
+        assert_eq!(endurance.durable_artifacts, diagnostics.durable_artifacts);
+        assert_eq!(endurance.pending_jobs, diagnostics.pending as u64);
+        assert_eq!(
+            endurance.active_jobs,
+            diagnostics
+                .running
+                .saturating_add(diagnostics.cancelling)
+                .saturating_add(diagnostics.committing) as u64
+        );
+        assert_eq!(
+            endurance.worker_failed,
+            diagnostics.worker_failure.is_some()
+        );
+    }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {
         let numerator = frame.checked_mul(time_base.num).expect("test time fits i64");

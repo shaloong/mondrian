@@ -23,28 +23,31 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::headless_realtime_playback::HeadlessEnduranceOwnerSnapshot;
+
 /// Additional gauges and independently verified facts owned by the Headless
 /// qualification driver rather than any single execution domain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnduranceCaptureFacts {
     /// Capture-fact schema version.
-    pub schema_version: u32,
-    /// Monotonic observation instant shared with the complete sample.
-    pub observed_at_us: u64,
+    schema_version: u32,
+    /// Monotonic completion stamp for the containing capture envelope.
+    observed_at_us: u64,
     /// Live Playback-current work bindings.
-    pub playback_pending: u64,
+    playback_pending: u64,
     /// Additional bounded queue depth outside Reference Output and Export.
-    pub other_queue_depth: u64,
-    /// Move-only leases/resources still owned across all sampled domains.
-    pub owned_resource_units: u64,
+    other_queue_depth: u64,
+    /// Selected Headless Preview/Audio/GPU leases and resources still owned.
+    owned_resource_units: u64,
     /// Failed controlled recovery cycles.
-    pub recovery_failures: u64,
+    recovery_failures: u64,
     /// Renderer device-loss/reset terminals.
-    pub gpu_device_losses: u64,
+    gpu_device_losses: u64,
     /// Other crash, panic, or dead-worker terminals.
-    pub fatal_errors: u64,
+    fatal_errors: u64,
 }
 
+#[cfg(test)]
 impl Default for EnduranceCaptureFacts {
     fn default() -> Self {
         Self {
@@ -57,6 +60,43 @@ impl Default for EnduranceCaptureFacts {
             gpu_device_losses: 0,
             fatal_errors: 0,
         }
+    }
+}
+
+impl EnduranceCaptureFacts {
+    /// Seal one settled Headless owner inventory into the capture vocabulary.
+    pub(crate) const fn from_headless_owner_snapshot(
+        snapshot: HeadlessEnduranceOwnerSnapshot,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            observed_at_us: 0,
+            playback_pending: snapshot.playback_pending(),
+            other_queue_depth: snapshot.other_queue_depth(),
+            owned_resource_units: snapshot.owned_resource_units(),
+            recovery_failures: 0,
+            gpu_device_losses: snapshot.gpu_device_losses(),
+            fatal_errors: snapshot.fatal_errors(),
+        }
+    }
+
+    /// Construct the zero-realtime-owner facts required by an Export-only phase.
+    pub(crate) const fn for_continuous_export() -> Self {
+        Self {
+            schema_version: 1,
+            observed_at_us: 0,
+            playback_pending: 0,
+            other_queue_depth: 0,
+            owned_resource_units: 0,
+            recovery_failures: 0,
+            gpu_device_losses: 0,
+            fatal_errors: 0,
+        }
+    }
+
+    /// Assign the supervisor's capture-envelope completion stamp.
+    pub(crate) fn stamp_observed_at_us(&mut self, observed_at_us: u64) {
+        self.observed_at_us = observed_at_us;
     }
 }
 
@@ -628,7 +668,7 @@ impl EndurancePhaseCapture {
     }
 
     /// Record one independently reopened and content-verified Export artifact.
-    pub fn record_export_artifact_verified(
+    pub(crate) fn record_export_artifact_verified(
         &mut self,
         completed_at_us: u64,
         artifact_id: &str,
@@ -646,7 +686,7 @@ impl EndurancePhaseCapture {
     }
 
     /// Record one exact operation in the ordered controlled-recovery protocol.
-    pub fn record_recovery_step_completed(
+    pub(crate) fn record_recovery_step_completed(
         &mut self,
         completed_at_us: u64,
         cycle_index: u32,
@@ -1150,6 +1190,23 @@ mod tests {
     use mondrian_reference_output::ReferenceOutputDiagnostics;
 
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn capture_facts_can_only_be_projected_from_the_sealed_owner_inventory() {
+        let mut facts = EnduranceCaptureFacts::from_headless_owner_snapshot(
+            HeadlessEnduranceOwnerSnapshot::test_fixture(1, 2, 3, 4, 5),
+        );
+        facts.stamp_observed_at_us(7);
+
+        assert_eq!(facts.schema_version, 1);
+        assert_eq!(facts.observed_at_us, 7);
+        assert_eq!(facts.playback_pending, 1);
+        assert_eq!(facts.other_queue_depth, 2);
+        assert_eq!(facts.owned_resource_units, 3);
+        assert_eq!(facts.gpu_device_losses, 4);
+        assert_eq!(facts.fatal_errors, 5);
+        assert_eq!(facts.recovery_failures, 0);
+    }
 
     #[test]
     fn capture_maps_owner_counters_without_reinterpreting_thresholds() {

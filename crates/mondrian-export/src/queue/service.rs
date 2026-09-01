@@ -739,6 +739,10 @@ struct ExportQueueState {
     resource_policy: ExportExecutionResourcePolicy,
     worker_failure: Option<String>,
     counters: ExportQueueCounters,
+    activity_events: u64,
+    shutdown_requested: bool,
+    worker_running: bool,
+    worker_terminated: bool,
 }
 
 struct RenderQueueInner {
@@ -747,20 +751,17 @@ struct RenderQueueInner {
     shutdown: AtomicBool,
     revision: AtomicU64,
     jobs_revision: AtomicU64,
-    activity_events: AtomicU64,
-    worker_running: AtomicBool,
-    worker_terminated: AtomicBool,
 }
 
 impl RenderQueueInner {
-    fn mark_diagnostics_changed(&self) {
+    fn mark_diagnostics_changed_locked(&self, _state: &ExportQueueState) {
         self.revision.fetch_add(1, Ordering::AcqRel);
     }
 
-    fn mark_jobs_changed(&self) {
+    fn mark_jobs_changed_locked(&self, state: &mut ExportQueueState) {
+        state.activity_events = state.activity_events.saturating_add(1);
         self.revision.fetch_add(1, Ordering::AcqRel);
         self.jobs_revision.fetch_add(1, Ordering::AcqRel);
-        self.activity_events.fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -881,7 +882,7 @@ fn wait_at_queue_execution_boundary(
         {
             if state.jobs[index].execution_yielded {
                 state.jobs[index].execution_yielded = false;
-                inner.mark_diagnostics_changed();
+                inner.mark_diagnostics_changed_locked(&state);
             }
             return false;
         }
@@ -897,15 +898,15 @@ fn wait_at_queue_execution_boundary(
                     JobStatus::Running { phase: ExportProgressPhase::Publishing };
             }
             if phase == ExportProgressPhase::Publishing {
-                inner.mark_jobs_changed();
+                inner.mark_jobs_changed_locked(&mut state);
             } else if changed {
-                inner.mark_diagnostics_changed();
+                inner.mark_diagnostics_changed_locked(&state);
             }
             return true;
         }
         if !state.jobs[index].execution_yielded {
             state.jobs[index].execution_yielded = true;
-            inner.mark_diagnostics_changed();
+            inner.mark_diagnostics_changed_locked(&state);
         }
         inner.wake.wait(&mut state);
     }
@@ -929,15 +930,13 @@ impl RenderQueue {
                     next_generation: 1,
                     dispatch_enabled: true,
                     resource_policy: ExportExecutionResourcePolicy::default(),
+                    worker_running: true,
                     ..ExportQueueState::default()
                 }),
                 wake: Condvar::new(),
                 shutdown: AtomicBool::new(false),
                 revision: AtomicU64::new(0),
                 jobs_revision: AtomicU64::new(0),
-                activity_events: AtomicU64::new(0),
-                worker_running: AtomicBool::new(false),
-                worker_terminated: AtomicBool::new(false),
             }),
         });
         queue.spawn_worker(executor);
@@ -946,25 +945,26 @@ impl RenderQueue {
 
     fn spawn_worker(&self, executor: Arc<dyn ExportExecutor>) {
         let inner = Arc::clone(&self.inner);
-        self.inner.worker_running.store(true, Ordering::Release);
         if let Err(error) = std::thread::Builder::new()
             .name("mondrian-export-worker".to_owned())
             .spawn(move || {
                 export_worker_loop(Arc::clone(&inner), executor);
-                inner.worker_running.store(false, Ordering::Release);
-                inner.worker_terminated.store(true, Ordering::Release);
-                inner.mark_diagnostics_changed();
+                let mut state = inner.state.lock();
+                state.worker_running = false;
+                state.worker_terminated = true;
+                inner.mark_diagnostics_changed_locked(&state);
+                drop(state);
                 inner.wake.notify_all();
             })
         {
-            self.inner.worker_running.store(false, Ordering::Release);
-            self.inner.worker_terminated.store(true, Ordering::Release);
             let mut state = self.inner.state.lock();
+            state.worker_running = false;
+            state.worker_terminated = true;
             state.worker_failure = Some(bounded_detail(format!(
                 "failed to start export worker: {error}"
             )));
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
         }
     }
 
@@ -1082,15 +1082,15 @@ impl RenderQueue {
         let mut state = self.inner.state.lock();
         if self.inner.shutdown.load(Ordering::Acquire) {
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(ExportAdmissionError::QueueShutdown);
         }
         if let Some(detail) = &state.worker_failure {
             let error = ExportAdmissionError::WorkerUnavailable { detail: detail.clone() };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
         let in_flight =
@@ -1099,8 +1099,8 @@ impl RenderQueue {
             let error =
                 ExportAdmissionError::CapacityExceeded { capacity: EXPORT_IN_FLIGHT_CAPACITY };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
         if state
@@ -1110,16 +1110,16 @@ impl RenderQueue {
         {
             let error = ExportAdmissionError::OutputPathBusy { path: output_path };
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(error);
         }
 
         let generation = state.next_generation.max(1);
         let Some(next_generation) = generation.checked_add(1) else {
             state.counters.rejections = state.counters.rejections.saturating_add(1);
+            self.inner.mark_diagnostics_changed_locked(&state);
             drop(state);
-            self.mark_diagnostics_changed();
             return Err(ExportAdmissionError::GenerationExhausted);
         };
         state.next_generation = next_generation;
@@ -1149,8 +1149,8 @@ impl RenderQueue {
             execution_yielded: false,
         });
         state.counters.admissions = state.counters.admissions.saturating_add(1);
+        self.inner.mark_jobs_changed_locked(&mut state);
         drop(state);
-        self.mark_jobs_changed();
         self.inner.wake.notify_one();
         Ok(id)
     }
@@ -1158,8 +1158,8 @@ impl RenderQueue {
     fn reject<T>(&self, error: ExportAdmissionError) -> Result<T, ExportAdmissionError> {
         let mut state = self.inner.state.lock();
         state.counters.rejections = state.counters.rejections.saturating_add(1);
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
         Err(error)
     }
 
@@ -1247,12 +1247,15 @@ impl RenderQueue {
                 ExportCancelOutcome::AlreadyTerminal
             }
         };
-        drop(state);
         if outcome == ExportCancelOutcome::Requested {
-            self.mark_jobs_changed();
+            self.inner.mark_jobs_changed_locked(&mut state);
+            drop(state);
             self.inner.wake.notify_all();
         } else if outcome == ExportCancelOutcome::TooLateCommitting {
-            self.mark_diagnostics_changed();
+            self.inner.mark_diagnostics_changed_locked(&state);
+            drop(state);
+        } else {
+            drop(state);
         }
         outcome
     }
@@ -1265,10 +1268,10 @@ impl RenderQueue {
         let before = state.jobs.len();
         state.jobs.retain(|entry| !entry.snapshot.status.is_terminal());
         let removed = before - state.jobs.len();
-        drop(state);
         if removed > 0 {
-            self.mark_jobs_changed();
+            self.inner.mark_jobs_changed_locked(&mut state);
         }
+        drop(state);
         removed
     }
 
@@ -1303,8 +1306,8 @@ impl RenderQueue {
             return;
         }
         state.dispatch_enabled = enabled;
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
         self.inner.wake.notify_all();
     }
 
@@ -1319,8 +1322,8 @@ impl RenderQueue {
             return;
         }
         state.resource_policy = policy;
+        self.inner.mark_diagnostics_changed_locked(&state);
         drop(state);
-        self.mark_diagnostics_changed();
     }
 
     /// Snapshot bounded queue health and lightweight job evidence.
@@ -1368,27 +1371,39 @@ impl RenderQueue {
 
     /// Capture one fixed-size queue observation for a long-duration producer.
     pub fn endurance_snapshot(&self, observed_at_us: u64) -> ExportEnduranceSnapshot {
-        let diagnostics = self.diagnostics();
+        let state = self.inner.state.lock();
+        let pending_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| matches!(entry.snapshot.status, JobStatus::Pending))
+            .count() as u64;
+        let active_jobs = state
+            .jobs
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.snapshot.status,
+                    JobStatus::Running { .. } | JobStatus::Cancelling { .. }
+                )
+            })
+            .count() as u64;
         ExportEnduranceSnapshot {
             schema_version: 1,
             observed_at_us,
-            shutdown_requested: self.inner.shutdown.load(Ordering::Acquire),
-            worker_running: self.inner.worker_running.load(Ordering::Acquire),
-            worker_terminated: self.inner.worker_terminated.load(Ordering::Acquire),
-            activity_events: self.inner.activity_events.load(Ordering::Acquire),
-            admissions: diagnostics.admissions,
-            rejections: diagnostics.rejections,
-            completions: diagnostics.completions,
-            failures: diagnostics.failures,
-            cancellations: diagnostics.cancellations,
-            rendered_frames: diagnostics.rendered_frames,
-            durable_artifacts: diagnostics.durable_artifacts,
-            pending_jobs: diagnostics.pending as u64,
-            active_jobs: diagnostics
-                .running
-                .saturating_add(diagnostics.cancelling)
-                .saturating_add(diagnostics.committing) as u64,
-            worker_failed: diagnostics.worker_failure.is_some(),
+            shutdown_requested: state.shutdown_requested,
+            worker_running: state.worker_running,
+            worker_terminated: state.worker_terminated,
+            activity_events: state.activity_events,
+            admissions: state.counters.admissions,
+            rejections: state.counters.rejections,
+            completions: state.counters.completions,
+            failures: state.counters.failures,
+            cancellations: state.counters.cancellations,
+            rendered_frames: state.counters.rendered_frames,
+            durable_artifacts: state.counters.durable_artifacts,
+            pending_jobs,
+            active_jobs,
+            worker_failed: state.worker_failure.is_some(),
         }
     }
 
@@ -1400,7 +1415,7 @@ impl RenderQueue {
         self.request_shutdown();
         let deadline = Instant::now().checked_add(timeout);
         let mut state = self.inner.state.lock();
-        while !self.inner.worker_terminated.load(Ordering::Acquire) {
+        while !state.worker_terminated {
             let Some(deadline) = deadline else {
                 break;
             };
@@ -1427,16 +1442,17 @@ impl RenderQueue {
             .count() as u64;
         ExportQueueShutdownEvidence {
             schema_version: 1,
-            worker_terminated: self.inner.worker_terminated.load(Ordering::Acquire),
+            worker_terminated: state.worker_terminated,
             pending_jobs,
             active_jobs,
-            activity_events: self.inner.activity_events.load(Ordering::Acquire),
+            activity_events: state.activity_events,
         }
     }
 
     fn request_shutdown(&self) {
-        let first_request = !self.inner.shutdown.swap(true, Ordering::AcqRel);
         let mut state = self.inner.state.lock();
+        let first_request = !self.inner.shutdown.swap(true, Ordering::AcqRel);
+        state.shutdown_requested = true;
         let mut pending_cancellations = 0_u64;
         if first_request {
             for entry in &mut state.jobs {
@@ -1473,19 +1489,11 @@ impl RenderQueue {
                 trim_terminal_history(&mut state);
             }
         }
-        drop(state);
         if first_request {
-            self.mark_jobs_changed();
+            self.inner.mark_jobs_changed_locked(&mut state);
         }
+        drop(state);
         self.inner.wake.notify_all();
-    }
-
-    fn mark_diagnostics_changed(&self) {
-        self.inner.mark_diagnostics_changed();
-    }
-
-    fn mark_jobs_changed(&self) {
-        self.inner.mark_jobs_changed();
     }
 }
 
@@ -1569,7 +1577,7 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 });
                 state.counters.failures = state.counters.failures.saturating_add(1);
                 trim_terminal_history(&mut state);
-                inner.mark_jobs_changed();
+                inner.mark_jobs_changed_locked(&mut state);
                 continue;
             };
             let resource_policy = state.resource_policy;
@@ -1583,8 +1591,8 @@ fn take_next_pending_job(inner: &RenderQueueInner) -> Option<ExportWork> {
                 cancellation: entry.cancellation.clone(),
                 resource_policy,
             };
+            inner.mark_jobs_changed_locked(&mut state);
             drop(state);
-            inner.mark_jobs_changed();
             return Some(work);
         }
         inner.wake.wait(&mut state);
@@ -1626,8 +1634,8 @@ fn update_job_progress(
     entry.snapshot.status = status;
     state.counters.rendered_frames =
         state.counters.rendered_frames.saturating_add(rendered_frame_delta);
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
 }
 
 fn progress_completed_frames(detail: ExportProgressDetail) -> u64 {
@@ -1658,8 +1666,8 @@ fn update_job_diagnostics(
         return;
     }
     entry.snapshot.diagnostics = diagnostics;
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
 }
 
 fn publish_terminal(
@@ -1834,8 +1842,8 @@ fn publish_terminal(
         deadline: ExecutionDeadlineStatus::NotApplicable,
     });
     trim_terminal_history(&mut state);
+    inner.mark_jobs_changed_locked(&mut state);
     drop(state);
-    inner.mark_jobs_changed();
     inner.wake.notify_all();
 }
 

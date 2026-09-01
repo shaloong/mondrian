@@ -24,13 +24,16 @@ The implementation is split at existing authority boundaries:
   neutral sample contract, verifies checked-in workload bytes, buffers at most
   one profile-bounded chunk, bounds both chunk receipts and producer events,
   publishes chunks and the run manifest create-only with file fsync, and
-  derives terminal closure from typed Reference Output and Export shutdown
-  evidence. It does not execute workloads or reinterpret gates.
+  derives terminal software/Export closure from typed owner receipts and the
+  final Reference Output accounting snapshot. It does not execute workloads or
+  reinterpret gates. A consuming vendor-session Reference Output receipt is
+  still a required follow-on boundary.
 - `mondrian-app::app::endurance_campaign` owns exact serial phase admission,
   monotonic cadence, native process-tree sampling, final-sample order, and
   shutdown-before-terminal capture. It consumes an `EnduranceCampaignRuntime`;
   the concrete runtime remains the authority for pumping real product work,
-  atomic owner snapshots, typed semantic events, and synchronous closure.
+  coordinator-bounded owner snapshots, typed semantic events, and synchronous
+  closure.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
@@ -41,7 +44,28 @@ The coordinator samples every phase at zero and at each profile cadence, pumps
 to the exact minimum-duration boundary, requests synchronous product shutdown,
 then takes the final sample. A missing physical prerequisite is admitted only
 as `NotRun` before any sample; a started phase cannot later relabel itself as
-`NotRun`.
+`NotRun`. A failed `begin_phase`, pump, event validation, native probe, or owner
+capture triggers one consuming `shutdown_phase` call. Even an `Ok` cleanup
+receipt is rejected when workers, children, or Export jobs remain. If cleanup
+itself fails, evidence retains both the primary and cleanup failures instead of
+detaching phase-owned work. The same closure test is applied to the normal
+shutdown path before semantic events, the final sample, or a later serial phase
+can proceed.
+
+Cross-domain capture is an explicitly bounded envelope, not a fictitious
+global linearization point. The supervisor stamps the envelope immediately
+before invoking the native memory probe, then collects each domain's internally
+consistent projection before the completion stamp. The snapshot path does not
+schedule, pump, or poll phase work; individual owner projections may still
+refresh bounded diagnostic caches. Export's endurance projection is linearized
+by the sole Queue mutex: lifecycle flags, cumulative counters, job gauges, and
+activity count are copied while the same lock is held. Job/activity mutations
+advance both activity and revision before releasing that lock;
+diagnostics-only changes advance their revision in the same critical section.
+Every runtime snapshot also carries private phase-kind provenance. The
+supervisor rejects an Export-only zero-realtime projection in Playback or
+Recovery, so a public snapshot constructor cannot erase required owners by
+crossing a phase boundary.
 
 Preview's consuming shutdown receipt inventories media decode, visual
 execution, CPU fallback, lazily-started Basic Title, and Timeline render-cache
@@ -54,17 +78,26 @@ Audio closure is similarly owner-derived: `AudioPlayback` joins its PCM render
 worker and asks the concrete output Adapter to join every device-lifecycle
 worker started over its lifetime. Earlier unexpected exits remain visible in
 cumulative termination and panic evidence instead of disappearing once their
-handles have been consumed by normal polling.
+handles have been consumed by normal polling. When the App terminally replaces
+an unexpectedly stopped PCM render owner with `ExecutionUnavailable`, a
+validation-only App-lifetime ledger first absorbs that owner's cumulative
+render-substitution, generation-recovery, underrun-recovery, backend-loss, and
+deactivation-failure counts. Headless endurance capture projects retired plus
+current counts, preventing counter regression at the replacement boundary.
 
 The validation-only `EnduranceExecutionOwners` group composes the production
 Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
-the phase's `AppState`. It never starts a sidecar Audio instance: its consuming
-close takes and synchronously retires the same PCM/device workers pumped by
-Playback before transferring the complete GPU device-generation retirement
-envelope to the existing progress worker. GPU
+the phase's `AppState`. It never starts a sidecar Audio instance. Its consuming
+close takes the complete `AppState`, so the Playback binding itself cannot
+survive a nominally clean terminal projection; a transport pause failure is
+latched as fatal evidence while cleanup continues. It synchronously retires the
+same PCM/device workers pumped by Playback before transferring the complete GPU
+device-generation retirement envelope to the existing progress worker. GPU
 closure is bounded by an explicit timeout and records worker start/return,
 panic, timeout, retirement-handoff acceptance, and exact resource retirement.
-A timeout detaches the still-authoritative progress worker so that it can
+A device-loss or progress-failure terminal observed through the final bounded
+join is merged into the terminal counters rather than being frozen only before
+teardown. A timeout detaches the still-authoritative progress worker so that it can
 finish safe retirement, but it is terminal campaign failure evidence: it never
 claims that a GPU/native owner returned or that its admission slot was freed.
 
@@ -80,6 +113,25 @@ gates; the concrete campaign runtime must call it rather than copying the
 former test harness loop. Consuming shutdown best-effort leaves any interrupted
 residency before synchronously joining Preview, the App State's actual Audio
 owner, and GPU retirement in that order.
+
+Outside realtime residency, the paired Headless owner exposes one sealed,
+fixed-size inventory instead of raw Preview/GPU access. The selected gauges
+cover the current Playback binding, Preview scheduler and worker-queue work,
+Frame Store aggregate residency and non-evictable Viewer pins, prepared visual
+programs, GPU submission/current/prepared/staged owners, Audio render/buffer
+ownership, and monotonic worker/device failure counters. The capture does not
+claim to enumerate durable Timeline cache files. Clean consuming closure clears
+gauges only after the Playback owner is consumed and Preview, Audio, and GPU all
+close; incomplete closure leaves nonzero ownership and fatal evidence.
+
+This checkpoint supplies the serial supervisor, sealed snapshot constructors,
+owner-consuming cleanup, and deterministic software tests. It does **not** yet
+supply the concrete three-phase `EnduranceCampaignRuntime`: repeated frozen
+Export plus independent verification, persistent Timeline clean-feed/audio
+pumping, a consuming vendor Reference Output shutdown receipt, typed recovery
+receipts, and the high-level validation executable remain explicit local
+follow-on work. Until those owners exist, physical phases must be admitted as
+`NotRun`; profile prose is not evidence that a runnable 72-hour producer exists.
 
 ## Commercial profile
 
@@ -152,11 +204,19 @@ scheduled = completed + late + dropped + flushed + aborted + outstanding
 Stop, block, and post-consume ANC/hardware-time failure classify every remaining
 frame instead of silently clearing it.
 
+The present terminal contract proves final Reference Output diagnostics and
+accounting closure, not vendor callback-thread join, device release, profile
+restore, or session consumption. Those claims require the forthcoming typed
+DeckLink/AJA shutdown receipt and cannot be inferred from `Stopped` plus zero
+outstanding frames.
+
 Export publishes a constant-size `ExportEnduranceSnapshot` with cumulative
 admissions, failures, cancellations, rendered frames, durable artifacts,
 activity events, active gauges, and worker lifecycle. `shutdown_and_wait`
 cancels reversible work, terminalizes pending jobs, waits within an explicit
 bound, and reports whether the worker returned and queues reached zero.
+Lifecycle flags, counters, activity, and gauges come from one Queue-lock
+critical section rather than several independently timed observations.
 Independent finished-artifact re-open/validation remains an App capture fact;
 durable namespace publication alone is not relabeled as content verification.
 The supervisor accepts only typed artifact receipts containing the artifact,
@@ -164,6 +224,10 @@ independent validator, and validator-report digests. Concurrent recovery must
 record `seek -> surface_device_reopen -> export_cancel_retry -> cache_pressure`
 for every complete cycle. Event order, time, count, and terminal counters close
 twice: before App publication and again in the external PowerShell verifier.
+The recovery event payload currently has no production constructor, and the
+low-level hash recorders are crate-private: recovery cannot begin until each
+operation issues a typed receipt whose before/after facts can be independently
+recomputed. A caller-supplied SHA string or bare failure counter is not evidence.
 
 The independent Export receipt is produced only after a bounded regular-file
 check, encoded-byte hash, typed container/stream probe, and a separate FFmpeg

@@ -7,9 +7,14 @@ reversible running work, waits for worker-loop return, and reports final queue
 closure. Shutdown is permanent admission state: later enqueue requests are
 rejected instead of creating work after the worker returned. Snapshot
 rejections, cancellations, durable publications, and independent verifications
-remain separate counters. Durable publication remains distinct from the
-independent artifact re-open/content verification required by commercial
-endurance qualification; see
+remain separate counters. The endurance snapshot is copied under the Queue's
+sole mutex, including mirrored shutdown/worker lifecycle, cumulative counters,
+activity count, and job gauges. Job/activity mutations publish both markers,
+while diagnostics-only mutations publish their revision, before releasing that
+mutex. The snapshot therefore cannot combine a newer job state with older
+lifecycle or activity facts. Durable publication remains distinct
+from the independent artifact re-open/content verification required by
+commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
 `mondrian-export` also owns an independent single-file artifact verifier for

@@ -295,6 +295,55 @@ pub(crate) struct HeadlessViewerGpuAdapterInfo {
     pub driver_info: String,
 }
 
+/// Fixed-size inventory of move-only Headless GPU owners at a settled boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeadlessViewerGpuEnduranceSnapshot {
+    submission_owners: usize,
+    physical_output_owners: usize,
+    staged_successor_owners: usize,
+    device_loss_count: u64,
+    fatal_error_count: u64,
+}
+
+impl HeadlessViewerGpuEnduranceSnapshot {
+    pub(crate) const fn submission_owners(self) -> usize {
+        self.submission_owners
+    }
+
+    pub(crate) const fn physical_output_owners(self) -> usize {
+        self.physical_output_owners
+    }
+
+    pub(crate) const fn staged_successor_owners(self) -> usize {
+        self.staged_successor_owners
+    }
+
+    pub(crate) const fn device_loss_count(self) -> u64 {
+        self.device_loss_count
+    }
+
+    pub(crate) const fn fatal_error_count(self) -> u64 {
+        self.fatal_error_count
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn test_fixture(
+        submission_owners: usize,
+        physical_output_owners: usize,
+        staged_successor_owners: usize,
+        device_loss_count: u64,
+        fatal_error_count: u64,
+    ) -> Self {
+        Self {
+            submission_owners,
+            physical_output_owners,
+            staged_successor_owners,
+            device_loss_count,
+            fatal_error_count,
+        }
+    }
+}
+
 /// Real no-Surface Adapter over the shared Viewer GPU Preview Runtime.
 pub(crate) struct HeadlessViewerGpuAdapter {
     // `Drop` transfers these move-only members to the non-caller progress
@@ -540,6 +589,7 @@ impl HeadlessViewerGpuAdapter {
                 retirement_requested: true,
                 retirement_handoff_accepted: false,
                 retirement_completed: false,
+                generation_terminal_kind: None,
             };
         };
         progress.retire_device_generation_and_wait(retirement, timeout)
@@ -761,6 +811,28 @@ impl HeadlessViewerGpuAdapter {
     /// Adapter identity bound to this execution device.
     pub(crate) fn adapter_info(&self) -> &HeadlessViewerGpuAdapterInfo {
         &self.adapter_info
+    }
+
+    /// Snapshot exact GPU ownership without polling or changing publication state.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn endurance_snapshot(&self) -> HeadlessViewerGpuEnduranceSnapshot {
+        let terminal = self.device_progress.generation_terminal();
+        let terminal_kind = terminal.as_ref().map(|terminal| terminal.kind);
+        let device_lost = terminal_kind
+            == Some(
+                crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceLost,
+            );
+        let progress_failed = terminal_kind
+            == Some(
+                crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::ProgressFailure,
+            );
+        HeadlessViewerGpuEnduranceSnapshot {
+            submission_owners: self.submission_lifecycle.active_count(),
+            physical_output_owners: self.physical_outputs.active_count(),
+            staged_successor_owners: self.staged_successors.len(),
+            device_loss_count: u64::from(device_lost),
+            fatal_error_count: u64::from(progress_failed),
+        }
     }
 
     /// Exact App session qualifying renderer-local native-import tokens.

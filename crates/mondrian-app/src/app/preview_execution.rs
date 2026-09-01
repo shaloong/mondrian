@@ -509,7 +509,7 @@ impl PreviewGpuFrameStaging {
         self.frames.retain(|frame| expected.contains(&frame.playback_intent()));
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn len(&self) -> usize {
         self.frames.len()
     }

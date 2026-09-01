@@ -53,11 +53,14 @@ product-process-tree memory result into `EnduranceSample`. The validation
 driver must derive recovery/resource/artifact-verification facts from the
 production owners; the capture authority pins that producer, and the evidence
 supervisor emits typed raw events rather than accepting arbitrary counter/hash
-files.
+files. Each returned snapshot is privately bound to its phase kind; the
+supervisor rejects an Export-only zero-realtime snapshot in Playback or
+Recovery.
 
 Use the validation-only `EnduranceExecutionOwners` group for the software
 Preview/Audio/GPU lifetime. Its consuming shutdown must complete before the
-terminal sample and must receive the phase's actual `AppState`; a separately
+terminal sample and consumes the phase's complete `AppState`, proving that its
+Playback binding cannot survive terminal projection. A separately
 constructed Audio Playback instance is not closure evidence for workers pumped
 by that state. Supply an explicit GPU retirement timeout appropriate to the
 approved rig; `timed_out`, a rejected retirement handoff, worker panic, or an
@@ -65,6 +68,11 @@ incomplete retirement receipt is a failed closure and must never be rewritten
 as quiescence. The detached progress worker remains the resource authority
 after a timeout, so the containing validation process must also remain inside
 the external process-tree supervision policy until it is reaped.
+
+An unexpected PCM render-worker exit replaces the App Audio owner only after
+its cumulative failure counters are absorbed into the validation ledger.
+Endurance capture reads the ledger plus the current owner; never read the new
+`ExecutionUnavailable` snapshot alone or historical counters can regress.
 
 The concrete endurance runtime inside `mondrian-app` must drive realtime
 software work through its crate-private `app::headless_realtime_playback`
@@ -86,14 +94,17 @@ Construct `EnduranceRunCapture` from the exact profile, release identity, and
 capture-authority file. Start phases only through `begin_phase`; it verifies the
 raw checked-in workload contract bytes. Submit each owner observation through
 `EndurancePhaseCapture::capture_and_push`; direct sample insertion is not a
-public producer seam. Record independently validated artifacts through
-`record_export_artifact_verified` and recovery operations through
-`record_recovery_step_completed`. The latter enforces the checked-in four-step
-cycle order. The supervisor automatically seals and publishes full chunks and
-generates the raw producer JSON plus normalized report. Finish executed phases
-with typed Reference Output diagnostics and `ExportQueueShutdownEvidence`, or
-use `finish_not_run` before any sample when an external prerequisite is absent.
-Commit phases in profile order and call `seal_manifest` once.
+public producer seam. The campaign coordinator routes sealed Export events into
+the crate-private artifact recorder. The recovery recorder and counter remain
+unavailable to production callers until typed, externally recomputable
+before/after operation receipts exist; caller-authored SHA strings are not an
+acceptable substitute. The supervisor automatically seals and publishes full
+chunks and generates the raw producer JSON plus normalized report. Finish
+executed phases with final Reference Output accounting and
+`ExportQueueShutdownEvidence`, or use `finish_not_run` before any sample when an
+external prerequisite is absent. Reference diagnostics do not yet prove vendor
+callback-thread/device-session consumption. Commit phases in profile order and
+call `seal_manifest` once.
 
 Before recording an artifact event, call
 `mondrian_export::verify_export_artifact` with the stable Export job/artifact
@@ -110,23 +121,32 @@ video, changed file, or exceeded evidence-output bound is a verification
 failure, never an artifact counter increment. Artifact identities cannot repeat
 within one phase.
 
-Production orchestration should normally enter through
-`run_endurance_campaign`. Its concrete `EnduranceCampaignRuntime` must pump the
-actual owners until each absolute campaign deadline, return an atomic snapshot,
-and synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
-coordinator takes the final sample. The coordinator owns cadence, native
+Production orchestration will enter through a public high-level App runner that
+uses `run_endurance_campaign` internally. Its concrete
+`EnduranceCampaignRuntime` must pump the actual owners until each absolute
+campaign deadline, return one coordinator-bounded capture envelope, and
+synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
+coordinator takes the final sample. That concrete three-phase runtime and thin
+validation executable are not implemented at this checkpoint. The coordinator owns cadence, native
 `ProductProcessTree` probing, phase order, and evidence publication. If a
 physical provider or required fixture is absent, `begin_phase` must return
 `NotRun` before starting work; a started phase cannot be downgraded to
-`NotRun`.
+`NotRun`. Any `begin_phase` error may follow partial owner creation and therefore
+must retain enough state for the supervisor's exactly-once consuming cleanup.
+An `Ok` shutdown receipt is still rejected immediately when any software
+worker, supervised child, Export worker, pending job, or active job remains;
+the coordinator must not take the final sample or admit the next phase.
 
 At every profile cadence:
 
 1. record scheduled monotonic offset;
-2. start the native product-process-tree memory query on the evidence worker;
-3. atomically snapshot Playback Evidence, Reference Output diagnostics, Export
-   endurance diagnostics, outstanding leases/queues, and independent artifact
-   verification totals;
+2. stamp the capture-envelope start immediately before the native
+   product-process-tree memory query;
+3. collect internally consistent Playback Evidence, Reference Output
+   diagnostics, Export endurance diagnostics, outstanding leases/queues, and
+   independent artifact-verification totals without claiming one cross-thread
+   linearization instant; snapshot adapters may refresh bounded diagnostics but
+   must not schedule, pump, or poll phase work;
 4. record completion offset and append the exact next sequence;
 5. when the 120-sample buffer is full, the supervisor seals it, publishes it
    create-only, fsyncs, and retains only its receipt and digest before
