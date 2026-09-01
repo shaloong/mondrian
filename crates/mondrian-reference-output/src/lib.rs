@@ -29,7 +29,8 @@ pub use frame::{
 };
 pub use module::{
     ReferenceOutputDiagnostics, ReferenceOutputError, ReferenceOutputModule,
-    ReferenceOutputModuleShutdownReceipt, ReferenceOutputState,
+    ReferenceOutputModuleShutdownReceipt, ReferenceOutputModuleStopCoordinator,
+    ReferenceOutputModuleStopOutcome, ReferenceOutputState,
 };
 pub use signal::{
     ReferenceAudioCadence, ReferenceAudioCadenceError, ReferenceHdrSignal,

@@ -147,6 +147,170 @@ pub struct ReferenceOutputModuleShutdownReceipt {
     pub module_failure: Option<String>,
 }
 
+/// Completion of an ordinary product stop coordinated away from the caller.
+///
+/// A clean stop returns the reusable Module, including its discovery Adapter.
+/// Any provider, coordinator, or accounting failure consumes that Module on
+/// the coordinator and returns terminal fail-closed evidence instead. This
+/// prevents a caller from accidentally reusing an owner whose device release
+/// was not positively proven.
+pub enum ReferenceOutputModuleStopOutcome<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    /// The Session was consumed cleanly and the Adapter can be reused.
+    Stopped(Box<ReferenceOutputModule<A>>),
+    /// The Module could not be recovered with proven resource closure.
+    Terminal(Box<ReferenceOutputModuleShutdownReceipt>),
+}
+
+impl<A> ReferenceOutputModuleStopOutcome<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    fn stopped(module: ReferenceOutputModule<A>) -> Self {
+        Self::Stopped(Box::new(module))
+    }
+
+    fn terminal(receipt: ReferenceOutputModuleShutdownReceipt) -> Self {
+        Self::Terminal(Box::new(receipt))
+    }
+}
+
+/// In-flight ordinary product stop for one complete Module owner.
+///
+/// The coordinator owns Session consumption. Dropping this value never joins
+/// the provider worker and never destroys a returned Module on the dropping
+/// thread; an unobserved completion is handed to a detached reaper instead.
+pub struct ReferenceOutputModuleStopCoordinator<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    handle: Option<thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>>,
+    immediate_failure: Option<ReferenceOutputModuleShutdownReceipt>,
+    panic_failure: Option<ReferenceOutputModuleShutdownReceipt>,
+    timeout_failure: Option<ReferenceOutputModuleShutdownReceipt>,
+    shutdown_request_admitted: bool,
+    completed_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl<A> ReferenceOutputModuleStopCoordinator<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    /// Whether coordinator completion can be consumed without waiting.
+    pub fn is_finished(&self) -> bool {
+        self.immediate_failure.is_some()
+            || self.handle.as_ref().is_none_or(thread::JoinHandle::is_finished)
+    }
+
+    /// Whether the provider accepted the non-blocking shutdown request.
+    ///
+    /// A false value does not return ownership to the caller: the coordinator
+    /// still consumes the fail-closed Session and produces terminal evidence.
+    pub const fn shutdown_request_admitted(&self) -> bool {
+        self.shutdown_request_admitted
+    }
+
+    /// Observe completion only until one shared absolute deadline.
+    ///
+    /// Completion wins at the deadline boundary. A still-running worker is
+    /// transferred to a detached reaper so its eventual Module/Adapter Drop
+    /// cannot run on this caller.
+    pub fn finish_until(mut self, deadline: Instant) -> ReferenceOutputModuleStopOutcome<A> {
+        if let Some(receipt) = self.immediate_failure.take() {
+            return ReferenceOutputModuleStopOutcome::terminal(receipt);
+        }
+        let Some(handle) = self.handle.take() else {
+            return ReferenceOutputModuleStopOutcome::terminal(
+                self.panic_failure.take().unwrap_or_else(|| {
+                    missing_stop_coordinator_receipt("ordinary stop coordinator owner is missing")
+                }),
+            );
+        };
+
+        let mut handle = Some(handle);
+        loop {
+            if handle.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+                let Some(handle) = handle.take() else {
+                    return ReferenceOutputModuleStopOutcome::terminal(
+                        missing_stop_coordinator_receipt(
+                            "ordinary stop coordinator finished without an owned handle",
+                        ),
+                    );
+                };
+                let Some(completed_at) = completion_time(&self.completed_at) else {
+                    let _reaper_started = detach_stop_coordinator(handle);
+                    return ReferenceOutputModuleStopOutcome::terminal(
+                        missing_stop_coordinator_receipt(
+                            "ordinary stop coordinator finished without a completion timestamp",
+                        ),
+                    );
+                };
+                if completed_at > deadline {
+                    return self.timeout_outcome(handle);
+                }
+                return match handle.join() {
+                    Ok(outcome) => mark_stop_coordinator_joined(outcome),
+                    Err(_) => ReferenceOutputModuleStopOutcome::terminal(
+                        self.panic_failure.take().unwrap_or_else(|| {
+                            missing_stop_coordinator_receipt(
+                                "ordinary stop coordinator panic receipt is missing",
+                            )
+                        }),
+                    ),
+                };
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                if handle.as_ref().is_some_and(thread::JoinHandle::is_finished) {
+                    continue;
+                }
+                let Some(handle) = handle.take() else {
+                    return ReferenceOutputModuleStopOutcome::terminal(
+                        missing_stop_coordinator_receipt(
+                            "ordinary stop coordinator timed out without an owned handle",
+                        ),
+                    );
+                };
+                return self.timeout_outcome(handle);
+            }
+            thread::sleep((deadline - now).min(Duration::from_millis(1)));
+        }
+    }
+
+    fn timeout_outcome(
+        &mut self,
+        handle: thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>,
+    ) -> ReferenceOutputModuleStopOutcome<A> {
+        let reaper_started = detach_stop_coordinator(handle);
+        let mut receipt = self.timeout_failure.take().unwrap_or_else(|| {
+            missing_stop_coordinator_receipt("ordinary stop coordinator timeout receipt is missing")
+        });
+        if !reaper_started {
+            receipt.session.coordinator.owner_abandoned = true;
+            append_shutdown_failure(
+                &mut receipt.module_failure,
+                "ordinary stop reaper could not be spawned; coordinator owner was abandoned"
+                    .to_owned(),
+            );
+        }
+        ReferenceOutputModuleStopOutcome::terminal(receipt)
+    }
+}
+
+impl<A> Drop for ReferenceOutputModuleStopCoordinator<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            let _reaper_started = detach_stop_coordinator(handle);
+        }
+    }
+}
+
 impl ReferenceOutputModuleShutdownReceipt {
     /// Whether both Module and provider facts prove complete resource release.
     pub const fn all_resources_released(&self) -> bool {
@@ -169,12 +333,27 @@ pub struct ReferenceOutputModule<A> {
     shutdown_request_failure: Option<ReferenceOutputProviderShutdownFailure>,
     shutdown_module_failure: Option<String>,
     outstanding_frames_at_shutdown_request: Option<u64>,
+    completed_stop_session: Option<ReferenceOutputSessionShutdownReceipt>,
+    completed_stop_outstanding_frames: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ScheduledBundleEvidence {
     frame_index: u64,
     ancillary_sha256: [u8; 32],
+}
+
+struct CompletionStamp {
+    completed_at: Arc<Mutex<Option<Instant>>>,
+}
+
+impl Drop for CompletionStamp {
+    fn drop(&mut self) {
+        match self.completed_at.lock() {
+            Ok(mut completed_at) => *completed_at = Some(Instant::now()),
+            Err(poisoned) => *poisoned.into_inner() = Some(Instant::now()),
+        }
+    }
 }
 
 impl<A> ReferenceOutputModule<A>
@@ -194,6 +373,8 @@ where
             shutdown_request_failure: None,
             shutdown_module_failure: None,
             outstanding_frames_at_shutdown_request: None,
+            completed_stop_session: None,
+            completed_stop_outstanding_frames: None,
         }
     }
 
@@ -244,6 +425,8 @@ where
                 self.shutdown_request_failure = None;
                 self.shutdown_module_failure = None;
                 self.outstanding_frames_at_shutdown_request = None;
+                self.completed_stop_session = None;
+                self.completed_stop_outstanding_frames = None;
                 Ok(())
             }
             Err(error) => {
@@ -423,10 +606,18 @@ where
     /// resources. Call [`Self::shutdown`] when the caller must retain that
     /// receipt as qualification evidence.
     pub fn stop(&mut self) -> Result<(), ReferenceOutputError> {
+        if self.session.is_none() {
+            self.request = None;
+            self.abort_outstanding()?;
+            return Ok(());
+        }
+        let outstanding_frames_before_shutdown = self.shutdown_outstanding_count();
         let session_shutdown = self.session.take().map_or_else(
             ReferenceOutputSessionShutdownReceipt::never_opened,
             |session| session.shutdown(),
         );
+        self.completed_stop_session = Some(session_shutdown.clone());
+        self.completed_stop_outstanding_frames = Some(outstanding_frames_before_shutdown);
         self.abort_outstanding()?;
         self.request = None;
         if !session_shutdown.all_resources_released() {
@@ -448,6 +639,22 @@ where
         Ok(())
     }
 
+    /// Admit an ordinary product stop without consuming vendor shutdown on
+    /// the calling thread.
+    ///
+    /// Admission closes scheduling authority and issues only the provider's
+    /// non-blocking shutdown request. Session consumption then runs on a
+    /// dedicated coordinator. Callers must treat the returned owner as
+    /// `Stopping` until [`ReferenceOutputModuleStopCoordinator::finish_until`]
+    /// returns a clean reusable Module; admission alone is not provider release
+    /// evidence.
+    pub fn begin_stop(self) -> ReferenceOutputModuleStopCoordinator<A>
+    where
+        A: 'static,
+    {
+        begin_module_stop(self)
+    }
+
     /// Consume the Module and return complete scheduler/provider shutdown evidence.
     ///
     /// This operation never discards a provider failure behind an error return:
@@ -455,10 +662,13 @@ where
     /// retained in the returned receipt.
     pub fn shutdown(mut self) -> ReferenceOutputModuleShutdownReceipt {
         let outstanding_frames_before_shutdown = self.shutdown_outstanding_count();
-        let session = self.session.take().map_or_else(
-            ReferenceOutputSessionShutdownReceipt::never_opened,
-            |session| session.shutdown(),
-        );
+        let session = match self.session.take() {
+            Some(session) => session.shutdown(),
+            None => self
+                .completed_stop_session
+                .take()
+                .unwrap_or_else(ReferenceOutputSessionShutdownReceipt::never_opened),
+        };
         self.finalize_shutdown(session, outstanding_frames_before_shutdown)
     }
 
@@ -478,6 +688,12 @@ where
     }
 
     fn shutdown_outstanding_count(&mut self) -> u64 {
+        if self.session.is_none()
+            && self.completed_stop_session.is_some()
+            && let Some(count) = self.completed_stop_outstanding_frames
+        {
+            return count;
+        }
         if let Some(count) = self.outstanding_frames_at_shutdown_request {
             return count;
         }
@@ -543,6 +759,42 @@ where
             outstanding_frames_before_shutdown,
             module_failure,
         }
+    }
+
+    fn finish_ordinary_stop(mut self) -> ReferenceOutputModuleStopOutcome<A>
+    where
+        A: 'static,
+    {
+        let outstanding_frames_before_shutdown = self.shutdown_outstanding_count();
+        let session = self.session.take().map_or_else(
+            ReferenceOutputSessionShutdownReceipt::never_opened,
+            |session| session.shutdown(),
+        );
+        self.request = None;
+        if let Err(error) = self.abort_outstanding() {
+            append_shutdown_failure(&mut self.shutdown_module_failure, error.to_string());
+        }
+
+        if self.shutdown_request_failure.is_none()
+            && self.shutdown_module_failure.is_none()
+            && session.all_resources_released()
+        {
+            let session_present = session.session_present;
+            self.completed_stop_session = Some(session);
+            self.completed_stop_outstanding_frames = Some(outstanding_frames_before_shutdown);
+            if session_present {
+                self.diagnostics.state = ReferenceOutputState::Stopped;
+            }
+            self.shutdown_request_attempted = false;
+            self.shutdown_request_failure = None;
+            self.shutdown_module_failure = None;
+            self.outstanding_frames_at_shutdown_request = None;
+            return ReferenceOutputModuleStopOutcome::stopped(self);
+        }
+
+        ReferenceOutputModuleStopOutcome::terminal(
+            self.finalize_shutdown(session, outstanding_frames_before_shutdown),
+        )
     }
 
     fn unresolved_shutdown_receipt(
@@ -811,6 +1063,261 @@ where
     }
 }
 
+fn begin_module_stop<A>(module: ReferenceOutputModule<A>) -> ReferenceOutputModuleStopCoordinator<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    begin_module_stop_with_spawner(module, |work| {
+        thread::Builder::new()
+            .name("mondrian-reference-output-stop".to_owned())
+            .spawn(work)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn begin_module_stop_with_spawner<A, F>(
+    mut module: ReferenceOutputModule<A>,
+    spawn: F,
+) -> ReferenceOutputModuleStopCoordinator<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+    F: FnOnce(
+        Box<dyn FnOnce() -> ReferenceOutputModuleStopOutcome<A> + Send>,
+    ) -> Result<thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>, String>,
+{
+    if !module.shutdown_request_attempted {
+        let _request_failed = module.begin_shutdown().is_err();
+    }
+    let shutdown_request_admitted = module.shutdown_request_failure.is_none();
+    let outstanding_frames_before_shutdown = module.shutdown_outstanding_count();
+    let payload_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "stop_coordinator_payload",
+        "ordinary stop coordinator could not acquire the Reference Output Module owner",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: true,
+            panicked: false,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: true,
+        },
+    );
+    let mut spawn_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "stop_coordinator_spawn",
+        "ordinary stop coordinator thread could not be spawned",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: false,
+            joined: false,
+            panicked: false,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: true,
+        },
+    );
+    let panic_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "stop_coordinator_panic",
+        "ordinary stop coordinator panicked while consuming the provider Session",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: true,
+            panicked: true,
+            timed_out: false,
+            detached: false,
+            owner_abandoned: false,
+        },
+    );
+    let timeout_failure = module.unresolved_shutdown_receipt(
+        outstanding_frames_before_shutdown,
+        "stop_coordinator_timeout",
+        "absolute stop deadline elapsed before coordinator completion was observed",
+        ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: false,
+            panicked: false,
+            timed_out: true,
+            detached: true,
+            owner_abandoned: false,
+        },
+    );
+
+    // Retain the Module outside the closure until the worker starts. A failed
+    // thread spawn drops its closure on this caller; the explicit leak below
+    // is preferable to running an unbounded provider/Adapter destructor here.
+    let payload = Arc::new(Mutex::new(Some(module)));
+    let worker_payload = Arc::clone(&payload);
+    let completed_at = Arc::new(Mutex::new(None));
+    let worker_completed_at = Arc::clone(&completed_at);
+    let work = Box::new(move || {
+        let _completion_stamp = CompletionStamp { completed_at: worker_completed_at };
+        match take_shutdown_module(&worker_payload) {
+            Some(module) => module.finish_ordinary_stop(),
+            None => ReferenceOutputModuleStopOutcome::terminal(payload_failure),
+        }
+    });
+    let spawn_result = panic::catch_unwind(AssertUnwindSafe(|| spawn(work)));
+    let spawn_result = match spawn_result {
+        Ok(result) => result,
+        Err(_) => Err("ordinary stop coordinator spawner panicked".to_owned()),
+    };
+    match spawn_result {
+        Ok(handle) => ReferenceOutputModuleStopCoordinator {
+            handle: Some(handle),
+            immediate_failure: None,
+            panic_failure: Some(panic_failure),
+            timeout_failure: Some(timeout_failure),
+            shutdown_request_admitted,
+            completed_at,
+        },
+        Err(error) => {
+            if let Some(module) = take_shutdown_module(&payload) {
+                std::mem::forget(module);
+            }
+            if let Some(failure) = spawn_failure.session.provider_failure.as_mut() {
+                failure.detail = error.clone();
+            }
+            spawn_failure.diagnostics.last_error = Some(format!(
+                "provider stop_coordinator_spawn failed during ordinary stop: {error}"
+            ));
+            ReferenceOutputModuleStopCoordinator {
+                handle: None,
+                immediate_failure: Some(spawn_failure),
+                panic_failure: Some(panic_failure),
+                timeout_failure: Some(timeout_failure),
+                shutdown_request_admitted,
+                completed_at,
+            }
+        }
+    }
+}
+
+fn detach_stop_coordinator<A>(
+    handle: thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>,
+) -> bool
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    detach_stop_coordinator_with_spawner(handle, |work| {
+        thread::Builder::new()
+            .name("mondrian-reference-output-stop-reaper".to_owned())
+            .spawn(work)
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn detach_stop_coordinator_with_spawner<A, F>(
+    handle: thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>,
+    spawn: F,
+) -> bool
+where
+    A: ReferenceOutputAdapter + 'static,
+    F: FnOnce(Box<dyn FnOnce() + Send>) -> Result<thread::JoinHandle<()>, String>,
+{
+    // The JoinHandle can contain a completed reusable Module. Retain it outside
+    // the reaper closure until the new thread starts so spawn failure cannot
+    // destroy that Module on this caller.
+    let payload = Arc::new(Mutex::new(Some(handle)));
+    let worker_payload = Arc::clone(&payload);
+    let work = Box::new(move || {
+        if let Some(handle) = take_stop_handle(&worker_payload) {
+            let _outcome = handle.join();
+        }
+    });
+    let spawn_result = panic::catch_unwind(AssertUnwindSafe(|| spawn(work)));
+    if matches!(spawn_result, Ok(Ok(_))) {
+        true
+    } else {
+        if let Some(handle) = take_stop_handle(&payload) {
+            std::mem::forget(handle);
+        }
+        false
+    }
+}
+
+fn mark_stop_coordinator_joined<A>(
+    mut outcome: ReferenceOutputModuleStopOutcome<A>,
+) -> ReferenceOutputModuleStopOutcome<A>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    let facts = match &mut outcome {
+        ReferenceOutputModuleStopOutcome::Stopped(module) => {
+            module.completed_stop_session.as_mut().map(|session| &mut session.coordinator)
+        }
+        ReferenceOutputModuleStopOutcome::Terminal(receipt) => {
+            Some(&mut receipt.session.coordinator)
+        }
+    };
+    if let Some(facts) = facts {
+        let provider = *facts;
+        *facts = ReferenceOutputShutdownCoordinatorFacts {
+            required: true,
+            spawned: true,
+            joined: true,
+            panicked: provider.panicked,
+            timed_out: provider.timed_out,
+            detached: provider.detached,
+            owner_abandoned: provider.owner_abandoned,
+        };
+    }
+    outcome
+}
+
+fn take_stop_handle<A>(
+    payload: &Mutex<Option<thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>>>,
+) -> Option<thread::JoinHandle<ReferenceOutputModuleStopOutcome<A>>>
+where
+    A: ReferenceOutputAdapter + 'static,
+{
+    match payload.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    }
+}
+
+fn completion_time(completed_at: &Mutex<Option<Instant>>) -> Option<Instant> {
+    match completed_at.lock() {
+        Ok(completed_at) => *completed_at,
+        Err(poisoned) => *poisoned.into_inner(),
+    }
+}
+
+fn missing_stop_coordinator_receipt(detail: &str) -> ReferenceOutputModuleShutdownReceipt {
+    let coordinator = ReferenceOutputShutdownCoordinatorFacts {
+        required: true,
+        spawned: false,
+        joined: false,
+        panicked: false,
+        timed_out: false,
+        detached: false,
+        owner_abandoned: true,
+    };
+    ReferenceOutputModuleShutdownReceipt {
+        schema_version: 2,
+        session: unresolved_session_shutdown(
+            true,
+            false,
+            0,
+            "stop_coordinator_state",
+            detail,
+            coordinator,
+        ),
+        diagnostics: ReferenceOutputDiagnostics {
+            state: ReferenceOutputState::Failed,
+            last_error: Some(detail.to_owned()),
+            ..ReferenceOutputDiagnostics::default()
+        },
+        outstanding_frames_before_shutdown: 0,
+        module_failure: Some(detail.to_owned()),
+    }
+}
+
 fn shutdown_module_until<A>(
     module: ReferenceOutputModule<A>,
     deadline: Instant,
@@ -906,11 +1413,20 @@ where
     // Module owner remains visible in the returned resource count.
     let payload = Arc::new(Mutex::new(Some(module)));
     let worker_payload = Arc::clone(&payload);
-    let work = Box::new(move || match take_shutdown_module(&worker_payload) {
-        Some(module) => module.shutdown(),
-        None => payload_failure,
+    let completed_at = Arc::new(Mutex::new(None));
+    let worker_completed_at = Arc::clone(&completed_at);
+    let work = Box::new(move || {
+        let _completion_stamp = CompletionStamp { completed_at: worker_completed_at };
+        match take_shutdown_module(&worker_payload) {
+            Some(module) => module.shutdown(),
+            None => payload_failure,
+        }
     });
-    let coordinator = spawn(work);
+    let coordinator = panic::catch_unwind(AssertUnwindSafe(|| spawn(work)));
+    let coordinator = match coordinator {
+        Ok(result) => result,
+        Err(_) => Err("Module shutdown coordinator spawner panicked".to_owned()),
+    };
     let handle = match coordinator {
         Ok(handle) => handle,
         Err(error) => {
@@ -934,6 +1450,9 @@ where
         // observable, joining is non-blocking and positively proves that the
         // Module destructor already ran on the coordinator.
         if handle.is_finished() {
+            if completion_time(&completed_at).is_none_or(|completed_at| completed_at > deadline) {
+                return timeout_failure;
+            }
             return match handle.join() {
                 Ok(mut receipt) => {
                     let provider_coordinator = receipt.session.coordinator;
@@ -1720,6 +2239,173 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_stop_admission_never_waits_for_blocking_session_shutdown() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_shutdown_delay(&request, Duration::from_millis(150));
+        module.open(&device, request, 0).expect("open");
+
+        let started = Instant::now();
+        let stopping = module.begin_stop();
+        assert!(started.elapsed() < Duration::from_millis(75));
+
+        let outcome = stopping.finish_until(Instant::now() + Duration::from_secs(1));
+        let ReferenceOutputModuleStopOutcome::Stopped(module) = outcome else {
+            panic!("ordinary stop should return a reusable Module");
+        };
+        assert_eq!(module.diagnostics().state, ReferenceOutputState::Stopped);
+        let receipt = module.shutdown_until(Instant::now() + Duration::from_secs(1));
+        assert!(receipt.session.session_present);
+        assert!(receipt.session.coordinator.required);
+        assert!(receipt.session.coordinator.joined);
+        assert!(receipt.all_resources_released());
+    }
+
+    #[test]
+    fn ordinary_stop_timeout_is_bounded_and_fail_closed() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_shutdown_delay(&request, Duration::from_millis(150));
+        module.open(&device, request, 0).expect("open");
+
+        let started = Instant::now();
+        let outcome = module.begin_stop().finish_until(Instant::now() + Duration::from_millis(5));
+        assert!(started.elapsed() < Duration::from_millis(75));
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("deadline must not recover a still-running Module");
+        };
+        assert!(receipt.session.coordinator.timed_out);
+        assert!(receipt.session.coordinator.detached);
+        assert!(!receipt.all_resources_released());
+        thread::sleep(Duration::from_millis(200));
+    }
+
+    #[test]
+    fn ordinary_stop_finished_after_deadline_cannot_be_promoted_to_clean() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
+        module.open(&device, request, 0).expect("open");
+        let deadline = Instant::now();
+        let stopping = module.begin_stop();
+        while !stopping.is_finished() {
+            thread::yield_now();
+        }
+
+        let outcome = stopping.finish_until(deadline);
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("late completion must remain fail closed");
+        };
+        assert!(receipt.session.coordinator.timed_out);
+        assert!(receipt.session.coordinator.detached);
+        assert!(!receipt.all_resources_released());
+        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+        while !adapter_dropped.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
+            thread::yield_now();
+        }
+        assert!(adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_stop_spawn_failure_never_drops_module_on_caller() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
+        module.open(&device, request, 0).expect("open");
+
+        let stopping = begin_module_stop_with_spawner(module, |_work| {
+            Err("synthetic ordinary stop spawn failure".to_owned())
+        });
+        let outcome = stopping.finish_until(Instant::now());
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("spawn failure must be terminal");
+        };
+        assert!(!receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.owner_abandoned);
+        assert!(!receipt.all_resources_released());
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_stop_panicking_spawner_abandons_owner_off_caller() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) =
+            drop_tracked_module_with_delay(&request, Duration::from_millis(150));
+        module.open(&device, request, 0).expect("open");
+
+        let started = Instant::now();
+        let stopping = begin_module_stop_with_spawner(module, |_work| {
+            panic!("synthetic ordinary stop spawner panic")
+        });
+        assert!(started.elapsed() < Duration::from_millis(75));
+        let outcome = stopping.finish_until(Instant::now());
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("spawner panic must be terminal");
+        };
+        assert!(receipt.session.coordinator.owner_abandoned);
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn panicking_reaper_spawner_never_drops_completed_module_on_caller() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
+        module.open(&device, request, 0).expect("open");
+        let mut stopping = module.begin_stop();
+        while !stopping.is_finished() {
+            thread::yield_now();
+        }
+        let handle = stopping.handle.take().expect("completed coordinator handle");
+        drop(stopping);
+
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            detach_stop_coordinator_with_spawner(handle, |_work| {
+                panic!("synthetic reaper spawner panic")
+            })
+        }));
+        assert!(matches!(result, Ok(false)));
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_stop_preserves_stale_provider_receipt_schema() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_stale_shutdown_schema(&request);
+        module.open(&device, request, 0).expect("open");
+
+        let outcome = module.begin_stop().finish_until(Instant::now() + Duration::from_secs(1));
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("stale provider schema must fail closed");
+        };
+        assert_eq!(receipt.schema_version, 2);
+        assert_eq!(receipt.session.schema_version, 1);
+        assert!(receipt.session.coordinator.joined);
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn ordinary_stop_request_failure_still_consumes_owner_on_coordinator() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device) = module_with_begin_shutdown_panic(&request);
+        module.open(&device, request, 0).expect("open");
+
+        let stopping = module.begin_stop();
+        assert!(!stopping.shutdown_request_admitted());
+        let outcome = stopping.finish_until(Instant::now() + Duration::from_secs(1));
+        let ReferenceOutputModuleStopOutcome::Terminal(receipt) = outcome else {
+            panic!("failed request admission must remain terminal");
+        };
+        assert!(receipt.session.coordinator.joined);
+        assert!(!receipt.session.shutdown_request_completed);
+        assert_eq!(
+            receipt
+                .session
+                .provider_failure
+                .as_ref()
+                .map(|failure| failure.operation.as_str()),
+            Some("begin_shutdown")
+        );
+        assert!(!receipt.all_resources_released());
+        thread::sleep(Duration::from_millis(120));
+    }
+
+    #[test]
     fn bounded_shutdown_signals_first_and_joins_clean_coordinator() {
         let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
         let (mut module, device, adapter_dropped) = drop_tracked_module(&request);
@@ -1870,6 +2556,25 @@ mod tests {
     }
 
     #[test]
+    fn whole_module_finished_after_deadline_cannot_be_promoted_to_clean() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (module, _device, adapter_dropped) = drop_tracked_module(&request);
+        let deadline = Instant::now();
+        let receipt = shutdown_module_until_with_spawner(module, deadline, |work| {
+            let handle = thread::spawn(work);
+            while !handle.is_finished() {
+                thread::yield_now();
+            }
+            Ok(handle)
+        });
+
+        assert!(adapter_dropped.load(Ordering::Acquire));
+        assert!(receipt.session.coordinator.timed_out);
+        assert!(receipt.session.coordinator.detached);
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
     fn bounded_shutdown_deadline_covers_blocking_adapter_destruction() {
         let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
         let (module, _device, adapter_dropped) =
@@ -1883,6 +2588,11 @@ mod tests {
         assert!(receipt.session.coordinator.detached);
         assert!(!adapter_dropped.load(Ordering::Acquire));
         assert!(!receipt.all_resources_released());
+        let cleanup_deadline = Instant::now() + Duration::from_secs(1);
+        while !adapter_dropped.load(Ordering::Acquire) && Instant::now() < cleanup_deadline {
+            thread::yield_now();
+        }
+        assert!(adapter_dropped.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1913,6 +2623,27 @@ mod tests {
                 .map(|failure| failure.operation.as_str()),
             Some("coordinator_spawn")
         );
+        assert!(!adapter_dropped.load(Ordering::Acquire));
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn bounded_shutdown_panicking_spawner_does_not_drop_provider_on_caller() {
+        let request = request(ReferenceOutputReferencePolicy::FreeRunAllowed);
+        let (mut module, device, adapter_dropped) =
+            drop_tracked_module_with_delay(&request, Duration::from_millis(150));
+        module.open(&device, request, 0).expect("open");
+
+        let started = Instant::now();
+        let receipt = shutdown_module_until_with_spawner(
+            module,
+            Instant::now() + Duration::from_secs(1),
+            |_work| panic!("synthetic Module shutdown spawner panic"),
+        );
+
+        assert!(started.elapsed() < Duration::from_millis(75));
+        assert!(!receipt.session.coordinator.spawned);
+        assert!(receipt.session.coordinator.owner_abandoned);
         assert!(!adapter_dropped.load(Ordering::Acquire));
         assert!(!receipt.all_resources_released());
     }

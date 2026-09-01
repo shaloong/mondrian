@@ -23,15 +23,31 @@ const PUMP_LOOKAHEAD_CHUNKS: usize = 2;
 const STDERR_TAIL_BYTES: usize = 64 * 1024;
 const CANCELLATION_POLL: Duration = Duration::from_millis(5);
 
+type OrdinaryDropShutdownWork = Box<dyn FnOnce() + Send + 'static>;
+type OrdinaryDropShutdownSpawner = Arc<
+    dyn Fn(OrdinaryDropShutdownWork) -> std::result::Result<JoinHandle<()>, String> + Send + Sync,
+>;
+
+fn product_ordinary_drop_shutdown_spawner() -> OrdinaryDropShutdownSpawner {
+    Arc::new(|work| {
+        std::thread::Builder::new()
+            .name("mondrian-audio-source-drop-shutdown".to_owned())
+            .spawn(work)
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Product decoder that reuses one bounded FFmpeg stream per active source contract.
 pub(super) struct PersistentFfmpegAudioWindowDecoder {
     state: Mutex<DecoderState>,
+    ordinary_drop_shutdown_spawner: OrdinaryDropShutdownSpawner,
 }
 
 impl Default for PersistentFfmpegAudioWindowDecoder {
     fn default() -> Self {
         Self {
             state: Mutex::new(DecoderState::new(DEFAULT_SESSION_CAPACITY)),
+            ordinary_drop_shutdown_spawner: product_ordinary_drop_shutdown_spawner(),
         }
     }
 }
@@ -226,6 +242,7 @@ impl PersistentFfmpegAudioWindowDecoder {
     pub(super) fn with_capacity(session_capacity: usize) -> Self {
         Self {
             state: Mutex::new(DecoderState::new(session_capacity)),
+            ordinary_drop_shutdown_spawner: product_ordinary_drop_shutdown_spawner(),
         }
     }
 
@@ -375,10 +392,58 @@ fn trim_idle_sessions_to_capacity(state: &mut DecoderState) -> VecDeque<DecoderE
     evicted
 }
 
+fn handoff_ordinary_drop_owner<T, F>(owner: T, spawner: &OrdinaryDropShutdownSpawner, teardown: F)
+where
+    T: Send + 'static,
+    F: FnOnce(T) + Send + 'static,
+{
+    // Builder::spawn drops an unstarted closure on failure. Retain the
+    // original owner outside that closure until successful thread creation is
+    // known, so foreign Drop code can never fall back onto this caller.
+    let payload = Arc::new(Mutex::new(Some(owner)));
+    let worker_payload = Arc::clone(&payload);
+    let work = Box::new(move || {
+        if let Some(owner) = worker_payload.lock().take() {
+            teardown(owner);
+        }
+    });
+
+    let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawner(work)));
+    match spawn_result {
+        Ok(Ok(worker)) => drop(worker),
+        Ok(Err(error)) => {
+            if let Some(owner) = payload.lock().take() {
+                tracing::error!(
+                    %error,
+                    "persistent audio decoder ordinary-drop shutdown owner was abandoned after handoff spawn failure"
+                );
+                std::mem::forget(owner);
+            }
+        }
+        Err(_) => {
+            if let Some(owner) = payload.lock().take() {
+                tracing::error!(
+                    "persistent audio decoder ordinary-drop shutdown owner was abandoned after handoff spawner panic"
+                );
+                std::mem::forget(owner);
+            }
+        }
+    }
+}
+
 impl Drop for PersistentFfmpegAudioWindowDecoder {
     fn drop(&mut self) {
         let entries = std::mem::take(&mut self.state.get_mut().entries);
-        let _ = terminate_entries(entries);
+        if entries.is_empty() {
+            return;
+        }
+
+        // The last AudioSourceCache can release this decoder from a UI or
+        // orchestration thread. Child kill/wait and pipe-pump joins therefore
+        // move to a detached teardown owner before any Session is destroyed.
+        handoff_ordinary_drop_owner(entries, &self.ordinary_drop_shutdown_spawner, |entries| {
+            let _ = terminate_entries(entries);
+        });
     }
 }
 
@@ -972,6 +1037,21 @@ mod tests {
     use crate::info::ChannelLayout;
     use mondrian_core::MediaFileFingerprint;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct BlockingDropProbe {
+        drop_started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl Drop for BlockingDropProbe {
+        fn drop(&mut self) {
+            self.drop_started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+        }
+    }
 
     fn test_session_key(index: u32) -> SessionKey {
         SessionKey {
@@ -1001,7 +1081,10 @@ mod tests {
             });
         }
         state.peak_sessions = count;
-        PersistentFfmpegAudioWindowDecoder { state: Mutex::new(state) }
+        PersistentFfmpegAudioWindowDecoder {
+            state: Mutex::new(state),
+            ordinary_drop_shutdown_spawner: product_ordinary_drop_shutdown_spawner(),
+        }
     }
 
     fn decoder_with_session(session: DecodeSession) -> PersistentFfmpegAudioWindowDecoder {
@@ -1011,7 +1094,10 @@ mod tests {
             slot: Arc::new(Mutex::new(Some(session))),
         });
         state.peak_sessions = 1;
-        PersistentFfmpegAudioWindowDecoder { state: Mutex::new(state) }
+        PersistentFfmpegAudioWindowDecoder {
+            state: Mutex::new(state),
+            ordinary_drop_shutdown_spawner: product_ordinary_drop_shutdown_spawner(),
+        }
     }
 
     fn test_decode_session(
@@ -1113,6 +1199,89 @@ mod tests {
         assert_eq!(converged.capacity_trim_evictions, 2);
         assert_eq!(decoder.state.lock().entries[0].key, test_session_key(0));
         drop(first_busy);
+    }
+
+    #[test]
+    fn ordinary_last_decoder_drop_hands_blocking_teardown_to_background() {
+        let release = Arc::new(AtomicBool::new(false));
+        let pump_exited = Arc::new(AtomicBool::new(false));
+        let pump_release = Arc::clone(&release);
+        let pump_exit = Arc::clone(&pump_exited);
+        let pump = std::thread::spawn(move || {
+            while !pump_release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            pump_exit.store(true, Ordering::Release);
+        });
+        let mut decoder = decoder_with_session(test_decode_session(None, Some(pump), None));
+        let teardown_finished = Arc::new(AtomicBool::new(false));
+        let worker_finished = Arc::clone(&teardown_finished);
+        decoder.ordinary_drop_shutdown_spawner = Arc::new(move |work| {
+            let worker_finished = Arc::clone(&worker_finished);
+            std::thread::Builder::new()
+                .name("mondrian-audio-source-drop-test".to_owned())
+                .spawn(move || {
+                    work();
+                    worker_finished.store(true, Ordering::Release);
+                })
+                .map_err(|error| error.to_string())
+        });
+        let (drop_finished_tx, drop_finished_rx) = mpsc::sync_channel(1);
+        let dropper = std::thread::spawn(move || {
+            drop(decoder);
+            let _ = drop_finished_tx.send(());
+        });
+
+        if drop_finished_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+            release.store(true, Ordering::Release);
+            let _ = dropper.join();
+            panic!("ordinary persistent decoder Drop blocked on pipe-pump teardown");
+        }
+        dropper.join().expect("ordinary decoder dropper returns");
+        assert!(!pump_exited.load(Ordering::Acquire));
+        assert!(!teardown_finished.load(Ordering::Acquire));
+
+        release.store(true, Ordering::Release);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !teardown_finished.load(Ordering::Acquire) && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(pump_exited.load(Ordering::Acquire));
+        assert!(teardown_finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn ordinary_drop_spawn_failure_abandons_owner_without_blocking_caller() {
+        let release = Arc::new(AtomicBool::new(false));
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let probe = BlockingDropProbe {
+            drop_started: Arc::clone(&drop_started),
+            release: Arc::clone(&release),
+        };
+        let spawn_attempted = Arc::new(AtomicBool::new(false));
+        let observed_spawn = Arc::clone(&spawn_attempted);
+        let failing_spawner: OrdinaryDropShutdownSpawner = Arc::new(move |_work| {
+            observed_spawn.store(true, Ordering::Release);
+            Err("synthetic ordinary-drop handoff failure".to_owned())
+        });
+        let (drop_finished_tx, drop_finished_rx) = mpsc::sync_channel(1);
+        let dropper = std::thread::spawn(move || {
+            handoff_ordinary_drop_owner(probe, &failing_spawner, |_probe| {});
+            let _ = drop_finished_tx.send(());
+        });
+
+        if drop_finished_rx.recv_timeout(Duration::from_secs(2)).is_err() {
+            release.store(true, Ordering::Release);
+            let _ = dropper.join();
+            panic!("spawn failure dropped the decoder teardown owner on the caller");
+        }
+        dropper.join().expect("spawn-failure dropper returns");
+        assert!(spawn_attempted.load(Ordering::Acquire));
+        assert!(!drop_started.load(Ordering::Acquire));
+
+        // Only a heap probe was abandoned. It contains no child or JoinHandle,
+        // so this failure test leaves no live kernel resource behind.
+        release.store(true, Ordering::Release);
     }
 
     #[test]

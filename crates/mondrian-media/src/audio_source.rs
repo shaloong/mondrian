@@ -457,22 +457,39 @@ pub struct AudioSourceCacheShutdownEvidence {
     pub external_decoder_references: usize,
     /// Deadline-bounded shutdown coordinators successfully created.
     pub shutdown_coordinators_started: u32,
-    /// Deadline-bounded shutdown coordinators observed returned.
+    /// Deadline-bounded shutdown coordinators whose termination was observed
+    /// and joined, including a joined panic or completion after the deadline.
     pub shutdown_coordinators_terminated: u32,
     /// Shutdown coordinator creation failures.
     pub shutdown_coordinator_start_failures: u32,
     /// Shutdown coordinators that panicked before publishing a receipt.
     pub shutdown_coordinator_panics: u32,
-    /// Shutdown coordinators still running at the shared deadline.
+    /// Shutdown coordinators whose own completion timestamp was after the
+    /// deadline, including a still-running coordinator detached at that seam.
     pub shutdown_coordinator_timeouts: u32,
     /// Shutdown coordinators detached after the shared deadline.
     pub shutdown_coordinator_detachments: u32,
+    /// Cache/decoder owners intentionally abandoned after coordinator creation failed.
+    ///
+    /// Abandonment keeps a potentially blocking foreign destructor off the
+    /// qualification caller, but can never be accepted as clean closure.
+    pub shutdown_coordinator_owner_abandonments: u32,
+    /// Whether complete cache/decoder resource facts were available at the
+    /// requested shutdown deadline.
+    ///
+    /// A coordinator that starts but completes late can eventually return
+    /// detailed resource fields, but those fields were not authoritative at
+    /// the deadline and this remains false.
+    pub shutdown_resource_facts_complete_at_deadline: bool,
+    /// Whether cache/decoder owner lifetime was still unresolved at the
+    /// requested shutdown deadline.
+    pub shutdown_owner_lifetime_unresolved_at_deadline: bool,
 }
 
 impl AudioSourceCacheShutdownEvidence {
     /// Whether every cache, child-process, pump-thread, and ownership fact closed exactly.
     pub const fn all_resources_released(self) -> bool {
-        self.schema_version == 2
+        self.schema_version == 3
             && self.in_flight_decodes_before == 0
             && self.external_pcm_buffer_references == 0
             && self.pcm_entries_remaining == 0
@@ -484,6 +501,9 @@ impl AudioSourceCacheShutdownEvidence {
             && self.shutdown_coordinator_panics == 0
             && self.shutdown_coordinator_timeouts == 0
             && self.shutdown_coordinator_detachments == 0
+            && self.shutdown_coordinator_owner_abandonments == 0
+            && self.shutdown_resource_facts_complete_at_deadline
+            && !self.shutdown_owner_lifetime_unresolved_at_deadline
             && AudioWindowDecoderShutdownEvidence {
                 sessions_before: self.decoder_sessions_before,
                 sessions_remaining: self.decoder_sessions_remaining,
@@ -501,6 +521,11 @@ impl AudioSourceCacheShutdownEvidence {
             }
             .all_resources_released()
     }
+}
+
+struct AudioSourceShutdownCoordinatorResult {
+    evidence: AudioSourceCacheShutdownEvidence,
+    completed_at: Instant,
 }
 
 impl AudioSourceCache {
@@ -730,7 +755,7 @@ impl AudioSourceCache {
         };
         let decoder = self.decoder.shutdown_sessions();
         AudioSourceCacheShutdownEvidence {
-            schema_version: 2,
+            schema_version: 3,
             in_flight_decodes_before,
             pcm_entries_before,
             pcm_bytes_before,
@@ -759,6 +784,9 @@ impl AudioSourceCache {
             shutdown_coordinator_panics: 0,
             shutdown_coordinator_timeouts: 0,
             shutdown_coordinator_detachments: 0,
+            shutdown_coordinator_owner_abandonments: 0,
+            shutdown_resource_facts_complete_at_deadline: true,
+            shutdown_owner_lifetime_unresolved_at_deadline: false,
         }
     }
 
@@ -770,63 +798,121 @@ impl AudioSourceCache {
 
     /// Consume cache/decoder ownership through one absolute qualification deadline.
     pub fn shutdown_until(self, deadline: Instant) -> AudioSourceCacheShutdownEvidence {
+        self.shutdown_until_with_spawner(deadline, |work| {
+            thread::Builder::new()
+                .name("mondrian-audio-source-endurance-shutdown".to_owned())
+                .spawn(work)
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    fn shutdown_until_with_spawner<F>(
+        self,
+        deadline: Instant,
+        spawn: F,
+    ) -> AudioSourceCacheShutdownEvidence
+    where
+        F: FnOnce(
+            Box<dyn FnOnce() -> AudioSourceShutdownCoordinatorResult + Send>,
+        ) -> std::result::Result<
+            thread::JoinHandle<AudioSourceShutdownCoordinatorResult>,
+            String,
+        >,
+    {
         self.begin_shutdown();
         let owner = Arc::new(Mutex::new(Some(self)));
         let coordinator_owner = Arc::clone(&owner);
-        let coordinator = thread::Builder::new()
-            .name("mondrian-audio-source-endurance-shutdown".to_owned())
-            .spawn(move || {
-                let Some(owner) = coordinator_owner.lock().take() else {
-                    return AudioSourceCache::coordinator_failure(1, 0, 0, 0, 1);
+        let coordinator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            spawn(Box::new(move || {
+                let evidence = match coordinator_owner.lock().take() {
+                    Some(owner) => owner.shutdown_and_wait(),
+                    None => AudioSourceCache::coordinator_failure(1, 1, 0, 0, 0, 0, 1),
                 };
-                owner.shutdown_and_wait()
-            });
-        let Ok(coordinator) = coordinator else {
-            // Preserve bounded caller behavior even when the operating system
-            // cannot create the coordinator. Dropping the foreign decoder owner
-            // here could synchronously wait on child/pump resources.
-            if let Some(owner) = owner.lock().take() {
-                std::mem::forget(owner);
+                AudioSourceShutdownCoordinatorResult { evidence, completed_at: Instant::now() }
+            }))
+        }));
+        let coordinator = match coordinator {
+            Ok(Ok(coordinator)) => coordinator,
+            Ok(Err(_)) | Err(_) => {
+                // Preserve bounded caller behavior even when the operating system
+                // cannot create the coordinator or an injected spawner panics.
+                // Dropping the foreign decoder owner here could synchronously
+                // wait on child/pump resources.
+                if let Some(owner) = owner.lock().take() {
+                    std::mem::forget(owner);
+                }
+                return Self::coordinator_failure(0, 0, 1, 0, 0, 0, 1);
             }
-            return Self::coordinator_failure(0, 1, 0, 0, 1);
         };
 
-        while !coordinator.is_finished() && Instant::now() < deadline {
+        loop {
+            // Completion wins at the deadline boundary. Once `is_finished`
+            // is observable, joining is non-blocking and proves that the cache
+            // owner and its decoder destructor already ran on the coordinator.
+            if coordinator.is_finished() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                if coordinator.is_finished() {
+                    continue;
+                }
+                drop(coordinator);
+                return Self::coordinator_failure(1, 0, 0, 0, 1, 1, 0);
+            }
             thread::sleep(Duration::from_millis(1));
-        }
-        if !coordinator.is_finished() {
-            drop(coordinator);
-            return Self::coordinator_failure(1, 0, 0, 1, 1);
         }
 
         match coordinator.join() {
-            Ok(mut evidence) => {
+            Ok(result) => {
+                let mut evidence = result.evidence;
                 evidence.shutdown_coordinators_started = 1;
                 evidence.shutdown_coordinators_terminated = 1;
+                if result.completed_at > deadline {
+                    evidence.shutdown_coordinator_timeouts =
+                        evidence.shutdown_coordinator_timeouts.saturating_add(1);
+                    evidence.shutdown_resource_facts_complete_at_deadline = false;
+                    evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
+                }
                 evidence
             }
-            Err(_) => Self::coordinator_failure(1, 0, 1, 0, 0),
+            Err(_) => {
+                let owner_abandonments = if let Some(owner) = owner.lock().take() {
+                    // An injected or platform spawner may have created a
+                    // worker that panicked before invoking the supplied work.
+                    // Keep that untouched owner off this caller's destructor.
+                    std::mem::forget(owner);
+                    1
+                } else {
+                    0
+                };
+                Self::coordinator_failure(1, 1, 0, 1, 0, 0, owner_abandonments)
+            }
         }
     }
 
     fn coordinator_failure(
         started: u32,
+        terminated: u32,
         start_failures: u32,
         panics: u32,
         timeouts: u32,
         detachments: u32,
+        owner_abandonments: u32,
     ) -> AudioSourceCacheShutdownEvidence {
         AudioSourceCacheShutdownEvidence {
-            schema_version: 2,
+            schema_version: 3,
             // The coordinator owns an unobservable cache/decoder lifetime.
             // Retain a conservative resource floor instead of claiming zero.
             decoder_resource_handles_remaining: 1,
             shutdown_coordinators_started: started,
-            shutdown_coordinators_terminated: u32::from(started != 0 && timeouts == 0),
+            shutdown_coordinators_terminated: terminated,
             shutdown_coordinator_start_failures: start_failures,
             shutdown_coordinator_panics: panics,
             shutdown_coordinator_timeouts: timeouts,
             shutdown_coordinator_detachments: detachments,
+            shutdown_coordinator_owner_abandonments: owner_abandonments,
+            shutdown_resource_facts_complete_at_deadline: false,
+            shutdown_owner_lifetime_unresolved_at_deadline: true,
             ..AudioSourceCacheShutdownEvidence::default()
         }
     }
@@ -1172,6 +1258,12 @@ mod tests {
 
     struct ResidualWindowDecoder;
 
+    struct BlockingDropWindowDecoder {
+        drop_started: Arc<AtomicBool>,
+        drop_finished: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
     impl AudioWindowDecoder for MalformedWindowDecoder {
         fn decode_window(
             &self,
@@ -1255,6 +1347,32 @@ mod tests {
         }
     }
 
+    impl AudioWindowDecoder for BlockingDropWindowDecoder {
+        fn decode_window(
+            &self,
+            _source: &AudioSourceIdentity,
+            _start_frame: i64,
+            _frame_count: usize,
+            _sample_rate: u32,
+            _channel_layout: AudioChannelLayout,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<AudioBuffer> {
+            Err(MondrianError::Other(anyhow::anyhow!(
+                "blocking-drop decoder must not decode"
+            )))
+        }
+    }
+
+    impl Drop for BlockingDropWindowDecoder {
+        fn drop(&mut self) {
+            self.drop_started.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::yield_now();
+            }
+            self.drop_finished.store(true, Ordering::Release);
+        }
+    }
+
     fn test_audio_source(
         decoder: Arc<RampWindowDecoder>,
         entry_capacity: usize,
@@ -1284,15 +1402,168 @@ mod tests {
         assert!(!AudioSourceCacheShutdownEvidence::default().all_resources_released());
         let evidence = AudioSourceCache::new(48_000).shutdown_and_wait();
 
-        assert_eq!(evidence.schema_version, 2);
+        assert_eq!(evidence.schema_version, 3);
         assert_eq!(
             evidence,
             AudioSourceCacheShutdownEvidence {
-                schema_version: 2,
+                schema_version: 3,
+                shutdown_resource_facts_complete_at_deadline: true,
+                shutdown_owner_lifetime_unresolved_at_deadline: false,
                 ..AudioSourceCacheShutdownEvidence::default()
             }
         );
         assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn deadline_consuming_shutdown_of_clean_cache_returns_exact_receipt() {
+        let evidence =
+            AudioSourceCache::new(48_000).shutdown_until(Instant::now() + Duration::from_secs(2));
+
+        assert_eq!(evidence.schema_version, 3);
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 0);
+        assert_eq!(evidence.shutdown_coordinator_panics, 0);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(!evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn joined_completion_after_absolute_deadline_fails_closed_as_late() {
+        let deadline = Instant::now() - Duration::from_secs(1);
+        let evidence =
+            AudioSourceCache::new(48_000).shutdown_until_with_spawner(deadline, |work| {
+                // Run the clean owner consumption before returning the handle,
+                // then wait until the result carrier is observably complete.
+                // An implementation that only checks `is_finished` would
+                // incorrectly turn this deliberately late completion clean.
+                let result = work();
+                let carrier = std::thread::spawn(move || result);
+                while !carrier.is_finished() {
+                    std::thread::yield_now();
+                }
+                Ok(carrier)
+            });
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn joined_coordinator_panic_records_termination_without_complete_facts() {
+        let evidence = AudioSourceCache::new(48_000).shutdown_until_with_spawner(
+            Instant::now() + Duration::from_secs(2),
+            |work| {
+                Ok(std::thread::spawn(
+                    move || -> AudioSourceShutdownCoordinatorResult {
+                        let _completed = work();
+                        panic!("synthetic audio-source coordinator panic after owner consumption");
+                    },
+                ))
+            },
+        );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_panics, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn deadline_consuming_shutdown_classifies_timeout_and_detaches_owner() {
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let drop_finished = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let cache = AudioSourceCache::with_decoder(
+            48_000,
+            1,
+            1,
+            1,
+            1,
+            Arc::new(BlockingDropWindowDecoder {
+                drop_started: Arc::clone(&drop_started),
+                drop_finished: Arc::clone(&drop_finished),
+                release: Arc::clone(&release),
+            }),
+        );
+
+        let evidence = cache.shutdown_until(Instant::now() + Duration::from_millis(20));
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 0);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 1);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_resources_released());
+
+        let started_deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_started.load(Ordering::Acquire) && Instant::now() < started_deadline {
+            std::thread::yield_now();
+        }
+        assert!(drop_started.load(Ordering::Acquire));
+        assert!(!drop_finished.load(Ordering::Acquire));
+        release.store(true, Ordering::Release);
+        let finished_deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_finished.load(Ordering::Acquire) && Instant::now() < finished_deadline {
+            std::thread::yield_now();
+        }
+        assert!(drop_finished.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn coordinator_spawn_failure_abandons_owner_without_running_drop_on_caller() {
+        let drop_started = Arc::new(AtomicBool::new(false));
+        let drop_finished = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let cache = AudioSourceCache::with_decoder(
+            48_000,
+            1,
+            1,
+            1,
+            1,
+            Arc::new(BlockingDropWindowDecoder {
+                drop_started: Arc::clone(&drop_started),
+                drop_finished: Arc::clone(&drop_finished),
+                release: Arc::clone(&release),
+            }),
+        );
+
+        let evidence = cache
+            .shutdown_until_with_spawner(Instant::now() + Duration::from_secs(2), |_work| {
+                Err("synthetic audio-source coordinator spawn failure".to_owned())
+            });
+
+        assert_eq!(evidence.shutdown_coordinators_started, 0);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 0);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 1);
+        assert_eq!(evidence.decoder_resource_handles_remaining, 1);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!drop_started.load(Ordering::Acquire));
+        assert!(!drop_finished.load(Ordering::Acquire));
+        assert!(!evidence.all_resources_released());
+        release.store(true, Ordering::Release);
     }
 
     #[test]

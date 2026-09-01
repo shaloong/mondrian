@@ -53,8 +53,22 @@ App is the composition and lifecycle Adapter. A Session binds to exact
 `SequenceId`, `SequenceRevision`, and Project author generation. Discovery,
 open, schedule, start, poll, and stop are machine-local operations and never
 enter Project state or Undo/Redo. Any author edit or active-Sequence change
-revokes the binding and stops queued output. Project close stops and releases
-device ownership.
+revokes the binding and admits an asynchronous stop request before more output
+can be scheduled. `AppReferenceOutputTeardownStatus::Stopping` is distinct from
+provider diagnostics: it means only that the non-blocking request was accepted,
+not that callbacks or device ownership are already closed. Open, start, bind,
+and adapter replacement non-blockingly reap a completed coordinator first and
+otherwise fail with `TeardownInProgress`; a terminal receipt latches `Failed`
+and prevents a second hardware owner from being admitted. Project close retires
+the complete Module within a fixed product budget. App Drop uses a zero-wait
+handoff, so neither path performs Session shutdown or Adapter/bridge Drop on the
+UI/calling thread.
+
+If the provider rejects or panics during the non-blocking request, the App does
+not report `Stopping`: it immediately latches request-failed-pending state,
+projects cached diagnostics as `Failed`, and keeps the coordinator solely to
+consume the unsafe owner. Its eventual terminal receipt replaces that interim
+diagnostic. Rebind remains blocked throughout.
 
 ## Exact signal contract
 
@@ -133,12 +147,39 @@ rejects phase isolation even though Rust subsequently drops the consumed
 object. The reusable `stop` operation also consumes its active Session and
 returns success only when the same provider receipt proves complete release.
 
+Ordinary product stop uses `ReferenceOutputModule::begin_stop` instead of that
+direct reusable operation. The caller performs only the contractually
+non-blocking shutdown request, then transfers the complete Module to an opaque
+stop coordinator. Request admission is reported separately and never promoted
+to clean provider evidence. A joined clean coordinator returns the Module and
+its discovery Adapter for reuse; the exact Session receipt is retained in that
+Module so a later qualification shutdown can still report the original Session
+lifetime. Provider failure consumes the Module on the coordinator and returns a
+terminal receipt. While stop is active, the App retains cached pre-stop
+diagnostics plus the independent `Stopping` status; it never rewrites provider
+state to `Stopped` before coordinator completion.
+
 Qualification first calls the non-blocking Session shutdown request, then
 moves the entire Module—not only the Session—onto one deadline coordinator.
 The coordinator therefore owns Session consumption plus Adapter/bridge
 destruction. Only a joined coordinator can produce clean schema-2 evidence;
 spawn failure abandons the owner fail-closed, while panic, timeout, or detach
 retains nonzero resource and coordinator facts without blocking the caller.
+The ordinary-stop coordinator uses the same absolute-deadline and
+completion-wins rule. Each worker publishes a monotonic completion timestamp
+before its handle becomes finished; clean evidence is accepted only when that
+timestamp is at or before the supplied deadline. An already-finished late
+worker therefore remains timeout/detach evidence rather than being promoted by
+a delayed caller observation. If a still-running or already-completed handle is
+discarded by product retirement/App Drop, a detached reaper joins it and drops
+any returned Module on that reaper. Reaper spawn failure intentionally abandons
+the handle rather than running a potentially blocking destructor on the
+caller. Stop-coordinator spawn failure likewise retains the Module outside the
+unstarted closure and leaks it fail-closed. Both coordinator and reaper spawner
+calls are panic-isolated; `Err` and unwind use the same retained-payload
+abandonment path, so neither can destroy Module/Session/Adapter ownership on the
+caller. Nested provider receipt schemas are never upgraded: a stale provider
+schema remains stale even inside a schema-2 Module/coordinator receipt.
 
 The deterministic simulated Adapter qualifies Module semantics and fault
 injection only. Its evidence permanently has `hardware_backed = false`, so it

@@ -367,6 +367,9 @@ pub trait ReferenceOutputAdapterSession: Send {
 /// but must not retain a provider resource whose release can block after
 /// [`Self::open`] returns. All such ownership transfers into the returned
 /// [`ReferenceOutputAdapterSession`], and Adapter Drop must be non-blocking.
+/// Product teardown nevertheless moves the complete Module, including this
+/// Adapter, onto its coordinator; a defective vendor bridge therefore cannot
+/// turn UI-thread Drop into an unbounded wait.
 pub trait ReferenceOutputAdapter: Send {
     /// Provider/runtime evidence from the most recent discovery.
     fn evidence(&self) -> &ReferenceOutputProviderEvidence;
@@ -410,8 +413,9 @@ where
 /// The bridge encapsulates SDK ABI details and creates the Session that owns
 /// vendor handles, callback threading, and device-configuration restoration.
 /// After `open` returns, the bridge must retain no blocking provider lifetime
-/// owner; its Drop is non-blocking. Rust product code retains only typed
-/// signal, lifecycle, and evidence semantics.
+/// owner; its Drop is non-blocking. Whole-Module teardown still destroys the
+/// bridge on a coordinator as a defensive ownership boundary. Rust product
+/// code retains only typed signal, lifecycle, and evidence semantics.
 pub trait VendorReferenceOutputBridge: Send {
     /// Immutable runtime evidence.
     fn evidence(&self) -> &ReferenceOutputProviderEvidence;

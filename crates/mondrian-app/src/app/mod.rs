@@ -45,7 +45,9 @@ use project_persistence::{
 };
 pub(crate) use project_recovery::discover_crash_recovery_candidates;
 pub use project_recovery::{CrashRecoveryCandidate, RecoveryCanonicalTargetEvidence};
-pub use reference_output::{AppReferenceOutputError, ReferenceOutputBinding};
+pub use reference_output::{
+    AppReferenceOutputError, AppReferenceOutputTeardownStatus, ReferenceOutputBinding,
+};
 
 const PROJECT_EXTENSION: &str = "mdp";
 const DEFAULT_VISUAL_PLACEMENT_DURATION_SECS: f64 = 5.0;

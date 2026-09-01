@@ -196,11 +196,27 @@ Non-product decoder implementations inherit a fail-closed shutdown default:
 only diagnostics that already report zero Sessions can produce clean closure
 without implementing the explicit Session shutdown Seam.
 
-The persistent FFmpeg decoder's ordinary `Drop` still performs synchronous
-child termination and pipe-thread join. It is not part of the bounded ordinary
-App teardown claim and remains a software-hardening follow-up. The consuming
-Audio Source Cache coordinator above is the only deadline-bounded qualification
-authority for those resources.
+The last persistent FFmpeg decoder's ordinary `Drop` transfers its complete
+Session owner to a named background teardown thread before any child kill/wait
+or pipe-pump join can run. It never treats that best-effort path as
+qualification evidence. If the OS cannot create the teardown thread, the
+potentially blocking owner is deliberately abandoned and an error is emitted;
+the failed handoff does not run foreign destructors on the caller. This narrow
+leak is preferable to an unbounded UI/App-owner stall and cannot be confused
+with a clean consuming receipt. Only `AudioSourceCache::shutdown_until` is the
+deadline-qualified authority: its instance receipt distinguishes coordinator
+start failure plus owner abandonment from a successfully started coordinator
+that was still running and detached at the deadline. The coordinator returns
+its own monotonic completion timestamp; observing and joining a result after
+the absolute deadline records `terminated = 1`, `timeout = 1`, and
+`detached = 0` rather than laundering late work into a clean receipt. A running
+deadline timeout instead records `terminated = 0` and `detached = 1`, while a
+joined panic records observed termination but no complete resource facts.
+Explicit facts say whether resource evidence was complete and owner lifetime
+was resolved at the requested deadline. Spawn failure, panic, running timeout,
+and joined-late completion all remain conservative unknown/unresolved states;
+default numeric zero resource counts cannot be mistaken for proof. Only an
+on-time successful completion proves exact child reap and pump joins.
 
 The cache, reader, and every returned `AudioBuffer` carry the selected stream's
 validated native `AudioChannelLayout`, not an independent channel count. Mono, canonical named

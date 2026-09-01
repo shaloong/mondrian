@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use mondrian_app::app::{AppReferenceOutputError, AppState};
+use mondrian_app::app::{AppReferenceOutputError, AppReferenceOutputTeardownStatus, AppState};
 use mondrian_app::app_ui::preferences_store::{
     load_app_ui_preferences_from, persist_app_ui_preferences_to, AppUiPreferences,
 };
@@ -167,6 +167,28 @@ fn reference_output_is_machine_local_and_stale_author_state_stops_playout() {
         AppReferenceOutputError::StaleBinding { .. }
     ));
     assert_eq!(state.reference_output_binding(), None);
+    assert_eq!(
+        state.reference_output_teardown_status(),
+        AppReferenceOutputTeardownStatus::Stopping,
+        "stop admission is not provider release evidence"
+    );
+
+    let stop_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match state.discover_reference_output_devices() {
+            Ok(_) => break,
+            Err(AppReferenceOutputError::TeardownInProgress)
+                if std::time::Instant::now() < stop_deadline =>
+            {
+                std::thread::yield_now();
+            }
+            Err(error) => panic!("ordinary Reference Output stop did not settle: {error}"),
+        }
+    }
+    assert_eq!(
+        state.reference_output_teardown_status(),
+        AppReferenceOutputTeardownStatus::Idle
+    );
     assert_eq!(
         state.reference_output_diagnostics().expect("diagnostics").state,
         ReferenceOutputState::Stopped
