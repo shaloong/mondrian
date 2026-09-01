@@ -19,12 +19,36 @@ commercial endurance qualification; see
 
 Qualification separates the signal from the wait. `RenderQueue::begin_shutdown`
 atomically closes admission and requests cancellation before the App starts
-joining any owner. The later consuming `shutdown_and_wait` call spends only the
-time remaining before the App-wide absolute deadline and returns the Queue-owned
-worker, pending-job, and active-job receipt. This lets sibling App domains begin
-cooperative shutdown together without granting Export a private renewed timeout.
-Ordinary Queue `Drop` reuses the shutdown signal as best-effort cleanup but is
-not a consuming qualification receipt and cannot prove worker return.
+joining any owner. `RenderQueue` retains the dedicated worker's `JoinHandle`;
+the later authoritative `shutdown_until` call consumes that ownership against
+the App-wide absolute monotonic deadline instead of granting Export a renewed
+relative timeout. Schema-3 shutdown evidence distinguishes successful worker
+start and normal join from an outer worker panic, deadline miss, handle detach,
+and any worker-owned executor, hook, factory-error payload, or opaque panic
+payload deliberately abandoned because its destructor is not safe on a caller
+or worker thread.
+Executor panics caught around one Job remain Job failures and do not become
+worker panics. Canonical string panic payloads are destroyed normally; an opaque
+`panic_any` payload is abandoned, latches the owner-abandonment fact, and makes
+the terminal receipt fail closed. The worker may drain already-admitted work,
+but the failure latch prevents further admission and therefore bounds opaque
+payload abandonment to the workset accepted before that failure.
+
+The worker publishes a monotonic completion stamp only after its outer task
+boundary has classified any panic payload and all foreign executor/hook locals
+have unwound. A handle still active at the deadline is timed out and detached
+once; that terminal classification cannot be upgraded when the detached thread
+later returns. A handle already finished with a completion stamp after the
+deadline is joined to reclaim it, but remains timed out and is explicitly not
+detached.
+Only a successful start, completion no later than the deadline, normal join,
+zero pending/active jobs, and no failure or abandonment facts prove closure.
+The duration-based wrapper translates to one absolute deadline and delegates to
+the same path. Ordinary Queue `Drop` only signals shutdown: it joins an already
+finished handle without blocking or detaches an active one, and is never a
+consuming qualification receipt. One product coordinator exclusively owns the
+consuming call; sequential repeats observe latched facts, while concurrent
+consumers are outside the qualification contract and cannot supply clean proof.
 
 `mondrian-export` also owns an independent single-file artifact verifier for
 that post-publication boundary. It accepts only a direct regular file within an

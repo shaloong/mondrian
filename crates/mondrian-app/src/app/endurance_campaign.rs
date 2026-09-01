@@ -429,9 +429,7 @@ impl EnduranceRuntimeClosure {
             status: self.status,
             playback_workers_terminated: self.playback_workers_terminated,
             supervised_child_processes_remaining: self.supervised_child_processes_remaining,
-            export_worker_terminated: self.export.worker_terminated,
-            export_pending_jobs: self.export.pending_jobs,
-            export_active_jobs: self.export.active_jobs,
+            export: self.export,
         }
     }
 }
@@ -791,7 +789,7 @@ pub enum EnduranceCampaignError {
     },
     /// A nominally successful cleanup receipt still retained owned execution.
     #[error(
-        "endurance phase cleanup was incomplete: status={status:?}, playback_workers_terminated={playback_workers_terminated}, supervised_children={supervised_child_processes_remaining}, export_worker_terminated={export_worker_terminated}, export_pending={export_pending_jobs}, export_active={export_active_jobs}"
+        "endurance phase cleanup was incomplete: status={status:?}, playback_workers_terminated={playback_workers_terminated}, supervised_children={supervised_child_processes_remaining}, export={export:?}"
     )]
     IncompletePhaseCleanup {
         /// Terminal status returned by the runtime.
@@ -800,12 +798,8 @@ pub enum EnduranceCampaignError {
         playback_workers_terminated: bool,
         /// Supervised descendants still retained.
         supervised_child_processes_remaining: u32,
-        /// Export worker closure projection.
-        export_worker_terminated: bool,
-        /// Pending Export jobs retained by cleanup.
-        export_pending_jobs: u64,
-        /// Active Export jobs retained by cleanup.
-        export_active_jobs: u64,
+        /// Complete Export shutdown receipt, retained without lossy projection.
+        export: ExportQueueShutdownEvidence,
     },
     /// A started runtime attempted to terminate as NotRun.
     #[error("a started endurance phase cannot terminate as not-run")]
@@ -1071,10 +1065,14 @@ mod tests {
                     playback_workers_terminated: true,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 2,
+                        schema_version: 3,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
+                        worker_panicked: false,
+                        worker_timed_out: false,
+                        worker_detached: false,
+                        worker_owner_abandoned: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: self.phase_elapsed_us() / 60_000_000,
@@ -1125,10 +1123,14 @@ mod tests {
                     playback_workers_terminated: !self.cleanup_incomplete,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 2,
+                        schema_version: 3,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
+                        worker_panicked: false,
+                        worker_timed_out: false,
+                        worker_detached: false,
+                        worker_owner_abandoned: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,
@@ -1187,6 +1189,39 @@ mod tests {
                     playback_workers_terminated: false,
                     ..
                 })
+        ));
+    }
+
+    #[test]
+    fn incomplete_cleanup_retains_joined_late_export_receipt() {
+        let export = ExportQueueShutdownEvidence {
+            schema_version: 3,
+            worker_started: true,
+            worker_start_failed: false,
+            worker_terminated: true,
+            worker_panicked: false,
+            worker_timed_out: true,
+            worker_detached: false,
+            worker_owner_abandoned: false,
+            pending_jobs: 0,
+            active_jobs: 0,
+            activity_events: 9,
+        };
+        let closure = EnduranceRuntimeClosure {
+            status: EndurancePhaseTerminalStatus::Completed,
+            playback_workers_terminated: true,
+            supervised_child_processes_remaining: 0,
+            export,
+        };
+
+        assert!(!closure.proves_consuming_cleanup());
+        let error = closure.incomplete_cleanup_error();
+        assert!(matches!(
+            error,
+            EnduranceCampaignError::IncompletePhaseCleanup {
+                export: retained,
+                ..
+            } if retained == export
         ));
     }
 
@@ -1343,10 +1378,14 @@ mod tests {
                     ),
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 2,
+                        schema_version: 3,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
+                        worker_panicked: false,
+                        worker_timed_out: false,
+                        worker_detached: false,
+                        worker_owner_abandoned: false,
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,

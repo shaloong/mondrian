@@ -677,9 +677,7 @@ impl AppState {
         }
 
         let audio = self.shutdown_audio_playback_until(deadline);
-        let export = self
-            .render_queue
-            .shutdown_and_wait(deadline.saturating_duration_since(Instant::now()));
+        let export = self.render_queue.shutdown_until(deadline);
         let proxy_generation = self.proxy_generation.finish_endurance_shutdown(deadline);
         let media_import = self.media_import.finish_endurance_shutdown(deadline);
         let media_asset_mutation = self.media_asset_mutations.finish_endurance_shutdown(deadline);
@@ -805,7 +803,16 @@ mod tests {
         assert!(evidence.app_owner_consumed);
         assert!(evidence.project.all_resources_released());
         assert!(evidence.reference_output.all_resources_released());
+        assert_eq!(evidence.export.schema_version, 3);
+        assert!(evidence.export.worker_started);
+        assert!(!evidence.export.worker_start_failed);
         assert!(evidence.export.worker_terminated);
+        assert!(!evidence.export.worker_panicked);
+        assert!(!evidence.export.worker_timed_out);
+        assert!(!evidence.export.worker_detached);
+        assert!(!evidence.export.worker_owner_abandoned);
+        assert_eq!(evidence.export.pending_jobs, 0);
+        assert_eq!(evidence.export.active_jobs, 0);
         assert!(evidence.audio.all_workers_terminated());
         assert!(evidence.audio_source_cache.all_resources_released());
         assert!(evidence.project_persistence.lifecycle_closed());

@@ -100,9 +100,11 @@ unavailable to production callers until typed, externally recomputable
 before/after operation receipts exist; caller-authored SHA strings are not an
 acceptable substitute. The supervisor automatically seals and publishes full
 chunks and generates the raw producer JSON plus normalized report. Finish
-executed phases with final Reference Output accounting and
-`ExportQueueShutdownEvidence`, or use `finish_not_run` before any sample when an
-external prerequisite is absent. Reference diagnostics do not yet prove vendor
+executed phases with final Reference Output accounting and one clean schema-3
+`ExportQueueShutdownEvidence`; a joined-late, panicked, timed-out, detached, or
+owner-abandoned worker receipt is terminal failure even when its pending/active
+gauges are zero. Use `finish_not_run` before any sample when an external
+prerequisite is absent. Reference diagnostics do not yet prove vendor
 callback-thread/device-session consumption. Commit phases in profile order and
 call `seal_manifest` once.
 

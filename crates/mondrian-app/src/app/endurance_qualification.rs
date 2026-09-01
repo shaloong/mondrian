@@ -760,7 +760,7 @@ impl EndurancePhaseCapture {
             )
             || export.pending_jobs != 0
             || export.active_jobs != 0
-            || export.schema_version != 2
+            || export.schema_version != 3
             || !export.all_resources_released()
             || !last.export_shutdown_requested
             || last.export_worker_running
@@ -1423,36 +1423,67 @@ mod tests {
                 &root.join("tests/validation/endurance-workloads/playback-reference-v1.json"),
             )
             .expect("begin executed phase");
-        first
-            .push_sample(EnduranceSample {
-                sequence: 0,
-                scheduled_at_us: 0,
-                started_at_us: 0,
-                completed_at_us: 1,
-                process_memory: EnduranceProcessMemorySample {
-                    scope: ProcessMemoryScope::ProductProcessTree,
-                    backend: ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
-                    metric: mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit,
-                    observed_process_count: 1,
-                    inventory_attempts: 1,
-                    inventory_complete: true,
-                    private_memory_bytes: 1,
-                    resident_bytes: 1,
-                },
-                reference_output_hardware_backed: true,
-                external_reference_locked: true,
-                reference_hardware_maximum_gap_us: 1,
-                export_shutdown_requested: true,
-                export_worker_running: false,
-                export_worker_terminated: true,
-                counters: EnduranceCounters::default(),
-                gauges: EnduranceGauges::default(),
-            })
-            .expect("capture sample");
+        let terminal_sample = EnduranceSample {
+            sequence: 0,
+            scheduled_at_us: 0,
+            started_at_us: 0,
+            completed_at_us: 1,
+            process_memory: EnduranceProcessMemorySample {
+                scope: ProcessMemoryScope::ProductProcessTree,
+                backend: ProcessMemoryProbeBackend::WindowsToolhelpProcessTree,
+                metric: mondrian_platform::ProcessPrivateMemoryMetric::WindowsPrivateCommit,
+                observed_process_count: 1,
+                inventory_attempts: 1,
+                inventory_complete: true,
+                private_memory_bytes: 1,
+                resident_bytes: 1,
+            },
+            reference_output_hardware_backed: true,
+            external_reference_locked: true,
+            reference_hardware_maximum_gap_us: 1,
+            export_shutdown_requested: true,
+            export_worker_running: false,
+            export_worker_terminated: true,
+            counters: EnduranceCounters::default(),
+            gauges: EnduranceGauges::default(),
+        };
+        first.push_sample(terminal_sample.clone()).expect("capture sample");
         let reference = ReferenceOutputDiagnostics {
             state: ReferenceOutputState::Stopped,
             ..ReferenceOutputDiagnostics::default()
         };
+        let mut late = capture
+            .begin_phase(
+                "01-playback-reference-24h",
+                0,
+                &evidence,
+                &root.join("tests/validation/endurance-workloads/playback-reference-v1.json"),
+            )
+            .expect("begin late-receipt phase probe");
+        late.push_sample(terminal_sample).expect("capture late-receipt sample");
+        assert!(matches!(
+            late.finish(
+                1,
+                EndurancePhaseTerminalStatus::Failed,
+                true,
+                0,
+                &reference,
+                ExportQueueShutdownEvidence {
+                    schema_version: 3,
+                    worker_started: true,
+                    worker_start_failed: false,
+                    worker_terminated: true,
+                    worker_panicked: false,
+                    worker_timed_out: true,
+                    worker_detached: false,
+                    worker_owner_abandoned: false,
+                    pending_jobs: 0,
+                    active_jobs: 0,
+                    activity_events: 1,
+                },
+            ),
+            Err(EnduranceCaptureError::InvalidTerminal)
+        ));
         let first = first
             .finish(
                 1,
@@ -1461,10 +1492,14 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 2,
+                    schema_version: 3,
                     worker_started: true,
                     worker_terminated: true,
                     worker_start_failed: false,
+                    worker_panicked: false,
+                    worker_timed_out: false,
+                    worker_detached: false,
+                    worker_owner_abandoned: false,
                     pending_jobs: 0,
                     active_jobs: 0,
                     activity_events: 1,

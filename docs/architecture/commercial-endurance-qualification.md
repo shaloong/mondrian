@@ -254,9 +254,14 @@ can be qualified.
 
 Export publishes a constant-size `ExportEnduranceSnapshot` with cumulative
 admissions, failures, cancellations, rendered frames, durable artifacts,
-activity events, active gauges, and worker lifecycle. `shutdown_and_wait`
-cancels reversible work, terminalizes pending jobs, waits within an explicit
-bound, and reports whether the worker returned and queues reached zero.
+activity events, active gauges, and worker lifecycle. The App signals every
+owner first, then passes its unchanged absolute monotonic deadline to
+`RenderQueue::shutdown_until`. The Queue cancels reversible work, terminalizes
+pending jobs, consumes its retained worker handle, and returns schema-3 facts
+for normal join, outer panic, deadline timeout, handle detach, and retained-owner
+abandonment after spawn failure or an opaque panic payload with an unsafe
+destructor. A worker joined after its completion deadline is terminated but
+still timed out and therefore never clean.
 Lifecycle flags, counters, activity, and gauges come from one Queue-lock
 critical section rather than several independently timed observations.
 Independent finished-artifact re-open/validation remains an App capture fact;

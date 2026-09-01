@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
@@ -668,7 +669,7 @@ pub struct ExportEnduranceSnapshot {
     pub shutdown_requested: bool,
     /// Whether the dedicated worker is currently alive.
     pub worker_running: bool,
-    /// Whether the dedicated worker returned from its loop.
+    /// Whether the dedicated worker returned normally and its handle was joined.
     pub worker_terminated: bool,
     /// Monotonic accepted queue/job activity count.
     pub activity_events: u64,
@@ -704,8 +705,22 @@ pub struct ExportQueueShutdownEvidence {
     pub worker_started: bool,
     /// Whether creating the dedicated worker failed before it could start.
     pub worker_start_failed: bool,
-    /// Whether the bounded wait observed worker-loop return.
+    /// Whether the worker handle was joined after a normal return.
     pub worker_terminated: bool,
+    /// Whether the worker's terminal guard or joined handle observed a panic
+    /// outside the per-Job executor panic boundary.
+    pub worker_panicked: bool,
+    /// Whether the worker missed the caller's absolute shutdown deadline.
+    ///
+    /// A worker that had already finished after the deadline can still be
+    /// joined and therefore need not be detached.
+    pub worker_timed_out: bool,
+    /// Whether the Queue relinquished a still-running worker handle.
+    pub worker_detached: bool,
+    /// Whether a worker-owned executor, hook, factory error, or opaque panic
+    /// payload had to be abandoned rather than destroyed on a latency-sensitive
+    /// thread.
+    pub worker_owner_abandoned: bool,
     /// Pending jobs remaining after the wait.
     pub pending_jobs: u64,
     /// Active jobs remaining after the wait.
@@ -721,10 +736,14 @@ impl ExportQueueShutdownEvidence {
     /// normal worker termination, even when no jobs were admitted.
     #[must_use]
     pub const fn all_resources_released(&self) -> bool {
-        self.schema_version == 2
+        self.schema_version == 3
             && self.worker_started
             && !self.worker_start_failed
             && self.worker_terminated
+            && !self.worker_panicked
+            && !self.worker_timed_out
+            && !self.worker_detached
+            && !self.worker_owner_abandoned
             && self.pending_jobs == 0
             && self.active_jobs == 0
     }
@@ -765,6 +784,11 @@ struct ExportQueueState {
     worker_start_failed: bool,
     worker_running: bool,
     worker_terminated: bool,
+    worker_completed_at: Option<Instant>,
+    worker_panicked: bool,
+    worker_timed_out: bool,
+    worker_detached: bool,
+    worker_owner_abandoned: bool,
 }
 
 struct RenderQueueInner {
@@ -796,10 +820,21 @@ fn mark_export_worker_started(inner: &RenderQueueInner) {
     inner.wake.notify_all();
 }
 
-fn mark_export_worker_terminated(inner: &RenderQueueInner) {
+fn mark_export_worker_completed(
+    inner: &RenderQueueInner,
+    completed_at: Instant,
+    unwind_observed: bool,
+) {
     let mut state = inner.state.lock();
     state.worker_running = false;
-    state.worker_terminated = true;
+    state.worker_completed_at.get_or_insert(completed_at);
+    if unwind_observed {
+        state.worker_panicked = true;
+        if state.worker_failure.is_none() {
+            state.worker_failure =
+                Some("export worker panicked outside the per-Job executor boundary".to_owned());
+        }
+    }
     inner.mark_diagnostics_changed_locked(&state);
     drop(state);
     inner.wake.notify_all();
@@ -809,7 +844,19 @@ fn mark_export_worker_start_failed(inner: &RenderQueueInner, detail: String) {
     let mut state = inner.state.lock();
     state.worker_running = false;
     state.worker_start_failed = true;
+    state.worker_owner_abandoned = true;
     state.worker_failure = Some(detail);
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn mark_export_worker_owner_abandoned(inner: &RenderQueueInner, detail: &str) {
+    let mut state = inner.state.lock();
+    state.worker_owner_abandoned = true;
+    if state.worker_failure.is_none() {
+        state.worker_failure = Some(detail.to_owned());
+    }
     inner.mark_diagnostics_changed_locked(&state);
     drop(state);
     inner.wake.notify_all();
@@ -962,9 +1009,60 @@ fn wait_at_queue_execution_boundary(
     }
 }
 
+type ExportWorkerTask = Box<dyn FnOnce() + Send + 'static>;
+type ExportWorkerEntryHook = Box<dyn FnOnce() + Send + 'static>;
+
+struct ExportWorkerPayload {
+    inner: Arc<RenderQueueInner>,
+    executor: Arc<dyn ExportExecutor>,
+    entry_hook: Option<ExportWorkerEntryHook>,
+}
+
+impl ExportWorkerPayload {
+    fn run(self) {
+        mark_export_worker_started(&self.inner);
+        let Self { inner, executor, entry_hook } = self;
+        if let Some(entry_hook) = entry_hook {
+            entry_hook();
+        }
+        export_worker_loop(Arc::clone(&inner), executor);
+    }
+}
+
+fn abandon_export_worker_payload(retained_payload: &Arc<Mutex<Option<ExportWorkerPayload>>>) {
+    let Some(payload) = retained_payload.lock().take() else {
+        return;
+    };
+    let ExportWorkerPayload { inner, executor, entry_hook } = payload;
+    drop(inner);
+    // A worker factory failure normally drops the task closure on this caller.
+    // The retained slot keeps the potentially foreign executor out of that
+    // destructor path. Qualification records this deliberate abandonment and
+    // can therefore never mistake it for a clean start or a worker detach.
+    std::mem::forget(executor);
+    if let Some(entry_hook) = entry_hook {
+        std::mem::forget(entry_hook);
+    }
+}
+
+fn dispose_canonical_or_abandon_opaque_panic_payload(
+    payload: Box<dyn std::any::Any + Send>,
+) -> bool {
+    if payload.is::<&'static str>() || payload.is::<String>() {
+        drop(payload);
+        false
+    } else {
+        // An arbitrary `panic_any` payload can own a blocking or panicking
+        // destructor. Never run it on the queue worker or shutdown caller.
+        std::mem::forget(payload);
+        true
+    }
+}
+
 /// Instance-owned bounded offline export queue.
 pub struct RenderQueue {
     inner: Arc<RenderQueueInner>,
+    worker: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl RenderQueue {
@@ -974,7 +1072,13 @@ impl RenderQueue {
     }
 
     pub(crate) fn new_with_executor(executor: Arc<dyn ExportExecutor>) -> Arc<Self> {
-        let queue = Arc::new(Self {
+        let queue = Self::new_unstarted();
+        queue.spawn_worker(executor);
+        queue
+    }
+
+    fn new_unstarted() -> Arc<Self> {
+        Arc::new(Self {
             inner: Arc::new(RenderQueueInner {
                 state: Mutex::new(ExportQueueState {
                     next_generation: 1,
@@ -987,25 +1091,87 @@ impl RenderQueue {
                 revision: AtomicU64::new(0),
                 jobs_revision: AtomicU64::new(0),
             }),
-        });
-        queue.spawn_worker(executor);
+            worker: Mutex::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_with_executor_and_spawner(
+        executor: Arc<dyn ExportExecutor>,
+        entry_hook: Option<ExportWorkerEntryHook>,
+        spawner: impl FnOnce(ExportWorkerTask) -> std::io::Result<JoinHandle<()>>,
+    ) -> Arc<Self> {
+        let queue = Self::new_unstarted();
+        queue.spawn_worker_with(executor, entry_hook, spawner);
         queue
     }
 
     fn spawn_worker(&self, executor: Arc<dyn ExportExecutor>) {
-        let inner = Arc::clone(&self.inner);
-        if let Err(error) = std::thread::Builder::new()
-            .name("mondrian-export-worker".to_owned())
-            .spawn(move || {
-                mark_export_worker_started(&inner);
-                export_worker_loop(Arc::clone(&inner), executor);
-                mark_export_worker_terminated(&inner);
-            })
-        {
-            mark_export_worker_start_failed(
-                &self.inner,
-                bounded_detail(format!("failed to start export worker: {error}")),
-            );
+        self.spawn_worker_with(executor, None, |task| {
+            thread::Builder::new().name("mondrian-export-worker".to_owned()).spawn(task)
+        });
+    }
+
+    fn spawn_worker_with(
+        &self,
+        executor: Arc<dyn ExportExecutor>,
+        entry_hook: Option<ExportWorkerEntryHook>,
+        spawner: impl FnOnce(ExportWorkerTask) -> std::io::Result<JoinHandle<()>>,
+    ) {
+        let retained_payload = Arc::new(Mutex::new(Some(ExportWorkerPayload {
+            inner: Arc::clone(&self.inner),
+            executor,
+            entry_hook,
+        })));
+        let worker_payload = Arc::clone(&retained_payload);
+        let task_inner = Arc::clone(&self.inner);
+        let task: ExportWorkerTask = Box::new(move || {
+            let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let Some(payload) = worker_payload.lock().take() else {
+                    panic!("export worker started without its retained owner payload");
+                };
+                payload.run();
+            }));
+            let panicked = match run_result {
+                Ok(()) => false,
+                Err(payload) => {
+                    if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                        mark_export_worker_owner_abandoned(
+                            &task_inner,
+                            "export worker panicked with an opaque payload whose owner was abandoned",
+                        );
+                    }
+                    true
+                }
+            };
+            mark_export_worker_completed(&task_inner, Instant::now(), panicked);
+        });
+        let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| spawner(task)));
+        match spawn_result {
+            Ok(Ok(worker)) => {
+                *self.worker.lock() = Some(worker);
+            }
+            Ok(Err(error)) => {
+                let error_kind = error.kind();
+                // `io::Error::other` may carry an arbitrary foreign Error with
+                // a blocking or panicking destructor. Startup already failed
+                // closed, so retain only the stable kind and abandon that
+                // opaque owner with the executor payload.
+                std::mem::forget(error);
+                abandon_export_worker_payload(&retained_payload);
+                mark_export_worker_start_failed(
+                    &self.inner,
+                    bounded_detail(format!("failed to start export worker: {error_kind:?}")),
+                );
+            }
+            Err(payload) => {
+                let _ = dispose_canonical_or_abandon_opaque_panic_payload(payload);
+                abandon_export_worker_payload(&retained_payload);
+                mark_export_worker_start_failed(
+                    &self.inner,
+                    "export worker spawner panicked before returning ownership".to_owned(),
+                );
+            }
         }
     }
 
@@ -1453,19 +1619,127 @@ impl RenderQueue {
     /// Publication that already crossed the irreversible namespace boundary is
     /// allowed to finish; every other live attempt receives cancellation.
     pub fn shutdown_and_wait(&self, timeout: Duration) -> ExportQueueShutdownEvidence {
+        let started_at = Instant::now();
+        let deadline = started_at.checked_add(timeout).unwrap_or(started_at);
+        self.shutdown_until(deadline)
+    }
+
+    /// Request queue shutdown and consume worker ownership through one absolute deadline.
+    ///
+    /// Normal termination is accepted only after the owned handle is joined and
+    /// its worker-published monotonic completion stamp is no later than
+    /// `deadline`. A handle still running at the deadline is relinquished once,
+    /// with timeout and detach facts latched permanently. If the handle is
+    /// already finished but its completion stamp is late, it is still joined to
+    /// reclaim ownership; timeout remains true while detach remains false.
+    ///
+    /// Exactly one product coordinator owns this consuming call. Sequential
+    /// repeats return the latched terminal receipt; concurrent consumers are
+    /// unsupported and any receipt observed while another caller owns the
+    /// handle is fail-closed rather than qualification evidence.
+    pub fn shutdown_until(&self, deadline: Instant) -> ExportQueueShutdownEvidence {
         self.begin_shutdown();
-        let deadline = Instant::now().checked_add(timeout);
-        let mut state = self.inner.state.lock();
-        while !state.worker_terminated && !state.worker_start_failed {
-            let Some(deadline) = deadline else {
-                break;
-            };
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            self.inner.wake.wait_for(&mut state, remaining);
+        let worker = self.worker.lock().take();
+        if let Some(worker) = worker {
+            self.finish_worker_until(worker, deadline);
         }
+        self.shutdown_evidence()
+    }
+
+    fn finish_worker_until(&self, worker: JoinHandle<()>, deadline: Instant) {
+        if worker.thread().id() == thread::current().id() {
+            self.mark_worker_detached(
+                Instant::now() >= deadline,
+                "export worker cannot join its own thread",
+            );
+            drop(worker);
+            return;
+        }
+
+        loop {
+            if worker.is_finished() {
+                self.join_finished_worker(worker, Some(deadline));
+                return;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                // Completion wins the observation race at the exact boundary,
+                // but its own monotonic stamp still decides whether it was late.
+                if worker.is_finished() {
+                    self.join_finished_worker(worker, Some(deadline));
+                } else {
+                    self.mark_worker_detached(
+                        true,
+                        "export worker exceeded the absolute shutdown deadline",
+                    );
+                    drop(worker);
+                }
+                return;
+            }
+
+            let remaining = deadline.saturating_duration_since(now);
+            let mut state = self.inner.state.lock();
+            if !worker.is_finished() {
+                // The outer supervisor publishes completion before the final
+                // trivial closure captures are destroyed, so retain a short
+                // bounded poll to observe JoinHandle completion without ever
+                // blocking join.
+                self.inner.wake.wait_for(&mut state, remaining.min(Duration::from_millis(1)));
+            }
+        }
+    }
+
+    fn join_finished_worker(&self, worker: JoinHandle<()>, deadline: Option<Instant>) {
+        debug_assert!(worker.is_finished());
+        let (worker_panicked, panic_payload_abandoned) = match worker.join() {
+            Ok(()) => (false, false),
+            Err(payload) => (
+                true,
+                dispose_canonical_or_abandon_opaque_panic_payload(payload),
+            ),
+        };
+        let mut state = self.inner.state.lock();
+        state.worker_running = false;
+        let completed_at = state.worker_completed_at;
+        let missed_deadline = deadline.is_some_and(|deadline| {
+            completed_at.is_none_or(|completed_at| completed_at > deadline)
+        });
+        state.worker_timed_out |= missed_deadline;
+        state.worker_owner_abandoned |= panic_payload_abandoned;
+        let logical_worker_panicked = worker_panicked || state.worker_panicked;
+        match (logical_worker_panicked, completed_at) {
+            (false, Some(_)) => {
+                state.worker_terminated = true;
+            }
+            (false, None) => {
+                state.worker_failure =
+                    Some("export worker returned without a monotonic completion stamp".to_owned());
+            }
+            (true, _) => {
+                state.worker_panicked = true;
+                state.worker_failure =
+                    Some("export worker panicked outside the per-Job executor boundary".to_owned());
+            }
+        }
+        self.inner.mark_diagnostics_changed_locked(&state);
+        drop(state);
+        self.inner.wake.notify_all();
+    }
+
+    fn mark_worker_detached(&self, timed_out: bool, detail: &str) {
+        let mut state = self.inner.state.lock();
+        state.worker_timed_out |= timed_out;
+        state.worker_detached = true;
+        if state.worker_failure.is_none() {
+            state.worker_failure = Some(detail.to_owned());
+        }
+        self.inner.mark_diagnostics_changed_locked(&state);
+        drop(state);
+        self.inner.wake.notify_all();
+    }
+
+    fn shutdown_evidence(&self) -> ExportQueueShutdownEvidence {
+        let state = self.inner.state.lock();
         let pending_jobs = state
             .jobs
             .iter()
@@ -1482,10 +1756,14 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportQueueShutdownEvidence {
-            schema_version: 2,
+            schema_version: 3,
             worker_started: state.worker_started,
             worker_start_failed: state.worker_start_failed,
             worker_terminated: state.worker_terminated,
+            worker_panicked: state.worker_panicked,
+            worker_timed_out: state.worker_timed_out,
+            worker_detached: state.worker_detached,
+            worker_owner_abandoned: state.worker_owner_abandoned,
             pending_jobs,
             active_jobs,
             activity_events: state.activity_events,
@@ -1548,6 +1826,18 @@ impl RenderQueue {
 impl Drop for RenderQueue {
     fn drop(&mut self) {
         self.begin_shutdown();
+        let Some(worker) = self.worker.lock().take() else {
+            return;
+        };
+        if worker.thread().id() == thread::current().id() {
+            self.mark_worker_detached(false, "export worker dropped its own Queue owner");
+            drop(worker);
+        } else if worker.is_finished() {
+            self.join_finished_worker(worker, None);
+        } else {
+            self.mark_worker_detached(false, "export Queue dropped while its worker was active");
+            drop(worker);
+        }
     }
 }
 
@@ -1576,7 +1866,7 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
             generation,
             work.resource_policy,
         );
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             executor.execute(
                 &work.job,
                 &work.cancellation,
@@ -1584,9 +1874,18 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
                 &mut report,
                 &mut report_diagnostics,
             )
-        }))
-        .map(ExportWorkerOutcome::Execution)
-        .unwrap_or(ExportWorkerOutcome::Panicked);
+        })) {
+            Ok(outcome) => ExportWorkerOutcome::Execution(outcome),
+            Err(payload) => {
+                if dispose_canonical_or_abandon_opaque_panic_payload(payload) {
+                    mark_export_worker_owner_abandoned(
+                        &inner,
+                        "export executor panicked with an opaque payload whose owner was abandoned",
+                    );
+                }
+                ExportWorkerOutcome::Panicked
+            }
+        };
         publish_terminal(&inner, job_id, generation, outcome);
     }
 }
@@ -1955,57 +2254,17 @@ fn bounded_detail(detail: String) -> String {
 mod shutdown_evidence_contract_tests {
     use super::*;
 
-    fn queue_without_worker() -> RenderQueue {
-        RenderQueue {
-            inner: Arc::new(RenderQueueInner {
-                state: Mutex::new(ExportQueueState {
-                    next_generation: 1,
-                    dispatch_enabled: true,
-                    resource_policy: ExportExecutionResourcePolicy::default(),
-                    ..ExportQueueState::default()
-                }),
-                wake: Condvar::new(),
-                shutdown: AtomicBool::new(false),
-                revision: AtomicU64::new(0),
-                jobs_revision: AtomicU64::new(0),
-            }),
-        }
-    }
-
-    #[test]
-    fn worker_exit_before_spawn_returns_preserves_clean_shutdown_proof() {
-        let queue = queue_without_worker();
-        mark_export_worker_started(&queue.inner);
-        mark_export_worker_terminated(&queue.inner);
-
-        let evidence = queue.shutdown_and_wait(Duration::ZERO);
-
-        assert!(evidence.worker_started);
-        assert!(!evidence.worker_start_failed);
-        assert!(evidence.worker_terminated);
-        assert!(evidence.all_resources_released());
-    }
-
-    #[test]
-    fn worker_spawn_failure_is_not_normal_termination_or_clean_shutdown() {
-        let queue = queue_without_worker();
-        mark_export_worker_start_failed(&queue.inner, "synthetic spawn failure".to_owned());
-
-        let evidence = queue.shutdown_and_wait(Duration::ZERO);
-
-        assert!(!evidence.worker_started);
-        assert!(evidence.worker_start_failed);
-        assert!(!evidence.worker_terminated);
-        assert!(!evidence.all_resources_released());
-    }
-
     #[test]
     fn shutdown_evidence_requires_started_terminated_worker_and_empty_workset() {
         let clean = ExportQueueShutdownEvidence {
-            schema_version: 2,
+            schema_version: 3,
             worker_started: true,
             worker_start_failed: false,
             worker_terminated: true,
+            worker_panicked: false,
+            worker_timed_out: false,
+            worker_detached: false,
+            worker_owner_abandoned: false,
             pending_jobs: 0,
             active_jobs: 0,
             activity_events: 0,
@@ -2013,7 +2272,7 @@ mod shutdown_evidence_contract_tests {
 
         assert!(clean.all_resources_released());
         assert!(
-            !ExportQueueShutdownEvidence { schema_version: 1, ..clean }.all_resources_released()
+            !ExportQueueShutdownEvidence { schema_version: 2, ..clean }.all_resources_released()
         );
         assert!(!ExportQueueShutdownEvidence { pending_jobs: 1, ..clean }.all_resources_released());
         assert!(!ExportQueueShutdownEvidence { active_jobs: 1, ..clean }.all_resources_released());
@@ -2029,15 +2288,35 @@ mod shutdown_evidence_contract_tests {
             !ExportQueueShutdownEvidence { worker_terminated: false, ..clean }
                 .all_resources_released()
         );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_panicked: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_timed_out: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_detached: true, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { worker_owner_abandoned: true, ..clean }
+                .all_resources_released()
+        );
     }
 
     #[test]
-    fn shutdown_evidence_schema_two_round_trips_worker_start_facts() {
+    fn shutdown_evidence_schema_three_round_trips_exact_worker_facts() {
         let evidence = ExportQueueShutdownEvidence {
-            schema_version: 2,
+            schema_version: 3,
             worker_started: false,
             worker_start_failed: true,
             worker_terminated: false,
+            worker_panicked: false,
+            worker_timed_out: false,
+            worker_detached: false,
+            worker_owner_abandoned: true,
             pending_jobs: 0,
             active_jobs: 0,
             activity_events: 7,
@@ -2050,6 +2329,22 @@ mod shutdown_evidence_contract_tests {
         assert_eq!(decoded, evidence);
         assert!(encoded.contains("\"worker_started\":false"));
         assert!(encoded.contains("\"worker_start_failed\":true"));
+        assert!(encoded.contains("\"worker_owner_abandoned\":true"));
+    }
+
+    #[test]
+    fn legacy_schema_two_json_without_exact_worker_facts_is_rejected() {
+        let encoded = r#"{
+            "schema_version": 2,
+            "worker_started": true,
+            "worker_start_failed": false,
+            "worker_terminated": true,
+            "pending_jobs": 0,
+            "active_jobs": 0,
+            "activity_events": 1
+        }"#;
+
+        assert!(serde_json::from_str::<ExportQueueShutdownEvidence>(encoded).is_err());
     }
 }
 

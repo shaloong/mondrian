@@ -480,6 +480,7 @@ mod tests {
         let diagnostics = state.export_queue_diagnostics();
         let endurance = state.export_endurance_snapshot(17);
 
+        assert_eq!(endurance.schema_version, 1);
         assert_eq!(endurance.observed_at_us, 17);
         assert_eq!(endurance.admissions, diagnostics.admissions);
         assert_eq!(endurance.rejections, diagnostics.rejections);
