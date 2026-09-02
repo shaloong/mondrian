@@ -316,7 +316,7 @@ foreach ($phase in @($manifest.phases)) {
                     throw "Endurance recovery receipt bytes do not match their bounded digest."
                 }
                 $receipt = $receiptJson | ConvertFrom-Json
-                if ([int]$receipt.schema_version -ne 1 -or
+                if ([int]$receipt.schema_version -ne 2 -or
                     [int64]$receipt.cycle_index -ne $expectedCycle -or
                     [string]$receipt.step -cne $expectedStep -or
                     [string]$receipt.operation_id -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
@@ -388,6 +388,10 @@ foreach ($phase in @($manifest.phases)) {
                             "recovered_decision_generation", "cache_bytes_before_pressure",
                             "cache_bytes_after_pressure", "pressure_trimmed_bytes",
                             "residual_owned_resources", "recovered_nominal",
+                            "exact_picture_ready", "gpu_device_losses_before",
+                            "gpu_device_losses_after", "fatal_errors_before",
+                            "fatal_errors_after", "export_failures_before",
+                            "export_failures_after",
                             "pressure_decision_sha256", "recovered_decision_sha256"
                         ) "Cache-pressure receipt"
                         Assert-LowerSha256 ([string]$receipt.pressure_decision_sha256) "Pressure decision"
@@ -398,7 +402,11 @@ foreach ($phase in @($manifest.phases)) {
                             [uint64]$receipt.cache_bytes_after_pressure -ge [uint64]$receipt.cache_bytes_before_pressure -or
                             $trimmed -ne [uint64]$receipt.pressure_trimmed_bytes -or $trimmed -eq 0 -or
                             [uint64]$receipt.residual_owned_resources -ne 0 -or
-                            -not [bool]$receipt.recovered_nominal) {
+                            -not [bool]$receipt.recovered_nominal -or
+                            -not [bool]$receipt.exact_picture_ready -or
+                            [uint64]$receipt.gpu_device_losses_before -ne [uint64]$receipt.gpu_device_losses_after -or
+                            [uint64]$receipt.fatal_errors_before -ne [uint64]$receipt.fatal_errors_after -or
+                            [uint64]$receipt.export_failures_before -ne [uint64]$receipt.export_failures_after) {
                             throw "Cache-pressure receipt does not prove bounded trim and nominal recovery."
                         }
                     }

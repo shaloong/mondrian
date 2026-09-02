@@ -361,8 +361,9 @@ independent validator, and validator-report digests. Concurrent recovery must
 record `seek -> surface_device_reopen -> export_cancel_retry -> cache_pressure`
 for every complete cycle. Event order, time, count, and terminal counters close
 twice: before App publication and again in the external PowerShell verifier.
-Each event embeds a bounded canonical operation receipt plus the SHA-256 of its
-exact UTF-8 bytes. App publication reparses the receipt, reserializes it to
+Each event embeds a bounded canonical schema-2 operation receipt plus the
+SHA-256 of its exact UTF-8 bytes. App publication reparses the receipt,
+reserializes it to
 reject non-canonical bytes, validates the step-specific before/after
 relationships, and rejects operation-ID replay. The external PowerShell
 verifier independently rehashes and reparses the embedded JSON and replays the
@@ -378,15 +379,26 @@ rechecks the frozen author binding before sealing the receipt. The sequence
 binding digest and operation identity are derived inside the owner; callers do
 not provide success booleans or hashes.
 
+Cache-pressure receipts are likewise available only from the persistent
+Timeline owner while the paired Headless session is outside native realtime
+residency. The owner requires nonzero optional decoded-media bytes, applies the
+real Manual `Critical` decision to both Preview and the idle Viewer GPU owner,
+proves exactly one policy application and actual byte/entry/resource-unit
+retirement, and unconditionally applies `Nominal` before evaluating the
+Critical result. It then re-enters the same owners, proves the exact current
+picture Ready under Audio Device Clock, returns to a settled boundary, and
+requires unchanged GPU-device-loss, aggregate fatal, and Export-failure
+counters. Decision digests bind the exact coordinator revision, pressure
+source, trim, Frame Store budgets, and Viewer idle-release request.
+
 The receipt schema and verifier deliberately recognize all four ordered steps,
-but production constructors for surface/device reopen, Export cancel/retry, and
-cache pressure remain closed until their real owner operations return sealed
-facts. Surface/device reopen still needs a consuming Window surface/device
-owner with actual generation identities; Export cancel/retry needs a recovery
-mode in the frozen Export state machine; cache pressure needs a scoped
-Critical-to-Nominal transaction proving nonzero real cache eviction. Protocol
-support is not operation qualification, and an incomplete concrete runtime
-must fail capability admission rather than fabricate any of these receipts.
+but production constructors for surface/device reopen and Export cancel/retry
+remain closed until their real owner operations return sealed facts.
+Surface/device reopen still needs a consuming Window surface/device owner with
+actual generation identities; Export cancel/retry needs a recovery mode in the
+frozen Export state machine. Protocol support is not operation qualification,
+and an incomplete concrete runtime must fail capability admission rather than
+fabricate either receipt.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

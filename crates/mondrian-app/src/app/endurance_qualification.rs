@@ -1431,6 +1431,13 @@ mod tests {
                 3072,
                 0,
                 true,
+                true,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 SHA.to_owned(),
                 SHA.to_owned(),
             )

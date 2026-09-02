@@ -119,14 +119,20 @@ raw checked-in workload contract bytes. Submit each owner observation through
 `EndurancePhaseCapture::capture_and_push`; direct sample insertion is not a
 public producer seam. The campaign coordinator routes sealed Export events into
 the crate-private artifact recorder. The recovery recorder accepts only a
-sealed canonical receipt and checks its embedded JSON, SHA-256, exact
+sealed canonical schema-2 receipt and checks its embedded JSON, SHA-256, exact
 cycle/step, and unique operation ID. The seek receipt can only be returned by
 `PersistentTimelinePlaybackPhase::recover_seek`, after the real typed product
 seek closes one exact Ready target under Audio Device Clock and the frozen
 author binding. Caller-authored SHA strings or success booleans are not an
-acceptable substitute. Surface/device reopen, Export cancel/retry, and cache
-pressure have no production receipt constructor yet; a runtime must keep those
-capabilities absent until their real operation owners exist. The supervisor
+acceptable substitute. Cache pressure can only be returned by
+`PersistentTimelinePlaybackPhase::recover_cache_pressure`; it applies real
+Critical and Nominal decisions to the settled Preview/GPU pair, requires
+nonzero media-cache byte retirement, then proves the same exact Ready picture
+and unchanged GPU/Preview/Audio/background/Export failure ledgers. Nominal is
+attempted even when Critical application fails. Surface/device reopen and
+Export cancel/retry still have no production receipt constructor; a runtime
+must keep those capabilities absent until their real operation owners exist.
+The supervisor
 automatically seals and publishes full
 chunks and generates the raw producer JSON plus normalized report. Finish
 executed phases with final Reference Output accounting and one clean schema-4

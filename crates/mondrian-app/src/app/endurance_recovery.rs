@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::endurance_playback::SeekRecoveryFacts;
+use super::endurance_playback::{CachePressureRecoveryFacts, SeekRecoveryFacts};
 use super::endurance_qualification::EnduranceRecoveryStep;
 
-const RECOVERY_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const RECOVERY_RECEIPT_SCHEMA_VERSION: u32 = 2;
 pub(crate) const MAXIMUM_RECOVERY_RECEIPT_JSON_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,13 @@ enum EnduranceRecoveryOperationEvidence {
         pressure_trimmed_bytes: u64,
         residual_owned_resources: u64,
         recovered_nominal: bool,
+        exact_picture_ready: bool,
+        gpu_device_losses_before: u64,
+        gpu_device_losses_after: u64,
+        fatal_errors_before: u64,
+        fatal_errors_after: u64,
+        export_failures_before: u64,
+        export_failures_after: u64,
         pressure_decision_sha256: String,
         recovered_decision_sha256: String,
     },
@@ -172,6 +179,13 @@ impl EnduranceRecoveryOperationEvidence {
                 pressure_trimmed_bytes,
                 residual_owned_resources,
                 recovered_nominal,
+                exact_picture_ready,
+                gpu_device_losses_before,
+                gpu_device_losses_after,
+                fatal_errors_before,
+                fatal_errors_after,
+                export_failures_before,
+                export_failures_after,
                 pressure_decision_sha256,
                 recovered_decision_sha256,
                 ..
@@ -183,6 +197,10 @@ impl EnduranceRecoveryOperationEvidence {
                 && *pressure_trimmed_bytes != 0
                 && *residual_owned_resources == 0
                 && *recovered_nominal
+                && *exact_picture_ready
+                && gpu_device_losses_before == gpu_device_losses_after
+                && fatal_errors_before == fatal_errors_after
+                && export_failures_before == export_failures_after
                 && valid_sha256(pressure_decision_sha256)
                 && valid_sha256(recovered_decision_sha256) =>
             {
@@ -257,6 +275,33 @@ impl EnduranceRecoveryOperationReceipt {
             before_epoch: facts.before_epoch(),
             after_epoch: facts.after_epoch(),
             exact_picture_ready: true,
+        })
+    }
+
+    pub(super) fn from_cache_pressure_facts(
+        facts: CachePressureRecoveryFacts,
+    ) -> Result<Self, EnduranceRecoveryReceiptError> {
+        Self::seal(EnduranceRecoveryOperationEvidence::CachePressure {
+            schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
+            cycle_index: facts.cycle_index(),
+            operation_id: facts.operation_id().to_owned(),
+            decision_generation_before: facts.decision_generation_before(),
+            pressure_decision_generation: facts.pressure_decision_generation(),
+            recovered_decision_generation: facts.recovered_decision_generation(),
+            cache_bytes_before_pressure: facts.cache_bytes_before_pressure(),
+            cache_bytes_after_pressure: facts.cache_bytes_after_pressure(),
+            pressure_trimmed_bytes: facts.pressure_trimmed_bytes(),
+            residual_owned_resources: facts.residual_owned_resources(),
+            recovered_nominal: true,
+            exact_picture_ready: facts.exact_picture_ready(),
+            gpu_device_losses_before: facts.gpu_device_losses_before(),
+            gpu_device_losses_after: facts.gpu_device_losses_after(),
+            fatal_errors_before: facts.fatal_errors_before(),
+            fatal_errors_after: facts.fatal_errors_after(),
+            export_failures_before: facts.export_failures_before(),
+            export_failures_after: facts.export_failures_after(),
+            pressure_decision_sha256: facts.pressure_decision_sha256().to_owned(),
+            recovered_decision_sha256: facts.recovered_decision_sha256().to_owned(),
         })
     }
 
@@ -351,6 +396,13 @@ impl EnduranceRecoveryOperationReceipt {
         pressure_trimmed_bytes: u64,
         residual_owned_resources: u64,
         recovered_nominal: bool,
+        exact_picture_ready: bool,
+        gpu_device_losses_before: u64,
+        gpu_device_losses_after: u64,
+        fatal_errors_before: u64,
+        fatal_errors_after: u64,
+        export_failures_before: u64,
+        export_failures_after: u64,
         pressure_decision_sha256: String,
         recovered_decision_sha256: String,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
@@ -366,6 +418,13 @@ impl EnduranceRecoveryOperationReceipt {
             pressure_trimmed_bytes,
             residual_owned_resources,
             recovered_nominal,
+            exact_picture_ready,
+            gpu_device_losses_before,
+            gpu_device_losses_after,
+            fatal_errors_before,
+            fatal_errors_after,
+            export_failures_before,
+            export_failures_after,
             pressure_decision_sha256,
             recovered_decision_sha256,
         })
@@ -486,6 +545,13 @@ mod tests {
                 3072,
                 0,
                 true,
+                true,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
                 SHA.to_owned(),
                 SHA.to_owned(),
             )
@@ -536,5 +602,27 @@ mod tests {
             EnduranceRecoveryOperationReceipt::parse_and_validate(receipt.canonical_json(), SHA,),
             Err(EnduranceRecoveryReceiptError::DigestMismatch)
         ));
+        assert!(EnduranceRecoveryOperationReceipt::cache_pressure(
+            0,
+            "cache-0".to_owned(),
+            1,
+            2,
+            3,
+            4096,
+            0,
+            4096,
+            0,
+            true,
+            true,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            SHA.to_owned(),
+            SHA.to_owned(),
+        )
+        .is_err());
     }
 }

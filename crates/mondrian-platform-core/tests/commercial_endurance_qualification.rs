@@ -621,7 +621,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                 let receipt = match step {
                     "seek" => serde_json::json!({
                         "step": step,
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "sequence_binding_sha256": SHA,
@@ -633,7 +633,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }),
                     "surface_device_reopen" => serde_json::json!({
                         "step": step,
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "sequence_binding_sha256": SHA,
@@ -646,7 +646,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }),
                     "export_cancel_retry" => serde_json::json!({
                         "step": step,
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "cancelled_job_id": format!("cancelled-{cycle}"),
@@ -659,7 +659,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }),
                     "cache_pressure" => serde_json::json!({
                         "step": step,
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "decision_generation_before": 1,
@@ -670,6 +670,13 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                         "pressure_trimmed_bytes": 3072,
                         "residual_owned_resources": 0,
                         "recovered_nominal": true,
+                        "exact_picture_ready": true,
+                        "gpu_device_losses_before": 0,
+                        "gpu_device_losses_after": 0,
+                        "fatal_errors_before": 0,
+                        "fatal_errors_after": 0,
+                        "export_failures_before": 0,
+                        "export_failures_after": 0,
                         "pressure_decision_sha256": SHA,
                         "recovered_decision_sha256": SHA,
                     }),

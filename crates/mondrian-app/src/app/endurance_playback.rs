@@ -8,9 +8,13 @@ use mondrian_playback::ClockMaster;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::endurance_campaign::{EnduranceExecutionOwners, EnduranceRealtimeIntervalObservation};
+use super::endurance_campaign::{
+    EnduranceCachePressureObservation, EnduranceExecutionOwners,
+    EnduranceRealtimeIntervalObservation,
+};
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::endurance_workload::PreparedEnduranceWorkload;
+use super::execution_resource_coordination::{ExecutionResourcePressure, ResourceTrimRequest};
 use super::product_action::{TimelineSeekPayload, TimelineSeekSource};
 use super::AppState;
 
@@ -63,6 +67,102 @@ impl SeekRecoveryFacts {
 
     pub(super) const fn after_epoch(&self) -> u64 {
         self.after_epoch
+    }
+}
+
+/// Owner-derived cache-pressure facts passed to the central receipt sealer.
+pub(super) struct CachePressureRecoveryFacts {
+    cycle_index: u32,
+    operation_id: String,
+    decision_generation_before: u64,
+    pressure_decision_generation: u64,
+    recovered_decision_generation: u64,
+    cache_bytes_before_pressure: u64,
+    cache_bytes_after_pressure: u64,
+    pressure_trimmed_bytes: u64,
+    residual_owned_resources: u64,
+    exact_picture_ready: bool,
+    gpu_device_losses_before: u64,
+    gpu_device_losses_after: u64,
+    fatal_errors_before: u64,
+    fatal_errors_after: u64,
+    export_failures_before: u64,
+    export_failures_after: u64,
+    pressure_decision_sha256: String,
+    recovered_decision_sha256: String,
+}
+
+impl CachePressureRecoveryFacts {
+    pub(super) const fn cycle_index(&self) -> u32 {
+        self.cycle_index
+    }
+
+    pub(super) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(super) const fn decision_generation_before(&self) -> u64 {
+        self.decision_generation_before
+    }
+
+    pub(super) const fn pressure_decision_generation(&self) -> u64 {
+        self.pressure_decision_generation
+    }
+
+    pub(super) const fn recovered_decision_generation(&self) -> u64 {
+        self.recovered_decision_generation
+    }
+
+    pub(super) const fn cache_bytes_before_pressure(&self) -> u64 {
+        self.cache_bytes_before_pressure
+    }
+
+    pub(super) const fn cache_bytes_after_pressure(&self) -> u64 {
+        self.cache_bytes_after_pressure
+    }
+
+    pub(super) const fn pressure_trimmed_bytes(&self) -> u64 {
+        self.pressure_trimmed_bytes
+    }
+
+    pub(super) const fn residual_owned_resources(&self) -> u64 {
+        self.residual_owned_resources
+    }
+
+    pub(super) const fn exact_picture_ready(&self) -> bool {
+        self.exact_picture_ready
+    }
+
+    pub(super) const fn gpu_device_losses_before(&self) -> u64 {
+        self.gpu_device_losses_before
+    }
+
+    pub(super) const fn gpu_device_losses_after(&self) -> u64 {
+        self.gpu_device_losses_after
+    }
+
+    pub(super) const fn fatal_errors_before(&self) -> u64 {
+        self.fatal_errors_before
+    }
+
+    pub(super) const fn fatal_errors_after(&self) -> u64 {
+        self.fatal_errors_after
+    }
+
+    pub(super) const fn export_failures_before(&self) -> u64 {
+        self.export_failures_before
+    }
+
+    pub(super) const fn export_failures_after(&self) -> u64 {
+        self.export_failures_after
+    }
+
+    pub(super) fn pressure_decision_sha256(&self) -> &str {
+        &self.pressure_decision_sha256
+    }
+
+    pub(super) fn recovered_decision_sha256(&self) -> &str {
+        &self.recovered_decision_sha256
     }
 }
 
@@ -250,6 +350,112 @@ impl PersistentTimelinePlaybackPhase {
             .map_err(|error| self.latch_fault(format!("seal seek recovery receipt: {error}")))
     }
 
+    /// Apply real bounded cache pressure, restore Nominal policy, and prove
+    /// the same current picture remains exactly usable on the persistent owners.
+    pub fn recover_cache_pressure(
+        &mut self,
+        app: &mut AppState,
+        owners: &mut EnduranceExecutionOwners,
+        cycle_index: u32,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<EnduranceRecoveryOperationReceipt, PersistentTimelinePlaybackError> {
+        self.require_healthy_active()?;
+        self.validate_binding(app)?;
+        validate_expected_coordinate(self.expected_epoch, self.expected_frame, app)
+            .map_err(|detail| self.latch_fault(detail))?;
+        self.settle_window(app, owners)?;
+        let before = owners
+            .capture_cache_pressure_observation(app)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        let pressure_result = owners.apply_cache_pressure(app, ExecutionResourcePressure::Critical);
+        let recovered_result = owners.apply_cache_pressure(app, ExecutionResourcePressure::Nominal);
+        let (pressure, recovered) = match (pressure_result, recovered_result) {
+            (Ok(pressure), Ok(recovered)) => (pressure, recovered),
+            (Err(primary), Ok(_)) => {
+                return Err(
+                    self.latch_fault(format!("apply critical cache-pressure policy: {primary}"))
+                );
+            }
+            (Ok(_), Err(cleanup)) => {
+                return Err(
+                    self.latch_fault(format!("restore Nominal cache-pressure policy: {cleanup}"))
+                );
+            }
+            (Err(primary), Err(cleanup)) => {
+                return Err(self.latch_fault(format!(
+                    "apply critical cache-pressure policy: {primary}; restore Nominal policy: {cleanup}"
+                )));
+            }
+        };
+        validate_cache_pressure_policy_transition(&before, &pressure, &recovered)
+            .map_err(|detail| self.latch_fault(detail))?;
+
+        self.resume_window(app, owners, absolute_deadline)?;
+        let sample = owners
+            .complete_current_picture(app, self.interval_timeout)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        if !sample.current_gpu_ready || sample.unavailable {
+            return Err(self.latch_fault(
+                "cache-pressure recovery did not prove the exact current picture Ready".to_owned(),
+            ));
+        }
+        if app.playback_clock_master() != Some(ClockMaster::AudioDevice) {
+            return Err(self.latch_fault(
+                "cache-pressure recovery was not governed by Audio Device Clock".to_owned(),
+            ));
+        }
+        self.validate_binding(app)?;
+        validate_expected_coordinate(self.expected_epoch, self.expected_frame, app)
+            .map_err(|detail| self.latch_fault(detail))?;
+
+        self.settle_window(app, owners)?;
+        let after_exact_picture = owners
+            .capture_cache_pressure_observation(app)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        validate_cache_pressure_terminal_health(&before, &recovered, &after_exact_picture)
+            .map_err(|detail| self.latch_fault(detail))?;
+        self.resume_window(app, owners, absolute_deadline)?;
+
+        let pressure_trimmed_bytes = before
+            .media_cache_bytes
+            .checked_sub(pressure.media_cache_bytes)
+            .ok_or_else(|| {
+                self.latch_fault("cache-pressure byte accounting regressed".to_owned())
+            })?;
+        let residual_owned_resources = pressure
+            .media_cache_entries
+            .checked_add(pressure.media_cache_resource_units)
+            .ok_or_else(|| {
+                self.latch_fault("cache-pressure residual ownership overflowed".to_owned())
+            })?;
+        let facts = CachePressureRecoveryFacts {
+            cycle_index,
+            operation_id: format!(
+                "cache.c{cycle_index}.d{}.r{}",
+                pressure.decision_revision, recovered.decision_revision
+            ),
+            decision_generation_before: before.decision_revision,
+            pressure_decision_generation: pressure.decision_revision,
+            recovered_decision_generation: recovered.decision_revision,
+            cache_bytes_before_pressure: before.media_cache_bytes,
+            cache_bytes_after_pressure: pressure.media_cache_bytes,
+            pressure_trimmed_bytes,
+            residual_owned_resources,
+            exact_picture_ready: true,
+            gpu_device_losses_before: before.gpu_device_losses,
+            gpu_device_losses_after: after_exact_picture.gpu_device_losses,
+            fatal_errors_before: before.fatal_errors,
+            fatal_errors_after: after_exact_picture.fatal_errors,
+            export_failures_before: before.export_failures,
+            export_failures_after: after_exact_picture.export_failures,
+            pressure_decision_sha256: pressure.decision_sha256,
+            recovered_decision_sha256: recovered.decision_sha256,
+        };
+        EnduranceRecoveryOperationReceipt::from_cache_pressure_facts(facts).map_err(|error| {
+            self.latch_fault(format!("seal cache-pressure recovery receipt: {error}"))
+        })
+    }
+
     /// Leave native realtime scheduling at a cadence boundary without stopping Playback.
     pub fn settle_window(
         &mut self,
@@ -376,6 +582,63 @@ fn sequence_binding_sha256(binding: PersistentTimelineBinding) -> String {
     hasher.update(binding.sequence_revision.get().to_le_bytes());
     hasher.update(binding.author_generation.to_le_bytes());
     hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn validate_cache_pressure_policy_transition(
+    before: &EnduranceCachePressureObservation,
+    pressure: &EnduranceCachePressureObservation,
+    recovered: &EnduranceCachePressureObservation,
+) -> Result<(), String> {
+    if before.pressure != ExecutionResourcePressure::Nominal
+        || pressure.pressure != ExecutionResourcePressure::Critical
+        || pressure.trim != ResourceTrimRequest::Aggressive
+        || recovered.pressure != ExecutionResourcePressure::Nominal
+        || recovered.trim != ResourceTrimRequest::None
+    {
+        return Err(
+            "cache-pressure recovery did not apply Critical then Nominal policy".to_owned(),
+        );
+    }
+    if pressure.decision_revision <= before.decision_revision
+        || recovered.decision_revision <= pressure.decision_revision
+        || before.resource_decision_applications.checked_add(1)
+            != Some(pressure.resource_decision_applications)
+        || pressure.resource_decision_applications.checked_add(1)
+            != Some(recovered.resource_decision_applications)
+    {
+        return Err(
+            "cache-pressure decisions were not applied exactly once in monotonic order".to_owned(),
+        );
+    }
+    if before.media_cache_bytes == 0
+        || pressure.media_cache_bytes >= before.media_cache_bytes
+        || pressure.media_cache_entries != 0
+        || pressure.media_cache_resource_units != 0
+    {
+        return Err(
+            "cache-pressure recovery did not trim nonzero optional media residency".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_cache_pressure_terminal_health(
+    before: &EnduranceCachePressureObservation,
+    recovered: &EnduranceCachePressureObservation,
+    after_exact_picture: &EnduranceCachePressureObservation,
+) -> Result<(), String> {
+    if after_exact_picture.pressure != ExecutionResourcePressure::Nominal
+        || after_exact_picture.decision_revision != recovered.decision_revision
+        || after_exact_picture.gpu_device_losses != before.gpu_device_losses
+        || after_exact_picture.fatal_errors != before.fatal_errors
+        || after_exact_picture.export_failures != before.export_failures
+    {
+        return Err(
+            "cache-pressure recovery changed policy identity or cumulative failure evidence"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_phase_contract(
@@ -515,6 +778,8 @@ mod tests {
     use super::*;
     use crate::app::headless_realtime_playback::HeadlessPreviewSample;
 
+    const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
     fn observation(
         before_epoch: u64,
         before_frame: i64,
@@ -532,6 +797,30 @@ mod tests {
                 stale_output_available: !ready,
                 unavailable: false,
             },
+        }
+    }
+
+    fn cache_observation(
+        decision_revision: u64,
+        pressure: ExecutionResourcePressure,
+        trim: ResourceTrimRequest,
+        applications: u64,
+        media_cache_bytes: u64,
+        media_cache_entries: u64,
+        media_cache_resource_units: u64,
+    ) -> EnduranceCachePressureObservation {
+        EnduranceCachePressureObservation {
+            decision_revision,
+            pressure,
+            trim,
+            decision_sha256: SHA.to_owned(),
+            resource_decision_applications: applications,
+            media_cache_bytes,
+            media_cache_entries,
+            media_cache_resource_units,
+            gpu_device_losses: 2,
+            fatal_errors: 3,
+            export_failures: 5,
         }
     }
 
@@ -572,5 +861,69 @@ mod tests {
             Some(ClockMaster::Synthetic),
         )
         .is_err());
+    }
+
+    #[test]
+    fn cache_pressure_transition_requires_real_trim_exact_policy_order_and_clean_recovery() {
+        let before = cache_observation(
+            10,
+            ExecutionResourcePressure::Nominal,
+            ResourceTrimRequest::None,
+            7,
+            4096,
+            2,
+            1,
+        );
+        let pressure = cache_observation(
+            11,
+            ExecutionResourcePressure::Critical,
+            ResourceTrimRequest::Aggressive,
+            8,
+            0,
+            0,
+            0,
+        );
+        let recovered = cache_observation(
+            12,
+            ExecutionResourcePressure::Nominal,
+            ResourceTrimRequest::None,
+            9,
+            0,
+            0,
+            0,
+        );
+        let after_exact_picture = cache_observation(
+            12,
+            ExecutionResourcePressure::Nominal,
+            ResourceTrimRequest::None,
+            9,
+            1024,
+            1,
+            0,
+        );
+
+        assert!(validate_cache_pressure_policy_transition(&before, &pressure, &recovered).is_ok());
+        assert!(
+            validate_cache_pressure_terminal_health(&before, &recovered, &after_exact_picture)
+                .is_ok()
+        );
+
+        let mut no_trim = pressure.clone();
+        no_trim.media_cache_bytes = before.media_cache_bytes;
+        assert!(validate_cache_pressure_policy_transition(&before, &no_trim, &recovered).is_err());
+
+        let mut skipped_application = recovered.clone();
+        skipped_application.resource_decision_applications =
+            pressure.resource_decision_applications;
+        assert!(validate_cache_pressure_policy_transition(
+            &before,
+            &pressure,
+            &skipped_application
+        )
+        .is_err());
+
+        let mut failed = after_exact_picture;
+        failed.fatal_errors += 1;
+        assert!(validate_cache_pressure_terminal_health(&before, &recovered, &failed).is_err());
     }
 }

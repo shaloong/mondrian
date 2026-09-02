@@ -16,6 +16,7 @@ use mondrian_platform::{
 };
 use mondrian_playback::PlaybackEvidenceReport;
 use mondrian_reference_output::ReferenceOutputDiagnostics;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::endurance_qualification::{
@@ -29,6 +30,9 @@ pub use super::endurance_shutdown::{
 };
 pub use super::endurance_workload::{EnduranceNotRunAdmission, EndurancePhaseAdmission};
 use super::endurance_workload::{EnduranceWorkloadError, PreparedEnduranceWorkload};
+use super::execution_resource_coordination::{
+    ExecutionResourcePressure, ExecutionResourcePressureSource, ResourceTrimRequest,
+};
 use super::headless_realtime_playback::{
     capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
     HeadlessEnduranceShutdownProjection, HeadlessGpuExecutionDisposition,
@@ -156,6 +160,21 @@ pub(super) struct EnduranceRealtimeIntervalObservation {
     pub(super) sample: HeadlessPreviewSample,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct EnduranceCachePressureObservation {
+    pub(super) decision_revision: u64,
+    pub(super) pressure: ExecutionResourcePressure,
+    pub(super) trim: ResourceTrimRequest,
+    pub(super) decision_sha256: String,
+    pub(super) resource_decision_applications: u64,
+    pub(super) media_cache_bytes: u64,
+    pub(super) media_cache_entries: u64,
+    pub(super) media_cache_resource_units: u64,
+    pub(super) gpu_device_losses: u64,
+    pub(super) fatal_errors: u64,
+    pub(super) export_failures: u64,
+}
+
 impl EnduranceExecutionOwners {
     /// Start real software execution owners without admitting a campaign phase.
     pub fn start() -> Result<Self, EnduranceCampaignError> {
@@ -222,6 +241,85 @@ impl EnduranceExecutionOwners {
             })?
             .complete_current_video_opportunity(app, &mut observer, gpu_completion_timeout)
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
+    }
+
+    pub(super) fn capture_cache_pressure_observation(
+        &self,
+        app: &AppState,
+    ) -> Result<EnduranceCachePressureObservation, EnduranceCampaignError> {
+        let realtime = self.realtime.as_ref().ok_or_else(|| {
+            EnduranceCampaignError::Runtime(
+                "Headless realtime execution session is missing".to_owned(),
+            )
+        })?;
+        let preview = realtime
+            .preview()
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?
+            .diagnostics();
+        let owner = realtime
+            .endurance_owner_snapshot(app)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        let decision = app.execution_resource_decision();
+        let export = app.export_endurance_snapshot(0);
+        Ok(EnduranceCachePressureObservation {
+            decision_revision: decision.revision,
+            pressure: decision.pressure,
+            trim: decision.preview.trim,
+            decision_sha256: cache_pressure_decision_sha256(&decision)?,
+            resource_decision_applications: preview.resource_decision_applications,
+            media_cache_bytes: u64::try_from(preview.frame_store.media_reserved_bytes).map_err(
+                |_| {
+                    EnduranceCampaignError::Runtime(
+                        "Preview media-cache bytes exceeded u64".to_owned(),
+                    )
+                },
+            )?,
+            media_cache_entries: u64::try_from(preview.frame_store.media_entries).map_err(
+                |_| {
+                    EnduranceCampaignError::Runtime(
+                        "Preview media-cache entries exceeded u64".to_owned(),
+                    )
+                },
+            )?,
+            media_cache_resource_units: u64::try_from(preview.frame_store.media_resource_units)
+                .map_err(|_| {
+                    EnduranceCampaignError::Runtime(
+                        "Preview media-cache resource units exceeded u64".to_owned(),
+                    )
+                })?,
+            gpu_device_losses: owner.gpu_device_losses(),
+            fatal_errors: owner.fatal_errors(),
+            export_failures: export.failures,
+        })
+    }
+
+    pub(super) fn apply_cache_pressure(
+        &mut self,
+        app: &AppState,
+        pressure: ExecutionResourcePressure,
+    ) -> Result<EnduranceCachePressureObservation, EnduranceCampaignError> {
+        app.observe_execution_resource_pressure(pressure);
+        let decision = app.execution_resource_decision();
+        if decision.pressure != pressure
+            || decision.pressure_source != ExecutionResourcePressureSource::Manual
+        {
+            return Err(EnduranceCampaignError::Runtime(
+                "manual cache-pressure decision was not retained by the product coordinator"
+                    .to_owned(),
+            ));
+        }
+        let realtime = self.realtime.as_mut().ok_or_else(|| {
+            EnduranceCampaignError::Runtime(
+                "Headless realtime execution session is missing".to_owned(),
+            )
+        })?;
+        let (preview, gpu) = realtime
+            .bound_resources()
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        preview.apply_resource_decision(&decision.preview);
+        gpu.apply_resource_decision(&decision.preview.viewer_gpu)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        self.capture_cache_pressure_observation(app)
     }
 
     pub(super) fn finish_realtime_window(&mut self) -> Result<(), EnduranceCampaignError> {
@@ -365,6 +463,54 @@ impl EnduranceExecutionOwners {
             terminal_owner_snapshot,
         })
     }
+}
+
+fn cache_pressure_decision_sha256(
+    decision: &super::execution_resource_coordination::ExecutionResourceDecisionSnapshot,
+) -> Result<String, EnduranceCampaignError> {
+    let frame_store = decision.preview.frame_store;
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.endurance.cache-pressure-decision.v1\0");
+    hasher.update(decision.schema_version.to_le_bytes());
+    hasher.update(decision.revision.to_le_bytes());
+    hasher.update([match decision.pressure {
+        ExecutionResourcePressure::Nominal => 0,
+        ExecutionResourcePressure::Elevated => 1,
+        ExecutionResourcePressure::Critical => 2,
+    }]);
+    hasher.update([match decision.pressure_source {
+        ExecutionResourcePressureSource::Baseline => 0,
+        ExecutionResourcePressureSource::Manual => 1,
+        ExecutionResourcePressureSource::NativeMemory => 2,
+    }]);
+    hasher.update([match decision.preview.trim {
+        ResourceTrimRequest::None => 0,
+        ResourceTrimRequest::Speculative => 1,
+        ResourceTrimRequest::Aggressive => 2,
+    }]);
+    for value in [
+        frame_store.media_entry_capacity,
+        frame_store.media_byte_budget,
+        frame_store.media_resource_unit_budget,
+        frame_store.current_media_working_set_entry_limit,
+        frame_store.current_media_working_set_byte_limit,
+        frame_store.current_media_working_set_resource_unit_limit,
+        frame_store.viewer_entry_capacity,
+        frame_store.viewer_byte_budget,
+        frame_store.failure_entry_capacity,
+    ] {
+        hasher.update(
+            u64::try_from(value)
+                .map_err(|_| {
+                    EnduranceCampaignError::Runtime(
+                        "cache-pressure decision field exceeded u64".to_owned(),
+                    )
+                })?
+                .to_le_bytes(),
+        );
+    }
+    hasher.update([u8::from(decision.preview.viewer_gpu.clear_idle)]);
+    Ok(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Process-monotonic campaign clock. UTC is never duration authority.
