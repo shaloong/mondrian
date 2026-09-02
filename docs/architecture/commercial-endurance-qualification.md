@@ -35,6 +35,10 @@ The implementation is split at existing authority boundaries:
   the concrete runtime remains the authority for pumping real product work,
   coordinator-bounded owner snapshots, typed semantic events, and synchronous
   closure.
+- `mondrian-app::app::endurance_workload` owns the bounded regular-file read,
+  SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
+  duration/counter validation, plus the exact pre-start capability inventory.
+  The runtime receives only `PreparedEnduranceWorkload`, never a raw path.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
@@ -184,8 +188,14 @@ deadline-qualified authority, and only consuming qualification paths plus typed
 receipts can close a phase.
 
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
-owner-consuming cleanup, and deterministic software tests. It does **not** yet
-supply the concrete three-phase `EnduranceCampaignRuntime`: repeated frozen
+owner-consuming cleanup, typed workload preparation/NotRun admission, and
+deterministic software tests. A valid contract can become `NotRun` only when a
+pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
+Audio Device, physical Reference provider, external lock, independent verifier,
+or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
+digest drift, duration drift, and counter-policy drift are execution errors,
+not absent prerequisites. It does **not** yet supply the concrete three-phase
+`EnduranceCampaignRuntime`: repeated frozen
 Export plus independent verification, persistent Timeline clean-feed/audio
 pumping, the real vendor Reference Output bridge and hardware validation, typed
 recovery receipts, and the high-level validation executable remain explicit
@@ -213,6 +223,14 @@ Each profile phase binds one raw checked-in contract under
 `mondrian-app-endurance-capture-v1` supervisor, and producer report schema 1.
 The reference-asset validator recomputes every workload file digest, so an
 opaque or missing workload cannot be admitted by editing only the profile.
+The campaign coordinator independently prepares those exact bytes before
+calling the product runtime. Playback/Reference fixes 60/1, Audio Device Clock,
+physical output, continuous external lock, every-completion hardware time, and
+no Export/recovery; Continuous Export fixes disabled realtime owners, repeated
+frozen Sequence export, independent full-content verification, and forbidden
+cancellation; Concurrent Recovery fixes all realtime/Export policies plus the
+ordered seek, surface/device reopen, Export cancel/retry, and cache-pressure
+cycle and exact cycle/cancellation counts.
 
 Each phase declares exact minimum duration, warmup, cadence, maximum sample and
 per-domain Playback/Reference/Export/recovery progress gaps, native memory

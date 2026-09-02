@@ -6,7 +6,7 @@
 //! synchronous worker shutdown; this module never reinterprets their facts.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
@@ -26,6 +26,8 @@ pub use super::endurance_shutdown::{
     AppAudioSourceCacheShutdownEvidence, AppEnduranceShutdownEvidence, AppProjectShutdownEvidence,
     EnduranceWorkerShutdownEvidence,
 };
+pub use super::endurance_workload::{EnduranceNotRunAdmission, EndurancePhaseAdmission};
+use super::endurance_workload::{EnduranceWorkloadError, PreparedEnduranceWorkload};
 use super::headless_realtime_playback::{
     capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
     HeadlessEnduranceShutdownProjection, HeadlessRealtimePlaybackSession,
@@ -354,15 +356,6 @@ impl EnduranceCampaignEvent {
     }
 }
 
-/// Result of attempting to admit one exact phase workload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EndurancePhaseAdmission {
-    /// Required fixtures and product owners started successfully.
-    Started,
-    /// A required external prerequisite was absent; no product work started.
-    NotRun,
-}
-
 /// Coordinator-bound projection of product-owned diagnostics at one cadence.
 ///
 /// Each domain snapshot is internally consistent. The surrounding sample's
@@ -444,7 +437,7 @@ pub trait EnduranceCampaignRuntime {
     fn begin_phase(
         &mut self,
         requirement: &EndurancePhaseRequirement,
-        workload_contract_path: &Path,
+        workload: &PreparedEnduranceWorkload,
     ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError>;
 
     /// Pump real product work until the absolute campaign deadline is reached.
@@ -512,6 +505,7 @@ where
             .workload_contracts
             .get(&requirement.phase_id)
             .ok_or_else(|| EnduranceCampaignError::MissingWorkload(requirement.phase_id.clone()))?;
+        let workload = PreparedEnduranceWorkload::load(requirement, workload_path)?;
         let started_at_run_us = clock.elapsed_us();
         let phase = capture.begin_phase(
             &requirement.phase_id,
@@ -519,12 +513,12 @@ where
             &request.evidence_directory,
             workload_path,
         )?;
-        let admission = match runtime.begin_phase(requirement, workload_path) {
+        let admission = match runtime.begin_phase(requirement, &workload) {
             Ok(admission) => admission,
             Err(primary) => return Err(cleanup_started_phase(runtime, primary)),
         };
         match admission {
-            EndurancePhaseAdmission::NotRun => {
+            EndurancePhaseAdmission::NotRun(_) => {
                 capture.commit_phase(phase.finish_not_run()?)?;
             }
             EndurancePhaseAdmission::Started => {
@@ -812,10 +806,14 @@ pub enum EnduranceCampaignError {
         /// Kind sealed into the returned snapshot.
         actual: EndurancePhaseKind,
     },
+    /// Checked-in workload bytes did not compile into the exact typed contract.
+    #[error(transparent)]
+    Workload(#[from] EnduranceWorkloadError),
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use mondrian_platform::{
@@ -980,7 +978,7 @@ mod tests {
         fn begin_phase(
             &mut self,
             requirement: &EndurancePhaseRequirement,
-            _workload_contract_path: &Path,
+            workload: &PreparedEnduranceWorkload,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             self.kind = Some(requirement.kind);
             self.phase_started_at_us = self.clock.elapsed_us();
@@ -990,7 +988,7 @@ mod tests {
                 if requirement.kind == mondrian_platform::EndurancePhaseKind::ContinuousExport {
                     EndurancePhaseAdmission::Started
                 } else {
-                    EndurancePhaseAdmission::NotRun
+                    workload.admit(&Default::default())
                 },
             )
         }
@@ -1105,7 +1103,7 @@ mod tests {
         fn begin_phase(
             &mut self,
             _requirement: &EndurancePhaseRequirement,
-            _workload_contract_path: &Path,
+            _workload: &PreparedEnduranceWorkload,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             unreachable!("cleanup test never admits a phase")
         }
@@ -1330,7 +1328,7 @@ mod tests {
         fn begin_phase(
             &mut self,
             _requirement: &EndurancePhaseRequirement,
-            _workload_contract_path: &Path,
+            _workload: &PreparedEnduranceWorkload,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             self.begin_calls += 1;
             if matches!(self.failpoint, CampaignFailpoint::Begin) {

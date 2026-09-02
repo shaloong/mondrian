@@ -113,6 +113,8 @@ pub mod endurance_campaign;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_qualification;
 mod endurance_shutdown;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_workload;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;

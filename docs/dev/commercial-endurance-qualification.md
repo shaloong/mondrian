@@ -110,6 +110,17 @@ prerequisite is absent. Reference diagnostics do not yet prove vendor
 callback-thread/device-session consumption. Commit phases in profile order and
 call `seal_manifest` once.
 
+Before creating a fresh `AppState` or any phase owner, let
+`run_endurance_campaign` compile the checked-in leaf into
+`PreparedEnduranceWorkload`. Concrete runtimes receive that prepared value, not
+the contract path. They must obtain `EndurancePhaseAdmission` through its
+capability inventory: Timeline playback fixture, frozen Export fixture, Audio
+Device, physical Reference provider, external lock, independent Export
+verifier, and each of seek/surface-reopen/export-retry/cache-pressure recovery
+are distinct capabilities. A non-empty missing list is the only legal
+`NotRun`; parse/hash/identity/policy/duration/counter mismatches abort the
+campaign as invalid input.
+
 Before recording an artifact event, call
 `mondrian_export::verify_export_artifact` with the stable Export job/artifact
 identity and explicit nonzero file-size and decode-time limits, then construct
@@ -133,8 +144,9 @@ synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
 coordinator takes the final sample. That concrete three-phase runtime and thin
 validation executable are not implemented at this checkpoint. The coordinator owns cadence, native
 `ProductProcessTree` probing, phase order, and evidence publication. If a
-physical provider or required fixture is absent, `begin_phase` must return
-`NotRun` before starting work; a started phase cannot be downgraded to
+physical provider or required fixture is absent, `begin_phase` must return the
+typed `NotRun` receipt created by prepared-workload admission before starting
+work; a started phase cannot be downgraded to
 `NotRun`. Any `begin_phase` error may follow partial owner creation and therefore
 must retain enough state for the supervisor's exactly-once consuming cleanup.
 An `Ok` shutdown receipt is still rejected immediately when any software
