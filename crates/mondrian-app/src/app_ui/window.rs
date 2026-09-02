@@ -193,6 +193,8 @@ const APP_UI_DISPLAY_CONTRACT_REFRESH_HISTORY_LIMIT: usize = 8;
 const APP_UI_EVENT_LOOP_SLOW_STAGE_BUDGET_US: u64 = 50_000;
 const APP_UI_BUFFERING_INTERACTIVE_WAKE_DELAY: Duration = Duration::from_millis(16);
 const VIEWER_HETEROGENEOUS_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "validation")]
+const MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES: usize = 24;
 static NEXT_APP_UI_SURFACE_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Process-local identity of one concrete Window/Surface generation.
@@ -2141,6 +2143,44 @@ pub fn run_app_ui() -> Result<(), Box<dyn std::error::Error>> {
     run_app_ui_with_initial_state(AppState::new())
 }
 
+/// Process-local reusable desktop event-loop owner for endurance validation.
+///
+/// Winit permits only one event-loop owner per process on the supported
+/// desktop platforms. Each validation run is an orthogonal Window/GPU session;
+/// no Window or device owner crosses a return from `run_on_demand`.
+#[cfg(feature = "validation")]
+pub(crate) struct AppUiReusableEventLoop {
+    event_loop: winit::event_loop::EventLoop<AppUiUserEvent>,
+}
+
+#[cfg(feature = "validation")]
+impl AppUiReusableEventLoop {
+    pub(crate) fn new() -> Result<Self, winit::error::EventLoopError> {
+        Ok(Self {
+            event_loop: winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event()
+                .build()?,
+        })
+    }
+
+    pub(crate) fn reopen_surface_device_with_pump(
+        &mut self,
+        initial_state: AppState,
+        recovery_pump: crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump,
+        cycle_index: u32,
+        operation_id: String,
+        timeout: Duration,
+    ) -> AppUiSurfaceDeviceReopenRun {
+        run_app_ui_surface_device_reopen_validation_returning_state_inner(
+            &mut self.event_loop,
+            initial_state,
+            Some(recovery_pump),
+            cycle_index,
+            operation_id,
+            timeout,
+        )
+    }
+}
+
 #[cfg(feature = "validation")]
 /// Run one real Window/Surface and Device reopen over an already-open Project.
 ///
@@ -2152,13 +2192,132 @@ pub fn run_app_ui_surface_device_reopen_validation(
     operation_id: String,
     timeout: Duration,
 ) -> Result<EnduranceRecoveryOperationReceipt, Box<dyn std::error::Error>> {
-    let run = run_app_ui_surface_device_reopen_validation_returning_state(
+    let mut receipts = run_app_ui_surface_device_reopen_validation_batch(
         initial_state,
-        cycle_index,
-        operation_id,
-        timeout,
-    );
-    let AppUiSurfaceDeviceReopenRun { app_state, result, recovery_pump: _ } = run;
+        vec![AppUiSurfaceDeviceReopenValidationRequest { cycle_index, operation_id, timeout }],
+    )?;
+    receipts
+        .pop()
+        .ok_or_else(|| "single Surface/device validation returned no receipt".to_owned().into())
+}
+
+/// One operation in a same-process Surface/Device validation batch.
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppUiSurfaceDeviceReopenValidationRequest {
+    /// Recovery-cycle identity bound into the sealed receipt.
+    pub cycle_index: u32,
+    /// Unique operation identity bound into the sealed receipt.
+    pub operation_id: String,
+    /// Absolute wall-clock budget for this Window session.
+    pub timeout: Duration,
+}
+
+/// Run orthogonal Surface/Device reopen sessions on one process-local event loop.
+///
+/// The same App owner crosses every operation, while each Window, Surface,
+/// Device, Queue, and callback session is destroyed before the next on-demand
+/// event-loop run. The App is consumed by a bounded endurance shutdown before
+/// this function returns.
+#[cfg(feature = "validation")]
+pub fn run_app_ui_surface_device_reopen_validation_batch(
+    initial_state: AppState,
+    requests: Vec<AppUiSurfaceDeviceReopenValidationRequest>,
+) -> Result<Vec<EnduranceRecoveryOperationReceipt>, Box<dyn std::error::Error>> {
+    let mut state = initial_state;
+    if requests.is_empty() {
+        return finish_surface_device_validation(
+            state,
+            Err("Surface/device validation batch must not be empty".to_owned()),
+        );
+    }
+    if requests.len() > MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES {
+        return finish_surface_device_validation(
+            state,
+            Err(format!(
+                "Surface/device validation batch exceeds {} operations",
+                MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES
+            )),
+        );
+    }
+    let unique_cycles = requests
+        .iter()
+        .map(|request| request.cycle_index)
+        .collect::<std::collections::BTreeSet<_>>();
+    let unique_operations = requests
+        .iter()
+        .map(|request| request.operation_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if unique_cycles.len() != requests.len()
+        || unique_operations.len() != requests.len()
+        || requests
+            .iter()
+            .any(|request| !valid_surface_validation_operation_id(&request.operation_id))
+    {
+        return finish_surface_device_validation(
+            state,
+            Err("Surface/device validation batch identities are invalid or replayed".to_owned()),
+        );
+    }
+    if requests.iter().any(|request| request.timeout.is_zero()) {
+        return finish_surface_device_validation(
+            state,
+            Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+        );
+    }
+    if requests
+        .iter()
+        .any(|request| Instant::now().checked_add(request.timeout).is_none())
+    {
+        return finish_surface_device_validation(
+            state,
+            Err("Surface/device reopen validation deadline overflow".to_owned()),
+        );
+    }
+    let mut event_loop = match AppUiReusableEventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            return finish_surface_device_validation(
+                state,
+                Err(format!(
+                    "could not create the Surface validation event loop: {error}"
+                )),
+            );
+        }
+    };
+    let mut receipts = Vec::with_capacity(requests.len());
+    for request in requests {
+        let run = run_app_ui_surface_device_reopen_validation_returning_state_inner(
+            &mut event_loop.event_loop,
+            state,
+            None,
+            request.cycle_index,
+            request.operation_id,
+            request.timeout,
+        );
+        state = run.app_state;
+        match run.result {
+            Ok(receipt) => receipts.push(receipt),
+            Err(error) => return finish_surface_device_validation(state, Err(error)),
+        }
+    }
+    finish_surface_device_validation(state, Ok(receipts))
+}
+
+#[cfg(feature = "validation")]
+fn valid_surface_validation_operation_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+#[cfg(feature = "validation")]
+fn finish_surface_device_validation<T>(
+    app_state: AppState,
+    result: Result<T, String>,
+) -> Result<T, Box<dyn std::error::Error>> {
     let (shutdown_deadline, deadline_failure) =
         match Instant::now().checked_add(Duration::from_secs(30)) {
             Some(deadline) => (deadline, None),
@@ -2173,7 +2332,7 @@ pub fn run_app_ui_surface_device_reopen_validation(
             .then(|| format!("Surface/device validation App shutdown was incomplete: {shutdown:?}"))
     });
     match (result, cleanup_failure) {
-        (Ok(receipt), None) => Ok(receipt),
+        (Ok(value), None) => Ok(value),
         (Err(primary), None) => Err(primary.into()),
         (Ok(_), Some(cleanup)) => Err(cleanup.into()),
         (Err(primary), Some(cleanup)) => {
@@ -2190,14 +2349,41 @@ pub(crate) struct AppUiSurfaceDeviceReopenRun {
         Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
 }
 
-#[cfg(feature = "validation")]
+#[cfg(all(feature = "validation", test))]
 pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
     initial_state: AppState,
     cycle_index: u32,
     operation_id: String,
     timeout: Duration,
 ) -> AppUiSurfaceDeviceReopenRun {
+    if timeout.is_zero() {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            recovery_pump: None,
+        };
+    }
+    if Instant::now().checked_add(timeout).is_none() {
+        return AppUiSurfaceDeviceReopenRun {
+            app_state: initial_state,
+            result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            recovery_pump: None,
+        };
+    }
+    let mut event_loop = match AppUiReusableEventLoop::new() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            return AppUiSurfaceDeviceReopenRun {
+                app_state: initial_state,
+                result: Err(format!(
+                    "could not create the Surface validation event loop: {error}"
+                )),
+                recovery_pump: None,
+            };
+        }
+    };
     run_app_ui_surface_device_reopen_validation_returning_state_inner(
+        &mut event_loop.event_loop,
         initial_state,
         None,
         cycle_index,
@@ -2207,24 +2393,8 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
 }
 
 #[cfg(feature = "validation")]
-pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state_with_pump(
-    initial_state: AppState,
-    recovery_pump: crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump,
-    cycle_index: u32,
-    operation_id: String,
-    timeout: Duration,
-) -> AppUiSurfaceDeviceReopenRun {
-    run_app_ui_surface_device_reopen_validation_returning_state_inner(
-        initial_state,
-        Some(recovery_pump),
-        cycle_index,
-        operation_id,
-        timeout,
-    )
-}
-
-#[cfg(feature = "validation")]
 fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
+    event_loop: &mut winit::event_loop::EventLoop<AppUiUserEvent>,
     initial_state: AppState,
     recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
     cycle_index: u32,
@@ -2257,7 +2427,8 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
         recovery_pump,
         recovery_pump_return: Rc::clone(&recovery_pump_return),
     };
-    let ui_result = run_app_ui_with_initial_state(
+    let ui_result = run_app_ui_with_initial_state_on_event_loop(
+        event_loop,
         initial_state,
         Some(validation),
         Some(Rc::clone(&returned_state)),
@@ -2285,6 +2456,26 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
 }
 
 fn run_app_ui_with_initial_state(
+    initial_state: AppState,
+    #[cfg(feature = "validation")] surface_reopen_validation: Option<
+        AppUiSurfaceDeviceReopenValidation,
+    >,
+    #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut event_loop =
+        winit::event_loop::EventLoop::<AppUiUserEvent>::with_user_event().build()?;
+    run_app_ui_with_initial_state_on_event_loop(
+        &mut event_loop,
+        initial_state,
+        #[cfg(feature = "validation")]
+        surface_reopen_validation,
+        #[cfg(feature = "validation")]
+        validation_return,
+    )
+}
+
+fn run_app_ui_with_initial_state_on_event_loop(
+    event_loop: &mut winit::event_loop::EventLoop<AppUiUserEvent>,
     initial_state: AppState,
     #[cfg(feature = "validation")] mut surface_reopen_validation: Option<
         AppUiSurfaceDeviceReopenValidation,
@@ -2317,8 +2508,6 @@ fn run_app_ui_with_initial_state(
 
     tracing::info!("Mondrian app UI starting");
 
-    use winit::event_loop::EventLoop;
-    let event_loop = EventLoop::<AppUiUserEvent>::with_user_event().build()?;
     let preview_work_event_proxy = event_loop.create_proxy();
     let startup_window =
         Arc::new(event_loop.create_window(window_attributes_for_role(AppUiWindowRole::Startup))?);
@@ -2405,7 +2594,9 @@ fn run_app_ui_with_initial_state(
     session.window.set_visible(true);
     session.window.request_redraw();
 
-    event_loop.run(move |event, elwt| {
+    use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
+    #[allow(deprecated)]
+    event_loop.run_on_demand(move |event, elwt| {
         use winit::event::ElementState;
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
@@ -9832,5 +10023,21 @@ mod tests {
     fn surface_reopen_window_does_not_advance_settled_playback() {
         assert!(!validation_window_advances_playback(true));
         assert!(validation_window_advances_playback(false));
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_validation_batch_rejects_unbounded_work_before_event_loop_creation() {
+        let requests = (0..=MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES)
+            .map(|cycle| AppUiSurfaceDeviceReopenValidationRequest {
+                cycle_index: u32::try_from(cycle).expect("bounded test cycle"),
+                operation_id: format!("surface.c{cycle}"),
+                timeout: Duration::from_secs(1),
+            })
+            .collect();
+        let error = run_app_ui_surface_device_reopen_validation_batch(AppState::new(), requests)
+            .expect_err("unbounded batch must fail");
+
+        assert!(error.to_string().contains("exceeds 24 operations"));
     }
 }

@@ -1753,6 +1753,16 @@ runtime may instead resume its settled persistent Timeline owner. Returning a
 receipt while a Window Preview worker, Basic Title task, visual/CPU fallback,
 render-cache worker, or Waveform owner detached is forbidden.
 
+Winit's event-loop creation authority is process-local, so endurance validation
+owns one non-`Send` event loop on the binary main thread and uses the desktop
+on-demand lifecycle for each orthogonal recovery session. Every invocation
+creates fresh Window/Surface/Device/Queue state and drops it completely before
+control returns; only the exact `AppState` and campaign recovery pump cross the
+boundary. The same owner is then re-entered for the next recovery cycle. A
+standalone batch runner exercises multiple cycles in one process so a second
+cycle cannot regress to `EventLoopError::RecreationAttempt`. macOS main-thread
+and Linux display-server availability remain native transfer gates.
+
 One non-renewing five-second lifecycle deadline revokes publication authority
 but does not free submitted resources. Timeout/cancellation enters
 non-reusable quarantine and defers runtime clear/reset; the device worker keeps

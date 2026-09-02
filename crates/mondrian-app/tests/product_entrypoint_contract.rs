@@ -79,10 +79,30 @@ bench = false"#,
         ),
         "Golden validation must remain feature-gated and outside product/test routes"
     );
+    let surface_reopen_bin = bins
+        .iter()
+        .find(|bin| bin.name == "mondrian-surface-reopen")
+        .expect("Surface reopen validation bin");
+    assert_eq!(
+        surface_reopen_bin.path,
+        "src/bin/mondrian_surface_reopen.rs"
+    );
+    assert!(
+        manifest.contains(
+            r#"[[bin]]
+name = "mondrian-surface-reopen"
+path = "src/bin/mondrian_surface_reopen.rs"
+required-features = ["validation"]
+test = false
+bench = false"#,
+        ),
+        "Surface reopen validation must remain feature-gated and outside product/test routes"
+    );
 
     let allowed_bins = [
         "mondrian",
         "mondrian-golden",
+        "mondrian-surface-reopen",
         "ui_demo",
         "ui_color_test",
         "ui_widget_test",

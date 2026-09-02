@@ -302,10 +302,21 @@ pub trait EnduranceSurfaceReopenDriver {
     ) -> EnduranceSurfaceReopenRun;
 }
 
-/// Production winit Window driver. It is intentionally not `Send`.
-#[derive(Debug, Default)]
+/// Production winit Window driver. It is intentionally not `Send` and owns
+/// exactly one process-local event loop across every recovery cycle.
 pub struct WindowEnduranceSurfaceReopenDriver {
+    event_loop: crate::app_ui::window::AppUiReusableEventLoop,
     _main_thread: PhantomData<Rc<()>>,
+}
+
+impl WindowEnduranceSurfaceReopenDriver {
+    /// Create the process-local event loop before campaign admission.
+    pub fn new() -> Result<Self, winit::error::EventLoopError> {
+        Ok(Self {
+            event_loop: crate::app_ui::window::AppUiReusableEventLoop::new()?,
+            _main_thread: PhantomData,
+        })
+    }
 }
 
 impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
@@ -317,14 +328,13 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
         operation_id: String,
         timeout: Duration,
     ) -> EnduranceSurfaceReopenRun {
-        let run = crate::app_ui::window::
-            run_app_ui_surface_device_reopen_validation_returning_state_with_pump(
-                app_state,
-                recovery_pump,
-                cycle_index,
-                operation_id,
-                timeout,
-            );
+        let run = self.event_loop.reopen_surface_device_with_pump(
+            app_state,
+            recovery_pump,
+            cycle_index,
+            operation_id,
+            timeout,
+        );
         EnduranceSurfaceReopenRun {
             app_state: run.app_state,
             result: run.result,

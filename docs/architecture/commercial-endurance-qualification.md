@@ -56,6 +56,9 @@ The implementation is split at existing authority boundaries:
   changing ordinary Continuous Export cancellation semantics. It does not
   recapture author state between jobs or reinterpret the Export executor.
 - `mondrian-app::app_ui::window` is the sole real Surface/Device recovery owner.
+  One validation driver owns the single process-local winit event loop and
+  re-enters it on demand for every orthogonal recovery session; no Window,
+  Surface, Device, Queue, or callback owner may survive between sessions.
   Its validation entrypoint waits for an actual Viewer external-texture batch
   to be presented, consumes the old generation under a bounded whole-queue and
   Adapter-retirement proof, creates a fresh wgpu Device and native Surface, and
@@ -428,9 +431,22 @@ must match exactly. Those canonical bytes and SHA-256 values are retained, so
 the independent verifier can reject either a changed picture or a semantically
 dirty nested receipt even when every outer digest is recomputed.
 
+The concrete campaign constructs `WindowEnduranceSurfaceReopenDriver` once on
+the binary main thread before phase admission. Its `reopen` calls reuse that
+same non-`Send` event loop for all 24 cycles. Windows, macOS, X11, and Wayland
+support this desktop on-demand lifecycle; macOS still requires construction and
+execution on the process main thread, while a Linux host without a display
+server must report the Surface capability as `NotRun` without blocking the
+headless Continuous Export phase. The compatibility single-operation wrapper
+is process-one-shot and is not the campaign driver.
+
 `mondrian-surface-reopen --self-test` provides a narrow local executable that
 authors a Basic Title through the ordinary ProductAction path and exercises
-this real window seam. CPU-upload or procedural content may carry overall
+this real window seam. `--self-test-batch` runs two or more orthogonal Window
+sessions through the same process-local event loop and returns one sealed
+receipt per cycle; it is the regression gate for winit's event-loop recreation
+guard and for returning the same App/Sequence owner between cycles. CPU-upload
+or procedural content may carry overall
 Viewer health `Degraded` while still proving Surface recovery; the operation
 therefore accepts `Ready` or `Degraded` only when GPU working composition was
 actually executed, an external texture batch was submitted, no external
