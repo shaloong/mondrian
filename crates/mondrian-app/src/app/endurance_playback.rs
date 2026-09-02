@@ -584,6 +584,18 @@ fn sequence_binding_sha256(binding: PersistentTimelineBinding) -> String {
     hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Canonical binding digest shared with the real Window recovery owner.
+#[cfg(feature = "validation")]
+pub(crate) fn current_sequence_binding_sha256(app: &AppState) -> Option<String> {
+    app.active_sequence()
+        .map(|sequence| PersistentTimelineBinding {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            author_generation: app.project_author_generation(),
+        })
+        .map(sequence_binding_sha256)
+}
+
 fn validate_cache_pressure_policy_transition(
     before: &EnduranceCachePressureObservation,
     pressure: &EnduranceCachePressureObservation,

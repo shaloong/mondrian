@@ -1120,6 +1120,17 @@ selected sRGB surface
 format, selected `SurfaceColorSpace`, SDR/HDR mode, available surface formats,
 per-format surface color-space capabilities, `display_hdr_info` and tone-map
 headroom diagnostics, present modes, alpha modes, and monitor fingerprint.
+The validation-only real-window recovery seam assigns separate monotonic
+identities to that native Surface and to the wgpu Device/progress generation.
+It can replace both only after the previous Device's complete Adapter envelope
+and whole queue are retired. A reopened generation must submit the Viewer
+external texture through the ordinary UI renderer and return
+`AppUiFrameResult::Presented` for the exact pre-reopen Timeline/color/display
+contract. Surface configuration, a Headless render, or a new Device without a
+presented matching picture is not recovery evidence. The narrow local runner
+accepts low-copy CPU upload as a valid Surface exercise but preserves its
+`Degraded` residency facts; native decoder-surface residency is qualified by
+the separate high-bit-depth/native-surface matrix.
 Viewer preview evaluation now splits at the correct boundary:
 `app::preview_runtime::PreviewProductionRuntime` resolves the timeline and
 composites a working-space

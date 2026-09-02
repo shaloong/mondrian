@@ -1727,6 +1727,21 @@ lifecycle, retained media/GPU owner, terminal state, and deferred cleanup move
 to the replacement session together. A delayed callback can therefore retire
 the old Window submission without publishing into the new Window generation.
 
+Validation-triggered Surface/Device recovery is a different consuming
+operation. The Window session assigns checked nonzero process-local identities
+to every concrete Surface and progress/Device generation. After an actual
+external-texture Viewer frame is presented, the event-loop owner revokes old
+publication, transfers the complete old runtime/lifecycle/native-owner envelope
+to its existing progress worker, and waits within one explicit bound. A clean
+return requires both Adapter-specific retirement and a successful whole-queue
+wgpu wait; concrete device loss/destroy may replace the queue fence for release
+but is not accepted as a clean qualification receipt. Only then does the owner
+install a separately requested Device/Queue/progress worker and a fresh native
+Window/Surface. The operation seals success only after that new Surface presents
+the same active Sequence/frame/color/display contract. A Headless surface, a
+successful `configure`, a reused Device generation, or a CPU-only raster is not
+Surface reopen evidence.
+
 One non-renewing five-second lifecycle deadline revokes publication authority
 but does not free submitted resources. Timeout/cancellation enters
 non-reusable quarantine and defers runtime clear/reset; the device worker keeps

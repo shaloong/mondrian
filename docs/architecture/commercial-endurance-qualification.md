@@ -46,6 +46,12 @@ The implementation is split at existing authority boundaries:
   one running reversible attempt and prove a distinct verified retry without
   changing ordinary Continuous Export cancellation semantics. It does not
   recapture author state between jobs or reinterpret the Export executor.
+- `mondrian-app::app_ui::window` is the sole real Surface/Device recovery owner.
+  Its validation entrypoint waits for an actual Viewer external-texture batch
+  to be presented, consumes the old generation under a bounded whole-queue and
+  Adapter-retirement proof, creates a fresh wgpu Device and native Surface, and
+  requires the same Timeline/color/display picture contract to be presented
+  again before it can return recovery facts.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
@@ -237,19 +243,19 @@ This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, typed workload preparation/NotRun admission, the
 phase-scoped frozen repeated-Export owner, the persistent production Timeline
 picture/audio phase owner, the canonical persistent Reference clean-feed pump,
-and deterministic software tests. A
+all four real recovery operation owners (including a narrow real-window Surface
+reopen executable), and deterministic software tests. A
 valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
 Audio Device, physical Reference provider, external lock, independent verifier,
 or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. It does **not** yet supply the concrete three-phase
-`EnduranceCampaignRuntime`: real vendor bridge/hardware validation, typed
-recovery receipts, and the
-high-level validation executable remain explicit
+`EnduranceCampaignRuntime`: real vendor bridge/hardware validation, four-step
+orchestration, and the unified high-level validation executable remain explicit
 follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
-execution or hardware HITL evidence. Until those owners exist, physical phases
-must be admitted as `NotRun`; profile prose is not evidence that a runnable
+execution or hardware HITL evidence. Until that runtime and its physical
+providers exist, physical phases must be admitted as `NotRun`; profile prose is not evidence that a runnable
 72-hour producer exists.
 
 ## Commercial profile
@@ -363,7 +369,7 @@ independent validator, and validator-report digests. Concurrent recovery must
 record `seek -> surface_device_reopen -> export_cancel_retry -> cache_pressure`
 for every complete cycle. Event order, time, count, and terminal counters close
 twice: before App publication and again in the external PowerShell verifier.
-Each event embeds a bounded canonical schema-2 operation receipt plus the
+Each event embeds a bounded canonical schema-3 operation receipt plus the
 SHA-256 of its exact UTF-8 bytes. App publication reparses the receipt,
 reserializes it to
 reject non-canonical bytes, validates the step-specific before/after
@@ -394,12 +400,32 @@ counters. Decision digests bind the exact coordinator revision, pressure
 source, trim, Frame Store budgets, and Viewer idle-release request.
 
 The receipt schema and verifier deliberately recognize all four ordered steps.
-Seek, Export cancel/retry, and Cache Pressure now have production constructors
-that accept only opaque facts returned by their real operation owners.
-Surface/device reopen remains closed until a consuming Window surface/device
-owner returns actual replacement generation identities. Protocol support is
-not operation qualification, and an incomplete concrete runtime must fail
-capability admission rather than fabricate that receipt.
+All four now have production constructors that accept only opaque facts
+returned by their real operation owners. Surface/device reopen can only enter
+through the winit Window event loop. Process-local Surface and Device
+generation identities are nonzero and monotonic; same-generation reuse is
+rejected. The old-generation receipt embeds canonical JSON proving the progress
+worker started and returned without panic/timeout, accepted the consuming
+retirement handoff, completed Adapter retirement, and had no loss/failure
+terminal. Clean retirement additionally requires one successful whole-queue
+wgpu wait; Adapter-local readiness alone is insufficient. The reopened
+contract embeds the exact active Sequence/frame, Program and monitor color
+spaces, display/view and display-contract digest, executed GPU residency, and
+an actual Surface-present observation. The owner seals the original presented
+picture digest beside the reopened picture's canonical JSON and digest; they
+must match exactly. Those canonical bytes and SHA-256 values are retained, so
+the independent verifier can reject either a changed picture or a semantically
+dirty nested receipt even when every outer digest is recomputed.
+
+`mondrian-surface-reopen --self-test` provides a narrow local executable that
+authors a Basic Title through the ordinary ProductAction path and exercises
+this real window seam. CPU-upload or procedural content may carry overall
+Viewer health `Degraded` while still proving Surface recovery; the operation
+therefore accepts `Ready` or `Degraded` only when GPU working composition was
+actually executed, an external texture batch was submitted, no external
+texture failed, and the exact picture contract matches after reopen. This does
+not claim native decoder-surface residency, physical Reference Output, final
+App-wide shutdown closure, or a 72-hour campaign.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

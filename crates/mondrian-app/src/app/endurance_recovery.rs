@@ -7,8 +7,10 @@ use thiserror::Error;
 use super::endurance_export::ExportCancelRetryFacts;
 use super::endurance_playback::{CachePressureRecoveryFacts, SeekRecoveryFacts};
 use super::endurance_qualification::EnduranceRecoveryStep;
+#[cfg(feature = "validation")]
+use crate::app_ui::window::SurfaceDeviceReopenFacts;
 
-const RECOVERY_RECEIPT_SCHEMA_VERSION: u32 = 2;
+const RECOVERY_RECEIPT_SCHEMA_VERSION: u32 = 3;
 pub(crate) const MAXIMUM_RECOVERY_RECEIPT_JSON_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,7 +36,9 @@ enum EnduranceRecoveryOperationEvidence {
         surface_generation_after: u64,
         device_generation_before: u64,
         device_generation_after: u64,
+        shutdown_receipt_json: String,
         shutdown_receipt_sha256: String,
+        reopened_contract_json: String,
         reopened_contract_sha256: String,
     },
     ExportCancelRetry {
@@ -137,7 +141,9 @@ impl EnduranceRecoveryOperationEvidence {
                 surface_generation_after,
                 device_generation_before,
                 device_generation_after,
+                shutdown_receipt_json,
                 shutdown_receipt_sha256,
+                reopened_contract_json,
                 reopened_contract_sha256,
                 ..
             } if valid_sha256(sequence_binding_sha256)
@@ -147,8 +153,14 @@ impl EnduranceRecoveryOperationEvidence {
                 && *device_generation_before != 0
                 && *device_generation_after != 0
                 && device_generation_before != device_generation_after
-                && valid_sha256(shutdown_receipt_sha256)
-                && valid_sha256(reopened_contract_sha256) =>
+                && valid_embedded_json_sha256(shutdown_receipt_json, shutdown_receipt_sha256)
+                && valid_embedded_json_sha256(reopened_contract_json, reopened_contract_sha256)
+                && valid_surface_shutdown_receipt(shutdown_receipt_json)
+                && valid_reopened_surface_contract(
+                    reopened_contract_json,
+                    *surface_generation_after,
+                    *device_generation_after,
+                ) =>
             {
                 Ok(())
             }
@@ -323,6 +335,26 @@ impl EnduranceRecoveryOperationReceipt {
         })
     }
 
+    #[cfg(feature = "validation")]
+    pub(crate) fn from_surface_device_reopen_facts(
+        facts: SurfaceDeviceReopenFacts,
+    ) -> Result<Self, EnduranceRecoveryReceiptError> {
+        Self::seal(EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
+            schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
+            cycle_index: facts.cycle_index(),
+            operation_id: facts.operation_id().to_owned(),
+            sequence_binding_sha256: facts.sequence_binding_sha256().to_owned(),
+            surface_generation_before: facts.surface_generation_before(),
+            surface_generation_after: facts.surface_generation_after(),
+            device_generation_before: facts.device_generation_before(),
+            device_generation_after: facts.device_generation_after(),
+            shutdown_receipt_json: facts.shutdown_receipt_json().to_owned(),
+            shutdown_receipt_sha256: facts.shutdown_receipt_sha256().to_owned(),
+            reopened_contract_json: facts.reopened_contract_json().to_owned(),
+            reopened_contract_sha256: facts.reopened_contract_sha256().to_owned(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn seek(
         cycle_index: u32,
@@ -357,9 +389,30 @@ impl EnduranceRecoveryOperationReceipt {
         surface_generation_after: u64,
         device_generation_before: u64,
         device_generation_after: u64,
-        shutdown_receipt_sha256: String,
-        reopened_contract_sha256: String,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
+        let shutdown_receipt_json = r#"{"schema_version":1,"worker_started":true,"worker_terminated":true,"worker_panicked":false,"timed_out":false,"retirement_requested":true,"retirement_handoff_accepted":true,"retirement_completed":true,"generation_terminal_kind":null}"#.to_owned();
+        let display_contract_sha256 =
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let reopened_picture_json = format!(
+            concat!(
+                r#"{{"sequence_id":"test-sequence","frame":0,"width":1920,"height":1080,"output_target":"Display","output_color_space":"Srgb","monitor_color_space":"Srgb","tone_map":false,"display_view":null,"frame_residency":{{"execution_observed":true,"working_residency":"GpuWorkingCompositeExecuted"}},"display_contract_sha256":"{display_contract_sha256}"}}"#,
+            ),
+            display_contract_sha256 = display_contract_sha256,
+        );
+        let reopened_picture_sha256 = lower_sha256(reopened_picture_json.as_bytes());
+        let reopened_picture_json_literal =
+            serde_json::to_string(&reopened_picture_json).expect("test picture JSON string");
+        let reopened_contract_json = format!(
+            concat!(
+                r#"{{"schema_version":2,"surface_generation":{surface_generation_after},"device_generation":{device_generation_after},"actual_surface_presented":true,"original_picture_sha256":"{reopened_picture_sha256}","reopened_picture_json":{reopened_picture_json_literal},"reopened_picture_sha256":"{reopened_picture_sha256}"}}"#,
+            ),
+            surface_generation_after = surface_generation_after,
+            device_generation_after = device_generation_after,
+            reopened_picture_sha256 = reopened_picture_sha256,
+            reopened_picture_json_literal = reopened_picture_json_literal,
+        );
+        let shutdown_receipt_sha256 = lower_sha256(shutdown_receipt_json.as_bytes());
+        let reopened_contract_sha256 = lower_sha256(reopened_contract_json.as_bytes());
         Self::seal(EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
             schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
             cycle_index,
@@ -369,7 +422,9 @@ impl EnduranceRecoveryOperationReceipt {
             surface_generation_after,
             device_generation_before,
             device_generation_after,
+            shutdown_receipt_json,
             shutdown_receipt_sha256,
+            reopened_contract_json,
             reopened_contract_sha256,
         })
     }
@@ -477,6 +532,132 @@ fn valid_sha256(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn valid_embedded_json_sha256(canonical_json: &str, expected_sha256: &str) -> bool {
+    canonical_json.len() <= MAXIMUM_RECOVERY_RECEIPT_JSON_BYTES
+        && valid_sha256(expected_sha256)
+        && lower_sha256(canonical_json.as_bytes()) == expected_sha256
+        && serde_json::from_str::<serde_json::Value>(canonical_json).is_ok()
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SurfaceShutdownReceiptEvidence {
+    schema_version: u32,
+    worker_started: bool,
+    worker_terminated: bool,
+    worker_panicked: bool,
+    timed_out: bool,
+    retirement_requested: bool,
+    retirement_handoff_accepted: bool,
+    retirement_completed: bool,
+    generation_terminal_kind: Option<String>,
+}
+
+fn valid_surface_shutdown_receipt(canonical_json: &str) -> bool {
+    serde_json::from_str::<SurfaceShutdownReceiptEvidence>(canonical_json)
+        .ok()
+        .is_some_and(|receipt| {
+            receipt.schema_version == 1
+                && receipt.worker_started
+                && receipt.worker_terminated
+                && !receipt.worker_panicked
+                && !receipt.timed_out
+                && receipt.retirement_requested
+                && receipt.retirement_handoff_accepted
+                && receipt.retirement_completed
+                && receipt.generation_terminal_kind.is_none()
+        })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReopenedSurfaceContractEvidence {
+    schema_version: u32,
+    surface_generation: u64,
+    device_generation: u64,
+    actual_surface_presented: bool,
+    original_picture_sha256: String,
+    reopened_picture_json: String,
+    reopened_picture_sha256: String,
+}
+
+fn valid_reopened_surface_contract(
+    canonical_json: &str,
+    expected_surface_generation: u64,
+    expected_device_generation: u64,
+) -> bool {
+    let Ok(contract) = serde_json::from_str::<ReopenedSurfaceContractEvidence>(canonical_json)
+    else {
+        return false;
+    };
+    if contract.schema_version != 2
+        || contract.surface_generation != expected_surface_generation
+        || contract.device_generation != expected_device_generation
+        || !contract.actual_surface_presented
+        || !valid_embedded_json_sha256(
+            &contract.reopened_picture_json,
+            &contract.reopened_picture_sha256,
+        )
+        || contract.original_picture_sha256 != contract.reopened_picture_sha256
+    {
+        return false;
+    }
+    let Ok(picture) = serde_json::from_str::<serde_json::Value>(&contract.reopened_picture_json)
+    else {
+        return false;
+    };
+    let Some(picture) = picture.as_object() else {
+        return false;
+    };
+    let expected_picture_keys = [
+        "sequence_id",
+        "frame",
+        "width",
+        "height",
+        "output_target",
+        "output_color_space",
+        "monitor_color_space",
+        "tone_map",
+        "display_view",
+        "frame_residency",
+        "display_contract_sha256",
+    ];
+    let exact_picture_shape = picture.len() == expected_picture_keys.len()
+        && expected_picture_keys.iter().all(|key| picture.contains_key(*key));
+    let frame_residency = picture.get("frame_residency").and_then(serde_json::Value::as_object);
+    valid_sha256(&contract.original_picture_sha256)
+        && exact_picture_shape
+        && picture
+            .get("sequence_id")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        && picture
+            .get("frame")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|frame| frame >= 0)
+        && picture
+            .get("width")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|width| width > 0)
+        && picture
+            .get("height")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|height| height > 0)
+        && picture.get("output_target").and_then(serde_json::Value::as_str) == Some("Display")
+        && picture
+            .get("display_contract_sha256")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(valid_sha256)
+        && frame_residency
+            .and_then(|residency| residency.get("execution_observed"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        && frame_residency
+            .and_then(|residency| residency.get("working_residency"))
+            .and_then(serde_json::Value::as_str)
+            == Some("GpuWorkingCompositeExecuted")
+}
+
 fn valid_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -536,8 +717,6 @@ mod tests {
                 2,
                 4,
                 5,
-                SHA.to_owned(),
-                SHA.to_owned(),
             )
             .expect("reopen receipt"),
             EnduranceRecoveryOperationReceipt::export_cancel_retry(
@@ -642,5 +821,82 @@ mod tests {
             SHA.to_owned(),
         )
         .is_err());
+    }
+
+    #[test]
+    fn surface_receipt_rejects_rehashed_dirty_nested_shutdown_evidence() {
+        let receipt = EnduranceRecoveryOperationReceipt::surface_device_reopen(
+            0,
+            "reopen-0".to_owned(),
+            SHA.to_owned(),
+            1,
+            2,
+            3,
+            4,
+        )
+        .expect("valid Surface/device receipt");
+        let mut evidence: EnduranceRecoveryOperationEvidence =
+            serde_json::from_str(receipt.canonical_json()).expect("receipt evidence");
+        let EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
+            shutdown_receipt_json,
+            shutdown_receipt_sha256,
+            ..
+        } = &mut evidence
+        else {
+            panic!("expected Surface/device receipt");
+        };
+        let mut shutdown: serde_json::Value =
+            serde_json::from_str(shutdown_receipt_json).expect("shutdown evidence");
+        shutdown["worker_terminated"] = serde_json::Value::Bool(false);
+        *shutdown_receipt_json = serde_json::to_string(&shutdown).expect("tampered shutdown JSON");
+        *shutdown_receipt_sha256 = lower_sha256(shutdown_receipt_json.as_bytes());
+        let tampered = serde_json::to_string(&evidence).expect("tampered receipt JSON");
+        let tampered_sha = lower_sha256(tampered.as_bytes());
+
+        assert!(matches!(
+            EnduranceRecoveryOperationReceipt::parse_and_validate(&tampered, &tampered_sha),
+            Err(EnduranceRecoveryReceiptError::InvalidOperationEvidence {
+                step: EnduranceRecoveryStep::SurfaceDeviceReopen
+            })
+        ));
+    }
+
+    #[test]
+    fn surface_receipt_rejects_rehashed_mismatched_original_picture_digest() {
+        let receipt = EnduranceRecoveryOperationReceipt::surface_device_reopen(
+            0,
+            "reopen-0".to_owned(),
+            SHA.to_owned(),
+            1,
+            2,
+            3,
+            4,
+        )
+        .expect("valid Surface/device receipt");
+        let mut evidence: EnduranceRecoveryOperationEvidence =
+            serde_json::from_str(receipt.canonical_json()).expect("receipt evidence");
+        let EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
+            reopened_contract_json,
+            reopened_contract_sha256,
+            ..
+        } = &mut evidence
+        else {
+            panic!("expected Surface/device receipt");
+        };
+        let mut contract: serde_json::Value =
+            serde_json::from_str(reopened_contract_json).expect("reopened contract");
+        contract["original_picture_sha256"] = serde_json::Value::String(SHA.to_owned());
+        *reopened_contract_json =
+            serde_json::to_string(&contract).expect("tampered reopened contract JSON");
+        *reopened_contract_sha256 = lower_sha256(reopened_contract_json.as_bytes());
+        let tampered = serde_json::to_string(&evidence).expect("tampered receipt JSON");
+        let tampered_sha = lower_sha256(tampered.as_bytes());
+
+        assert!(matches!(
+            EnduranceRecoveryOperationReceipt::parse_and_validate(&tampered, &tampered_sha),
+            Err(EnduranceRecoveryReceiptError::InvalidOperationEvidence {
+                step: EnduranceRecoveryStep::SurfaceDeviceReopen
+            })
+        ));
     }
 }

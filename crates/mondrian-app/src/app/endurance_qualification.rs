@@ -1404,8 +1404,6 @@ mod tests {
                 2,
                 3,
                 4,
-                SHA.to_owned(),
-                SHA.to_owned(),
             )
             .expect("reopen receipt"),
             EnduranceRecoveryOperationReceipt::export_cancel_retry(

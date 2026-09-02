@@ -23,7 +23,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -37,6 +37,27 @@ const DEFAULT_VIEWER_GPU_WAIT_QUANTUM: Duration = Duration::from_millis(8);
 // accumulate an unbounded number of detached progress domains or envelopes.
 const MAX_LIVE_VIEWER_GPU_DEVICE_GENERATIONS: usize = 4;
 static LIVE_VIEWER_GPU_DEVICE_GENERATIONS: AtomicUsize = AtomicUsize::new(0);
+static NEXT_VIEWER_GPU_DEVICE_GENERATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Process-local identity of one actual wgpu device/progress generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ViewerGpuDeviceGenerationId(u64);
+
+impl ViewerGpuDeviceGenerationId {
+    fn next() -> Result<Self, ViewerGpuDeviceProgressStartError> {
+        NEXT_VIEWER_GPU_DEVICE_GENERATION_ID
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map(Self)
+            .map_err(|_| ViewerGpuDeviceProgressStartError::GenerationIdentityExhausted)
+    }
+
+    /// Nonzero process-local generation value sealed into recovery evidence.
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
 
 type ViewerGpuDeviceProgressWakeTarget = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -190,6 +211,9 @@ pub(crate) enum ViewerGpuDeviceProgressStartError {
         /// Process-wide generation bound.
         capacity: usize,
     },
+    /// Process-local generation identity space was exhausted.
+    #[error("Viewer GPU device generation identity space is exhausted")]
+    GenerationIdentityExhausted,
     /// The operating system rejected the worker thread.
     #[error("failed to start Viewer GPU device progress worker: {0}")]
     ThreadSpawn(#[source] std::io::Error),
@@ -362,6 +386,11 @@ impl<T> DerefMut for ViewerGpuDeviceGenerationMember<T> {
 }
 
 impl ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner> {
+    /// Identity of the live concrete device generation, when installed.
+    pub(crate) fn generation_id(&self) -> Option<ViewerGpuDeviceGenerationId> {
+        self.value.as_ref().map(ViewerGpuDeviceProgressOwner::generation_id)
+    }
+
     /// Progress terminal for the live owner.
     ///
     /// An empty replacement shell has no authoritative device generation yet,
@@ -697,6 +726,7 @@ impl ViewerGpuDeviceProgressPermit<'_> {
 
 /// Device-scoped owner shared by Window and Headless Viewer Adapters.
 pub(crate) struct ViewerGpuDeviceProgressOwner {
+    generation_id: ViewerGpuDeviceGenerationId,
     worker: ViewerGpuDeviceProgressWorker<wgpu::SubmissionIndex>,
 }
 
@@ -708,6 +738,7 @@ impl ViewerGpuDeviceProgressOwner {
         wake: ViewerGpuDeviceProgressWake,
     ) -> Result<Self, ViewerGpuDeviceProgressStartError> {
         let generation_admission = ViewerGpuDeviceGenerationAdmission::reserve()?;
+        let generation_id = ViewerGpuDeviceGenerationId::next()?;
         let health = ViewerGpuDeviceGenerationHealth::install(device, wake);
         let worker = ViewerGpuDeviceProgressWorker::spawn(
             "mondrian-viewer-gpu-progress",
@@ -716,7 +747,12 @@ impl ViewerGpuDeviceProgressOwner {
             health,
             Some(generation_admission),
         )?;
-        Ok(Self { worker })
+        Ok(Self { generation_id, worker })
+    }
+
+    /// Identity of the concrete wgpu device generation owned by this progress domain.
+    pub(crate) const fn generation_id(&self) -> ViewerGpuDeviceGenerationId {
+        self.generation_id
     }
 
     /// Install the Headless validation notification target.
@@ -1352,14 +1388,58 @@ fn drive_viewer_gpu_device_generation_retirement<I, D>(
 where
     D: ViewerGpuDeviceWait<I>,
 {
+    let mut wgpu_queue_quiesced = false;
     loop {
+        let terminal_before_wait = health.terminal();
+        if terminal_before_wait
+            .as_ref()
+            .is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+        {
+            wgpu_queue_quiesced = true;
+        }
+
+        let wait_started = Instant::now();
+        if !wgpu_queue_quiesced {
+            let wait = catch_unwind(AssertUnwindSafe(|| driver.wait(None, policy.wait_quantum)));
+            match wait {
+                Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut)) => {}
+                Ok(Ok(ViewerGpuDeviceWaitStatus::Satisfied)) => {
+                    wgpu_queue_quiesced = true;
+                }
+                Ok(Err(reason)) => {
+                    health.mark_progress_failure(None, reason, Instant::now());
+                }
+                Err(panic) => {
+                    health.mark_progress_failure(
+                        None,
+                        format!(
+                            "wgpu generation retirement progress panicked: {}",
+                            panic_payload_message(panic)
+                        ),
+                        Instant::now(),
+                    );
+                }
+            }
+        }
+
+        // A device-lost callback may be delivered by the wait above. Concrete
+        // loss/destroy invalidates all wgpu work and therefore replaces a
+        // successful QueueEmpty fence, but an ordinary progress failure does
+        // not. The Adapter retirement envelope still owns independent native
+        // copies and must prove those below.
         let terminal = health.terminal();
+        if terminal
+            .as_ref()
+            .is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
+        {
+            wgpu_queue_quiesced = true;
+        }
         let retirement_ready = catch_unwind(AssertUnwindSafe(|| {
             retirement.poll_retirement(terminal.as_ref())
         }));
         match retirement_ready {
-            Ok(true) => return true,
-            Ok(false) => {}
+            Ok(true) if wgpu_queue_quiesced => return true,
+            Ok(true) | Ok(false) => {}
             Err(panic) => {
                 tracing::error!(
                     label = retirement.label(),
@@ -1368,25 +1448,6 @@ where
                 );
                 std::mem::forget(retirement);
                 return false;
-            }
-        }
-
-        let wait_started = Instant::now();
-        let wait = catch_unwind(AssertUnwindSafe(|| driver.wait(None, policy.wait_quantum)));
-        match wait {
-            Ok(Ok(ViewerGpuDeviceWaitStatus::TimedOut | ViewerGpuDeviceWaitStatus::Satisfied)) => {}
-            Ok(Err(reason)) => {
-                health.mark_progress_failure(None, reason, Instant::now());
-            }
-            Err(panic) => {
-                health.mark_progress_failure(
-                    None,
-                    format!(
-                        "wgpu generation retirement progress panicked: {}",
-                        panic_payload_message(panic)
-                    ),
-                    Instant::now(),
-                );
             }
         }
         pace_bounded_wait(wait_started, policy.wait_quantum);
@@ -1668,6 +1729,15 @@ mod tests {
             ViewerGpuDeviceProgressPolicy::new(Duration::ZERO),
             Err(ViewerGpuDeviceProgressPolicyError::ZeroWaitQuantum)
         );
+    }
+
+    #[test]
+    fn device_generation_identities_are_nonzero_and_strictly_monotonic() {
+        let first = ViewerGpuDeviceGenerationId::next().expect("first generation identity");
+        let second = ViewerGpuDeviceGenerationId::next().expect("second generation identity");
+
+        assert_ne!(first.get(), 0);
+        assert_eq!(first.get().checked_add(1), Some(second.get()));
     }
 
     #[test]
@@ -2062,7 +2132,11 @@ mod tests {
 
     #[test]
     fn teardown_handoff_is_non_blocking_and_retains_owner_until_reaped() {
-        let (mut worker, calls) = scripted_worker([]);
+        let (mut worker, calls) = scripted_worker([
+            Ok(ViewerGpuDeviceWaitStatus::TimedOut),
+            Ok(ViewerGpuDeviceWaitStatus::Satisfied),
+            Ok(ViewerGpuDeviceWaitStatus::Satisfied),
+        ]);
         let first = worker.reserve_submission().expect("first permit");
         let first_completion = first.completion_signal();
         first.commit(test_submission_id(10), 59);
@@ -2095,6 +2169,39 @@ mod tests {
             worker.progress_state.active_slots.load(Ordering::Acquire),
             0
         );
+    }
+
+    #[test]
+    fn clean_retirement_requires_a_satisfied_whole_queue_wait() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let results = Arc::new(Mutex::new(VecDeque::from([
+            Ok(ViewerGpuDeviceWaitStatus::TimedOut),
+            Ok(ViewerGpuDeviceWaitStatus::Satisfied),
+        ])));
+        let health =
+            ViewerGpuDeviceGenerationHealth::for_test(ViewerGpuDeviceProgressWake::default());
+        let polls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        let completed = drive_viewer_gpu_device_generation_retirement(
+            &mut ScriptedWait { results, calls: Arc::clone(&calls) },
+            ViewerGpuDeviceProgressPolicy::new(Duration::from_millis(1)).expect("valid policy"),
+            &health,
+            Box::new(TestRetirement {
+                safe_to_release: Arc::new(AtomicBool::new(true)),
+                polls: Arc::clone(&polls),
+                drops: Arc::clone(&drops),
+                require_device_lost: false,
+            }),
+        );
+
+        assert!(completed);
+        assert_eq!(
+            calls.lock().expect("wait call log").as_slice(),
+            &[None, None]
+        );
+        assert_eq!(polls.load(Ordering::Acquire), 2);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
     }
 
     #[test]
@@ -2142,7 +2249,11 @@ mod tests {
         assert!(!evidence.retirement_completed);
         assert!(!progress_shutdown_complete(evidence));
         safe_to_release.store(true, Ordering::Release);
-        wait_for_atomic(&drops, 1);
+        // The caller abandoned its bounded join before the generation ever
+        // produced whole-queue completion evidence. Later Adapter readiness
+        // alone must not release the quarantined generation.
+        thread::yield_now();
+        assert_eq!(drops.load(Ordering::Acquire), 0);
     }
 
     #[test]

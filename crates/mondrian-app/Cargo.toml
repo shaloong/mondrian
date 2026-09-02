@@ -26,6 +26,13 @@ required-features = ["validation"]
 test = false
 bench = false
 
+[[bin]]
+name = "mondrian-surface-reopen"
+path = "src/bin/mondrian_surface_reopen.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
 # Developer gallery for reusable app UI widgets.
 [[bin]]
 name = "ui_demo"

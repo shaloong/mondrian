@@ -316,7 +316,7 @@ foreach ($phase in @($manifest.phases)) {
                     throw "Endurance recovery receipt bytes do not match their bounded digest."
                 }
                 $receipt = $receiptJson | ConvertFrom-Json
-                if ([int]$receipt.schema_version -ne 2 -or
+                if ([int]$receipt.schema_version -ne 3 -or
                     [int64]$receipt.cycle_index -ne $expectedCycle -or
                     [string]$receipt.step -cne $expectedStep -or
                     [string]$receipt.operation_id -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
@@ -343,18 +343,73 @@ foreach ($phase in @($manifest.phases)) {
                             "step", "schema_version", "cycle_index", "operation_id",
                             "sequence_binding_sha256", "surface_generation_before",
                             "surface_generation_after", "device_generation_before",
-                            "device_generation_after", "shutdown_receipt_sha256",
+                            "device_generation_after", "shutdown_receipt_json",
+                            "shutdown_receipt_sha256", "reopened_contract_json",
                             "reopened_contract_sha256"
                         ) "Surface/device recovery receipt"
                         Assert-LowerSha256 ([string]$receipt.sequence_binding_sha256) "Reopen Sequence binding"
                         Assert-LowerSha256 ([string]$receipt.shutdown_receipt_sha256) "Reopen shutdown receipt"
                         Assert-LowerSha256 ([string]$receipt.reopened_contract_sha256) "Reopened contract"
+                        $shutdownJson = [string]$receipt.shutdown_receipt_json
+                        $reopenedJson = [string]$receipt.reopened_contract_json
+                        if ([Text.Encoding]::UTF8.GetByteCount($shutdownJson) -le 0 -or
+                            [Text.Encoding]::UTF8.GetByteCount($shutdownJson) -gt 4096 -or
+                            (Get-LowerUtf8Sha256 $shutdownJson) -cne [string]$receipt.shutdown_receipt_sha256 -or
+                            [Text.Encoding]::UTF8.GetByteCount($reopenedJson) -le 0 -or
+                            [Text.Encoding]::UTF8.GetByteCount($reopenedJson) -gt 4096 -or
+                            (Get-LowerUtf8Sha256 $reopenedJson) -cne [string]$receipt.reopened_contract_sha256) {
+                            throw "Surface/device nested evidence does not match its bounded digest."
+                        }
+                        $shutdown = $shutdownJson | ConvertFrom-Json
+                        $reopened = $reopenedJson | ConvertFrom-Json
+                        Assert-ExactJsonProperties $shutdown @(
+                            "schema_version", "worker_started", "worker_terminated",
+                            "worker_panicked", "timed_out", "retirement_requested",
+                            "retirement_handoff_accepted", "retirement_completed",
+                            "generation_terminal_kind"
+                        ) "Surface/device shutdown evidence"
+                        Assert-ExactJsonProperties $reopened @(
+                            "schema_version", "surface_generation", "device_generation",
+                            "actual_surface_presented", "original_picture_sha256",
+                            "reopened_picture_json", "reopened_picture_sha256"
+                        ) "Reopened Surface contract"
+                        Assert-LowerSha256 ([string]$reopened.original_picture_sha256) "Original Surface picture"
+                        Assert-LowerSha256 ([string]$reopened.reopened_picture_sha256) "Reopened Surface picture"
+                        $pictureJson = [string]$reopened.reopened_picture_json
+                        if ([Text.Encoding]::UTF8.GetByteCount($pictureJson) -le 0 -or
+                            [Text.Encoding]::UTF8.GetByteCount($pictureJson) -gt 4096 -or
+                            (Get-LowerUtf8Sha256 $pictureJson) -cne [string]$reopened.reopened_picture_sha256 -or
+                            [string]$reopened.original_picture_sha256 -cne [string]$reopened.reopened_picture_sha256) {
+                            throw "Reopened Surface picture does not match the original presented picture digest."
+                        }
+                        $picture = $pictureJson | ConvertFrom-Json
+                        Assert-ExactJsonProperties $picture @(
+                            "sequence_id", "frame", "width", "height", "output_target",
+                            "output_color_space", "monitor_color_space", "tone_map",
+                            "display_view", "frame_residency", "display_contract_sha256"
+                        ) "Reopened Surface picture contract"
+                        Assert-LowerSha256 ([string]$picture.display_contract_sha256) "Reopened display contract"
                         if ([uint64]$receipt.surface_generation_before -eq 0 -or
                             [uint64]$receipt.surface_generation_after -eq 0 -or
                             [uint64]$receipt.surface_generation_before -eq [uint64]$receipt.surface_generation_after -or
                             [uint64]$receipt.device_generation_before -eq 0 -or
                             [uint64]$receipt.device_generation_after -eq 0 -or
-                            [uint64]$receipt.device_generation_before -eq [uint64]$receipt.device_generation_after) {
+                            [uint64]$receipt.device_generation_before -eq [uint64]$receipt.device_generation_after -or
+                            [int]$shutdown.schema_version -ne 1 -or -not [bool]$shutdown.worker_started -or
+                            -not [bool]$shutdown.worker_terminated -or [bool]$shutdown.worker_panicked -or
+                            [bool]$shutdown.timed_out -or -not [bool]$shutdown.retirement_requested -or
+                            -not [bool]$shutdown.retirement_handoff_accepted -or
+                            -not [bool]$shutdown.retirement_completed -or $null -ne $shutdown.generation_terminal_kind -or
+                            [int]$reopened.schema_version -ne 2 -or
+                            [uint64]$reopened.surface_generation -ne [uint64]$receipt.surface_generation_after -or
+                            [uint64]$reopened.device_generation -ne [uint64]$receipt.device_generation_after -or
+                            -not [bool]$reopened.actual_surface_presented -or
+                            [string]$picture.sequence_id -eq "" -or
+                            [int64]$picture.frame -lt 0 -or
+                            [uint64]$picture.width -eq 0 -or [uint64]$picture.height -eq 0 -or
+                            [string]$picture.output_target -cne "Display" -or
+                            -not [bool]$picture.frame_residency.execution_observed -or
+                            [string]$picture.frame_residency.working_residency -cne "GpuWorkingCompositeExecuted") {
                             throw "Surface/device recovery receipt does not prove replacement generations."
                         }
                     }
