@@ -339,7 +339,7 @@ impl EnduranceCampaignEvent {
     }
 
     #[cfg(test)]
-    fn test_export_artifact_verified(
+    pub(super) fn test_export_artifact_verified(
         completed_at_us: u64,
         artifact_id: impl Into<String>,
         artifact_sha256: impl Into<String>,

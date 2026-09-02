@@ -39,6 +39,11 @@ The implementation is split at existing authority boundaries:
   SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
   duration/counter validation, plus the exact pre-start capability inventory.
   The runtime receives only `PreparedEnduranceWorkload`, never a raw path.
+- `mondrian-app::app::endurance_export` captures one ordinary immutable
+  Timeline Export configuration and exclusively drives its fresh Queue through
+  strictly serial create-only publication, independent verification, and exact
+  terminal-history cleanup. It does not recapture author state between jobs or
+  reinterpret the Export executor.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
@@ -188,16 +193,16 @@ deadline-qualified authority, and only consuming qualification paths plus typed
 receipts can close a phase.
 
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
-owner-consuming cleanup, typed workload preparation/NotRun admission, and
-deterministic software tests. A valid contract can become `NotRun` only when a
+owner-consuming cleanup, typed workload preparation/NotRun admission, the
+phase-scoped frozen repeated-Export owner, and deterministic software tests. A
+valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
 Audio Device, physical Reference provider, external lock, independent verifier,
 or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. It does **not** yet supply the concrete three-phase
-`EnduranceCampaignRuntime`: repeated frozen
-Export plus independent verification, persistent Timeline clean-feed/audio
-pumping, the real vendor Reference Output bridge and hardware validation, typed
+`EnduranceCampaignRuntime`: persistent Timeline clean-feed/audio pumping, the
+real vendor Reference Output bridge and hardware validation, typed
 recovery receipts, and the high-level validation executable remain explicit
 follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
 execution or hardware HITL evidence. Until those owners exist, physical phases
@@ -320,6 +325,30 @@ low-level hash recorders are crate-private: recovery cannot begin until each
 operation issues a typed receipt whose before/after facts can be independently
 recomputed. A caller-supplied SHA string or bare failure counter is not evidence.
 
+Continuous Export now has a validation-only product owner instead of a loop in
+the campaign harness. Start requires a fresh empty Queue, a supported
+single-file media preset, an existing canonical output directory, and a bounded
+link-free ASCII artifact prefix. The owner freezes the complete ordinary Export
+configuration once and changes only the monotonically numbered output path for
+later clones. Every output uses `CreateNew`; the Queue must contain exactly the
+one phase-owned Job while it is active and no Job between attempts. Completion
+is eligible for verification only when the Queue reports `Completed`,
+`Published`, and exact path-matching `Durable` evidence. The owner then invokes
+the independent full-decode verifier, emits its sealed campaign event, and
+requires removal of exactly one terminal history record before another Job can
+be admitted.
+
+Closing the owner stops admission but allows the current attempt to publish and
+verify, because the Continuous Export workload forbids cancellation. Job
+failure/cancellation/disappearance, publication/path mismatch, Queue
+contamination, verification failure, cleanup mismatch, or checked counter
+overflow permanently faults the phase. The concrete runtime must hold the owner
+only for the Export interval and drop it before consuming the complete
+`AppState`; otherwise its extra Queue `Arc` is residual ownership, not clean
+shutdown evidence. Concurrent Recovery deliberately uses a separate retry
+owner because its workload requires cancellation and cannot weaken this phase's
+contract.
+
 The independent Export receipt is produced only after a bounded regular-file
 check, encoded-byte hash, typed container/stream probe, and a separate FFmpeg
 decode of every advertised video/audio stream through EOF from an immutable
@@ -359,8 +388,9 @@ It also rejects reparse-point ancestors and applies explicit JSON size bounds.
 ## Qualification boundary
 
 Fast synthetic tests prove schema, hashing, deterministic verdicts, accounting,
-leak detection, chunk tamper rejection, synchronous Preview/Audio/GPU owner
-closure, bounded GPU-timeout failure, and worker retirement. They do not
+leak detection, chunk tamper rejection, frozen repeated-Export ordering and
+fault latching, synchronous Preview/Audio/GPU owner closure, bounded GPU-timeout
+failure, and worker retirement. They do not
 prove 8/24/72-hour stability, physical reference lock, DeckLink/AJA callback
 cadence, monitor behavior, or a platform/driver campaign. Those facts remain
 HITL and must be captured on the approved physical rig; `NotRun` can never be

@@ -195,57 +195,12 @@ impl AppState {
 
     /// Build and enqueue a render job from a timeline export request.
     pub fn enqueue_timeline_export(&mut self, request: TimelineExportRequest) -> Result<JobId> {
-        if request.output_path.as_os_str().is_empty() {
-            let reason = "请指定输出路径".to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        }
-
-        let sequences = self.export_sequences_snapshot();
-        let sequence = match request.sequence_id {
-            Some(sequence_id) => {
-                sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
-            }
-            None => self.active_sequence().cloned(),
-        };
-        let Some(sequence) = sequence else {
-            let reason = "当前无序列".to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        };
-
-        if let Err(error) = resolve_export_delivery(
-            &request.preset,
-            &sequence.settings,
-            self.project_color_environment(),
-        ) {
-            let reason = error.to_string();
-            self.set_status_hint(format!("导出失败：{reason}"), true);
-            return Err(export_error("enqueue_timeline_export", reason));
-        }
-
-        let audio_selection = request.preset.audio_program_selection();
-        let timeline = match capture_timeline_export_snapshot_with_audio_selection(
-            self,
-            sequence,
-            sequences,
-            request.range,
-            audio_selection,
-        ) {
-            Ok(timeline) => timeline,
+        let config = match self.build_timeline_export_config(request) {
+            Ok(config) => config,
             Err(reason) => {
                 self.set_status_hint(format!("导出失败：{reason}"), true);
                 return Err(export_error("enqueue_timeline_export", reason));
             }
-        };
-
-        let config = ExportConfig {
-            preset: request.preset,
-            timeline: Box::new(timeline),
-            output_path: request.output_path,
-            output_policy: request.output_policy,
-            smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
-            broadcast_qc: request.broadcast_qc,
         };
         let output_path = config.output_path.display().to_string();
         let job_id = self.render_queue.enqueue(RenderJob::new(config)).map_err(|error| {
@@ -257,6 +212,45 @@ impl AppState {
         self.set_status_hint("已加入导出队列", false);
         tracing::info!(%job_id, "导出任务已加入队列: {output_path}");
         Ok(job_id)
+    }
+
+    pub(crate) fn build_timeline_export_config(
+        &self,
+        request: TimelineExportRequest,
+    ) -> std::result::Result<ExportConfig, String> {
+        if request.output_path.as_os_str().is_empty() {
+            return Err("请指定输出路径".to_owned());
+        }
+        let sequences = self.export_sequences_snapshot();
+        let sequence = match request.sequence_id {
+            Some(sequence_id) => {
+                sequences.iter().find(|sequence| sequence.id == sequence_id).cloned()
+            }
+            None => self.active_sequence().cloned(),
+        }
+        .ok_or_else(|| "当前无序列".to_owned())?;
+        resolve_export_delivery(
+            &request.preset,
+            &sequence.settings,
+            self.project_color_environment(),
+        )
+        .map_err(|error| error.to_string())?;
+        let audio_selection = request.preset.audio_program_selection();
+        let timeline = capture_timeline_export_snapshot_with_audio_selection(
+            self,
+            sequence,
+            sequences,
+            request.range,
+            audio_selection,
+        )?;
+        Ok(ExportConfig {
+            preset: request.preset,
+            timeline: Box::new(timeline),
+            output_path: request.output_path,
+            output_policy: request.output_policy,
+            smart_render: mondrian_export::ExportSmartRenderPolicy::Automatic,
+            broadcast_qc: request.broadcast_qc,
+        })
     }
 
     /// Lightweight export snapshots for UI and Headless observers.

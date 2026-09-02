@@ -17,6 +17,17 @@ from the independent artifact re-open/content verification required by
 commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+The validation-only repeated-Export owner sits above this Queue rather than
+inside it. It freezes one ordinary `ExportConfig`, changes only a unique
+monotonic create-only output path, admits exactly one Job at a time, requires
+exact `Published` plus path-matching `Durable` evidence, and invokes the
+independent full-decode verifier before another Job is eligible. A fresh Queue
+is an invariant for the whole interval, not only startup. Closing stops new
+admission but finishes the active irreversible publication and verification;
+Continuous Export never requests cancellation. This owner must be dropped
+before App-wide consuming shutdown so its Queue reference cannot outlive the
+qualified phase.
+
 Qualification separates the signal from the wait. `RenderQueue::begin_shutdown`
 atomically closes admission and requests cancellation before the App starts
 joining any owner. `RenderQueue` retains the dedicated worker's `JoinHandle`;

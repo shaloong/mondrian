@@ -121,20 +121,29 @@ are distinct capabilities. A non-empty missing list is the only legal
 `NotRun`; parse/hash/identity/policy/duration/counter mismatches abort the
 campaign as invalid input.
 
-Before recording an artifact event, call
-`mondrian_export::verify_export_artifact` with the stable Export job/artifact
-identity and explicit nonzero file-size and decode-time limits, then construct
-the App event with
-`EnduranceCampaignEvent::export_artifact_verified`. Do not synthesize the
-artifact, validator, or report digests from queue state. The verifier reopens
-the final regular file into a bounded immutable snapshot, hashes it, probes its
-typed streams, fully decodes every advertised video/audio stream under a
-supervised deadline, hashes decoded
-output, and rechecks the encoded bytes before issuing its sealed receipt. A
-decode timeout, cancellation, malformed terminal progress, empty selected
-video, changed file, or exceeded evidence-output bound is a verification
-failure, never an artifact counter increment. Artifact identities cannot repeat
-within one phase.
+For Continuous Export, construct one
+`app::endurance_export::FrozenRepeatedExportPhase` after prepared-workload
+capability admission and before the phase starts. Use a fresh `AppState` whose
+Queue has no retained jobs, a single-file media preset, an existing real output
+directory, a bounded ASCII artifact prefix, and explicit nonzero independent
+verification limits. The owner captures the ordinary Timeline Export snapshot
+and delivery configuration once. Call `poll` from the runtime pump; it admits
+strictly one unique `CreateNew` artifact at a time and returns only sealed
+`ExportArtifactVerified` events after exact durable publication and independent
+full decode. Forward those events unchanged to the campaign coordinator. Never
+enqueue UI or recovery jobs into this Queue, mutate the Timeline expecting a
+later artifact to observe it, or synthesize artifact/validator/report digests
+from Queue state.
+
+At phase close call `begin_close`, keep polling until the current artifact is
+published and verified, require `is_quiescent`, then drop the phase owner before
+the complete `AppState` consuming shutdown. Do not cancel the active attempt:
+the Continuous Export workload explicitly forbids cancellation. A decode
+timeout, cancellation, malformed terminal progress, empty selected video,
+changed file, Queue contamination, mismatched durable path, or non-exact history
+cleanup is a terminal phase failure, never an artifact counter increment. The
+separate Concurrent Recovery runtime must own its typed cancel/retry protocol;
+it cannot reuse this non-cancelling owner.
 
 Production orchestration will enter through a public high-level App runner that
 uses `run_endurance_campaign` internally. Its concrete
@@ -142,7 +151,9 @@ uses `run_endurance_campaign` internally. Its concrete
 campaign deadline, return one coordinator-bounded capture envelope, and
 synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
 coordinator takes the final sample. That concrete three-phase runtime and thin
-validation executable are not implemented at this checkpoint. The coordinator owns cadence, native
+validation executable are not implemented at this checkpoint; its Continuous
+Export leaf must compose the existing frozen repeated-Export owner rather than
+reimplementing the loop. The coordinator owns cadence and native
 `ProductProcessTree` probing, phase order, and evidence publication. If a
 physical provider or required fixture is absent, `begin_phase` must return the
 typed `NotRun` receipt created by prepared-workload admission before starting
