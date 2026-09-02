@@ -617,13 +617,76 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         ];
         for cycle in 0..phase.terminal.counters.recovery_cycles {
             for step in steps {
+                let operation_id = format!("{step}-{cycle}");
+                let receipt = match step {
+                    "seek" => serde_json::json!({
+                        "step": step,
+                        "schema_version": 1,
+                        "cycle_index": cycle,
+                        "operation_id": operation_id,
+                        "sequence_binding_sha256": SHA,
+                        "from_frame": 1,
+                        "target_frame": 2,
+                        "before_epoch": 1,
+                        "after_epoch": 2,
+                        "exact_picture_ready": true,
+                    }),
+                    "surface_device_reopen" => serde_json::json!({
+                        "step": step,
+                        "schema_version": 1,
+                        "cycle_index": cycle,
+                        "operation_id": operation_id,
+                        "sequence_binding_sha256": SHA,
+                        "surface_generation_before": 1,
+                        "surface_generation_after": 2,
+                        "device_generation_before": 3,
+                        "device_generation_after": 4,
+                        "shutdown_receipt_sha256": SHA,
+                        "reopened_contract_sha256": SHA,
+                    }),
+                    "export_cancel_retry" => serde_json::json!({
+                        "step": step,
+                        "schema_version": 1,
+                        "cycle_index": cycle,
+                        "operation_id": operation_id,
+                        "cancelled_job_id": format!("cancelled-{cycle}"),
+                        "retry_job_id": format!("retry-{cycle}"),
+                        "cancellation_count_before": cycle,
+                        "cancellation_count_after": cycle + 1,
+                        "cancelled_terminal_sha256": SHA,
+                        "retry_artifact_sha256": SHA,
+                        "retry_validation_report_sha256": SHA,
+                    }),
+                    "cache_pressure" => serde_json::json!({
+                        "step": step,
+                        "schema_version": 1,
+                        "cycle_index": cycle,
+                        "operation_id": operation_id,
+                        "decision_generation_before": 1,
+                        "pressure_decision_generation": 2,
+                        "recovered_decision_generation": 3,
+                        "cache_bytes_before_pressure": 4096,
+                        "cache_bytes_after_pressure": 1024,
+                        "pressure_trimmed_bytes": 3072,
+                        "residual_owned_resources": 0,
+                        "recovered_nominal": true,
+                        "pressure_decision_sha256": SHA,
+                        "recovered_decision_sha256": SHA,
+                    }),
+                    _ => unreachable!("fixed recovery step"),
+                };
+                let operation_receipt_json =
+                    serde_json::to_string(&receipt).expect("serialize recovery receipt");
+                let operation_receipt_sha256 =
+                    format!("{:x}", Sha256::digest(operation_receipt_json.as_bytes()));
                 events.push(serde_json::json!({
                     "kind": "recovery_step_completed",
                     "sequence": events.len(),
                     "completed_at_us": events.len() + 1,
                     "cycle_index": cycle,
                     "step": step,
-                    "operation_receipt_sha256": SHA,
+                    "operation_receipt_json": operation_receipt_json,
+                    "operation_receipt_sha256": operation_receipt_sha256,
                 }));
             }
         }

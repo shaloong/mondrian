@@ -22,6 +22,7 @@ use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
 };
+use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 pub use super::endurance_shutdown::{
     AppAudioSourceCacheShutdownEvidence, AppEnduranceShutdownEvidence, AppProjectShutdownEvidence,
     EnduranceWorkerShutdownEvidence,
@@ -204,6 +205,23 @@ impl EnduranceExecutionOwners {
             after_frame: app.current_frame(),
             sample,
         })
+    }
+
+    pub(super) fn complete_current_picture(
+        &mut self,
+        app: &mut AppState,
+        gpu_completion_timeout: Duration,
+    ) -> Result<HeadlessPreviewSample, EnduranceCampaignError> {
+        let mut observer = EnduranceRealtimeObserver;
+        self.realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .complete_current_video_opportunity(app, &mut observer, gpu_completion_timeout)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
     }
 
     pub(super) fn finish_realtime_window(&mut self) -> Result<(), EnduranceCampaignError> {
@@ -399,15 +417,13 @@ pub struct VerifiedExportArtifactEvent {
     validation_report_sha256: String,
 }
 
-/// Sealed placeholder for the forthcoming owner-derived recovery receipt.
-///
-/// No production constructor exists until the four recovery operations expose
-/// independently recomputable before/after receipts.
+/// Sealed projection of one owner-derived, independently replayable receipt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedRecoveryStepEvent {
     completed_at_us: u64,
     cycle_index: u32,
     step: EnduranceRecoveryStep,
+    operation_receipt_json: String,
     operation_receipt_sha256: String,
 }
 
@@ -423,6 +439,20 @@ impl EnduranceCampaignEvent {
             artifact_sha256: receipt.report().artifact_sha256.clone(),
             validator_id: receipt.report().validator_id.to_owned(),
             validation_report_sha256: receipt.validation_report_sha256().to_owned(),
+        })
+    }
+
+    /// Construct a recovery event only from a sealed owner receipt.
+    pub fn recovery_step_completed(
+        completed_at_us: u64,
+        receipt: &EnduranceRecoveryOperationReceipt,
+    ) -> Self {
+        Self::RecoveryStepCompleted(VerifiedRecoveryStepEvent {
+            completed_at_us,
+            cycle_index: receipt.cycle_index(),
+            step: receipt.step(),
+            operation_receipt_json: receipt.canonical_json().to_owned(),
+            operation_receipt_sha256: receipt.sha256().to_owned(),
         })
     }
 
@@ -763,6 +793,7 @@ fn record_events(
                     event.completed_at_us,
                     event.cycle_index,
                     event.step,
+                    &event.operation_receipt_json,
                     &event.operation_receipt_sha256,
                 )?,
         }

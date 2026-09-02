@@ -2,13 +2,16 @@
 
 use std::time::{Duration, Instant};
 
-use mondrian_core::{Rational, SequenceRevision};
+use mondrian_core::{FramePosition, Rational, SequenceRevision};
 use mondrian_platform::{EndurancePhaseKind, EndurancePhaseRequirement};
 use mondrian_playback::ClockMaster;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::endurance_campaign::{EnduranceExecutionOwners, EnduranceRealtimeIntervalObservation};
+use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::endurance_workload::PreparedEnduranceWorkload;
+use super::product_action::{TimelineSeekPayload, TimelineSeekSource};
 use super::AppState;
 
 /// Persistent Timeline binding retained across every realtime observation window.
@@ -17,6 +20,50 @@ struct PersistentTimelineBinding {
     sequence_id: mondrian_core::SequenceId,
     sequence_revision: SequenceRevision,
     author_generation: u64,
+}
+
+/// Owner-derived facts passed to the central recovery receipt sealer.
+///
+/// Fields stay private to this operation owner so sibling modules cannot
+/// manufacture a successful seek from caller-authored primitive values.
+pub(super) struct SeekRecoveryFacts {
+    cycle_index: u32,
+    operation_id: String,
+    sequence_binding_sha256: String,
+    from_frame: i64,
+    target_frame: i64,
+    before_epoch: u64,
+    after_epoch: u64,
+}
+
+impl SeekRecoveryFacts {
+    pub(super) const fn cycle_index(&self) -> u32 {
+        self.cycle_index
+    }
+
+    pub(super) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(super) fn sequence_binding_sha256(&self) -> &str {
+        &self.sequence_binding_sha256
+    }
+
+    pub(super) const fn source_frame(&self) -> i64 {
+        self.from_frame
+    }
+
+    pub(super) const fn target_frame(&self) -> i64 {
+        self.target_frame
+    }
+
+    pub(super) const fn before_epoch(&self) -> u64 {
+        self.before_epoch
+    }
+
+    pub(super) const fn after_epoch(&self) -> u64 {
+        self.after_epoch
+    }
 }
 
 /// Phase-scoped driver for the shared production Preview and physical Audio path.
@@ -105,6 +152,102 @@ impl PersistentTimelinePlaybackPhase {
             self.latch_fault("persistent Timeline interval counter overflow".to_owned())
         })?;
         Ok(())
+    }
+
+    /// Execute and prove one settled product Timeline seek without replacing
+    /// the persistent Preview/GPU/Audio owners.
+    pub fn recover_seek(
+        &mut self,
+        app: &mut AppState,
+        owners: &mut EnduranceExecutionOwners,
+        cycle_index: u32,
+        target_frame: i64,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<EnduranceRecoveryOperationReceipt, PersistentTimelinePlaybackError> {
+        self.require_healthy_active()?;
+        self.validate_binding(app)?;
+        validate_expected_coordinate(self.expected_epoch, self.expected_frame, app)
+            .map_err(|detail| self.latch_fault(detail))?;
+        let last_content_frame = app
+            .last_content_frame()
+            .map_err(|error| self.latch_fault(format!("inspect seek recovery extent: {error}")))?;
+        if target_frame < 0
+            || target_frame == self.expected_frame
+            || target_frame >= last_content_frame
+        {
+            return Err(self.latch_fault(format!(
+                "seek recovery target {target_frame} must be non-negative, distinct from frame {}, and precede terminal guard frame {last_content_frame}",
+                self.expected_frame
+            )));
+        }
+
+        let from_frame = self.expected_frame;
+        let before_epoch = self.expected_epoch;
+        let evidence_before = app.playback_evidence_report();
+        let target_position = {
+            let sequence = app.active_sequence().ok_or_else(|| {
+                self.latch_fault("seek recovery lost its active Sequence".to_owned())
+            })?;
+            FramePosition::new(target_frame, sequence.time_base())
+        };
+
+        self.settle_window(app, owners)?;
+        app.seek_from_product_action(TimelineSeekPayload {
+            position: target_position,
+            source: TimelineSeekSource::Settled,
+        })
+        .map_err(|error| self.latch_fault(format!("execute product seek recovery: {error}")))?;
+        self.validate_binding(app)?;
+
+        let after_epoch = app.playback_epoch().get();
+        if after_epoch <= before_epoch || app.current_frame() != target_frame || !app.is_playing() {
+            return Err(self.latch_fault(
+                "product seek recovery did not commit the exact target on a newer running epoch"
+                    .to_owned(),
+            ));
+        }
+        self.expected_epoch = after_epoch;
+        self.expected_frame = target_frame;
+        self.resume_window(app, owners, absolute_deadline)?;
+        let sample = owners
+            .complete_current_picture(app, self.interval_timeout)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        if !sample.current_gpu_ready || sample.unavailable {
+            return Err(self.latch_fault(
+                "seek recovery did not prove its exact target picture Ready".to_owned(),
+            ));
+        }
+        if app.playback_clock_master() != Some(ClockMaster::AudioDevice) {
+            return Err(
+                self.latch_fault("seek recovery was not governed by Audio Device Clock".to_owned())
+            );
+        }
+        self.validate_binding(app)?;
+        validate_expected_coordinate(after_epoch, target_frame, app)
+            .map_err(|detail| self.latch_fault(detail))?;
+
+        let evidence_after = app.playback_evidence_report();
+        if evidence_before.accurate_seek_latency.count.checked_add(1)
+            != Some(evidence_after.accurate_seek_latency.count)
+            || evidence_after.latest_epoch != Some(after_epoch)
+        {
+            return Err(self.latch_fault(
+                "seek recovery did not close exactly one accurate-seek evidence interval"
+                    .to_owned(),
+            ));
+        }
+
+        let facts = SeekRecoveryFacts {
+            cycle_index,
+            operation_id: format!("seek.c{cycle_index}.e{after_epoch}"),
+            sequence_binding_sha256: sequence_binding_sha256(self.binding),
+            from_frame,
+            target_frame,
+            before_epoch,
+            after_epoch,
+        };
+        EnduranceRecoveryOperationReceipt::from_seek_facts(facts)
+            .map_err(|error| self.latch_fault(format!("seal seek recovery receipt: {error}")))
     }
 
     /// Leave native realtime scheduling at a cadence boundary without stopping Playback.
@@ -223,6 +366,16 @@ impl PersistentTimelinePlaybackPhase {
         }
         PersistentTimelinePlaybackError::Faulted(self.fault.as_ref().cloned().unwrap_or(detail))
     }
+}
+
+fn sequence_binding_sha256(binding: PersistentTimelineBinding) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mondrian.endurance.sequence-binding.v1\0");
+    hasher.update(binding.sequence_id.to_string().as_bytes());
+    hasher.update([0]);
+    hasher.update(binding.sequence_revision.get().to_le_bytes());
+    hasher.update(binding.author_generation.to_le_bytes());
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn validate_phase_contract(

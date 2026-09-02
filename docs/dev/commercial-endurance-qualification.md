@@ -118,10 +118,16 @@ capture-authority file. Start phases only through `begin_phase`; it verifies the
 raw checked-in workload contract bytes. Submit each owner observation through
 `EndurancePhaseCapture::capture_and_push`; direct sample insertion is not a
 public producer seam. The campaign coordinator routes sealed Export events into
-the crate-private artifact recorder. The recovery recorder and counter remain
-unavailable to production callers until typed, externally recomputable
-before/after operation receipts exist; caller-authored SHA strings are not an
-acceptable substitute. The supervisor automatically seals and publishes full
+the crate-private artifact recorder. The recovery recorder accepts only a
+sealed canonical receipt and checks its embedded JSON, SHA-256, exact
+cycle/step, and unique operation ID. The seek receipt can only be returned by
+`PersistentTimelinePlaybackPhase::recover_seek`, after the real typed product
+seek closes one exact Ready target under Audio Device Clock and the frozen
+author binding. Caller-authored SHA strings or success booleans are not an
+acceptable substitute. Surface/device reopen, Export cancel/retry, and cache
+pressure have no production receipt constructor yet; a runtime must keep those
+capabilities absent until their real operation owners exist. The supervisor
+automatically seals and publishes full
 chunks and generates the raw producer JSON plus normalized report. Finish
 executed phases with final Reference Output accounting and one clean schema-4
 `ExportQueueShutdownEvidence`; a joined-late, panicked, timed-out, detached, or

@@ -361,10 +361,32 @@ independent validator, and validator-report digests. Concurrent recovery must
 record `seek -> surface_device_reopen -> export_cancel_retry -> cache_pressure`
 for every complete cycle. Event order, time, count, and terminal counters close
 twice: before App publication and again in the external PowerShell verifier.
-The recovery event payload currently has no production constructor, and the
-low-level hash recorders are crate-private: recovery cannot begin until each
-operation issues a typed receipt whose before/after facts can be independently
-recomputed. A caller-supplied SHA string or bare failure counter is not evidence.
+Each event embeds a bounded canonical operation receipt plus the SHA-256 of its
+exact UTF-8 bytes. App publication reparses the receipt, reserializes it to
+reject non-canonical bytes, validates the step-specific before/after
+relationships, and rejects operation-ID replay. The external PowerShell
+verifier independently rehashes and reparses the embedded JSON and replays the
+same exact property sets, relationships, cycle order, and replay rejection.
+
+The production seek receipt is available only from the persistent Timeline
+Playback owner. That owner exits native scheduling at a cadence boundary,
+invokes the typed settled Timeline product action, proves a strictly newer
+Playback Epoch and exact target coordinate, re-enters the same paired
+Preview/GPU/Audio owners, closes the target's exact Ready delivery, verifies
+Audio Device Clock and exactly one new accurate-seek latency observation, and
+rechecks the frozen author binding before sealing the receipt. The sequence
+binding digest and operation identity are derived inside the owner; callers do
+not provide success booleans or hashes.
+
+The receipt schema and verifier deliberately recognize all four ordered steps,
+but production constructors for surface/device reopen, Export cancel/retry, and
+cache pressure remain closed until their real owner operations return sealed
+facts. Surface/device reopen still needs a consuming Window surface/device
+owner with actual generation identities; Export cancel/retry needs a recovery
+mode in the frozen Export state machine; cache pressure needs a scoped
+Critical-to-Nominal transaction proving nonzero real cache eviction. Protocol
+support is not operation qualification, and an incomplete concrete runtime
+must fail capability admission rather than fabricate any of these receipts.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

@@ -5,6 +5,7 @@
 //! authorities and writes fixed-capacity chunks for the platform-core replay
 //! Module.
 
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -23,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::headless_realtime_playback::HeadlessEnduranceOwnerSnapshot;
 
 /// Additional gauges and independently verified facts owned by the Headless
@@ -141,6 +143,7 @@ enum EnduranceProducerEvent {
         completed_at_us: u64,
         cycle_index: u32,
         step: EnduranceRecoveryStep,
+        operation_receipt_json: String,
         operation_receipt_sha256: String,
     },
 }
@@ -188,6 +191,7 @@ struct EnduranceSemanticRecorder {
     events: Vec<EnduranceProducerEvent>,
     verified_export_artifacts: u64,
     recovery_steps: u64,
+    recovery_operation_ids: BTreeSet<String>,
     last_completed_at_us: Option<u64>,
 }
 
@@ -199,6 +203,7 @@ impl EnduranceSemanticRecorder {
             events: Vec::with_capacity(usize::from(maximum_events)),
             verified_export_artifacts: 0,
             recovery_steps: 0,
+            recovery_operation_ids: BTreeSet::new(),
             last_completed_at_us: None,
         }
     }
@@ -260,8 +265,14 @@ impl EnduranceSemanticRecorder {
         completed_at_us: u64,
         cycle_index: u32,
         step: EnduranceRecoveryStep,
+        operation_receipt_json: &str,
         operation_receipt_sha256: &str,
     ) -> Result<(), EnduranceCaptureError> {
+        let receipt = EnduranceRecoveryOperationReceipt::parse_and_validate(
+            operation_receipt_json,
+            operation_receipt_sha256,
+        )
+        .map_err(|_| EnduranceCaptureError::InvalidProducerEvent)?;
         let expected_cycle = self.recovery_steps / RECOVERY_STEP_COUNT;
         let expected_step =
             RECOVERY_STEPS[usize::try_from(self.recovery_steps % RECOVERY_STEP_COUNT)
@@ -269,7 +280,9 @@ impl EnduranceSemanticRecorder {
         if self.phase_kind != EndurancePhaseKind::ConcurrentRecovery
             || u64::from(cycle_index) != expected_cycle
             || step != expected_step
-            || !valid_sha256(operation_receipt_sha256)
+            || receipt.cycle_index() != cycle_index
+            || receipt.step() != step
+            || self.recovery_operation_ids.contains(receipt.operation_id())
         {
             return Err(EnduranceCaptureError::InvalidProducerEvent);
         }
@@ -281,8 +294,10 @@ impl EnduranceSemanticRecorder {
             completed_at_us,
             cycle_index,
             step,
+            operation_receipt_json: operation_receipt_json.to_owned(),
             operation_receipt_sha256: operation_receipt_sha256.to_owned(),
         });
+        self.recovery_operation_ids.insert(receipt.operation_id().to_owned());
         self.recovery_steps = self
             .recovery_steps
             .checked_add(1)
@@ -693,12 +708,14 @@ impl EndurancePhaseCapture {
         completed_at_us: u64,
         cycle_index: u32,
         step: EnduranceRecoveryStep,
+        operation_receipt_json: &str,
         operation_receipt_sha256: &str,
     ) -> Result<(), EnduranceCaptureError> {
         self.semantic.record_recovery_step_completed(
             completed_at_us,
             cycle_index,
             step,
+            operation_receipt_json,
             operation_receipt_sha256,
         )
     }
@@ -1356,26 +1373,91 @@ mod tests {
 
         let mut recovery =
             EnduranceSemanticRecorder::new(EndurancePhaseKind::ConcurrentRecovery, 4);
+        let seek_receipt = EnduranceRecoveryOperationReceipt::seek(
+            0,
+            "seek-0".to_owned(),
+            SHA.to_owned(),
+            1,
+            2,
+            3,
+            4,
+            true,
+        )
+        .expect("seek receipt");
         assert!(matches!(
             recovery.record_recovery_step_completed(
                 1,
                 0,
                 EnduranceRecoveryStep::ExportCancelRetry,
-                SHA,
+                seek_receipt.canonical_json(),
+                seek_receipt.sha256(),
             ),
             Err(EnduranceCaptureError::InvalidProducerEvent)
         ));
-        for (index, step) in RECOVERY_STEPS.into_iter().enumerate() {
+        let receipts = [
+            seek_receipt,
+            EnduranceRecoveryOperationReceipt::surface_device_reopen(
+                0,
+                "reopen-0".to_owned(),
+                SHA.to_owned(),
+                1,
+                2,
+                3,
+                4,
+                SHA.to_owned(),
+                SHA.to_owned(),
+            )
+            .expect("reopen receipt"),
+            EnduranceRecoveryOperationReceipt::export_cancel_retry(
+                0,
+                "export-0".to_owned(),
+                "cancelled-job".to_owned(),
+                "retry-job".to_owned(),
+                0,
+                1,
+                SHA.to_owned(),
+                SHA.to_owned(),
+                SHA.to_owned(),
+            )
+            .expect("Export receipt"),
+            EnduranceRecoveryOperationReceipt::cache_pressure(
+                0,
+                "cache-0".to_owned(),
+                1,
+                2,
+                3,
+                4096,
+                1024,
+                3072,
+                0,
+                true,
+                SHA.to_owned(),
+                SHA.to_owned(),
+            )
+            .expect("cache receipt"),
+        ];
+        for (index, receipt) in receipts.iter().enumerate() {
             recovery
                 .record_recovery_step_completed(
                     u64::try_from(index + 1).expect("event time"),
                     0,
-                    step,
-                    SHA,
+                    receipt.step(),
+                    receipt.canonical_json(),
+                    receipt.sha256(),
                 )
                 .expect("record ordered recovery step");
         }
         assert_eq!(recovery.counters().recovery_cycles, 1);
+        assert!(matches!(
+            recovery.record_recovery_step_completed(
+                5,
+                1,
+                EnduranceRecoveryStep::Seek,
+                receipts[0].canonical_json(),
+                receipts[0].sha256(),
+            ),
+            Err(EnduranceCaptureError::InvalidProducerEvent)
+        ));
     }
 
     #[test]

@@ -71,6 +71,25 @@ function Get-LowerSha256([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-LowerUtf8Sha256([string]$Value) {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes($Value)
+        return ([Convert]::ToHexString($algorithm.ComputeHash($bytes))).ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+}
+
+function Assert-ExactJsonProperties([object]$Object, [string[]]$Expected, [string]$Description) {
+    $actual = @($Object.PSObject.Properties.Name | Sort-Object)
+    $expectedSorted = @($Expected | Sort-Object)
+    if (@(Compare-Object $expectedSorted $actual).Count -ne 0) {
+        throw "$Description has unknown or missing properties."
+    }
+}
+
 function Get-ClosureSnapshot([string[]]$Paths) {
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($path in $Paths) {
@@ -259,6 +278,7 @@ foreach ($phase in @($manifest.phases)) {
     [int64]$recoveryStepCount = 0
     [int64]$completedRecoveryCycles = 0
     $recoverySteps = @("seek", "surface_device_reopen", "export_cancel_retry", "cache_pressure")
+    $recoveryOperationIds = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($event in $events) {
         if ([int]$event.sequence -ne $expectedSequence) {
             throw "Endurance producer event sequence is not contiguous for phase $($phase.phase_id)."
@@ -289,6 +309,100 @@ foreach ($phase in @($manifest.phases)) {
                     throw "Endurance recovery event order is invalid for phase $($phase.phase_id)."
                 }
                 Assert-LowerSha256 ([string]$event.operation_receipt_sha256) "Recovery operation receipt digest"
+                $receiptJson = [string]$event.operation_receipt_json
+                $receiptBytes = [Text.Encoding]::UTF8.GetByteCount($receiptJson)
+                if ($receiptBytes -le 0 -or $receiptBytes -gt 4096 -or
+                    (Get-LowerUtf8Sha256 $receiptJson) -cne [string]$event.operation_receipt_sha256) {
+                    throw "Endurance recovery receipt bytes do not match their bounded digest."
+                }
+                $receipt = $receiptJson | ConvertFrom-Json
+                if ([int]$receipt.schema_version -ne 1 -or
+                    [int64]$receipt.cycle_index -ne $expectedCycle -or
+                    [string]$receipt.step -cne $expectedStep -or
+                    [string]$receipt.operation_id -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
+                    -not $recoveryOperationIds.Add([string]$receipt.operation_id)) {
+                    throw "Endurance recovery receipt common evidence is invalid or replayed."
+                }
+                switch ($expectedStep) {
+                    "seek" {
+                        Assert-ExactJsonProperties $receipt @(
+                            "step", "schema_version", "cycle_index", "operation_id",
+                            "sequence_binding_sha256", "from_frame", "target_frame",
+                            "before_epoch", "after_epoch", "exact_picture_ready"
+                        ) "Seek recovery receipt"
+                        Assert-LowerSha256 ([string]$receipt.sequence_binding_sha256) "Seek Sequence binding"
+                        if ([int64]$receipt.from_frame -lt 0 -or [int64]$receipt.target_frame -lt 0 -or
+                            [int64]$receipt.from_frame -eq [int64]$receipt.target_frame -or
+                            [uint64]$receipt.after_epoch -le [uint64]$receipt.before_epoch -or
+                            -not [bool]$receipt.exact_picture_ready) {
+                            throw "Seek recovery receipt does not prove an exact completed seek."
+                        }
+                    }
+                    "surface_device_reopen" {
+                        Assert-ExactJsonProperties $receipt @(
+                            "step", "schema_version", "cycle_index", "operation_id",
+                            "sequence_binding_sha256", "surface_generation_before",
+                            "surface_generation_after", "device_generation_before",
+                            "device_generation_after", "shutdown_receipt_sha256",
+                            "reopened_contract_sha256"
+                        ) "Surface/device recovery receipt"
+                        Assert-LowerSha256 ([string]$receipt.sequence_binding_sha256) "Reopen Sequence binding"
+                        Assert-LowerSha256 ([string]$receipt.shutdown_receipt_sha256) "Reopen shutdown receipt"
+                        Assert-LowerSha256 ([string]$receipt.reopened_contract_sha256) "Reopened contract"
+                        if ([uint64]$receipt.surface_generation_before -eq 0 -or
+                            [uint64]$receipt.surface_generation_after -eq 0 -or
+                            [uint64]$receipt.surface_generation_before -eq [uint64]$receipt.surface_generation_after -or
+                            [uint64]$receipt.device_generation_before -eq 0 -or
+                            [uint64]$receipt.device_generation_after -eq 0 -or
+                            [uint64]$receipt.device_generation_before -eq [uint64]$receipt.device_generation_after) {
+                            throw "Surface/device recovery receipt does not prove replacement generations."
+                        }
+                    }
+                    "export_cancel_retry" {
+                        Assert-ExactJsonProperties $receipt @(
+                            "step", "schema_version", "cycle_index", "operation_id",
+                            "cancelled_job_id", "retry_job_id", "cancellation_count_before",
+                            "cancellation_count_after", "cancelled_terminal_sha256",
+                            "retry_artifact_sha256", "retry_validation_report_sha256"
+                        ) "Export cancel/retry receipt"
+                        foreach ($token in @([string]$receipt.cancelled_job_id, [string]$receipt.retry_job_id)) {
+                            if ($token -cnotmatch '^[A-Za-z0-9._-]{1,128}$') {
+                                throw "Export cancel/retry receipt contains an invalid Job identity."
+                            }
+                        }
+                        foreach ($digest in @(
+                            [string]$receipt.cancelled_terminal_sha256,
+                            [string]$receipt.retry_artifact_sha256,
+                            [string]$receipt.retry_validation_report_sha256
+                        )) { Assert-LowerSha256 $digest "Export cancel/retry evidence" }
+                        if ([string]$receipt.cancelled_job_id -ceq [string]$receipt.retry_job_id -or
+                            [uint64]$receipt.cancellation_count_after -ne
+                                ([uint64]$receipt.cancellation_count_before + 1)) {
+                            throw "Export cancel/retry receipt does not prove one cancellation and a distinct retry."
+                        }
+                    }
+                    "cache_pressure" {
+                        Assert-ExactJsonProperties $receipt @(
+                            "step", "schema_version", "cycle_index", "operation_id",
+                            "decision_generation_before", "pressure_decision_generation",
+                            "recovered_decision_generation", "cache_bytes_before_pressure",
+                            "cache_bytes_after_pressure", "pressure_trimmed_bytes",
+                            "residual_owned_resources", "recovered_nominal",
+                            "pressure_decision_sha256", "recovered_decision_sha256"
+                        ) "Cache-pressure receipt"
+                        Assert-LowerSha256 ([string]$receipt.pressure_decision_sha256) "Pressure decision"
+                        Assert-LowerSha256 ([string]$receipt.recovered_decision_sha256) "Recovered decision"
+                        $trimmed = [uint64]$receipt.cache_bytes_before_pressure - [uint64]$receipt.cache_bytes_after_pressure
+                        if ([uint64]$receipt.decision_generation_before -ge [uint64]$receipt.pressure_decision_generation -or
+                            [uint64]$receipt.pressure_decision_generation -ge [uint64]$receipt.recovered_decision_generation -or
+                            [uint64]$receipt.cache_bytes_after_pressure -ge [uint64]$receipt.cache_bytes_before_pressure -or
+                            $trimmed -ne [uint64]$receipt.pressure_trimmed_bytes -or $trimmed -eq 0 -or
+                            [uint64]$receipt.residual_owned_resources -ne 0 -or
+                            -not [bool]$receipt.recovered_nominal) {
+                            throw "Cache-pressure receipt does not prove bounded trim and nominal recovery."
+                        }
+                    }
+                }
                 $recoveryStepCount += 1
                 if (($recoveryStepCount % 4) -eq 0) { $completedRecoveryCycles += 1 }
             }
