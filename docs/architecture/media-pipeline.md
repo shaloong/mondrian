@@ -359,10 +359,33 @@ retains bounded source LRU, failure memory, and terminal evidence and exposes
 both effective budgets plus PCM/session trim facts for Headless tests.
 
 Timeline paint receives only `AudioWaveformSource`, a shallow nonblocking
-lookup Adapter. A cache miss may request work and returns `None`; no Widget,
-layout pass, or event callback opens FFmpeg, blocks for PCM, owns a worker, or
+lookup Adapter backed by `Weak<AudioWaveformService>`. A cache miss may request
+work and returns `None`; a retained Widget/model Adapter cannot extend the
+service, worker, result transport, or FFmpeg cache lifetime. No Widget, layout
+pass, or event callback opens FFmpeg, blocks for PCM, owns a worker, or
 reconstructs generation/failure policy. The presentation-width resampler uses
 max aggregation while reducing resolution so a narrow transient cannot vanish.
+
+Waveform shutdown is an explicit two-phase owner protocol. The begin phase
+atomically closes dispatch, wakes a paused worker, cancels and removes every
+pending/deferred demand, closes the bounded job sender, and signals the private
+`AudioSourceCache`; it performs no join or process teardown. The terminal phase
+joins the retained worker only before one absolute deadline, drains result
+publication acknowledgements, then uniquely consumes the source cache through
+its schema-5 close. `AudioWaveformShutdownEvidence` schema 1 records configured,
+started, start-failed, returned, result-transport-failed, panicked, timed-out,
+detached, and abandoned workers; logical/physical/publication residuals;
+external cache references; and
+the nested cache receipt. Default, stale, timeout, panic, retained adapter, or
+incomplete cache evidence fails closed. Worker publication uses nonblocking
+bounded transport, so shutdown does not depend on a UI result drain.
+
+The product `AppUiHost` arms its final process watchdog first, signals Preview
+and Waveform, and gives Waveform a bounded 750 ms share before requesting event-
+loop exit. A dirty receipt is logged as terminal evidence rather than silently
+presented as clean shutdown. Ordinary service `Drop` only signals and joins an
+already-finished worker; it remains bounded best effort and is not qualification
+evidence.
 
 ## Asset thumbnails
 

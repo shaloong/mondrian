@@ -82,6 +82,8 @@ use crate::app_ui::shortcuts::{
 use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRecoveryProject};
 use mondrian_editor_state::Action;
 
+const WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
+
 /// Window-host commands produced while draining app UI actions.
 ///
 /// These are native shell side effects, not editor-state mutations. Entrypoints
@@ -1147,9 +1149,7 @@ impl AppUiHost {
                 match action {
                     PendingCloseAction::CloseProject => (true, false),
                     PendingCloseAction::QuitApp => {
-                        self.preview_service.shutdown();
-                        #[cfg(not(test))]
-                        super::window::arm_process_exit_watchdog();
+                        self.shutdown_product_services_for_quit();
                         (true, true)
                     }
                 }
@@ -1914,9 +1914,7 @@ impl AppUiHost {
                     self.pending_close_action = None;
                     self.root.close_pending_close_dialog();
                     if pending == PendingCloseAction::QuitApp {
-                        self.preview_service.shutdown();
-                        #[cfg(not(test))]
-                        super::window::arm_process_exit_watchdog();
+                        self.shutdown_product_services_for_quit();
                         commands.quit = true;
                     } else {
                         self.refresh_recovery_candidates();
@@ -1947,9 +1945,7 @@ impl AppUiHost {
             }
             Ok(false) => {
                 if pending == PendingCloseAction::QuitApp {
-                    self.preview_service.shutdown();
-                    #[cfg(not(test))]
-                    super::window::arm_process_exit_watchdog();
+                    self.shutdown_product_services_for_quit();
                     commands.quit = true;
                 } else {
                     self.refresh_recovery_candidates();
@@ -1965,6 +1961,22 @@ impl AppUiHost {
                     .set_status_hint(format!("无法开始安全关闭项目：{err}"), true);
                 self.mark_dirty();
             }
+        }
+    }
+
+    fn shutdown_product_services_for_quit(&self) {
+        #[cfg(not(test))]
+        super::window::arm_process_exit_watchdog();
+        self.preview_service.shutdown();
+        self.waveform_service.begin_shutdown();
+        let evidence = self
+            .waveform_service
+            .shutdown_until(Instant::now() + WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT);
+        if !evidence.all_resources_released() {
+            tracing::error!(
+                ?evidence,
+                "waveform service did not close cleanly before product exit"
+            );
         }
     }
 }
@@ -4155,6 +4167,12 @@ mod tests {
             }
         );
         assert!(!host.app_state().has_open_project());
+        let waveform_shutdown =
+            host.waveform_service.shutdown_until(Instant::now() + Duration::from_secs(1));
+        assert!(
+            waveform_shutdown.all_resources_released(),
+            "{waveform_shutdown:#?}"
+        );
     }
 
     #[test]

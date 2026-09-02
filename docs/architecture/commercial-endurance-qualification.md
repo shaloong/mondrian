@@ -96,6 +96,15 @@ and both pumps have retired. A resource-free closed cache placeholder replaces
 the consumed App field, preventing terminal capture from accidentally starting
 a fresh decoder worker.
 
+The App-owned product Waveform service now has its own schema-1 consuming-style
+receipt over the analysis worker, request/publication backlog, external cache
+references, and nested schema-5 Audio Source closure; its Timeline adapter is
+weak and cannot prolong those owners. Normal `AppUiHost` quit consumes that
+receipt under a fixed deadline. The concrete three-phase campaign runtime must
+instantiate and include the same receipt in its shutdown window before COL-047
+can claim complete product-domain closure; the current `AppState`-only owner
+group does not fabricate a Waveform owner or infer closure from zero demand.
+
 The validation-only `EnduranceExecutionOwners` group composes the production
 Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
 the phase's `AppState`. It never starts a sidecar Audio instance. Its consuming

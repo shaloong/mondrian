@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use mondrian_core::{AssetId, ExecutionCancellationToken, ExecutionTerminalDisposition};
@@ -335,6 +336,9 @@ fn dispatch_gate_holds_transported_waveform_work_until_resume() {
     service.set_resource_policy(false, false, WAVEFORM_SOURCE_CACHE_BYTE_BUDGET);
     service
         .jobs
+        .lock()
+        .as_ref()
+        .expect("waveform sender")
         .try_send(WaveformJob {
             key,
             generation: 1,
@@ -363,4 +367,72 @@ fn dispatch_gate_holds_transported_waveform_work_until_resume() {
         );
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+#[test]
+fn source_adapter_is_weak_and_clean_shutdown_reclaims_every_owner() {
+    let service = AudioWaveformService::new();
+    let source = service.source();
+    assert_eq!(Arc::strong_count(&service), 1);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let evidence = service.shutdown_until(deadline);
+    assert_eq!(evidence.schema_version, 1);
+    assert_eq!(evidence.workers_started, 1);
+    assert_eq!(evidence.workers_terminated, 1);
+    assert!(evidence.all_resources_released(), "{evidence:#?}");
+    assert_eq!(service.shutdown_until(deadline), evidence);
+
+    let key = source_key(501);
+    assert!(source.lookup(key.asset_id, &key.selection, 0.0, 1.0, 64).is_none());
+    drop(service);
+    assert!(source.lookup(key.asset_id, &key.selection, 0.0, 1.0, 64).is_none());
+}
+
+#[test]
+fn shutdown_boundary_cancels_deferred_demand_and_closes_source_cache() {
+    let service = AudioWaveformService::new();
+    let key = source_key(502);
+    let cancellation = ExecutionCancellationToken::new();
+    {
+        let mut state = service.state.lock();
+        state.dispatch_enabled = false;
+        state.pending.insert(
+            key.clone(),
+            PendingWaveform { generation: 1, cancellation: cancellation.clone() },
+        );
+        state.deferred.push_back(WaveformJob {
+            key,
+            generation: 1,
+            path: PathBuf::from("unused-shutdown-waveform-source.wav"),
+            total_frames: 1,
+            cancellation: cancellation.clone(),
+        });
+    }
+
+    service.begin_shutdown();
+    assert!(cancellation.is_canceled());
+    let evidence = service.shutdown_until(std::time::Instant::now() + Duration::from_secs(2));
+    assert_eq!(evidence.pending_requests_before, 1);
+    assert_eq!(evidence.deferred_requests_before, 1);
+    assert_eq!(evidence.pending_requests_remaining, 0);
+    assert_eq!(evidence.deferred_requests_remaining, 0);
+    assert!(evidence.source_cache.all_resources_released());
+    assert!(evidence.all_resources_released(), "{evidence:#?}");
+}
+
+#[test]
+fn default_and_stale_waveform_shutdown_evidence_fail_closed() {
+    let clean = AudioWaveformService::new()
+        .shutdown_until(std::time::Instant::now() + Duration::from_secs(2));
+    assert!(clean.all_resources_released());
+    assert!(!super::AudioWaveformShutdownEvidence::default().all_resources_released());
+    assert!(
+        !super::AudioWaveformShutdownEvidence { schema_version: 0, ..clean }
+            .all_resources_released()
+    );
+    assert!(
+        !super::AudioWaveformShutdownEvidence { worker_failures: 1, ..clean }
+            .all_resources_released()
+    );
 }
