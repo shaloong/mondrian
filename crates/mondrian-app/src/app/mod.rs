@@ -116,6 +116,8 @@ pub mod endurance_export;
 pub mod endurance_playback;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_qualification;
+#[cfg(any(test, feature = "validation"))]
+pub mod endurance_reference_output;
 mod endurance_shutdown;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_workload;

@@ -25,6 +25,42 @@ struct TimelineAudioRenderState {
 }
 
 impl TimelineAudioPcmRenderer {
+    /// Prepare the canonical public Program without audition or channel remapping.
+    pub(super) fn new_public_program(
+        sequence: Sequence,
+        sequences: Vec<Sequence>,
+        library: Arc<AssetLibrary>,
+        source_cache: Arc<AudioSourceCache>,
+        runtime_grant: AudioRuntimeResourceGrant,
+    ) -> mondrian_core::Result<Self> {
+        let sample_rate = sequence.settings.audio_sample_rate;
+        let channel_layout = sequence.settings.audio_channel_layout;
+        let renderer = Self::new(
+            sequence,
+            sequences,
+            library,
+            source_cache,
+            runtime_grant,
+            AudioAuditionOverlay::default(),
+            sample_rate,
+            channel_layout,
+        )?;
+        let evidence = renderer.delivery_evidence();
+        if evidence.program_layout != channel_layout
+            || evidence.target_layout != channel_layout
+            || matches!(
+                evidence.mapping_kind,
+                mondrian_audio::AudioDeliveryMappingKind::Standard
+            )
+        {
+            return Err(audio_render_error(
+                "public_program_audio_delivery",
+                "Reference Audio Program requires identity-layout delivery without audition or standard remapping",
+            ));
+        }
+        Ok(renderer)
+    }
+
     pub(super) fn new(
         sequence: Sequence,
         sequences: Vec<Sequence>,
@@ -418,6 +454,36 @@ mod tests {
 
         assert_eq!(output.channel_layout, AudioChannelLayout::Stereo);
         assert_eq!(output.samples, vec![0.0; 8]);
+        drop(renderer);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn public_program_adapter_preserves_sequence_layout_without_audition_mapping() {
+        let root = std::env::temp_dir().join(format!(
+            "mondrian-public-program-audio-{}",
+            mondrian_core::ProjectId::new()
+        ));
+        let mut sequence = Sequence::new("public Program");
+        sequence.settings.audio_sample_rate = 48_000;
+        sequence.settings.audio_channel_layout = AudioChannelLayout::Stereo;
+        let renderer = TimelineAudioPcmRenderer::new_public_program(
+            sequence,
+            Vec::new(),
+            AssetLibrary::open(root.clone()).expect("asset library"),
+            Arc::new(AudioSourceCache::new(48_000)),
+            test_runtime_grant(),
+        )
+        .expect("public Program renderer");
+
+        let evidence = renderer.delivery_evidence();
+        assert_eq!(evidence.program_layout, AudioChannelLayout::Stereo);
+        assert_eq!(evidence.target_layout, AudioChannelLayout::Stereo);
+        assert!(matches!(
+            evidence.mapping_kind,
+            mondrian_audio::AudioDeliveryMappingKind::Identity
+                | mondrian_audio::AudioDeliveryMappingKind::ProvenSilence
+        ));
         drop(renderer);
         let _ = std::fs::remove_dir_all(root);
     }

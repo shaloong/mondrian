@@ -1,4 +1,6 @@
-use mondrian_core::{AudioChannelLayout, ColorSpace, ProjectColorEnvironment, Rational};
+use mondrian_core::{
+    AudioChannelLayout, ColorSpace, FramePosition, ProjectColorEnvironment, Rational,
+};
 use mondrian_reference_output::{
     ReferenceHdrSignal, ReferenceOutputPixelFormat, ReferenceOutputRange, ReferenceOutputScan,
     ReferenceOutputSignal,
@@ -6,9 +8,26 @@ use mondrian_reference_output::{
 use mondrian_renderer::color::{ProgramOutputRole, SourceColorModule};
 use mondrian_renderer::{
     CpuEncodedColorFrame, CpuSourceColorFrame, ReferenceOutputProgram,
-    RenderCpuColorExecutionSession,
+    RenderCpuColorExecutionSession, TimelineEvaluationRequest, TimelineRenderColorTarget,
+    TimelineRenderIntent, TimelineRenderQuality,
 };
 use mondrian_timeline::sequence::SequenceSettings;
+
+#[test]
+fn reference_output_timeline_intent_is_full_raster_working_final() {
+    let position = FramePosition::new(18, Rational::new(1, 60));
+    let request = TimelineEvaluationRequest::reference_output(position);
+
+    assert_eq!(request.position, position);
+    assert_eq!(request.intent, TimelineRenderIntent::ReferenceOutput);
+    assert_eq!(request.settings.quality, TimelineRenderQuality::Final);
+    assert_eq!(
+        request.settings.color_target,
+        TimelineRenderColorTarget::Working
+    );
+    assert!(!request.settings.allow_frame_drop);
+    assert_eq!(request.settings.resolution_scale, 1.0);
+}
 
 #[test]
 fn canonical_program_output_lowers_to_clean_feed_video_and_exact_audio() {

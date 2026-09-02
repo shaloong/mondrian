@@ -129,7 +129,10 @@ mod validation;
 mod visual_effect_execution;
 pub use service::*;
 #[cfg(feature = "validation")]
-pub use validation::{export_visual_frame_validation, ExportVisualFrameValidation};
+pub use validation::{
+    export_visual_frame_validation, ExportVisualFrameValidation,
+    FrozenTimelineReferenceFrameSession,
+};
 use visual_effect_execution::{
     prepare_export_effect_frame_plan, ExportHeterogeneousRouteContract,
     PreparedExportHeterogeneousElement,
@@ -5773,6 +5776,7 @@ fn preflight_timeline_visual_range_once(
                 position,
                 root_resolution,
                 root_color_context.clone(),
+                TimelineVisualExecutionIntent::Export,
             )
             .map_err(|reason| {
                 if cancel.is_canceled() {
@@ -6978,6 +6982,7 @@ pub fn export_input_color_resolution_counts_for_frame(
         FramePosition::new(timeline_frame, timeline.sequence.time_base()),
         timeline.sequence.settings.resolution,
         color_context,
+        TimelineVisualExecutionIntent::Export,
     )?;
     let mut counts = InputColorResolutionSourceCounts::default();
     for node in closure.nodes() {
@@ -7317,6 +7322,7 @@ fn prepare_export_visual_frame_closure(
     root_position: FramePosition,
     root_resolution: Resolution,
     root_color_context: ProgramColorContext,
+    intent: TimelineVisualExecutionIntent,
 ) -> Result<PreparedExportVisualClosure, String> {
     let visual_session = std::cell::RefCell::new(visual_session);
     prepare_visual_frame_closure(
@@ -7341,7 +7347,7 @@ fn prepare_export_visual_frame_closure(
                 .prepare_timeline_frame_execution(
                     program.as_ref(),
                     TimelineFrameExecutionRequest::new(
-                        TimelineEvaluationRequest::export(position),
+                        intent.evaluation_request(position),
                         effect_execution_generation,
                         EffectExecutionContinuity::Discontinuous,
                         extent,
@@ -7389,6 +7395,23 @@ fn prepare_export_visual_frame_closure(
     .map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimelineVisualExecutionIntent {
+    Export,
+    #[cfg(feature = "validation")]
+    ReferenceOutput,
+}
+
+impl TimelineVisualExecutionIntent {
+    fn evaluation_request(self, position: FramePosition) -> TimelineEvaluationRequest {
+        match self {
+            Self::Export => TimelineEvaluationRequest::export(position),
+            #[cfg(feature = "validation")]
+            Self::ReferenceOutput => TimelineEvaluationRequest::reference_output(position),
+        }
+    }
+}
+
 fn render_sequence_frame_into(
     timeline: &TimelineExportSnapshot,
     context: &mut ExportFrameRenderContext<'_>,
@@ -7426,6 +7449,7 @@ fn render_sequence_sample_into(
         timeline_position,
         resolution,
         color_context,
+        TimelineVisualExecutionIntent::Export,
     )?;
     let materialization_bytes = closure
         .conservative_cpu_materialization_active_bytes()

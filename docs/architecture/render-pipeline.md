@@ -97,6 +97,17 @@ TimelineEvaluationRequest
   -> Display or Export Encode
 ```
 
+`TimelineRenderIntent::ReferenceOutput` is the explicit third final-quality
+consumer intent. Its settings are full raster, Working color target, Final
+quality, and no frame drop. It deliberately stops before Program Output because
+`ReferenceOutputProgram` owns that boundary and physical packing. The
+validation endurance path supplies this intent to the same frozen Export
+Prepared Visual closure and execution Adapter used for exact-source Export
+materialization; it does not route through Preview representation selection,
+proxy preference, Viewer scaling, monitor/ICC processing, or presentation
+overlays. Preview, Export, and Reference may schedule differently, but none may
+reinterpret Timeline placement, nesting, Effects, Grades, or working color.
+
 For persistent working-frame reuse, each Preview materialization Adapter emits
 one exhaustive `ResolvedVisualNodeMaterializationIdentity`. The Renderer-owned
 Prepared Visual Module combines it with exact node time/raster/working/engine

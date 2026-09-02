@@ -19,6 +19,8 @@ pub enum TimelineRenderIntent {
     Preview,
     /// Final timeline export.
     Export,
+    /// Full-raster working-space program prepared for scheduled reference output.
+    ReferenceOutput,
     /// Thumbnail or low-cost still generation.
     Thumbnail,
     /// Non-presentational analysis such as diagnostics or media collection.
@@ -81,6 +83,20 @@ impl TimelineRenderSettings {
         }
     }
 
+    /// Settings for full-raster reference-output preparation.
+    ///
+    /// The result remains in working space because the dedicated Reference
+    /// Output Program applies the exact Program Output transform and signal
+    /// packing after Timeline compositing.
+    pub fn reference_output() -> Self {
+        Self {
+            resolution_scale: 1.0,
+            quality: TimelineRenderQuality::Final,
+            color_target: TimelineRenderColorTarget::Working,
+            allow_frame_drop: false,
+        }
+    }
+
     /// Settings for timeline diagnostics and non-presentational analysis.
     pub fn analysis() -> Self {
         Self {
@@ -123,6 +139,15 @@ impl TimelineEvaluationRequest {
             position,
             intent: TimelineRenderIntent::Export,
             settings: TimelineRenderSettings::export(),
+        }
+    }
+
+    /// Build a full-raster reference-output evaluation request.
+    pub fn reference_output(position: FramePosition) -> Self {
+        Self {
+            position,
+            intent: TimelineRenderIntent::ReferenceOutput,
+            settings: TimelineRenderSettings::reference_output(),
         }
     }
 

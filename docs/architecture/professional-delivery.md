@@ -28,6 +28,18 @@ Continuous Export never requests cancellation. This owner must be dropped
 before App-wide consuming shutdown so its Queue reference cannot outlive the
 qualified phase.
 
+The validation feature also exposes one persistent frozen Timeline visual
+Session for Reference Output correctness qualification. It owns the same
+`TimelineExportSnapshot` and `ExportVisualRenderSession` used by production
+Export, retaining decoder, title, prepared Program, Effect, color, and
+composite state across contiguous frames. It forces authored root/child
+rasters, executes the shared Prepared Visual closure, and returns only the
+canonical root Float32 working composite before Export delivery, codec, and
+publication. The existing one-shot visual validator delegates to the same
+private materializer. This seam is qualification-only reuse; it grants no
+Export publication authority and is not a long-term ownership claim for the
+Reference product path.
+
 Qualification separates the signal from the wait. `RenderQueue::begin_shutdown`
 atomically closes admission and requests cancellation before the App starts
 joining any owner. `RenderQueue` retains the dedicated worker's `JoinHandle`;

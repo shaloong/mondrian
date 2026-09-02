@@ -49,6 +49,30 @@ Embedded audio comes from the selected public Audio Program. It never consumes
 Monitor Path PCM, device-volume state, or a convenience downmix. The first
 product matrix requires exact 48 kHz channel semantics and at most 16 channels.
 
+The validation-only `PersistentReferenceOutputPump` is the canonical endurance
+producer over those two seams. It freezes one ordinary exact-source Timeline
+Export snapshot, owns one persistent visual materialization Session, and owns
+one independent public Audio Program Runtime with an empty audition overlay.
+The visual Session reuses decoder, title, prepared Program, Effect, color, and
+composite state across contiguous frames, uses authored full-resolution child
+canvases, and stops at the root Float32 working composite before any Export
+delivery transform. `TimelineRenderIntent::ReferenceOutput` fixes full raster,
+Final quality, Working color target, and no frame drop. This is a temporary
+qualification reuse of Export's canonical frozen materializer, not a second
+Timeline interpreter and not a claim that Reference Output should remain
+coupled to Export as a product architecture.
+
+The pump uses one exact frame index as both Timeline coordinate and physical
+cadence phase. `ReferenceAudioCadence` derives the corresponding 48 kHz start
+and length; the first window enters one Audio continuity generation and every
+later window strictly continues it. Picture materialization, Audio Program
+rendering, Program Output, carrier packing, and provider schedule are ordered
+as one fail-closed transaction: no bundle reaches the provider unless every
+upstream step succeeded. Sequence identity/revision or Project Author
+Generation drift permanently faults the generation. Closing cancels software
+work and hands provider teardown to the existing App lifecycle owner, whose
+ordinary or endurance consuming receipts remain the only release evidence.
+
 App is the composition and lifecycle Adapter. A Session binds to exact
 `SequenceId`, `SequenceRevision`, and Project author generation. Discovery,
 open, schedule, start, poll, and stop are machine-local operations and never
@@ -199,15 +223,18 @@ ticks fail the Session; stop/block/failure classifies every queued frame so
 `scheduled = completed + late + dropped + flushed + aborted + outstanding`
 always remains auditable. Provider poll/stop failures and out-of-order
 callbacks also enter stable failure and abort the complete remaining queue.
-The current Renderer seam
-has a correct CPU Float32 Program Output and packing path. It deliberately does
-not claim a GPU-to-device resident path; future work should deepen the same
+The current Renderer seam and persistent qualification pump have a correct CPU
+Float32 full-raster Program Output and packing path with exact public Audio
+Program cadence. They deliberately do not claim a GPU-to-device resident path,
+vendor performance, or wire correctness; future work should deepen the same
 Module with reusable pinned buffers or device-resident transfers rather than
 creating a second signal interpretation.
 
 Software tests prove exact mode admission, carrier packing, cadence, ordering,
 reference-loss behavior, runtime-unavailable behavior, clean-feed color
-identity, App author binding, and preference persistence. Commercial hardware
+identity, persistent exact-source visual/Audio continuity, App author binding,
+author-drift fault latching, ordinary stop completion, and preference
+persistence. Commercial hardware
 qualification additionally requires licensed vendor bridges, supported
 DeckLink/AJA hardware and drivers, SDI capture/monitor loopback including ANC
 line/field readback, external

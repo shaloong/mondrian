@@ -1415,3 +1415,12 @@ and video plus audio schedule atomically as one bounded bundle; fractional
 cadences therefore accumulate exact sample positions instead of rounding every
 frame. Device routing and reference lock remain in the Reference Output Module,
 not the Audio Program. See [Reference Output](reference-output.md).
+
+The App's validation-only persistent Reference producer prepares that public
+Program through a dedicated constructor: audition is empty, the target layout
+equals the Sequence Program layout, and `Standard` delivery remapping is
+rejected. Only identity delivery or already-proven silence is admissible. One
+generation enters at the exact first frame's rational sample position and all
+later windows must continue at the prior terminal sample. The Runtime shares
+the App's sole `AudioSourceCache`; it does not create a qualification-only
+decoder authority or borrow Monitor Path state.

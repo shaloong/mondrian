@@ -171,8 +171,27 @@ resume revalidates the same binding and coordinate before native scheduling is
 entered again. Startup failure deliberately leaves `AppState` and the execution
 owner group with the caller so their consuming terminal contract can still run.
 This is production Timeline picture/audio-path evidence only: canonical
-Reference Output must later consume a full-raster working Program Output plus
-the public Audio Program and cannot use the monitor-adapted Viewer raster.
+Reference Output is independently driven by the persistent canonical pump
+described below and cannot use the monitor-adapted Viewer raster.
+
+The validation-only `PersistentReferenceOutputPump` now supplies that exact
+clean-feed producer. It freezes the active Sequence identity/revision, Project
+Author Generation, exact-source `TimelineExportSnapshot`, and first physical
+frame/cadence phase before opening a device. One persistent Export visual
+materializer reuses decoder/Program/Effect/color/composite state and returns an
+authored full-raster Float32 working composite; one independent public Audio
+Program Runtime uses no audition or standard channel remapping. The pump
+derives 48 kHz windows from rational frame boundaries, strictly enters then
+continues one Audio generation, lowers picture and Audio through
+`ReferenceOutputProgram`, and schedules only a complete A/V bundle. Author
+drift or any picture, Audio, packing, provider, continuity, or counter failure
+permanently faults the generation. Its close path cancels software work and
+hands the ordinary provider stop to App; App-wide consuming shutdown remains
+the terminal Reference/Adapter release authority.
+
+This CPU path proves software semantics and simulated scheduling only. It does
+not prove GPU/device residency, DeckLink/AJA bridge behavior, SDI wire output,
+external lock, reference-monitor behavior, or long-duration performance.
 
 Outside realtime residency, the paired Headless owner exposes one sealed,
 fixed-size inventory instead of raw Preview/GPU access. The selected gauges
@@ -215,15 +234,16 @@ receipts can close a phase.
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, typed workload preparation/NotRun admission, the
 phase-scoped frozen repeated-Export owner, the persistent production Timeline
-picture/audio phase owner, and deterministic software tests. A
+picture/audio phase owner, the canonical persistent Reference clean-feed pump,
+and deterministic software tests. A
 valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
 Audio Device, physical Reference provider, external lock, independent verifier,
 or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. It does **not** yet supply the concrete three-phase
-`EnduranceCampaignRuntime`: the canonical full-raster Reference Output pump and
-real vendor bridge/hardware validation, typed recovery receipts, and the
+`EnduranceCampaignRuntime`: real vendor bridge/hardware validation, typed
+recovery receipts, and the
 high-level validation executable remain explicit
 follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
 execution or hardware HITL evidence. Until those owners exist, physical phases
