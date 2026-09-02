@@ -621,7 +621,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                 let receipt = match step {
                     "seek" => serde_json::json!({
                         "step": step,
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "sequence_binding_sha256": SHA,
@@ -631,22 +631,71 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                         "after_epoch": 2,
                         "exact_picture_ready": true,
                     }),
-                    "surface_device_reopen" => serde_json::json!({
-                        "step": step,
-                        "schema_version": 2,
-                        "cycle_index": cycle,
-                        "operation_id": operation_id,
-                        "sequence_binding_sha256": SHA,
-                        "surface_generation_before": 1,
-                        "surface_generation_after": 2,
-                        "device_generation_before": 3,
-                        "device_generation_after": 4,
-                        "shutdown_receipt_sha256": SHA,
-                        "reopened_contract_sha256": SHA,
-                    }),
+                    "surface_device_reopen" => {
+                        let shutdown_receipt_json = serde_json::to_string(&serde_json::json!({
+                            "schema_version": 1,
+                            "worker_started": true,
+                            "worker_terminated": true,
+                            "worker_panicked": false,
+                            "timed_out": false,
+                            "retirement_requested": true,
+                            "retirement_handoff_accepted": true,
+                            "retirement_completed": true,
+                            "generation_terminal_kind": null,
+                        }))
+                        .expect("serialize Surface shutdown receipt");
+                        let shutdown_receipt_sha256 =
+                            format!("{:x}", Sha256::digest(shutdown_receipt_json.as_bytes()));
+                        let reopened_picture_json = serde_json::to_string(&serde_json::json!({
+                            "sequence_id": "test-sequence",
+                            "frame": cycle,
+                            "width": 1920,
+                            "height": 1080,
+                            "output_target": "Display",
+                            "output_color_space": "Srgb",
+                            "monitor_color_space": "Srgb",
+                            "tone_map": false,
+                            "display_view": null,
+                            "frame_residency": {
+                                "execution_observed": true,
+                                "working_residency": "GpuWorkingCompositeExecuted",
+                            },
+                            "display_contract_sha256": SHA,
+                        }))
+                        .expect("serialize reopened Surface picture");
+                        let reopened_picture_sha256 =
+                            format!("{:x}", Sha256::digest(reopened_picture_json.as_bytes()));
+                        let reopened_contract_json = serde_json::to_string(&serde_json::json!({
+                            "schema_version": 2,
+                            "surface_generation": cycle + 2,
+                            "device_generation": cycle + 4,
+                            "actual_surface_presented": true,
+                            "original_picture_sha256": reopened_picture_sha256,
+                            "reopened_picture_json": reopened_picture_json,
+                            "reopened_picture_sha256": reopened_picture_sha256,
+                        }))
+                        .expect("serialize reopened Surface contract");
+                        let reopened_contract_sha256 =
+                            format!("{:x}", Sha256::digest(reopened_contract_json.as_bytes()));
+                        serde_json::json!({
+                            "step": step,
+                            "schema_version": 3,
+                            "cycle_index": cycle,
+                            "operation_id": operation_id,
+                            "sequence_binding_sha256": SHA,
+                            "surface_generation_before": cycle + 1,
+                            "surface_generation_after": cycle + 2,
+                            "device_generation_before": cycle + 3,
+                            "device_generation_after": cycle + 4,
+                            "shutdown_receipt_json": shutdown_receipt_json,
+                            "shutdown_receipt_sha256": shutdown_receipt_sha256,
+                            "reopened_contract_json": reopened_contract_json,
+                            "reopened_contract_sha256": reopened_contract_sha256,
+                        })
+                    }
                     "export_cancel_retry" => serde_json::json!({
                         "step": step,
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "cancelled_job_id": format!("cancelled-{cycle}"),
@@ -659,7 +708,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }),
                     "cache_pressure" => serde_json::json!({
                         "step": step,
-                        "schema_version": 2,
+                        "schema_version": 3,
                         "cycle_index": cycle,
                         "operation_id": operation_id,
                         "decision_generation_before": 1,
@@ -831,58 +880,196 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     assert!(output_path.is_file());
 
     std::fs::remove_file(&output_path).expect("remove first test report");
-    let phase = run
+    let recovery_phase = run
         .phases
-        .iter_mut()
+        .iter()
         .find(|phase| phase.terminal.counters.recovery_cycles != 0)
         .expect("concurrent recovery phase");
-    let raw_path = evidence_directory.join(&phase.producer.raw_evidence_file_name);
-    let mut raw: serde_json::Value =
+    let raw_path = evidence_directory.join(&recovery_phase.producer.raw_evidence_file_name);
+    let baseline_raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&raw_path).expect("read raw evidence"))
             .expect("parse raw evidence");
-    let events = raw["events"].as_array_mut().expect("producer events array");
-    let export_recovery = events
+    let report_path = evidence_directory.join(&recovery_phase.producer.report_file_name);
+    let baseline_producer_report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&report_path).expect("read producer report"))
+            .expect("parse producer report");
+    let baseline_run = run.clone();
+    let mut assert_rehashed_tamper_rejected = |description: &str, raw: &serde_json::Value| {
+        let mut tampered_run = baseline_run.clone();
+        let phase = tampered_run
+            .phases
+            .iter_mut()
+            .find(|phase| phase.terminal.counters.recovery_cycles != 0)
+            .expect("concurrent recovery phase");
+        std::fs::write(
+            &raw_path,
+            serde_json::to_vec_pretty(raw).expect("serialize tampered raw evidence"),
+        )
+        .expect("write tampered raw evidence");
+        phase.producer.raw_evidence_sha256 = file_sha256(&raw_path);
+        let mut producer_report = baseline_producer_report.clone();
+        producer_report["raw_evidence_sha256"] =
+            serde_json::json!(phase.producer.raw_evidence_sha256);
+        producer_report["event_count"] =
+            serde_json::json!(raw["events"].as_array().expect("producer events array").len());
+        std::fs::write(
+            &report_path,
+            serde_json::to_vec_pretty(&producer_report)
+                .expect("serialize tampered producer report"),
+        )
+        .expect("write tampered producer report");
+        phase.producer.report_sha256 = file_sha256(&report_path);
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered_run).expect("serialize tampered run"),
+        )
+        .expect("write tampered run");
+        let status = verifier.status().expect("rerun PowerShell verifier");
+        assert!(!status.success(), "{description}");
+        assert!(
+            !output_path.exists(),
+            "a rejected verifier attempt must not publish a report: {description}"
+        );
+    };
+    let reseal_receipt = |event: &mut serde_json::Value, receipt: &serde_json::Value| {
+        let receipt_json = serde_json::to_string(receipt).expect("serialize tampered receipt");
+        event["operation_receipt_sha256"] =
+            serde_json::json!(format!("{:x}", Sha256::digest(receipt_json.as_bytes())));
+        event["operation_receipt_json"] = serde_json::json!(receipt_json);
+    };
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
         .iter_mut()
         .find(|event| {
             event["kind"] == "recovery_step_completed" && event["step"] == "export_cancel_retry"
         })
         .expect("Export cancel/retry recovery event");
     let mut receipt: serde_json::Value = serde_json::from_str(
-        export_recovery["operation_receipt_json"]
+        event["operation_receipt_json"]
             .as_str()
             .expect("embedded Export recovery receipt"),
     )
     .expect("parse embedded Export recovery receipt");
     receipt["cancellation_count_after"] = receipt["cancellation_count_before"].clone();
-    let receipt_json = serde_json::to_string(&receipt).expect("serialize tampered receipt");
-    export_recovery["operation_receipt_sha256"] =
-        serde_json::json!(format!("{:x}", Sha256::digest(receipt_json.as_bytes())));
-    export_recovery["operation_receipt_json"] = serde_json::json!(receipt_json);
-    std::fs::write(
-        &raw_path,
-        serde_json::to_vec_pretty(&raw).expect("serialize tampered raw evidence"),
-    )
-    .expect("write tampered raw evidence");
-    phase.producer.raw_evidence_sha256 = file_sha256(&raw_path);
-    let report_path = evidence_directory.join(&phase.producer.report_file_name);
-    let mut producer_report: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&report_path).expect("read producer report"))
-            .expect("parse producer report");
-    producer_report["raw_evidence_sha256"] = serde_json::json!(phase.producer.raw_evidence_sha256);
-    std::fs::write(
-        &report_path,
-        serde_json::to_vec_pretty(&producer_report).expect("serialize producer report"),
-    )
-    .expect("write producer report");
-    phase.producer.report_sha256 = file_sha256(&report_path);
-    std::fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&run).expect("serialize tampered run"),
-    )
-    .expect("write tampered run");
-    let status = verifier.status().expect("rerun PowerShell verifier");
-    assert!(
-        !status.success(),
-        "rehash-consistent Export cancel/retry leaf substitution must fail"
+    reseal_receipt(event, &receipt);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent Export cancellation leaf substitution must fail",
+        &raw,
     );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["kind"] == "recovery_step_completed")
+        .expect("recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse receipt");
+    receipt["operation_id"] = serde_json::json!("x".repeat(4_097));
+    reseal_receipt(event, &receipt);
+    assert_rehashed_tamper_rejected("an outer recovery receipt above 4 KiB must fail", &raw);
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let oversized_nested = format!(
+        "{}{}",
+        receipt["shutdown_receipt_json"].as_str().expect("shutdown receipt"),
+        " ".repeat(4_097)
+    );
+    receipt["shutdown_receipt_json"] = serde_json::json!(oversized_nested);
+    receipt["shutdown_receipt_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(oversized_nested.as_bytes())));
+    reseal_receipt(event, &receipt);
+    assert_rehashed_tamper_rejected("nested Surface evidence above 4 KiB must fail", &raw);
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let mut reopened: serde_json::Value = serde_json::from_str(
+        receipt["reopened_contract_json"].as_str().expect("reopened contract"),
+    )
+    .expect("parse reopened contract");
+    reopened["original_picture_sha256"] = serde_json::json!(SHA);
+    let reopened_json =
+        serde_json::to_string(&reopened).expect("serialize substituted reopened contract");
+    receipt["reopened_contract_json"] = serde_json::json!(reopened_json);
+    receipt["reopened_contract_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(reopened_json.as_bytes())));
+    reseal_receipt(event, &receipt);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent nested Surface picture substitution must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let events = raw["events"].as_array_mut().expect("producer events array");
+    let first_operation_id = events
+        .iter()
+        .find(|event| event["kind"] == "recovery_step_completed")
+        .and_then(|event| event["operation_receipt_json"].as_str())
+        .map(|json| serde_json::from_str::<serde_json::Value>(json).expect("parse receipt"))
+        .and_then(|receipt| receipt["operation_id"].as_str().map(str::to_owned))
+        .expect("first operation id");
+    let event = events
+        .iter_mut()
+        .filter(|event| event["kind"] == "recovery_step_completed")
+        .nth(1)
+        .expect("second recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse receipt");
+    receipt["operation_id"] = serde_json::json!(first_operation_id);
+    reseal_receipt(event, &receipt);
+    assert_rehashed_tamper_rejected("a replayed recovery operation identity must fail", &raw);
+
+    let mut raw = baseline_raw.clone();
+    let events = raw["events"].as_array_mut().expect("producer events array");
+    let seek_indices = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| (event["step"] == "seek").then_some(index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        seek_indices.len(),
+        2,
+        "fixture must contain two seek cycles"
+    );
+    let first_json = events[seek_indices[0]]["operation_receipt_json"].clone();
+    let first_hash = events[seek_indices[0]]["operation_receipt_sha256"].clone();
+    events[seek_indices[0]]["operation_receipt_json"] =
+        events[seek_indices[1]]["operation_receipt_json"].clone();
+    events[seek_indices[0]]["operation_receipt_sha256"] =
+        events[seek_indices[1]]["operation_receipt_sha256"].clone();
+    events[seek_indices[1]]["operation_receipt_json"] = first_json;
+    events[seek_indices[1]]["operation_receipt_sha256"] = first_hash;
+    assert_rehashed_tamper_rejected("cross-cycle receipt substitution must fail", &raw);
+
+    let mut raw = baseline_raw.clone();
+    let events = raw["events"].as_array_mut().expect("producer events array");
+    let partial_index = events
+        .iter()
+        .rposition(|event| event["kind"] == "recovery_step_completed")
+        .expect("last recovery event");
+    events.remove(partial_index);
+    assert_rehashed_tamper_rejected("a partial recovery cycle must fail", &raw);
 }

@@ -539,6 +539,13 @@ the evidence directory to contain exactly every declared chunk, owner report,
 and raw evidence file; rejects links/extra files/hash drift; re-enumerates the
 directory after replay; and rehashes both inputs and output around inspection.
 It also rejects reparse-point ancestors and applies explicit JSON size bounds.
+The Windows integration harness keeps one current schema-3 positive closure and
+then recomputes every affected raw-evidence, producer-report, manifest, outer
+receipt, and nested-receipt digest around adversarial changes. It requires the
+verifier to reject oversized outer and nested receipts, nested Surface-picture
+substitution, operation-ID replay, cross-cycle receipt swaps, partial recovery
+cycles, and an invalid Export cancellation transition. This is a verifier
+regression gate, not qualification evidence from a physical campaign.
 
 ## Qualification boundary
 
