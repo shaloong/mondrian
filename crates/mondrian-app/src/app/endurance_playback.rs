@@ -1,0 +1,423 @@
+//! Persistent production Timeline picture/audio execution for endurance phases.
+
+use std::time::{Duration, Instant};
+
+use mondrian_core::{Rational, SequenceRevision};
+use mondrian_platform::{EndurancePhaseKind, EndurancePhaseRequirement};
+use mondrian_playback::ClockMaster;
+use thiserror::Error;
+
+use super::endurance_campaign::{EnduranceExecutionOwners, EnduranceRealtimeIntervalObservation};
+use super::endurance_workload::PreparedEnduranceWorkload;
+use super::AppState;
+
+/// Persistent Timeline binding retained across every realtime observation window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PersistentTimelineBinding {
+    sequence_id: mondrian_core::SequenceId,
+    sequence_revision: SequenceRevision,
+    author_generation: u64,
+}
+
+/// Phase-scoped driver for the shared production Preview and physical Audio path.
+#[must_use = "a persistent Timeline phase must be explicitly closed before its execution owners"]
+pub struct PersistentTimelinePlaybackPhase {
+    binding: PersistentTimelineBinding,
+    expected_epoch: u64,
+    expected_frame: i64,
+    accepted_intervals: u64,
+    interval_timeout: Duration,
+    realtime_active: bool,
+    closing: bool,
+    fault: Option<String>,
+}
+
+impl PersistentTimelinePlaybackPhase {
+    /// Validate one long-form fixture, start product Playback, and enter realtime residency.
+    ///
+    /// `app` and `owners` remain with the caller even when startup fails so the
+    /// campaign runtime can execute its consuming cleanup contract exactly once.
+    pub fn start(
+        app: &mut AppState,
+        owners: &mut EnduranceExecutionOwners,
+        requirement: &EndurancePhaseRequirement,
+        workload: &PreparedEnduranceWorkload,
+        absolute_deadline: Option<Instant>,
+        interval_timeout: Duration,
+    ) -> Result<Self, PersistentTimelinePlaybackError> {
+        if interval_timeout.is_zero() {
+            return Err(PersistentTimelinePlaybackError::InvalidPlan(
+                "GPU completion timeout must be nonzero".to_owned(),
+            ));
+        }
+        validate_phase_contract(requirement, workload)?;
+        if app.is_playing() || app.current_frame() != 0 {
+            return Err(PersistentTimelinePlaybackError::InvalidPlan(
+                "persistent Timeline playback requires a fresh stopped frame-zero transport"
+                    .to_owned(),
+            ));
+        }
+        let binding = capture_fixture_binding(app, requirement)?;
+        app.play().map_err(|error| {
+            PersistentTimelinePlaybackError::Startup(format!(
+                "start production Timeline Playback: {error}"
+            ))
+        })?;
+        owners.begin_realtime_window(app, absolute_deadline).map_err(|error| {
+            PersistentTimelinePlaybackError::Startup(format!(
+                "enter Headless realtime residency: {error}"
+            ))
+        })?;
+        Ok(Self {
+            binding,
+            expected_epoch: app.playback_epoch().get(),
+            expected_frame: app.current_frame(),
+            accepted_intervals: 0,
+            interval_timeout,
+            realtime_active: true,
+            closing: false,
+            fault: None,
+        })
+    }
+
+    /// Advance one exact production A/V interval through the shared coordinator.
+    pub fn pump_interval(
+        &mut self,
+        app: &mut AppState,
+        owners: &mut EnduranceExecutionOwners,
+    ) -> Result<(), PersistentTimelinePlaybackError> {
+        self.require_healthy_active()?;
+        self.validate_binding(app)?;
+        let observation = owners
+            .run_realtime_interval(app, self.interval_timeout)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        validate_interval_transition(
+            self.expected_epoch,
+            self.expected_frame,
+            observation,
+            app.playback_clock_master(),
+        )
+        .map_err(|detail| self.latch_fault(detail))?;
+        self.validate_binding(app)?;
+        self.expected_epoch = observation.after_epoch;
+        self.expected_frame = observation.after_frame;
+        self.accepted_intervals = self.accepted_intervals.checked_add(1).ok_or_else(|| {
+            self.latch_fault("persistent Timeline interval counter overflow".to_owned())
+        })?;
+        Ok(())
+    }
+
+    /// Leave native realtime scheduling at a cadence boundary without stopping Playback.
+    pub fn settle_window(
+        &mut self,
+        app: &AppState,
+        owners: &mut EnduranceExecutionOwners,
+    ) -> Result<(), PersistentTimelinePlaybackError> {
+        let finish_result = if self.realtime_active {
+            let result = owners
+                .finish_realtime_window()
+                .map_err(|error| self.latch_fault(error.to_string()));
+            if result.is_ok() {
+                self.realtime_active = false;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let binding_result = self.validate_binding(app);
+        finish_result?;
+        binding_result?;
+        if let Some(detail) = &self.fault {
+            return Err(PersistentTimelinePlaybackError::Faulted(detail.clone()));
+        }
+        Ok(())
+    }
+
+    /// Re-enter native realtime scheduling after one settled owner snapshot.
+    pub fn resume_window(
+        &mut self,
+        app: &AppState,
+        owners: &mut EnduranceExecutionOwners,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<(), PersistentTimelinePlaybackError> {
+        if let Some(detail) = &self.fault {
+            return Err(PersistentTimelinePlaybackError::Faulted(detail.clone()));
+        }
+        if self.closing {
+            return Err(PersistentTimelinePlaybackError::Faulted(
+                "persistent Timeline phase is closing".to_owned(),
+            ));
+        }
+        if self.realtime_active {
+            return Err(self.latch_fault(
+                "persistent Timeline realtime residency is already active".to_owned(),
+            ));
+        }
+        self.validate_binding(app)?;
+        validate_expected_coordinate(self.expected_epoch, self.expected_frame, app)
+            .map_err(|detail| self.latch_fault(detail))?;
+        owners
+            .begin_realtime_window(app, absolute_deadline)
+            .map_err(|error| self.latch_fault(error.to_string()))?;
+        self.realtime_active = true;
+        Ok(())
+    }
+
+    /// Stop new realtime work, leave scheduling, and pause the product transport.
+    pub fn begin_close(
+        &mut self,
+        app: &mut AppState,
+        owners: &mut EnduranceExecutionOwners,
+    ) -> Result<(), PersistentTimelinePlaybackError> {
+        self.closing = true;
+        let settle_result = self.settle_window(app, owners);
+        let pause_result = if app.is_playing() {
+            app.pause().map_err(|error| {
+                self.latch_fault(format!("pause persistent Timeline Playback: {error}"))
+            })
+        } else {
+            Ok(())
+        };
+        settle_result.and(pause_result)
+    }
+
+    /// Number of exact unit-frame intervals accepted by this phase owner.
+    pub const fn accepted_intervals(&self) -> u64 {
+        self.accepted_intervals
+    }
+
+    /// Whether native scheduling is inactive and no further work may be admitted.
+    pub const fn is_closed(&self) -> bool {
+        self.closing && !self.realtime_active
+    }
+
+    fn require_healthy_active(&self) -> Result<(), PersistentTimelinePlaybackError> {
+        if let Some(detail) = &self.fault {
+            return Err(PersistentTimelinePlaybackError::Faulted(detail.clone()));
+        }
+        if self.closing || !self.realtime_active {
+            return Err(PersistentTimelinePlaybackError::Faulted(
+                "persistent Timeline realtime residency is not active".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_binding(&mut self, app: &AppState) -> Result<(), PersistentTimelinePlaybackError> {
+        let current = app.active_sequence().map(|sequence| PersistentTimelineBinding {
+            sequence_id: sequence.id,
+            sequence_revision: sequence.revision,
+            author_generation: app.project_author_generation(),
+        });
+        if current != Some(self.binding) {
+            return Err(self.latch_fault(
+                "persistent Timeline author binding changed during qualification".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn latch_fault(&mut self, detail: String) -> PersistentTimelinePlaybackError {
+        if self.fault.is_none() {
+            self.fault = Some(detail.clone());
+        }
+        PersistentTimelinePlaybackError::Faulted(self.fault.as_ref().cloned().unwrap_or(detail))
+    }
+}
+
+fn validate_phase_contract(
+    requirement: &EndurancePhaseRequirement,
+    workload: &PreparedEnduranceWorkload,
+) -> Result<(), PersistentTimelinePlaybackError> {
+    if requirement.phase_id != workload.phase_id() || requirement.kind != workload.kind() {
+        return Err(PersistentTimelinePlaybackError::InvalidPlan(
+            "prepared workload does not match the phase requirement".to_owned(),
+        ));
+    }
+    if !matches!(
+        requirement.kind,
+        EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery
+    ) || requirement.counters.minimum_playback_presented_frames == 0
+    {
+        return Err(PersistentTimelinePlaybackError::InvalidPlan(
+            "persistent Timeline playback requires a realtime qualification phase".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn capture_fixture_binding(
+    app: &AppState,
+    requirement: &EndurancePhaseRequirement,
+) -> Result<PersistentTimelineBinding, PersistentTimelinePlaybackError> {
+    let sequence = app.active_sequence().ok_or_else(|| {
+        PersistentTimelinePlaybackError::InvalidPlan(
+            "persistent Timeline playback requires an active Sequence".to_owned(),
+        )
+    })?;
+    validate_fixture_extent(
+        sequence.settings.frame_rate,
+        app.last_content_frame()
+            .map_err(|error| PersistentTimelinePlaybackError::InvalidPlan(error.to_string()))?,
+        requirement.counters.minimum_playback_presented_frames,
+    )?;
+    Ok(PersistentTimelineBinding {
+        sequence_id: sequence.id,
+        sequence_revision: sequence.revision,
+        author_generation: app.project_author_generation(),
+    })
+}
+
+fn validate_fixture_extent(
+    frame_rate: Rational,
+    last_content_frame: i64,
+    minimum_presented_frames: u64,
+) -> Result<(), PersistentTimelinePlaybackError> {
+    let required_rate = Rational::new(60, 1);
+    if frame_rate != required_rate {
+        return Err(PersistentTimelinePlaybackError::InvalidPlan(
+            "persistent Timeline fixture must use the workload's exact 60/1 frame rate".to_owned(),
+        ));
+    }
+    let available_frames = u64::try_from(last_content_frame)
+        .ok()
+        .and_then(|frame| frame.checked_add(1))
+        .ok_or_else(|| {
+            PersistentTimelinePlaybackError::InvalidPlan(
+                "persistent Timeline fixture has no non-negative content extent".to_owned(),
+            )
+        })?;
+    let required_frames = minimum_presented_frames.checked_add(1).ok_or_else(|| {
+        PersistentTimelinePlaybackError::InvalidPlan(
+            "persistent Timeline presentation requirement overflowed its guard frame".to_owned(),
+        )
+    })?;
+    if available_frames < required_frames {
+        return Err(PersistentTimelinePlaybackError::InvalidPlan(format!(
+            "persistent Timeline fixture has {available_frames} frames, requires at least {required_frames} including the terminal guard frame"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_expected_coordinate(
+    expected_epoch: u64,
+    expected_frame: i64,
+    app: &AppState,
+) -> Result<(), String> {
+    if app.playback_epoch().get() != expected_epoch || app.current_frame() != expected_frame {
+        return Err("persistent Timeline coordinate changed outside the phase owner".to_owned());
+    }
+    if !app.is_playing() {
+        return Err("persistent Timeline transport stopped outside the phase owner".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_interval_transition(
+    expected_epoch: u64,
+    expected_frame: i64,
+    observation: EnduranceRealtimeIntervalObservation,
+    clock_master: Option<ClockMaster>,
+) -> Result<(), String> {
+    if observation.before_epoch != expected_epoch || observation.before_frame != expected_frame {
+        return Err("persistent Timeline interval began from an unexpected coordinate".to_owned());
+    }
+    let expected_after_frame = expected_frame
+        .checked_add(1)
+        .ok_or_else(|| "persistent Timeline frame coordinate overflow".to_owned())?;
+    if observation.after_epoch != expected_epoch || observation.after_frame != expected_after_frame
+    {
+        return Err("persistent Timeline interval did not advance exactly one frame".to_owned());
+    }
+    if !observation.sample.current_gpu_ready || observation.sample.unavailable {
+        return Err(
+            "persistent Timeline interval did not prove its exact picture ready".to_owned(),
+        );
+    }
+    if clock_master != Some(ClockMaster::AudioDevice) {
+        return Err(
+            "persistent Timeline interval was not governed by Audio Device Clock".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Stable persistent Timeline phase failure.
+#[derive(Debug, Error)]
+pub enum PersistentTimelinePlaybackError {
+    /// Workload, fixture, transport, or duration admission was invalid.
+    #[error("invalid persistent Timeline playback plan: {0}")]
+    InvalidPlan(String),
+    /// Product Playback or realtime scheduling could not start.
+    #[error("persistent Timeline playback startup failed: {0}")]
+    Startup(String),
+    /// A started interval violated exact continuity or execution authority.
+    #[error("persistent Timeline playback failed: {0}")]
+    Faulted(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::headless_realtime_playback::HeadlessPreviewSample;
+
+    fn observation(
+        before_epoch: u64,
+        before_frame: i64,
+        after_epoch: u64,
+        after_frame: i64,
+        ready: bool,
+    ) -> EnduranceRealtimeIntervalObservation {
+        EnduranceRealtimeIntervalObservation {
+            before_epoch,
+            before_frame,
+            after_epoch,
+            after_frame,
+            sample: HeadlessPreviewSample {
+                current_gpu_ready: ready,
+                stale_output_available: !ready,
+                unavailable: false,
+            },
+        }
+    }
+
+    #[test]
+    fn fixture_requires_exact_rate_complete_extent_and_terminal_guard_frame() {
+        assert!(validate_fixture_extent(Rational::new(60, 1), 100, 100).is_ok());
+        assert!(validate_fixture_extent(Rational::new(60, 1), 99, 100).is_err());
+        assert!(validate_fixture_extent(Rational::new(30, 1), 100, 100).is_err());
+        assert!(validate_fixture_extent(Rational::new(60, 1), -1, 1).is_err());
+        assert!(validate_fixture_extent(Rational::new(60, 1), i64::MAX, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn interval_accepts_only_exact_ready_audio_clocked_unit_progress() {
+        assert!(validate_interval_transition(
+            7,
+            41,
+            observation(7, 41, 7, 42, true),
+            Some(ClockMaster::AudioDevice),
+        )
+        .is_ok());
+
+        for invalid in [
+            observation(8, 41, 8, 42, true),
+            observation(7, 41, 7, 43, true),
+            observation(7, 41, 8, 42, true),
+            observation(7, 41, 7, 42, false),
+        ] {
+            assert!(
+                validate_interval_transition(7, 41, invalid, Some(ClockMaster::AudioDevice),)
+                    .is_err()
+            );
+        }
+        assert!(validate_interval_transition(
+            7,
+            41,
+            observation(7, 41, 7, 42, true),
+            Some(ClockMaster::Synthetic),
+        )
+        .is_err());
+    }
+}

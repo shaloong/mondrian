@@ -154,6 +154,26 @@ former test harness loop. Consuming shutdown best-effort leaves any interrupted
 residency before synchronously joining Preview, the App State's actual Audio
 owner, and GPU retirement in that order.
 
+The validation-only `PersistentTimelinePlaybackPhase` is the high-level
+realtime phase owner over that sealed session. Startup requires an admitted
+Playback/Reference or Concurrent/Recovery workload, a fresh stopped frame-zero
+transport, one active exact 60/1 Sequence, and enough authored extent for every
+required presentation plus one terminal guard frame. It freezes Sequence ID,
+Sequence Revision, and Project Author Generation before starting ordinary App
+Playback. Each accepted interval pumps the actual App Audio output before the
+Clock through the shared coordinator, begins at the frozen expected coordinate,
+advances exactly one frame without changing Playback Epoch, proves the departed
+exact picture ready, and observes `AudioDevice` as Clock Master. Natural end,
+skipped/non-unit progress, picture unavailability, clock fallback, external
+transport or author drift, overflow, and owner failure permanently fault the
+phase. A cadence observation first finishes the current realtime residency;
+resume revalidates the same binding and coordinate before native scheduling is
+entered again. Startup failure deliberately leaves `AppState` and the execution
+owner group with the caller so their consuming terminal contract can still run.
+This is production Timeline picture/audio-path evidence only: canonical
+Reference Output must later consume a full-raster working Program Output plus
+the public Audio Program and cannot use the monitor-adapted Viewer raster.
+
 Outside realtime residency, the paired Headless owner exposes one sealed,
 fixed-size inventory instead of raw Preview/GPU access. The selected gauges
 cover the current Playback binding, Preview scheduler and worker-queue work,
@@ -194,16 +214,17 @@ receipts can close a phase.
 
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, typed workload preparation/NotRun admission, the
-phase-scoped frozen repeated-Export owner, and deterministic software tests. A
+phase-scoped frozen repeated-Export owner, the persistent production Timeline
+picture/audio phase owner, and deterministic software tests. A
 valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
 Audio Device, physical Reference provider, external lock, independent verifier,
 or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. It does **not** yet supply the concrete three-phase
-`EnduranceCampaignRuntime`: persistent Timeline clean-feed/audio pumping, the
-real vendor Reference Output bridge and hardware validation, typed
-recovery receipts, and the high-level validation executable remain explicit
+`EnduranceCampaignRuntime`: the canonical full-raster Reference Output pump and
+real vendor bridge/hardware validation, typed recovery receipts, and the
+high-level validation executable remain explicit
 follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
 execution or hardware HITL evidence. Until those owners exist, physical phases
 must be admitted as `NotRun`; profile prose is not evidence that a runnable
@@ -389,8 +410,9 @@ It also rejects reparse-point ancestors and applies explicit JSON size bounds.
 
 Fast synthetic tests prove schema, hashing, deterministic verdicts, accounting,
 leak detection, chunk tamper rejection, frozen repeated-Export ordering and
-fault latching, synchronous Preview/Audio/GPU owner closure, bounded GPU-timeout
-failure, and worker retirement. They do not
+fault latching, persistent Timeline rate/extent/guard-frame admission and exact
+interval policy, synchronous Preview/Audio/GPU owner closure, bounded
+GPU-timeout failure, and worker retirement. They do not
 prove 8/24/72-hour stability, physical reference lock, DeckLink/AJA callback
 cadence, monitor behavior, or a platform/driver campaign. Those facts remain
 HITL and must be captured on the approved physical rig; `NotRun` can never be

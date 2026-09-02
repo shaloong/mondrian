@@ -90,6 +90,29 @@ diagnostics, or blocking shutdown. The eventual standalone validation binary
 must invoke a public high-level App library runner; it must not expose or call
 these low-level crate-private owners directly.
 
+For Playback/Reference and Concurrent/Recovery, construct
+`app::endurance_playback::PersistentTimelinePlaybackPhase` only after the exact
+prepared workload and complete capability inventory are admitted. The App must
+have one active stopped frame-zero Sequence at exactly 60/1. Its authored extent
+must cover `minimum_playback_presented_frames + 1`: one interval proves the
+departed frame before advancing, so the additional terminal guard frame is
+required to finish the exact 24-hour count without looping or reaching natural
+end. Pump only through `pump_interval`; every interval must remain in the same
+Playback Epoch, advance exactly one frame, prove the departed exact picture, and
+retain Audio Device Clock authority. Before a cadence capture call
+`settle_window`, collect the owner envelope only after native scheduling has
+ended, then call `resume_window`; either operation revalidates the frozen
+Sequence ID/revision, Project Author Generation, transport, and coordinate.
+Any violation is a permanent phase fault. Close explicitly with `begin_close`
+before consuming the complete App owner. A startup error can occur after App
+Playback starts, so the runtime must still execute consuming cleanup on the
+caller-retained App and execution owners.
+
+This phase owner is not the physical clean-feed producer. The next canonical
+Reference pump must branch the full-raster Program Output from the shared
+working composite and pair it with the selected public Audio Program; never
+submit the monitor/display-transformed Viewer raster to Reference Output.
+
 Construct `EnduranceRunCapture` from the exact profile, release identity, and
 capture-authority file. Start phases only through `begin_phase`; it verifies the
 raw checked-in workload contract bytes. Submit each owner observation through
@@ -153,7 +176,8 @@ synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
 coordinator takes the final sample. That concrete three-phase runtime and thin
 validation executable are not implemented at this checkpoint; its Continuous
 Export leaf must compose the existing frozen repeated-Export owner rather than
-reimplementing the loop. The coordinator owns cadence and native
+reimplementing the loop, and its realtime leaves must compose the existing
+persistent Timeline phase owner. The coordinator owns cadence and native
 `ProductProcessTree` probing, phase order, and evidence publication. If a
 physical provider or required fixture is absent, `begin_phase` must return the
 typed `NotRun` receipt created by prepared-workload admission before starting

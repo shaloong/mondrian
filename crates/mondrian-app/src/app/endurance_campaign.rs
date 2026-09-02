@@ -30,7 +30,8 @@ pub use super::endurance_workload::{EnduranceNotRunAdmission, EndurancePhaseAdmi
 use super::endurance_workload::{EnduranceWorkloadError, PreparedEnduranceWorkload};
 use super::headless_realtime_playback::{
     capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
-    HeadlessEnduranceShutdownProjection, HeadlessRealtimePlaybackSession,
+    HeadlessEnduranceShutdownProjection, HeadlessGpuExecutionDisposition,
+    HeadlessGpuExecutionObserver, HeadlessPreviewSample, HeadlessRealtimePlaybackSession,
 };
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
 use super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
@@ -124,12 +125,99 @@ pub struct EnduranceExecutionOwners {
     realtime: Option<HeadlessRealtimePlaybackSession>,
 }
 
+#[derive(Default)]
+struct EnduranceRealtimeObserver;
+
+impl HeadlessGpuExecutionObserver for EnduranceRealtimeObserver {
+    fn execution_completed(
+        &mut self,
+        _execution: super::headless_viewer_gpu::HeadlessViewerGpuExecution,
+        _disposition: HeadlessGpuExecutionDisposition,
+        _completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) {
+    }
+
+    fn current_output_presented(
+        &mut self,
+        _completed_demand: Option<mondrian_playback::FrameDemandIdentity>,
+    ) {
+    }
+
+    fn successor_preparation(&mut self, _ready: bool) {}
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct EnduranceRealtimeIntervalObservation {
+    pub(super) before_epoch: u64,
+    pub(super) before_frame: i64,
+    pub(super) after_epoch: u64,
+    pub(super) after_frame: i64,
+    pub(super) sample: HeadlessPreviewSample,
+}
+
 impl EnduranceExecutionOwners {
     /// Start real software execution owners without admitting a campaign phase.
     pub fn start() -> Result<Self, EnduranceCampaignError> {
         let realtime = HeadlessRealtimePlaybackSession::new()
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
         Ok(Self { realtime: Some(realtime) })
+    }
+
+    pub(super) fn begin_realtime_window(
+        &mut self,
+        app: &AppState,
+        absolute_deadline: Option<Instant>,
+    ) -> Result<(), EnduranceCampaignError> {
+        self.realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .begin_realtime(app, absolute_deadline)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))
+    }
+
+    pub(super) fn run_realtime_interval(
+        &mut self,
+        app: &mut AppState,
+        gpu_completion_timeout: Duration,
+    ) -> Result<EnduranceRealtimeIntervalObservation, EnduranceCampaignError> {
+        let before_epoch = app.playback_epoch().get();
+        let before_frame = app.current_frame();
+        let mut observer = EnduranceRealtimeObserver;
+        let sample = self
+            .realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .run_production_av_interval(app, &mut observer, gpu_completion_timeout)
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        Ok(EnduranceRealtimeIntervalObservation {
+            before_epoch,
+            before_frame,
+            after_epoch: app.playback_epoch().get(),
+            after_frame: app.current_frame(),
+            sample,
+        })
+    }
+
+    pub(super) fn finish_realtime_window(&mut self) -> Result<(), EnduranceCampaignError> {
+        let _timing = self
+            .realtime
+            .as_mut()
+            .ok_or_else(|| {
+                EnduranceCampaignError::Runtime(
+                    "Headless realtime execution session is missing".to_owned(),
+                )
+            })?
+            .finish_realtime()
+            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
+        Ok(())
     }
 
     /// Capture owner-derived gauges and terminal counters at a settled boundary.

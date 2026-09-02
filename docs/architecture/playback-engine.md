@@ -870,6 +870,23 @@ reuse its candidate transition and publication primitives. The Module is
 compiled for `validation` as well as tests, including the same successor,
 physical-output, work-watch, and retry seams.
 
+COL-047 endurance execution wraps this coordinator with one validation-only
+`PersistentTimelinePlaybackPhase`; it does not add another playback loop. The
+owner freezes the active Sequence ID/revision, Project Author Generation, and
+the frame-zero coordinate at startup, admits only an exact 60/1 non-looping
+fixture with one guard frame beyond the required presentation count, and pumps
+the App-owned physical Audio output. One accepted interval must prove the
+departed exact picture ready, remain under Audio Device Clock, and advance
+exactly one frame in the same Playback Epoch. Natural end, author/transport
+drift, clock fallback, skipped progress, picture unavailability, and execution
+failure latch permanently. Owner snapshots occur only after the phase has
+finished the current native-scheduling residency; resume verifies the unchanged
+binding and coordinate before constructing another residency. This proves the
+production Timeline A/V transport but is intentionally not Reference Output
+clean-feed evidence: that downstream branch must originate from the canonical
+full-raster working Program Output and public Audio Program, never Viewer
+presentation pixels.
+
 A `HeadlessRealtimePlaybackSession` creates one Preview Runtime, installs that
 Runtime's completion waker on the exact GPU Adapter, derives hardware-decode
 admission from the same device generation, and exposes no mutable paired
