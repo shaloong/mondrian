@@ -179,6 +179,16 @@ over-capacity residency are diagnostic facts. This is an intentionally isolated
 process Adapter, not an in-process FFmpeg claim; a linked FFmpeg Adapter may
 replace it behind the same Interface without changing cache or sample semantics.
 
+The capacity is a physical-owner limit, not merely an LRU-entry limit. One
+permit covers a Session from pre-spawn admission through active, queued,
+terminating, partial-construction, and EOF-finalization states; it is released
+only after the child and both pipe pumps are proven retired. Capacity is clamped
+to 64, random seeks cannot create a replacement-child storm, and online
+reconfiguration converges without hiding terminating processes from the live
+and peak Session diagnostics. Shutdown/fault state is rechecked while holding
+the relevant cache/permit lock, immediately before spawn, and immediately after
+spawn so no reader or child can escape a racing shutdown signal.
+
 An execution owner that must prove phase isolation first obtains unique
 `AudioSourceCache` ownership, signals `begin_shutdown`, and then consumes it
 through `shutdown_until` using the App's shared absolute deadline. The
@@ -196,27 +206,44 @@ Non-product decoder implementations inherit a fail-closed shutdown default:
 only diagnostics that already report zero Sessions can produce clean closure
 without implementing the explicit Session shutdown Seam.
 
-The last persistent FFmpeg decoder's ordinary `Drop` transfers its complete
-Session owner to a named background teardown thread before any child kill/wait
-or pipe-pump join can run. It never treats that best-effort path as
-qualification evidence. If the OS cannot create the teardown thread, the
-potentially blocking owner is deliberately abandoned and an error is emitted;
-the failed handoff does not run foreign destructors on the caller. This narrow
-leak is preferable to an unbounded UI/App-owner stall and cannot be confused
-with a clean consuming receipt. Only `AudioSourceCache::shutdown_until` is the
-deadline-qualified authority: its instance receipt distinguishes coordinator
-start failure plus owner abandonment from a successfully started coordinator
-that was still running and detached at the deadline. The coordinator returns
-its own monotonic completion timestamp; observing and joining a result after
-the absolute deadline records `terminated = 1`, `timeout = 1`, and
-`detached = 0` rather than laundering late work into a clean receipt. A running
-deadline timeout instead records `terminated = 0` and `detached = 1`, while a
-joined panic records observed termination but no complete resource facts.
-Explicit facts say whether resource evidence was complete and owner lifetime
-was resolved at the requested deadline. Spawn failure, panic, running timeout,
-and joined-late completion all remain conservative unknown/unresolved states;
-default numeric zero resource counts cannot be mistaken for proof. Only an
-on-time successful completion proves exact child reap and pump joins.
+`AudioSourceCacheShutdownEvidence` schema 5 also records the persistent decoder
+teardown worker and coordinator lifecycle. Its shutdown signal is captured at
+construction: the first request is an atomic state transition plus `unpark`,
+with no mutex acquisition, thread creation, or idle polling at the begin seam.
+The consuming coordinator retains one shutdown mutex until terminal evidence is
+published, so concurrent followers reuse the same final receipt instead of
+racing a second cleanup interpretation. The App's post-consumption replacement
+is a resource-free, already-closed placeholder and does not create a hidden
+decoder worker while terminal evidence is being collected.
+
+Persistent decoding owns one prebuilt named teardown worker. Session eviction,
+random-seek replacement, partial child construction, normal EOF, cancellation,
+and ordinary last-owner `Drop` transfer the complete foreign owner to that
+worker before any child kill/wait, process-status wait, or pipe-pump join can
+run. EOF is not completion evidence by itself: the teardown worker waits for a
+bounded terminal child status, verifies the exit result, reaps the process and
+pumps, and returns only a safe value to the decode worker. The decode worker
+waits cooperatively on that internal completion and can still observe request
+cancellation, decoder shutdown, and its own deadline.
+
+No caller-side fallback runs a foreign destructor. If the prebuilt worker or a
+later handoff fails, the remaining opaque owners are deliberately abandoned and
+dirty evidence is latched; this narrow leak is preferable to an unbounded
+UI/render/App-owner stall and cannot be confused with a clean receipt. Only
+`AudioSourceCache::shutdown_until` is the deadline-qualified authority: its
+instance receipt distinguishes coordinator start failure plus owner
+abandonment from a successfully started coordinator that was still running and
+detached at the deadline. The coordinator returns its own monotonic completion
+timestamp; observing and joining a result after the absolute deadline records
+`terminated = 1`, `timeout = 1`, and `detached = 0` rather than laundering late
+work into a clean receipt. A running deadline timeout instead records
+`terminated = 0` and `detached = 1`, while a joined panic records observed
+termination but no complete resource facts. Explicit facts say whether resource
+evidence was complete and owner lifetime was resolved at the requested
+deadline. Spawn failure, panic, running timeout, and joined-late completion all
+remain conservative unknown/unresolved states; default numeric zero resource
+counts cannot be mistaken for proof. Only an on-time successful completion
+proves exact child reap and pump joins.
 
 The cache, reader, and every returned `AudioBuffer` carry the selected stream's
 validated native `AudioChannelLayout`, not an independent channel count. Mono, canonical named

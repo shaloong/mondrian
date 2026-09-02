@@ -6,6 +6,7 @@ mod session;
 pub use mapping::AudioSourceSelection;
 
 use crate::audio::AudioBuffer;
+use crate::owner_lifetime::{abandon_io_error, dispose_canonical_or_abandon_opaque_panic_payload};
 use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
 use parking_lot::{Condvar, Mutex};
 use session::PersistentFfmpegAudioWindowDecoder;
@@ -13,7 +14,7 @@ use std::collections::VecDeque;
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ const AUDIO_SOURCE_WINDOW_SECONDS: usize = 10;
 const AUDIO_SOURCE_CACHE_ENTRY_CAPACITY: usize = 16;
 const AUDIO_SOURCE_CACHE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 const AUDIO_SOURCE_DECODER_SESSION_CAPACITY: usize = 2;
+pub(super) const AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX: usize = 64;
 const AUDIO_SOURCE_FAILURE_CAPACITY: usize = 64;
 
 /// Online-reconfigurable residency limits for one decoded-audio source cache.
@@ -56,6 +58,8 @@ impl AudioSourceCacheConfig {
             byte_budget: if byte_budget == 0 { 1 } else { byte_budget },
             decoder_session_capacity: if decoder_session_capacity == 0 {
                 1
+            } else if decoder_session_capacity > AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX {
+                AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX
             } else {
                 decoder_session_capacity
             },
@@ -71,7 +75,41 @@ pub struct AudioSourceCache {
     state: Mutex<AudioSourceCacheState>,
     window_ready: Condvar,
     decoder: Arc<dyn AudioWindowDecoder>,
+    decoder_shutdown_signal: Option<Arc<AudioWindowDecoderShutdownSignal>>,
     shutdown_requested: AtomicBool,
+}
+
+pub(super) struct AudioWindowDecoderShutdownSignal {
+    requested: AtomicBool,
+    worker: OnceLock<thread::Thread>,
+}
+
+impl AudioWindowDecoderShutdownSignal {
+    pub(super) fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            worker: OnceLock::new(),
+        }
+    }
+
+    pub(super) fn request(&self) {
+        self.requested.store(true, Ordering::Release);
+        self.notify_worker();
+    }
+
+    pub(super) fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+    }
+
+    pub(super) fn register_worker(&self) {
+        let _already_registered = self.worker.set(thread::current());
+    }
+
+    pub(super) fn notify_worker(&self) {
+        if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -234,11 +272,19 @@ pub(super) struct AudioWindowDecoderShutdownEvidence {
     pub(super) stdout_pump_threads_observed: usize,
     pub(super) stdout_pump_threads_joined: usize,
     pub(super) stdout_pump_threads_panicked: usize,
+    pub(super) stdout_pump_thread_owner_abandonments: usize,
     pub(super) stderr_pump_threads_observed: usize,
     pub(super) stderr_pump_threads_joined: usize,
     pub(super) stderr_pump_threads_panicked: usize,
+    pub(super) stderr_pump_thread_owner_abandonments: usize,
     pub(super) external_session_slot_references: usize,
     pub(super) resource_handles_remaining: usize,
+    pub(super) shutdown_workers_started: u32,
+    pub(super) shutdown_workers_terminated: u32,
+    pub(super) shutdown_worker_start_failures: u32,
+    pub(super) shutdown_worker_panics: u32,
+    pub(super) shutdown_worker_publication_missing: u32,
+    pub(super) shutdown_worker_owner_abandonments: u32,
 }
 
 impl AudioWindowDecoderShutdownEvidence {
@@ -248,10 +294,17 @@ impl AudioWindowDecoderShutdownEvidence {
             && self.child_process_termination_failures == 0
             && self.stdout_pump_threads_observed == self.stdout_pump_threads_joined
             && self.stdout_pump_threads_panicked == 0
+            && self.stdout_pump_thread_owner_abandonments == 0
             && self.stderr_pump_threads_observed == self.stderr_pump_threads_joined
             && self.stderr_pump_threads_panicked == 0
+            && self.stderr_pump_thread_owner_abandonments == 0
             && self.external_session_slot_references == 0
             && self.resource_handles_remaining == 0
+            && self.shutdown_workers_started == self.shutdown_workers_terminated
+            && self.shutdown_worker_start_failures == 0
+            && self.shutdown_worker_panics == 0
+            && self.shutdown_worker_publication_missing == 0
+            && self.shutdown_worker_owner_abandonments == 0
     }
 
     pub(super) fn merge(&mut self, other: Self) {
@@ -272,6 +325,9 @@ impl AudioWindowDecoderShutdownEvidence {
         self.stdout_pump_threads_panicked = self
             .stdout_pump_threads_panicked
             .saturating_add(other.stdout_pump_threads_panicked);
+        self.stdout_pump_thread_owner_abandonments = self
+            .stdout_pump_thread_owner_abandonments
+            .saturating_add(other.stdout_pump_thread_owner_abandonments);
         self.stderr_pump_threads_observed = self
             .stderr_pump_threads_observed
             .saturating_add(other.stderr_pump_threads_observed);
@@ -280,15 +336,38 @@ impl AudioWindowDecoderShutdownEvidence {
         self.stderr_pump_threads_panicked = self
             .stderr_pump_threads_panicked
             .saturating_add(other.stderr_pump_threads_panicked);
+        self.stderr_pump_thread_owner_abandonments = self
+            .stderr_pump_thread_owner_abandonments
+            .saturating_add(other.stderr_pump_thread_owner_abandonments);
         self.external_session_slot_references = self
             .external_session_slot_references
             .saturating_add(other.external_session_slot_references);
         self.resource_handles_remaining =
             self.resource_handles_remaining.saturating_add(other.resource_handles_remaining);
+        self.shutdown_workers_started =
+            self.shutdown_workers_started.saturating_add(other.shutdown_workers_started);
+        self.shutdown_workers_terminated = self
+            .shutdown_workers_terminated
+            .saturating_add(other.shutdown_workers_terminated);
+        self.shutdown_worker_start_failures = self
+            .shutdown_worker_start_failures
+            .saturating_add(other.shutdown_worker_start_failures);
+        self.shutdown_worker_panics =
+            self.shutdown_worker_panics.saturating_add(other.shutdown_worker_panics);
+        self.shutdown_worker_publication_missing = self
+            .shutdown_worker_publication_missing
+            .saturating_add(other.shutdown_worker_publication_missing);
+        self.shutdown_worker_owner_abandonments = self
+            .shutdown_worker_owner_abandonments
+            .saturating_add(other.shutdown_worker_owner_abandonments);
     }
 }
 
 pub(super) trait AudioWindowDecoder: Send + Sync {
+    fn shutdown_signal(&self) -> Option<Arc<AudioWindowDecoderShutdownSignal>> {
+        None
+    }
+
     fn decode_window(
         &self,
         source: &AudioSourceIdentity,
@@ -313,6 +392,22 @@ pub(super) trait AudioWindowDecoder: Send + Sync {
             resource_handles_remaining: diagnostics.sessions,
             ..AudioWindowDecoderShutdownEvidence::default()
         }
+    }
+}
+
+struct ShutdownAudioWindowDecoder;
+
+impl AudioWindowDecoder for ShutdownAudioWindowDecoder {
+    fn decode_window(
+        &self,
+        source: &AudioSourceIdentity,
+        _start_frame: i64,
+        _frame_count: usize,
+        _sample_rate: u32,
+        _channel_layout: AudioChannelLayout,
+        _cancellation: &ExecutionCancellationToken,
+    ) -> Result<AudioBuffer> {
+        Err(canceled_audio_decode(&source.path))
     }
 }
 
@@ -443,16 +538,32 @@ pub struct AudioSourceCacheShutdownEvidence {
     pub stdout_pump_threads_joined: usize,
     /// Joined decoder stdout pump threads that panicked.
     pub stdout_pump_threads_panicked: usize,
+    /// Opaque stdout-pump panic payload owners deliberately abandoned.
+    pub stdout_pump_thread_owner_abandonments: usize,
     /// Decoder stderr pump threads encountered by lifetime cleanup.
     pub stderr_pump_threads_observed: usize,
     /// Decoder stderr pump threads synchronously joined without panic.
     pub stderr_pump_threads_joined: usize,
     /// Joined decoder stderr pump threads that panicked.
     pub stderr_pump_threads_panicked: usize,
+    /// Opaque stderr-pump panic payload owners deliberately abandoned.
+    pub stderr_pump_thread_owner_abandonments: usize,
     /// Session-slot `Arc` references retained outside decoder ownership.
     pub external_decoder_session_references: usize,
     /// Decoder child/thread/resource handles not proven reclaimed.
     pub decoder_resource_handles_remaining: usize,
+    /// Early decoder shutdown workers successfully created during signal phase.
+    pub decoder_shutdown_workers_started: u32,
+    /// Early decoder shutdown workers synchronously joined by consuming cleanup.
+    pub decoder_shutdown_workers_terminated: u32,
+    /// Early decoder shutdown worker creation failures.
+    pub decoder_shutdown_worker_start_failures: u32,
+    /// Joined early decoder shutdown workers that panicked.
+    pub decoder_shutdown_worker_panics: u32,
+    /// Joined shutdown workers that returned without publishing resource evidence.
+    pub decoder_shutdown_worker_publication_missing: u32,
+    /// Foreign startup errors or opaque worker payloads deliberately abandoned.
+    pub decoder_shutdown_worker_owner_abandonments: u32,
     /// Decoder-owner `Arc` references retained outside the consumed cache.
     pub external_decoder_references: usize,
     /// Deadline-bounded shutdown coordinators successfully created.
@@ -462,14 +573,17 @@ pub struct AudioSourceCacheShutdownEvidence {
     pub shutdown_coordinators_terminated: u32,
     /// Shutdown coordinator creation failures.
     pub shutdown_coordinator_start_failures: u32,
-    /// Shutdown coordinators that panicked before publishing a receipt.
+    /// Shutdown supervisors or their returned JoinHandles that panicked.
     pub shutdown_coordinator_panics: u32,
     /// Shutdown coordinators whose own completion timestamp was after the
     /// deadline, including a still-running coordinator detached at that seam.
     pub shutdown_coordinator_timeouts: u32,
     /// Shutdown coordinators detached after the shared deadline.
     pub shutdown_coordinator_detachments: u32,
-    /// Cache/decoder owners intentionally abandoned after coordinator creation failed.
+    /// Shutdown coordinator spawners that panicked before returning a handle.
+    pub shutdown_coordinator_spawner_panics: u32,
+    /// Cache/decoder owners, foreign startup errors, or opaque panic payloads
+    /// deliberately abandoned by coordinator lifetime handling.
     ///
     /// Abandonment keeps a potentially blocking foreign destructor off the
     /// qualification caller, but can never be accepted as clean closure.
@@ -489,7 +603,7 @@ pub struct AudioSourceCacheShutdownEvidence {
 impl AudioSourceCacheShutdownEvidence {
     /// Whether every cache, child-process, pump-thread, and ownership fact closed exactly.
     pub const fn all_resources_released(self) -> bool {
-        self.schema_version == 3
+        self.schema_version == 5
             && self.in_flight_decodes_before == 0
             && self.external_pcm_buffer_references == 0
             && self.pcm_entries_remaining == 0
@@ -501,6 +615,7 @@ impl AudioSourceCacheShutdownEvidence {
             && self.shutdown_coordinator_panics == 0
             && self.shutdown_coordinator_timeouts == 0
             && self.shutdown_coordinator_detachments == 0
+            && self.shutdown_coordinator_spawner_panics == 0
             && self.shutdown_coordinator_owner_abandonments == 0
             && self.shutdown_resource_facts_complete_at_deadline
             && !self.shutdown_owner_lifetime_unresolved_at_deadline
@@ -513,20 +628,38 @@ impl AudioSourceCacheShutdownEvidence {
                 stdout_pump_threads_observed: self.stdout_pump_threads_observed,
                 stdout_pump_threads_joined: self.stdout_pump_threads_joined,
                 stdout_pump_threads_panicked: self.stdout_pump_threads_panicked,
+                stdout_pump_thread_owner_abandonments: self.stdout_pump_thread_owner_abandonments,
                 stderr_pump_threads_observed: self.stderr_pump_threads_observed,
                 stderr_pump_threads_joined: self.stderr_pump_threads_joined,
                 stderr_pump_threads_panicked: self.stderr_pump_threads_panicked,
+                stderr_pump_thread_owner_abandonments: self.stderr_pump_thread_owner_abandonments,
                 external_session_slot_references: self.external_decoder_session_references,
                 resource_handles_remaining: self.decoder_resource_handles_remaining,
+                shutdown_workers_started: self.decoder_shutdown_workers_started,
+                shutdown_workers_terminated: self.decoder_shutdown_workers_terminated,
+                shutdown_worker_start_failures: self.decoder_shutdown_worker_start_failures,
+                shutdown_worker_panics: self.decoder_shutdown_worker_panics,
+                shutdown_worker_publication_missing: self
+                    .decoder_shutdown_worker_publication_missing,
+                shutdown_worker_owner_abandonments: self.decoder_shutdown_worker_owner_abandonments,
             }
             .all_resources_released()
     }
 }
 
-struct AudioSourceShutdownCoordinatorResult {
+#[derive(Clone, Copy)]
+struct AudioSourceShutdownCoordinatorPublication {
     evidence: AudioSourceCacheShutdownEvidence,
     completed_at: Instant,
+    logical_panic: bool,
 }
+
+#[derive(Default)]
+struct AudioSourceShutdownCoordinatorState {
+    publication: Option<AudioSourceShutdownCoordinatorPublication>,
+}
+
+struct AudioSourceShutdownCoordinatorResult;
 
 impl AudioSourceCache {
     /// Create a conservatively sized product cache.
@@ -545,6 +678,24 @@ impl AudioSourceCache {
                 AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
             )),
         )
+    }
+
+    /// Build an inert, already-closed replacement for a consumed owner slot.
+    ///
+    /// This constructor starts no decoder worker and admits no reads. It is
+    /// intended only for structures whose consuming shutdown API operates
+    /// through `&mut self` and therefore needs a resource-free tombstone.
+    pub fn shutdown_placeholder(sample_rate: u32) -> Self {
+        let cache = Self::with_decoder(
+            sample_rate,
+            1,
+            1,
+            1,
+            1,
+            Arc::new(ShutdownAudioWindowDecoder),
+        );
+        cache.shutdown_requested.store(true, Ordering::Release);
+        cache
     }
 
     /// Sample rate shared by every decoded window in this cache.
@@ -606,6 +757,7 @@ impl AudioSourceCache {
         let config =
             AudioSourceCacheConfig::new(entry_capacity, byte_budget, decoder_session_capacity);
         decoder.reconfigure_session_capacity(config.decoder_session_capacity);
+        let decoder_shutdown_signal = decoder.shutdown_signal();
         Self {
             sample_rate,
             window_frames: (sample_rate as usize).saturating_mul(window_seconds.max(1)),
@@ -613,6 +765,7 @@ impl AudioSourceCache {
             state: Mutex::new(AudioSourceCacheState::new(config)),
             window_ready: Condvar::new(),
             decoder,
+            decoder_shutdown_signal,
             shutdown_requested: AtomicBool::new(false),
         }
     }
@@ -659,10 +812,24 @@ impl AudioSourceCache {
         path: &Path,
         selection: AudioSourceSelection,
     ) -> Result<AudioSourceReader> {
-        Ok(AudioSourceReader {
-            cache: Arc::clone(self),
-            source: AudioSourceIdentity::capture(path, selection)?,
-        })
+        if self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "audio source cache is shutting down".to_owned(),
+            });
+        }
+        // Acquire the owner before the final admission check. If shutdown
+        // races metadata capture, this temporary owner is dropped here and no
+        // post-signal reader escapes to the caller.
+        let cache = Arc::clone(self);
+        let source = AudioSourceIdentity::capture(path, selection)?;
+        if cache.shutdown_requested.load(Ordering::Acquire) {
+            return Err(MondrianError::DecodeFailed {
+                asset_id: path.display().to_string(),
+                reason: "audio source cache is shutting down".to_owned(),
+            });
+        }
+        Ok(AudioSourceReader { cache, source })
     }
 
     /// Capture bounded residency and execution evidence.
@@ -755,7 +922,7 @@ impl AudioSourceCache {
         };
         let decoder = self.decoder.shutdown_sessions();
         AudioSourceCacheShutdownEvidence {
-            schema_version: 3,
+            schema_version: 5,
             in_flight_decodes_before,
             pcm_entries_before,
             pcm_bytes_before,
@@ -772,11 +939,20 @@ impl AudioSourceCache {
             stdout_pump_threads_observed: decoder.stdout_pump_threads_observed,
             stdout_pump_threads_joined: decoder.stdout_pump_threads_joined,
             stdout_pump_threads_panicked: decoder.stdout_pump_threads_panicked,
+            stdout_pump_thread_owner_abandonments: decoder.stdout_pump_thread_owner_abandonments,
             stderr_pump_threads_observed: decoder.stderr_pump_threads_observed,
             stderr_pump_threads_joined: decoder.stderr_pump_threads_joined,
             stderr_pump_threads_panicked: decoder.stderr_pump_threads_panicked,
+            stderr_pump_thread_owner_abandonments: decoder.stderr_pump_thread_owner_abandonments,
             external_decoder_session_references: decoder.external_session_slot_references,
             decoder_resource_handles_remaining: decoder.resource_handles_remaining,
+            decoder_shutdown_workers_started: decoder.shutdown_workers_started,
+            decoder_shutdown_workers_terminated: decoder.shutdown_workers_terminated,
+            decoder_shutdown_worker_start_failures: decoder.shutdown_worker_start_failures,
+            decoder_shutdown_worker_panics: decoder.shutdown_worker_panics,
+            decoder_shutdown_worker_publication_missing: decoder
+                .shutdown_worker_publication_missing,
+            decoder_shutdown_worker_owner_abandonments: decoder.shutdown_worker_owner_abandonments,
             external_decoder_references,
             shutdown_coordinators_started: 0,
             shutdown_coordinators_terminated: 0,
@@ -784,6 +960,7 @@ impl AudioSourceCache {
             shutdown_coordinator_panics: 0,
             shutdown_coordinator_timeouts: 0,
             shutdown_coordinator_detachments: 0,
+            shutdown_coordinator_spawner_panics: 0,
             shutdown_coordinator_owner_abandonments: 0,
             shutdown_resource_facts_complete_at_deadline: true,
             shutdown_owner_lifetime_unresolved_at_deadline: false,
@@ -794,6 +971,9 @@ impl AudioSourceCache {
     pub fn begin_shutdown(&self) {
         self.shutdown_requested.store(true, Ordering::Release);
         self.window_ready.notify_all();
+        if let Some(signal) = &self.decoder_shutdown_signal {
+            signal.request();
+        }
     }
 
     /// Consume cache/decoder ownership through one absolute qualification deadline.
@@ -802,7 +982,6 @@ impl AudioSourceCache {
             thread::Builder::new()
                 .name("mondrian-audio-source-endurance-shutdown".to_owned())
                 .spawn(work)
-                .map_err(|error| error.to_string())
         })
     }
 
@@ -814,34 +993,79 @@ impl AudioSourceCache {
     where
         F: FnOnce(
             Box<dyn FnOnce() -> AudioSourceShutdownCoordinatorResult + Send>,
-        ) -> std::result::Result<
-            thread::JoinHandle<AudioSourceShutdownCoordinatorResult>,
-            String,
-        >,
+        )
+            -> std::io::Result<thread::JoinHandle<AudioSourceShutdownCoordinatorResult>>,
     {
         self.begin_shutdown();
         let owner = Arc::new(Mutex::new(Some(self)));
         let coordinator_owner = Arc::clone(&owner);
-        let coordinator = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let coordinator_state =
+            Arc::new(Mutex::new(AudioSourceShutdownCoordinatorState::default()));
+        let worker_state = Arc::clone(&coordinator_state);
+        let spawn_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             spawn(Box::new(move || {
-                let evidence = match coordinator_owner.lock().take() {
-                    Some(owner) => owner.shutdown_and_wait(),
-                    None => AudioSourceCache::coordinator_failure(1, 1, 0, 0, 0, 0, 1),
+                // Release the retained-owner slot before any decoder teardown.
+                // A `match coordinator_owner.lock().take()` scrutinee keeps its
+                // temporary guard alive through the selected arm, which would
+                // deadlock the deadline observer while a destructor blocks.
+                let retained_owner = { coordinator_owner.lock().take() };
+                let (evidence, logical_panic) = match retained_owner {
+                    Some(owner) => {
+                        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            owner.shutdown_and_wait()
+                        })) {
+                            Ok(evidence) => (evidence, false),
+                            Err(payload) => {
+                                let owner_abandonments = u32::from(
+                                    dispose_canonical_or_abandon_opaque_panic_payload(payload),
+                                );
+                                (
+                                    AudioSourceCache::coordinator_failure(
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        0,
+                                        owner_abandonments,
+                                    ),
+                                    true,
+                                )
+                            }
+                        }
+                    }
+                    None => (
+                        AudioSourceCache::coordinator_failure(0, 0, 0, 0, 0, 0, 0, 0),
+                        true,
+                    ),
                 };
-                AudioSourceShutdownCoordinatorResult { evidence, completed_at: Instant::now() }
+                let publication = AudioSourceShutdownCoordinatorPublication {
+                    evidence,
+                    completed_at: Instant::now(),
+                    logical_panic,
+                };
+                worker_state.lock().publication.get_or_insert(publication);
+                AudioSourceShutdownCoordinatorResult
             }))
         }));
-        let coordinator = match coordinator {
+        let coordinator = match spawn_result {
             Ok(Ok(coordinator)) => coordinator,
-            Ok(Err(_)) | Err(_) => {
+            Ok(Err(error)) => {
                 // Preserve bounded caller behavior even when the operating system
-                // cannot create the coordinator or an injected spawner panics.
-                // Dropping the foreign decoder owner here could synchronously
-                // wait on child/pump resources.
-                if let Some(owner) = owner.lock().take() {
-                    std::mem::forget(owner);
-                }
-                return Self::coordinator_failure(0, 0, 1, 0, 0, 0, 1);
+                // cannot create the coordinator. `io::Error::other` may own a
+                // foreign blocking destructor, so retain only its stable kind.
+                let (_, error_owner_abandoned) = abandon_io_error(error);
+                let owner_abandonments = Self::abandon_retained_coordinator_owner(&owner)
+                    .saturating_add(u32::from(error_owner_abandoned));
+                return Self::coordinator_failure(0, 0, 1, 0, 0, 0, 0, owner_abandonments);
+            }
+            Err(payload) => {
+                let payload_abandonments =
+                    u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload));
+                let owner_abandonments = payload_abandonments
+                    .saturating_add(Self::abandon_retained_coordinator_owner(&owner));
+                return Self::coordinator_failure(0, 0, 1, 0, 0, 0, 1, owner_abandonments);
             }
         };
 
@@ -857,37 +1081,84 @@ impl AudioSourceCache {
                     continue;
                 }
                 drop(coordinator);
-                return Self::coordinator_failure(1, 0, 0, 0, 1, 1, 0);
+                let publication = coordinator_state.lock().publication;
+                let retained_owner = owner.lock().is_some();
+                if retained_owner {
+                    // An injected worker may have accepted but never invoked
+                    // the supplied supervisor. Keep that owner off this
+                    // deadline caller while preserving the shared slot for a
+                    // worker that eventually starts.
+                    std::mem::forget(owner);
+                }
+                let mut evidence = publication.map_or_else(
+                    || Self::coordinator_failure(0, 0, 0, 0, 0, 0, 0, u32::from(retained_owner)),
+                    |publication| publication.evidence,
+                );
+                evidence.shutdown_coordinators_started =
+                    evidence.shutdown_coordinators_started.saturating_add(1);
+                evidence.shutdown_coordinator_timeouts =
+                    evidence.shutdown_coordinator_timeouts.saturating_add(1);
+                evidence.shutdown_coordinator_detachments =
+                    evidence.shutdown_coordinator_detachments.saturating_add(1);
+                if publication.is_some_and(|publication| publication.logical_panic) {
+                    evidence.shutdown_coordinator_panics =
+                        evidence.shutdown_coordinator_panics.saturating_add(1);
+                }
+                evidence.shutdown_resource_facts_complete_at_deadline = false;
+                evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
+                return evidence;
             }
             thread::sleep(Duration::from_millis(1));
         }
 
-        match coordinator.join() {
-            Ok(result) => {
-                let mut evidence = result.evidence;
-                evidence.shutdown_coordinators_started = 1;
-                evidence.shutdown_coordinators_terminated = 1;
-                if result.completed_at > deadline {
-                    evidence.shutdown_coordinator_timeouts =
-                        evidence.shutdown_coordinator_timeouts.saturating_add(1);
-                    evidence.shutdown_resource_facts_complete_at_deadline = false;
-                    evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
-                }
-                evidence
-            }
-            Err(_) => {
-                let owner_abandonments = if let Some(owner) = owner.lock().take() {
-                    // An injected or platform spawner may have created a
-                    // worker that panicked before invoking the supplied work.
-                    // Keep that untouched owner off this caller's destructor.
-                    std::mem::forget(owner);
-                    1
-                } else {
-                    0
-                };
-                Self::coordinator_failure(1, 1, 0, 1, 0, 0, owner_abandonments)
-            }
+        let (join_panicked, join_payload_abandonments) = match coordinator.join() {
+            Ok(_) => (false, 0),
+            Err(payload) => (
+                true,
+                u32::from(dispose_canonical_or_abandon_opaque_panic_payload(payload)),
+            ),
+        };
+        let publication = coordinator_state.lock().publication;
+        let retained_owner_abandonments = if publication.is_none() {
+            Self::abandon_retained_coordinator_owner(&owner)
+        } else {
+            0
+        };
+        let mut evidence = publication.map_or_else(
+            || Self::coordinator_failure(0, 0, 0, 0, 0, 0, 0, 0),
+            |publication| publication.evidence,
+        );
+        evidence.shutdown_coordinators_started =
+            evidence.shutdown_coordinators_started.saturating_add(1);
+        evidence.shutdown_coordinators_terminated =
+            evidence.shutdown_coordinators_terminated.saturating_add(1);
+        if join_panicked || publication.is_some_and(|publication| publication.logical_panic) {
+            evidence.shutdown_coordinator_panics =
+                evidence.shutdown_coordinator_panics.saturating_add(1);
+            evidence.shutdown_resource_facts_complete_at_deadline = false;
+            evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
         }
+        evidence.shutdown_coordinator_owner_abandonments = evidence
+            .shutdown_coordinator_owner_abandonments
+            .saturating_add(join_payload_abandonments)
+            .saturating_add(retained_owner_abandonments);
+        let missed_deadline = publication
+            .map(|publication| publication.completed_at > deadline)
+            .unwrap_or(true);
+        if missed_deadline {
+            evidence.shutdown_coordinator_timeouts =
+                evidence.shutdown_coordinator_timeouts.saturating_add(1);
+            evidence.shutdown_resource_facts_complete_at_deadline = false;
+            evidence.shutdown_owner_lifetime_unresolved_at_deadline = true;
+        }
+        evidence
+    }
+
+    fn abandon_retained_coordinator_owner(owner: &Arc<Mutex<Option<Self>>>) -> u32 {
+        owner.lock().take().map_or(0, |owner| {
+            std::mem::forget(owner);
+            1
+        })
     }
 
     fn coordinator_failure(
@@ -897,10 +1168,11 @@ impl AudioSourceCache {
         panics: u32,
         timeouts: u32,
         detachments: u32,
+        spawner_panics: u32,
         owner_abandonments: u32,
     ) -> AudioSourceCacheShutdownEvidence {
         AudioSourceCacheShutdownEvidence {
-            schema_version: 3,
+            schema_version: 5,
             // The coordinator owns an unobservable cache/decoder lifetime.
             // Retain a conservative resource floor instead of claiming zero.
             decoder_resource_handles_remaining: 1,
@@ -910,6 +1182,7 @@ impl AudioSourceCache {
             shutdown_coordinator_panics: panics,
             shutdown_coordinator_timeouts: timeouts,
             shutdown_coordinator_detachments: detachments,
+            shutdown_coordinator_spawner_panics: spawner_panics,
             shutdown_coordinator_owner_abandonments: owner_abandonments,
             shutdown_resource_facts_complete_at_deadline: false,
             shutdown_owner_lifetime_unresolved_at_deadline: true,
@@ -933,6 +1206,12 @@ impl AudioSourceCache {
         }
         loop {
             let mut state = self.state.lock();
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Err(MondrianError::DecodeFailed {
+                    asset_id: key.source.path.display().to_string(),
+                    reason: "audio source cache is shutting down".to_owned(),
+                });
+            }
             if let Some(index) = state.entries.iter().position(|entry| entry.key == key)
                 && let Some(entry) = state.entries.remove(index)
             {
@@ -1264,6 +1543,27 @@ mod tests {
         release: Arc<AtomicBool>,
     }
 
+    #[derive(Debug)]
+    struct DropTrackingPayload {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl std::fmt::Display for DropTrackingPayload {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("drop-tracking payload")
+        }
+    }
+
+    impl std::error::Error for DropTrackingPayload {}
+
+    impl Drop for DropTrackingPayload {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::Release);
+        }
+    }
+
+    struct AbandonedPumpPayloadWindowDecoder;
+
     impl AudioWindowDecoder for MalformedWindowDecoder {
         fn decode_window(
             &self,
@@ -1363,6 +1663,31 @@ mod tests {
         }
     }
 
+    impl AudioWindowDecoder for AbandonedPumpPayloadWindowDecoder {
+        fn decode_window(
+            &self,
+            _source: &AudioSourceIdentity,
+            _start_frame: i64,
+            _frame_count: usize,
+            _sample_rate: u32,
+            _channel_layout: AudioChannelLayout,
+            _cancellation: &ExecutionCancellationToken,
+        ) -> Result<AudioBuffer> {
+            Err(MondrianError::Other(anyhow::anyhow!(
+                "pump-payload decoder must not decode"
+            )))
+        }
+
+        fn shutdown_sessions(&self) -> AudioWindowDecoderShutdownEvidence {
+            AudioWindowDecoderShutdownEvidence {
+                stdout_pump_threads_observed: 1,
+                stdout_pump_threads_panicked: 1,
+                stdout_pump_thread_owner_abandonments: 1,
+                ..AudioWindowDecoderShutdownEvidence::default()
+            }
+        }
+    }
+
     impl Drop for BlockingDropWindowDecoder {
         fn drop(&mut self) {
             self.drop_started.store(true, Ordering::Release);
@@ -1402,17 +1727,83 @@ mod tests {
         assert!(!AudioSourceCacheShutdownEvidence::default().all_resources_released());
         let evidence = AudioSourceCache::new(48_000).shutdown_and_wait();
 
-        assert_eq!(evidence.schema_version, 3);
+        assert_eq!(evidence.schema_version, 5);
         assert_eq!(
             evidence,
             AudioSourceCacheShutdownEvidence {
-                schema_version: 3,
+                schema_version: 5,
+                decoder_shutdown_workers_started: 1,
+                decoder_shutdown_workers_terminated: 1,
                 shutdown_resource_facts_complete_at_deadline: true,
                 shutdown_owner_lifetime_unresolved_at_deadline: false,
                 ..AudioSourceCacheShutdownEvidence::default()
             }
         );
         assert!(evidence.all_resources_released());
+
+        let stale = AudioSourceCacheShutdownEvidence { schema_version: 4, ..evidence };
+        assert!(!stale.all_resources_released());
+    }
+
+    #[test]
+    fn shutdown_placeholder_owns_no_decoder_worker() {
+        let evidence = AudioSourceCache::shutdown_placeholder(48_000).shutdown_and_wait();
+
+        assert_eq!(evidence.schema_version, 5);
+        assert_eq!(evidence.decoder_shutdown_workers_started, 0);
+        assert_eq!(evidence.decoder_shutdown_workers_terminated, 0);
+        assert!(evidence.all_resources_released());
+    }
+
+    #[test]
+    fn decoder_session_capacity_is_normalized_to_the_physical_owner_limit() {
+        assert_eq!(
+            AudioSourceCacheConfig::new(1, 1, 0).decoder_session_capacity,
+            1
+        );
+        assert_eq!(
+            AudioSourceCacheConfig::new(1, 1, AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX + 1,)
+                .decoder_session_capacity,
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY_MAX
+        );
+    }
+
+    #[test]
+    fn begin_shutdown_rejects_open_before_filesystem_admission() {
+        let cache = Arc::new(AudioSourceCache::new(48_000));
+        cache.begin_shutdown();
+        let owners_before = Arc::strong_count(&cache);
+        let missing = std::path::Path::new("definitely-missing-after-audio-source-shutdown.wav");
+        let selection = AudioSourceSelection::new(
+            0,
+            ChannelLayout::Exact(AudioChannelLayout::Stereo),
+            MediaFileFingerprint::default(),
+        );
+
+        let error = cache.open(missing, selection).err().expect("closed admission");
+
+        assert!(error.to_string().contains("shutting down"));
+        assert_eq!(Arc::strong_count(&cache), owners_before);
+    }
+
+    #[test]
+    fn consuming_shutdown_propagates_opaque_pump_payload_abandonment() {
+        let cache = AudioSourceCache::with_decoder(
+            48_000,
+            1,
+            1,
+            1,
+            1,
+            Arc::new(AbandonedPumpPayloadWindowDecoder),
+        );
+
+        let evidence = cache.shutdown_and_wait();
+
+        assert_eq!(evidence.stdout_pump_threads_observed, 1);
+        assert_eq!(evidence.stdout_pump_threads_panicked, 1);
+        assert_eq!(evidence.stdout_pump_thread_owner_abandonments, 1);
+        assert_eq!(evidence.stderr_pump_thread_owner_abandonments, 0);
+        assert!(!evidence.all_resources_released());
     }
 
     #[test]
@@ -1420,7 +1811,7 @@ mod tests {
         let evidence =
             AudioSourceCache::new(48_000).shutdown_until(Instant::now() + Duration::from_secs(2));
 
-        assert_eq!(evidence.schema_version, 3);
+        assert_eq!(evidence.schema_version, 5);
         assert_eq!(evidence.shutdown_coordinators_started, 1);
         assert_eq!(evidence.shutdown_coordinators_terminated, 1);
         assert_eq!(evidence.shutdown_coordinator_start_failures, 0);
@@ -1461,16 +1852,51 @@ mod tests {
     }
 
     #[test]
-    fn joined_coordinator_panic_records_termination_without_complete_facts() {
+    fn joined_late_coordinator_panic_records_timeout_and_termination() {
+        let evidence = AudioSourceCache::new(48_000).shutdown_until_with_spawner(
+            Instant::now() - Duration::from_secs(1),
+            |work| {
+                let carrier =
+                    std::thread::spawn(move || -> AudioSourceShutdownCoordinatorResult {
+                        let _completed = work();
+                        panic!("synthetic audio-source coordinator panic after owner consumption");
+                    });
+                while !carrier.is_finished() {
+                    std::thread::yield_now();
+                }
+                Ok(carrier)
+            },
+        );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_panics, 1);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
+        assert_eq!(evidence.shutdown_coordinator_detachments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
+        assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn joined_opaque_coordinator_panic_abandons_payload_owner() {
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let worker_payload_dropped = Arc::clone(&payload_dropped);
         let evidence = AudioSourceCache::new(48_000).shutdown_until_with_spawner(
             Instant::now() + Duration::from_secs(2),
             |work| {
-                Ok(std::thread::spawn(
-                    move || -> AudioSourceShutdownCoordinatorResult {
+                let carrier =
+                    std::thread::spawn(move || -> AudioSourceShutdownCoordinatorResult {
                         let _completed = work();
-                        panic!("synthetic audio-source coordinator panic after owner consumption");
-                    },
-                ))
+                        std::panic::panic_any(DropTrackingPayload {
+                            dropped: worker_payload_dropped,
+                        });
+                    });
+                while !carrier.is_finished() {
+                    std::thread::yield_now();
+                }
+                Ok(carrier)
             },
         );
 
@@ -1478,10 +1904,70 @@ mod tests {
         assert_eq!(evidence.shutdown_coordinators_terminated, 1);
         assert_eq!(evidence.shutdown_coordinator_panics, 1);
         assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 1);
+        assert!(!payload_dropped.load(Ordering::Acquire));
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn injected_join_handle_without_supervisor_stamp_fails_closed() {
+        let evidence = AudioSourceCache::new(48_000).shutdown_until_with_spawner(
+            Instant::now() + Duration::from_secs(2),
+            |_work| {
+                let carrier = std::thread::spawn(|| AudioSourceShutdownCoordinatorResult);
+                while !carrier.is_finished() {
+                    std::thread::yield_now();
+                }
+                Ok(carrier)
+            },
+        );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 1);
+        assert_eq!(evidence.shutdown_coordinators_terminated, 1);
+        assert_eq!(evidence.shutdown_coordinator_panics, 0);
+        assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
         assert_eq!(evidence.shutdown_coordinator_detachments, 0);
-        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 0);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 1);
         assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
         assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn canonical_spawner_panic_abandons_only_retained_cache_owner() {
+        let evidence = AudioSourceCache::new(48_000).shutdown_until_with_spawner(
+            Instant::now() + Duration::from_secs(2),
+            |_work| -> std::io::Result<thread::JoinHandle<AudioSourceShutdownCoordinatorResult>> {
+                panic!("synthetic canonical audio-source spawner panic")
+            },
+        );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 0);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
+        assert_eq!(evidence.shutdown_coordinator_spawner_panics, 1);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 1);
+        assert!(!evidence.all_resources_released());
+    }
+
+    #[test]
+    fn opaque_spawner_panic_abandons_payload_and_retained_cache_owners() {
+        let payload_dropped = Arc::new(AtomicBool::new(false));
+        let panic_payload_dropped = Arc::clone(&payload_dropped);
+        let evidence =
+            AudioSourceCache::new(48_000).shutdown_until_with_spawner(
+                Instant::now() + Duration::from_secs(2),
+                move |_work| -> std::io::Result<
+                    thread::JoinHandle<AudioSourceShutdownCoordinatorResult>,
+                > {
+                    std::panic::panic_any(DropTrackingPayload { dropped: panic_payload_dropped })
+                },
+            );
+
+        assert_eq!(evidence.shutdown_coordinators_started, 0);
+        assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
+        assert_eq!(evidence.shutdown_coordinator_spawner_panics, 1);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 2);
+        assert!(!payload_dropped.load(Ordering::Acquire));
         assert!(!evidence.all_resources_released());
     }
 
@@ -1503,8 +1989,32 @@ mod tests {
             }),
         );
 
-        let evidence = cache.shutdown_until(Instant::now() + Duration::from_millis(20));
+        let observed_drop_started = Arc::clone(&drop_started);
+        let evidence = cache.shutdown_until_with_spawner(
+            Instant::now() + Duration::from_millis(20),
+            move |work| {
+                let coordinator = std::thread::spawn(work);
+                let started_deadline = Instant::now() + Duration::from_secs(2);
+                while !observed_drop_started.load(Ordering::Acquire)
+                    && Instant::now() < started_deadline
+                {
+                    std::thread::yield_now();
+                }
+                Ok(coordinator)
+            },
+        );
 
+        let observed_start = drop_started.load(Ordering::Acquire);
+        let completed_before_release = drop_finished.load(Ordering::Acquire);
+        release.store(true, Ordering::Release);
+        let finished_deadline = Instant::now() + Duration::from_secs(2);
+        while !drop_finished.load(Ordering::Acquire) && Instant::now() < finished_deadline {
+            std::thread::yield_now();
+        }
+
+        assert!(observed_start);
+        assert!(!completed_before_release);
+        assert!(drop_finished.load(Ordering::Acquire));
         assert_eq!(evidence.shutdown_coordinators_started, 1);
         assert_eq!(evidence.shutdown_coordinators_terminated, 0);
         assert_eq!(evidence.shutdown_coordinator_timeouts, 1);
@@ -1513,19 +2023,6 @@ mod tests {
         assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
         assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
         assert!(!evidence.all_resources_released());
-
-        let started_deadline = Instant::now() + Duration::from_secs(2);
-        while !drop_started.load(Ordering::Acquire) && Instant::now() < started_deadline {
-            std::thread::yield_now();
-        }
-        assert!(drop_started.load(Ordering::Acquire));
-        assert!(!drop_finished.load(Ordering::Acquire));
-        release.store(true, Ordering::Release);
-        let finished_deadline = Instant::now() + Duration::from_secs(2);
-        while !drop_finished.load(Ordering::Acquire) && Instant::now() < finished_deadline {
-            std::thread::yield_now();
-        }
-        assert!(drop_finished.load(Ordering::Acquire));
     }
 
     #[test]
@@ -1533,6 +2030,8 @@ mod tests {
         let drop_started = Arc::new(AtomicBool::new(false));
         let drop_finished = Arc::new(AtomicBool::new(false));
         let release = Arc::new(AtomicBool::new(false));
+        let error_payload_dropped = Arc::new(AtomicBool::new(false));
+        let spawn_error_payload_dropped = Arc::clone(&error_payload_dropped);
         let cache = AudioSourceCache::with_decoder(
             48_000,
             1,
@@ -1546,9 +2045,11 @@ mod tests {
             }),
         );
 
-        let evidence = cache
-            .shutdown_until_with_spawner(Instant::now() + Duration::from_secs(2), |_work| {
-                Err("synthetic audio-source coordinator spawn failure".to_owned())
+        let evidence =
+            cache.shutdown_until_with_spawner(Instant::now() + Duration::from_secs(2), |_work| {
+                Err(std::io::Error::other(DropTrackingPayload {
+                    dropped: spawn_error_payload_dropped,
+                }))
             });
 
         assert_eq!(evidence.shutdown_coordinators_started, 0);
@@ -1556,12 +2057,13 @@ mod tests {
         assert_eq!(evidence.shutdown_coordinator_start_failures, 1);
         assert_eq!(evidence.shutdown_coordinator_timeouts, 0);
         assert_eq!(evidence.shutdown_coordinator_detachments, 0);
-        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 1);
+        assert_eq!(evidence.shutdown_coordinator_owner_abandonments, 2);
         assert_eq!(evidence.decoder_resource_handles_remaining, 1);
         assert!(!evidence.shutdown_resource_facts_complete_at_deadline);
         assert!(evidence.shutdown_owner_lifetime_unresolved_at_deadline);
         assert!(!drop_started.load(Ordering::Acquire));
         assert!(!drop_finished.load(Ordering::Acquire));
+        assert!(!error_payload_dropped.load(Ordering::Acquire));
         assert!(!evidence.all_resources_released());
         release.store(true, Ordering::Release);
     }

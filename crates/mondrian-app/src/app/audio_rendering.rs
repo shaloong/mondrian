@@ -97,13 +97,14 @@ impl TimelineAudioPcmRenderer {
     pub(super) fn delivery_evidence(&self) -> AudioDeliveryEvidence {
         self.state.lock().delivery.evidence()
     }
+
+    /// Immutable cross-window state contract captured before trait erasure.
+    pub(super) const fn continuity_model(&self) -> AudioPcmContinuityModel {
+        self.continuity_model
+    }
 }
 
 impl AudioPcmRenderer for TimelineAudioPcmRenderer {
-    fn continuity_model(&self) -> AudioPcmContinuityModel {
-        self.continuity_model
-    }
-
     fn render(
         &self,
         request: AudioPcmRenderRequest,

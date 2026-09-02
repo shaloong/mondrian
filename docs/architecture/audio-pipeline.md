@@ -1076,12 +1076,42 @@ phantom in-flight requests. Concrete stream-generation identities are issued
 with checked monotonic allocation; exhaustion is a structured creation failure
 and never wraps to a reused or zero identity.
 
+The PCM continuity contract is captured as an `AudioPcmContinuityModel` before
+the renderer is erased behind a trait object. `prepare`, `reprime`, anchor
+validation, and shutdown never call a foreign renderer merely to rediscover
+that contract. Pure anchor, generation, configuration, shutdown, and worker
+availability checks run before output deactivation or any other foreign call.
+If admission subsequently rejects a renderer, ownership is transferred to the
+single tracked retirement worker; the caller, render coordinator, and UI thread
+never become its destructor path. The retirement queue has the same hard
+in-flight ceiling as playback admission, so its capacity proof cannot be
+invalidated by an accepted render burst.
+
 The consuming `AudioPlayback::shutdown_and_wait` receipt closes the lifetime
 inventory of both PCM render and concrete device-lifecycle workers. Workers
 already joined after an unexpected disconnect remain in its cumulative
 terminated/panic counts; an absent handle therefore cannot be reinterpreted as
 "never started." Same-thread detachment and any panic fail the aggregate
 closure used by commercial endurance qualification.
+
+Shutdown is a captured two-phase protocol. `begin_shutdown` performs only
+prebuilt atomic cancellation/signaling and queue wakeup; it invokes no trait
+method, allocates no replacement work, and waits for no foreign owner. The
+consuming phase then supervises the render coordinator, renderer-retirement
+worker, output manager, and every device worker against one absolute deadline.
+`AudioPlaybackShutdownEvidence` schema 3 and
+`RealtimeAudioOutputShutdownEvidence` schema 2 distinguish configured,
+started, returned, panicked, timed out, detached, abandoned, and residual
+owners. Evidence is fail-closed and monotonic across handles already consumed
+by ordinary polling.
+
+Render completion messages contain only owned PCM or a stabilized plain error
+string. A renderer's type-erased error value is transferred to the tracked
+retirement worker and destroyed there; it cannot cross the completion channel
+and later run an opaque destructor on playback polling, shutdown, or UI code.
+Queue closure, queue overflow, worker panic, and owner-handoff failure latch
+terminal retirement evidence instead of silently dropping the renderer or
+error on the discovering thread.
 
 The validation App also retains a small App-lifetime Audio failure ledger at
 the terminal owner-replacement seam. Before an unexpectedly stopped render

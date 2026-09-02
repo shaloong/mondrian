@@ -686,7 +686,9 @@ impl AppState {
         let execution_memory_observer =
             self.execution_resources.finish_endurance_shutdown(deadline);
 
-        let replacement_cache = Arc::new(AudioSourceCache::new(self.audio_sample_rate));
+        let replacement_cache = Arc::new(AudioSourceCache::shutdown_placeholder(
+            self.audio_sample_rate,
+        ));
         let source_cache = std::mem::replace(&mut self.audio_source_cache, replacement_cache);
         let strong_references_before_consumption =
             saturating_usize_to_u32(Arc::strong_count(&source_cache));

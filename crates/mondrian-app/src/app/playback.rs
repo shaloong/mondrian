@@ -7,6 +7,7 @@ const AUDIO_CALLBACK_STALE_AFTER: Duration = Duration::from_millis(100);
 
 struct PreparedTimelineAudioSource {
     renderer: Arc<dyn AudioPcmRenderer>,
+    continuity_model: AudioPcmContinuityModel,
     meter_observer: mondrian_audio::AudioMeterObserver,
     delivery_evidence: mondrian_audio::AudioDeliveryEvidence,
     authoring_session_id: AuthoringSessionId,
@@ -98,10 +99,7 @@ impl AppAudioPlayback {
         );
         match retired {
             Self::Available(playback) => (*playback).shutdown_and_wait(),
-            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence {
-                schema_version: 2,
-                ..mondrian_media::AudioPlaybackShutdownEvidence::default()
-            },
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence::no_owner(),
         }
     }
 
@@ -121,10 +119,7 @@ impl AppAudioPlayback {
         );
         match retired {
             Self::Available(playback) => (*playback).shutdown_until(deadline),
-            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence {
-                schema_version: 2,
-                ..mondrian_media::AudioPlaybackShutdownEvidence::default()
-            },
+            Self::Unavailable { .. } => mondrian_media::AudioPlaybackShutdownEvidence::no_owner(),
         }
     }
 
@@ -152,12 +147,15 @@ impl AppAudioPlayback {
         &mut self,
         anchor: AudioSamplePosition,
         renderer: Arc<dyn AudioPcmRenderer>,
+        continuity_model: AudioPcmContinuityModel,
     ) -> Result<(), AudioPlaybackError> {
         match self {
-            Self::Available(playback) => playback.prepare(anchor, renderer),
+            Self::Available(playback) => playback.prepare(anchor, renderer, continuity_model),
             Self::Unavailable { sample_rate, .. } => {
-                drop(renderer);
-                mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate)
+                let validation =
+                    mondrian_media::validate_audio_playback_anchor(anchor, *sample_rate);
+                mondrian_media::handoff_unqualified_audio_pcm_renderer(renderer);
+                validation
             }
         }
     }
@@ -1084,10 +1082,12 @@ impl AppState {
         )
         .map_err(|error| transport_action_error(action, error))?;
         let requires_execution = renderer.execution_demand().requires_execution();
+        let continuity_model = renderer.continuity_model();
         let meter_observer = renderer.meter_observer();
         let delivery_evidence = renderer.delivery_evidence();
         Ok(requires_execution.then(|| PreparedTimelineAudioSource {
             renderer: Arc::new(renderer),
+            continuity_model,
             meter_observer,
             delivery_evidence,
             authoring_session_id,
@@ -1103,7 +1103,7 @@ impl AppState {
     ) -> mondrian_core::Result<()> {
         if let Some(source) = source {
             self.audio_playback
-                .prepare(anchor, source.renderer)
+                .prepare(anchor, source.renderer, source.continuity_model)
                 .map_err(|error| transport_action_error(action, error))?;
             self.audio_monitoring.bind_meter(
                 source.authoring_session_id,
@@ -2350,8 +2350,32 @@ mod tests {
             Some("Audio Playback was synchronously retired")
         );
         let repeated = state.shutdown_audio_playback_and_wait();
+        assert_eq!(repeated.schema_version, 3);
         assert_eq!(repeated.render_workers_started, 0);
+        assert!(repeated.shutdown_resource_facts_complete_at_deadline);
+        assert!(!repeated.shutdown_owner_lifetime_unresolved_at_deadline);
         assert!(repeated.all_workers_terminated());
+    }
+
+    #[test]
+    fn unavailable_audio_shutdown_returns_complete_resolved_current_schema_receipts() {
+        let sample_rate = 48_000;
+        let mut playback = AppAudioPlayback::Unavailable {
+            sample_rate,
+            reason: "injected unavailable Audio owner".to_owned(),
+        };
+
+        let synchronous = playback.shutdown_and_wait(sample_rate);
+        assert_eq!(synchronous.schema_version, 3);
+        assert!(synchronous.shutdown_resource_facts_complete_at_deadline);
+        assert!(!synchronous.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(synchronous.all_workers_terminated());
+
+        let deadline = playback.shutdown_until(sample_rate, Instant::now());
+        assert_eq!(deadline.schema_version, 3);
+        assert!(deadline.shutdown_resource_facts_complete_at_deadline);
+        assert!(!deadline.shutdown_owner_lifetime_unresolved_at_deadline);
+        assert!(deadline.all_workers_terminated());
     }
 
     #[test]

@@ -86,6 +86,16 @@ render-substitution, generation-recovery, underrun-recovery, backend-loss, and
 deactivation-failure counts. Headless endurance capture projects retired plus
 current counts, preventing counter regression at the replacement boundary.
 
+The closure consumes schema-3 Playback, schema-2 physical-output, and schema-5
+Audio Source receipts. Playback additionally inventories its prebuilt renderer
+retirement owner; completion channels retain only PCM or safe value errors, so
+an opaque renderer error/destructor cannot migrate onto the coordinator or
+campaign caller. Audio Source Session permits remain charged across active,
+queued, partial-spawn, terminating, and EOF-finalization states until the child
+and both pumps have retired. A resource-free closed cache placeholder replaces
+the consumed App field, preventing terminal capture from accidentally starting
+a fresh decoder worker.
+
 The validation-only `EnduranceExecutionOwners` group composes the production
 Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
 the phase's `AppState`. It never starts a sidecar Audio instance. Its consuming
@@ -156,11 +166,13 @@ remain capability facts rather than fabricated operation failures.
 Ordinary `Drop` for the App/Preview/cache/background worker owners covered by
 this checkpoint is bounded best-effort cleanup. It may send cancellation or
 shutdown and relinquish a still-running handle, so it is never accepted as
-worker-return or resource-release evidence. Persistent FFmpeg decoder-session
-destructors remain outside that ordinary-Drop guarantee and are a follow-on
-software hardening slice. The explicit consuming Audio Source Cache
-coordinator is deadline-bounded and fail-closed; only consuming qualification
-paths and typed receipts can close a phase.
+worker-return or resource-release evidence. Persistent FFmpeg decoder Sessions
+now transfer eviction, random-restart, partial-construction, EOF-finalization,
+and last-owner teardown to one prebuilt worker; no App/render caller performs
+child wait/kill or pump join. This bounded ordinary path still is not terminal
+proof. The explicit consuming Audio Source Cache coordinator remains the sole
+deadline-qualified authority, and only consuming qualification paths plus typed
+receipts can close a phase.
 
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, and deterministic software tests. It does **not** yet
@@ -321,3 +333,14 @@ prove 8/24/72-hour stability, physical reference lock, DeckLink/AJA callback
 cadence, monitor behavior, or a platform/driver campaign. Those facts remain
 HITL and must be captured on the approved physical rig; `NotRun` can never be
 promoted to success.
+
+The current Windows development machine can close source, unit, integration,
+and headless GPU software gates only. Release transfer must separately execute
+the native `cfg` build/test matrix and endurance capture on physical macOS and
+Linux hosts, preserving each platform's scheduler, filesystem identity,
+process-tree memory metric, audio-device Adapter, decoder/encoder runtime, GPU
+driver, and display behavior. The same transfer package must carry the real
+HDR/P3 display, DeckLink/AJA SDI loopback, Genlock/reference monitor, ancillary
+data, external Blender/DaVinci Resolve/Premiere reference-frame, and final
+72-hour rig gates. A Windows success, simulator receipt, or `NotRun` result is
+not transferable evidence for any of those cells.

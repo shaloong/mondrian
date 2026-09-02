@@ -19,6 +19,7 @@ mod ffmpeg_tools;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
+mod owner_lifetime;
 mod packet_identity;
 pub mod preview;
 mod process_supervisor;
@@ -40,12 +41,13 @@ pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdow
 #[cfg(feature = "validation")]
 pub use audio_playback::AudioPlaybackValidationError;
 pub use audio_playback::{
-    validate_audio_playback_anchor, AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot,
-    AudioPcmContinuity, AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest,
-    AudioPcmRenderer, AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError,
-    AudioPlaybackCreateError, AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode,
-    AudioPlaybackPoll, AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence,
-    AudioPlaybackSnapshot, AudioPlaybackState, AudioRenderRecoveryDisposition,
+    handoff_unqualified_audio_pcm_renderer, validate_audio_playback_anchor,
+    AudioOutputLifecycleDiagnostics, AudioOutputLossSnapshot, AudioPcmContinuity,
+    AudioPcmContinuityModel, AudioPcmRenderGeneration, AudioPcmRenderRequest, AudioPcmRenderer,
+    AudioPlayback, AudioPlaybackConfig, AudioPlaybackConfigError, AudioPlaybackCreateError,
+    AudioPlaybackError, AudioPlaybackEvent, AudioPlaybackMode, AudioPlaybackPoll,
+    AudioPlaybackShutdownError, AudioPlaybackShutdownEvidence, AudioPlaybackSnapshot,
+    AudioPlaybackState, AudioRenderRecoveryDisposition,
 };
 pub use audio_source::{
     AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics,
