@@ -1342,7 +1342,10 @@ mod tests {
                 if requirement.kind == mondrian_platform::EndurancePhaseKind::ContinuousExport {
                     EndurancePhaseAdmission::Started
                 } else {
-                    workload.admit(&Default::default())
+                    match workload.prepare_start(&Default::default()) {
+                        Ok(_) => EndurancePhaseAdmission::Started,
+                        Err(not_run) => EndurancePhaseAdmission::NotRun(not_run),
+                    }
                 },
             )
         }

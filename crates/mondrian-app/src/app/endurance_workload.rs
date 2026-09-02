@@ -22,29 +22,33 @@ const PLAYBACK_REFERENCE_WORKLOAD_ID: &str = "mondrian-col047/playback-reference
 const CONTINUOUS_EXPORT_WORKLOAD_ID: &str = "mondrian-col047/continuous-export/v1";
 const CONCURRENT_RECOVERY_WORKLOAD_ID: &str = "mondrian-col047/concurrent-recovery/v1";
 
-/// One concrete product capability required before an endurance phase may start.
+/// One side-effect-free prerequisite that can be prepared before phase owners start.
+///
+/// These variants never claim that a device Session is open or that a signal
+/// remains locked. Dynamic provider/readback facts are proved by the started
+/// product owners after this admission boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EnduranceWorkloadCapability {
-    /// Exact Timeline picture/audio fixture can run continuously.
-    TimelinePlaybackFixture,
-    /// Immutable Sequence snapshot and source fixture can be exported repeatedly.
-    FrozenExportFixture,
-    /// A real audio output device is eligible to own Playback Clock.
-    AudioOutputDevice,
-    /// A physical Reference Output provider is open.
-    PhysicalReferenceOutput,
-    /// The physical provider reports continuous external-reference lock.
-    ExternalReferenceLock,
-    /// Published artifacts can be independently reopened and fully decoded.
-    IndependentExportVerifier,
-    /// Product seek can produce a sealed recovery receipt.
-    SeekRecovery,
-    /// Surface/device reopen can produce a sealed recovery receipt.
-    SurfaceDeviceReopenRecovery,
-    /// Export cancel and retry can produce a sealed recovery receipt.
-    ExportCancelRetryRecovery,
-    /// Bounded cache pressure and recovery can produce a sealed receipt.
-    CachePressureRecovery,
+pub enum EndurancePreStartCapability {
+    /// Exact Timeline picture/audio fixture was validated without starting playback.
+    TimelinePlaybackFixturePrepared,
+    /// Immutable Sequence/source Export fixture was validated without starting a job.
+    FrozenExportFixturePrepared,
+    /// One exact audio-device contract was prepared without opening its stream.
+    AudioOutputDevicePrepared,
+    /// Physical provider/runtime/device/mode discovery was prepared without a Session.
+    PhysicalReferenceProviderPrepared,
+    /// External-reference signal was observed during preflight, not promised continuously.
+    ExternalReferenceSignalPreflight,
+    /// Pinned independent verifier identity and execution contract were prepared.
+    IndependentExportVerifierPrepared,
+    /// Product seek recovery contract and target inventory were prepared.
+    SeekRecoveryPrepared,
+    /// Process-local Surface event-loop recovery owner was prepared.
+    SurfaceEventLoopPrepared,
+    /// Export cancel/retry contract was prepared.
+    ExportCancelRetryPrepared,
+    /// Bounded cache pressure/recovery contract was prepared.
+    CachePressurePrepared,
 }
 
 /// Result of attempting to admit one exact, already prepared workload.
@@ -61,14 +65,14 @@ pub enum EndurancePhaseAdmission {
 pub struct EnduranceNotRunAdmission {
     phase_id: String,
     workload_id: String,
-    missing_capabilities: Vec<EnduranceWorkloadCapability>,
+    missing_capabilities: Vec<EndurancePreStartCapability>,
 }
 
 impl EnduranceNotRunAdmission {
     fn new(
         phase_id: String,
         workload_id: String,
-        missing_capabilities: Vec<EnduranceWorkloadCapability>,
+        missing_capabilities: Vec<EndurancePreStartCapability>,
     ) -> Self {
         debug_assert!(!missing_capabilities.is_empty());
         Self { phase_id, workload_id, missing_capabilities }
@@ -85,32 +89,60 @@ impl EnduranceNotRunAdmission {
     }
 
     /// Complete ordered prerequisite inventory absent at admission.
-    pub fn missing_capabilities(&self) -> &[EnduranceWorkloadCapability] {
+    pub fn missing_capabilities(&self) -> &[EndurancePreStartCapability] {
         &self.missing_capabilities
     }
 }
 
 /// Exact capability inventory observed before attempting phase owner creation.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EnduranceWorkloadCapabilityInventory {
-    capabilities: BTreeSet<EnduranceWorkloadCapability>,
+pub struct EndurancePreStartCapabilityInventory {
+    capabilities: BTreeSet<EndurancePreStartCapability>,
 }
 
-impl EnduranceWorkloadCapabilityInventory {
+impl EndurancePreStartCapabilityInventory {
     /// Construct an inventory from independently observed product capabilities.
-    pub fn new(capabilities: impl IntoIterator<Item = EnduranceWorkloadCapability>) -> Self {
+    pub fn new(capabilities: impl IntoIterator<Item = EndurancePreStartCapability>) -> Self {
         Self { capabilities: capabilities.into_iter().collect() }
     }
 
     fn missing(
         &self,
-        required: &[EnduranceWorkloadCapability],
-    ) -> Vec<EnduranceWorkloadCapability> {
+        required: &[EndurancePreStartCapability],
+    ) -> Vec<EndurancePreStartCapability> {
         required
             .iter()
             .copied()
             .filter(|capability| !self.capabilities.contains(capability))
             .collect()
+    }
+}
+
+/// Runtime-created token binding one admitted pre-start inventory to its exact workload.
+///
+/// Fields are private so a machine factory can consume this token but cannot
+/// fabricate or retarget it to a different phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedEndurancePhaseStart {
+    phase_id: String,
+    workload_id: String,
+    kind: EndurancePhaseKind,
+}
+
+impl PreparedEndurancePhaseStart {
+    /// Exact phase admitted by the runtime.
+    pub fn phase_id(&self) -> &str {
+        &self.phase_id
+    }
+
+    /// Exact checked workload admitted by the runtime.
+    pub fn workload_id(&self) -> &str {
+        &self.workload_id
+    }
+
+    /// Phase family bound to this one-use factory call.
+    pub const fn kind(&self) -> EndurancePhaseKind {
+        self.kind
     }
 }
 
@@ -120,7 +152,7 @@ pub struct PreparedEnduranceWorkload {
     phase_id: String,
     workload_id: String,
     kind: EndurancePhaseKind,
-    required_capabilities: Vec<EnduranceWorkloadCapability>,
+    required_capabilities: Vec<EndurancePreStartCapability>,
     recovery_cycle_count: u32,
 }
 
@@ -144,10 +176,10 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EnduranceWorkloadCapability::TimelinePlaybackFixture,
-                        EnduranceWorkloadCapability::AudioOutputDevice,
-                        EnduranceWorkloadCapability::PhysicalReferenceOutput,
-                        EnduranceWorkloadCapability::ExternalReferenceLock,
+                        EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
+                        EndurancePreStartCapability::AudioOutputDevicePrepared,
+                        EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
+                        EndurancePreStartCapability::ExternalReferenceSignalPreflight,
                     ],
                     recovery_cycle_count: 0,
                 })
@@ -160,8 +192,8 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EnduranceWorkloadCapability::FrozenExportFixture,
-                        EnduranceWorkloadCapability::IndependentExportVerifier,
+                        EndurancePreStartCapability::FrozenExportFixturePrepared,
+                        EndurancePreStartCapability::IndependentExportVerifierPrepared,
                     ],
                     recovery_cycle_count: 0,
                 })
@@ -174,16 +206,16 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EnduranceWorkloadCapability::TimelinePlaybackFixture,
-                        EnduranceWorkloadCapability::FrozenExportFixture,
-                        EnduranceWorkloadCapability::AudioOutputDevice,
-                        EnduranceWorkloadCapability::PhysicalReferenceOutput,
-                        EnduranceWorkloadCapability::ExternalReferenceLock,
-                        EnduranceWorkloadCapability::IndependentExportVerifier,
-                        EnduranceWorkloadCapability::SeekRecovery,
-                        EnduranceWorkloadCapability::SurfaceDeviceReopenRecovery,
-                        EnduranceWorkloadCapability::ExportCancelRetryRecovery,
-                        EnduranceWorkloadCapability::CachePressureRecovery,
+                        EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
+                        EndurancePreStartCapability::FrozenExportFixturePrepared,
+                        EndurancePreStartCapability::AudioOutputDevicePrepared,
+                        EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
+                        EndurancePreStartCapability::ExternalReferenceSignalPreflight,
+                        EndurancePreStartCapability::IndependentExportVerifierPrepared,
+                        EndurancePreStartCapability::SeekRecoveryPrepared,
+                        EndurancePreStartCapability::SurfaceEventLoopPrepared,
+                        EndurancePreStartCapability::ExportCancelRetryPrepared,
+                        EndurancePreStartCapability::CachePressurePrepared,
                     ],
                     recovery_cycle_count: contract.recovery_cycle_count,
                 })
@@ -211,16 +243,20 @@ impl PreparedEnduranceWorkload {
         self.recovery_cycle_count
     }
 
-    /// Admit only when every phase prerequisite was observed before owner start.
-    pub fn admit(
+    /// Prepare a bound factory token only when every pre-start fact was observed.
+    pub fn prepare_start(
         &self,
-        inventory: &EnduranceWorkloadCapabilityInventory,
-    ) -> EndurancePhaseAdmission {
+        inventory: &EndurancePreStartCapabilityInventory,
+    ) -> Result<PreparedEndurancePhaseStart, EnduranceNotRunAdmission> {
         let missing = inventory.missing(&self.required_capabilities);
         if missing.is_empty() {
-            EndurancePhaseAdmission::Started
+            Ok(PreparedEndurancePhaseStart {
+                phase_id: self.phase_id.clone(),
+                workload_id: self.workload_id.clone(),
+                kind: self.kind,
+            })
         } else {
-            EndurancePhaseAdmission::NotRun(EnduranceNotRunAdmission::new(
+            Err(EnduranceNotRunAdmission::new(
                 self.phase_id.clone(),
                 self.workload_id.clone(),
                 missing,
@@ -621,33 +657,33 @@ mod tests {
         let workload =
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed recovery workload");
-        let inventory = EnduranceWorkloadCapabilityInventory::new([
-            EnduranceWorkloadCapability::TimelinePlaybackFixture,
-            EnduranceWorkloadCapability::FrozenExportFixture,
+        let inventory = EndurancePreStartCapabilityInventory::new([
+            EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
+            EndurancePreStartCapability::FrozenExportFixturePrepared,
         ]);
 
-        let EndurancePhaseAdmission::NotRun(receipt) = workload.admit(&inventory) else {
-            panic!("missing providers must not start product work");
-        };
+        let receipt = workload
+            .prepare_start(&inventory)
+            .expect_err("missing providers must not start");
         assert_eq!(receipt.phase_id(), requirement.phase_id);
         assert_eq!(receipt.workload_id(), workload.workload_id());
         assert_eq!(
             receipt.missing_capabilities(),
             &[
-                EnduranceWorkloadCapability::AudioOutputDevice,
-                EnduranceWorkloadCapability::PhysicalReferenceOutput,
-                EnduranceWorkloadCapability::ExternalReferenceLock,
-                EnduranceWorkloadCapability::IndependentExportVerifier,
-                EnduranceWorkloadCapability::SeekRecovery,
-                EnduranceWorkloadCapability::SurfaceDeviceReopenRecovery,
-                EnduranceWorkloadCapability::ExportCancelRetryRecovery,
-                EnduranceWorkloadCapability::CachePressureRecovery,
+                EndurancePreStartCapability::AudioOutputDevicePrepared,
+                EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
+                EndurancePreStartCapability::ExternalReferenceSignalPreflight,
+                EndurancePreStartCapability::IndependentExportVerifierPrepared,
+                EndurancePreStartCapability::SeekRecoveryPrepared,
+                EndurancePreStartCapability::SurfaceEventLoopPrepared,
+                EndurancePreStartCapability::ExportCancelRetryPrepared,
+                EndurancePreStartCapability::CachePressurePrepared,
             ]
         );
     }
 
     #[test]
-    fn complete_capability_inventory_starts_the_exact_workload() {
+    fn complete_pre_start_inventory_produces_an_exact_bound_factory_token() {
         let requirement = profile()
             .phases
             .into_iter()
@@ -656,11 +692,14 @@ mod tests {
         let workload =
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed Export workload");
-        let inventory = EnduranceWorkloadCapabilityInventory::new([
-            EnduranceWorkloadCapability::FrozenExportFixture,
-            EnduranceWorkloadCapability::IndependentExportVerifier,
+        let inventory = EndurancePreStartCapabilityInventory::new([
+            EndurancePreStartCapability::FrozenExportFixturePrepared,
+            EndurancePreStartCapability::IndependentExportVerifierPrepared,
         ]);
-        assert_eq!(workload.admit(&inventory), EndurancePhaseAdmission::Started);
+        let prepared = workload.prepare_start(&inventory).expect("prepared start");
+        assert_eq!(prepared.phase_id(), workload.phase_id());
+        assert_eq!(prepared.workload_id(), workload.workload_id());
+        assert_eq!(prepared.kind(), EndurancePhaseKind::ContinuousExport);
     }
 
     #[test]

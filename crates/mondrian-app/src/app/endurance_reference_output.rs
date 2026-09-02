@@ -7,7 +7,9 @@ use mondrian_export::preset::TimelineExportRange;
 use mondrian_export::queue::FrozenTimelineReferenceFrameSession;
 use mondrian_media::{AudioPcmContinuity, AudioPcmRenderGeneration, AudioPcmRenderRequest};
 use mondrian_reference_output::{
-    ReferenceAudioCadence, ReferenceOutputDeviceDescriptor, ReferenceOutputOpenRequest,
+    ReferenceAudioCadence, ReferenceOutputDeviceDescriptor, ReferenceOutputDiagnostics,
+    ReferenceOutputOpenRequest, ReferenceOutputProvider, ReferenceOutputReferencePolicy,
+    ReferenceOutputRuntimeAvailability, ReferenceOutputState,
 };
 use mondrian_renderer::{ReferenceOutputProgram, RenderCpuColorExecutionSession};
 use thiserror::Error;
@@ -53,6 +55,13 @@ pub struct PersistentReferenceOutputPump {
     fault: Option<String>,
 }
 
+/// Opaque proof that the exact physical Session opened, reported external
+/// lock through its live event/readback path, and entered Running state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhysicalReferenceStartEvidence {
+    _private: (),
+}
+
 impl PersistentReferenceOutputPump {
     /// Nanosecond scheduling interval derived from the exact rational picture cadence.
     pub(crate) fn cadence_interval(&self) -> Result<std::time::Duration, String> {
@@ -89,6 +98,11 @@ impl PersistentReferenceOutputPump {
         if sequence.settings.audio_sample_rate != 48_000 {
             return Err(PersistentReferenceOutputError::InvalidPlan(
                 "Reference embedded Audio Program requires an exact 48 kHz Sequence".to_owned(),
+            ));
+        }
+        if request.reference_policy != ReferenceOutputReferencePolicy::RequireExternalLock {
+            return Err(PersistentReferenceOutputError::InvalidPlan(
+                "commercial endurance Reference Output requires external lock".to_owned(),
             ));
         }
         let sequences = app.export_sequences_snapshot();
@@ -157,7 +171,7 @@ impl PersistentReferenceOutputPump {
         &mut self,
         app: &mut AppState,
         device: &ReferenceOutputDeviceDescriptor,
-    ) -> Result<(), PersistentReferenceOutputError> {
+    ) -> Result<PhysicalReferenceStartEvidence, PersistentReferenceOutputError> {
         self.require_state(ReferencePumpState::Prepared)?;
         self.validate_binding(app)?;
         app.open_reference_output(
@@ -169,10 +183,14 @@ impl PersistentReferenceOutputPump {
         for _ in 0..self.request.preroll_frames {
             self.render_and_schedule_next(app)?;
         }
+        app.poll_reference_output(self.request.max_scheduled_frames as usize)
+            .map_err(|error| self.latch_fault(format!("poll initial Reference status: {error}")))?;
+        self.validate_physical_start_evidence(app, device, ReferenceOutputState::Priming)?;
         app.start_reference_output()
             .map_err(|error| self.latch_fault(format!("start Reference Output: {error}")))?;
+        self.validate_physical_start_evidence(app, device, ReferenceOutputState::Running)?;
         self.state = ReferencePumpState::Running;
-        Ok(())
+        Ok(PhysicalReferenceStartEvidence { _private: () })
     }
 
     /// Drain provider callbacks and atomically schedule one subsequent A/V bundle.
@@ -269,6 +287,23 @@ impl PersistentReferenceOutputPump {
         Ok(())
     }
 
+    fn validate_physical_start_evidence(
+        &mut self,
+        app: &AppState,
+        device: &ReferenceOutputDeviceDescriptor,
+        expected_state: ReferenceOutputState,
+    ) -> Result<(), PersistentReferenceOutputError> {
+        let diagnostics = app.reference_output_diagnostics().cloned().ok_or_else(|| {
+            self.latch_fault("Reference Output did not publish live diagnostics".to_owned())
+        })?;
+        if !physical_start_evidence_is_complete(&diagnostics, device, expected_state) {
+            return Err(self.latch_fault(format!(
+                "Reference Output dynamic start evidence is incomplete: {diagnostics:?}"
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_binding(&mut self, app: &AppState) -> Result<(), PersistentReferenceOutputError> {
         let current = app.active_sequence().map(|sequence| FrozenReferenceBinding {
             sequence_id: sequence.id,
@@ -312,6 +347,24 @@ impl PersistentReferenceOutputPump {
     }
 }
 
+fn physical_start_evidence_is_complete(
+    diagnostics: &ReferenceOutputDiagnostics,
+    device: &ReferenceOutputDeviceDescriptor,
+    expected_state: ReferenceOutputState,
+) -> bool {
+    diagnostics.state == expected_state
+        && diagnostics.provider.as_ref().is_some_and(|provider| {
+            provider.hardware_backed
+                && provider.provider != ReferenceOutputProvider::Simulated
+                && provider.provider == device.provider
+                && provider.availability == ReferenceOutputRuntimeAvailability::Available
+        })
+        && diagnostics.device_id.as_ref() == Some(&device.id)
+        && diagnostics.device_generation == Some(device.generation)
+        && diagnostics.reference_locked == Some(true)
+        && diagnostics.reference_lock_losses == 0
+}
+
 /// Stable persistent Reference Output preparation/execution failure.
 #[derive(Debug, Error)]
 pub enum PersistentReferenceOutputError {
@@ -321,4 +374,71 @@ pub enum PersistentReferenceOutputError {
     /// A started/opening generation faulted and cannot continue.
     #[error("persistent Reference Output failed: {0}")]
     Faulted(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use mondrian_reference_output::{ReferenceOutputDeviceId, ReferenceOutputProviderEvidence};
+
+    use super::*;
+
+    fn physical_fixture() -> (ReferenceOutputDeviceDescriptor, ReferenceOutputDiagnostics) {
+        let device = ReferenceOutputDeviceDescriptor {
+            id: ReferenceOutputDeviceId::new("decklink:test:1").expect("device id"),
+            provider: ReferenceOutputProvider::DeckLink,
+            display_name: "DeckLink Test".to_owned(),
+            generation: 7,
+            modes: Vec::new(),
+        };
+        let diagnostics = ReferenceOutputDiagnostics {
+            state: ReferenceOutputState::Priming,
+            provider: Some(ReferenceOutputProviderEvidence {
+                provider: ReferenceOutputProvider::DeckLink,
+                adapter_version: "test".to_owned(),
+                sdk_version: Some("test-sdk".to_owned()),
+                driver_version: Some("test-driver".to_owned()),
+                hardware_backed: true,
+                availability: ReferenceOutputRuntimeAvailability::Available,
+            }),
+            device_id: Some(device.id.clone()),
+            device_generation: Some(device.generation),
+            reference_locked: Some(true),
+            ..ReferenceOutputDiagnostics::default()
+        };
+        (device, diagnostics)
+    }
+
+    #[test]
+    fn dynamic_reference_start_requires_physical_exact_locked_readback() {
+        let (device, diagnostics) = physical_fixture();
+        assert!(physical_start_evidence_is_complete(
+            &diagnostics,
+            &device,
+            ReferenceOutputState::Priming
+        ));
+
+        let mut non_hardware = diagnostics.clone();
+        non_hardware.provider.as_mut().expect("provider").hardware_backed = false;
+        assert!(!physical_start_evidence_is_complete(
+            &non_hardware,
+            &device,
+            ReferenceOutputState::Priming
+        ));
+
+        let mut unlocked = diagnostics.clone();
+        unlocked.reference_locked = Some(false);
+        assert!(!physical_start_evidence_is_complete(
+            &unlocked,
+            &device,
+            ReferenceOutputState::Priming
+        ));
+
+        let mut stale_generation = diagnostics;
+        stale_generation.device_generation = Some(device.generation + 1);
+        assert!(!physical_start_evidence_is_complete(
+            &stale_generation,
+            &device,
+            ReferenceOutputState::Priming
+        ));
+    }
 }

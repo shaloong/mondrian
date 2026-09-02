@@ -27,7 +27,8 @@ use super::endurance_qualification::EnduranceCaptureFacts;
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::endurance_reference_output::PersistentReferenceOutputPump;
 use super::endurance_workload::{
-    EndurancePhaseAdmission, EnduranceWorkloadCapabilityInventory, PreparedEnduranceWorkload,
+    EndurancePhaseAdmission, EndurancePreStartCapabilityInventory, PreparedEndurancePhaseStart,
+    PreparedEnduranceWorkload,
 };
 use super::AppState;
 
@@ -177,17 +178,21 @@ impl FreshEndurancePhaseBuild {
 /// therefore creates no App, worker, device, Queue, or child-process owner.
 pub trait FreshEndurancePhaseFactory {
     /// Observe all exact prerequisites without starting phase owners.
-    fn capability_inventory(
+    fn pre_start_capability_inventory(
         &mut self,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
-    ) -> Result<EnduranceWorkloadCapabilityInventory, EnduranceCampaignError>;
+    ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError>;
 
     /// Create one fresh App and machine composition after successful admission.
+    ///
+    /// The one-use token is constructed by the runtime and binds this call to
+    /// the exact phase/workload whose complete pre-start inventory was checked.
     fn build_phase(
         &mut self,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
+        prepared_start: PreparedEndurancePhaseStart,
     ) -> FreshEndurancePhaseBuild;
 }
 
@@ -507,7 +512,8 @@ impl PhaseOwners {
                 .map_err(|error| error.to_string())?;
                 self.reference = Some(reference);
                 let app = self.app.as_mut().ok_or("phase App owner is missing")?;
-                self.reference
+                let _physical_start = self
+                    .reference
                     .as_mut()
                     .ok_or("Reference owner disappeared")?
                     .open_preroll_and_start(app, &plan.device)
@@ -873,14 +879,14 @@ where
 
         let inventory = self
             .factory
-            .capability_inventory(requirement, workload)
+            .pre_start_capability_inventory(requirement, workload)
             .map_err(|error| EnduranceCampaignError::PreStartRuntime(error.to_string()))?;
-        let admission = workload.admit(&inventory);
-        if !matches!(admission, EndurancePhaseAdmission::Started) {
-            return Ok(admission);
-        }
+        let prepared_start = match workload.prepare_start(&inventory) {
+            Ok(prepared_start) => prepared_start,
+            Err(not_run) => return Ok(EndurancePhaseAdmission::NotRun(not_run)),
+        };
 
-        let build = self.factory.build_phase(requirement, workload);
+        let build = self.factory.build_phase(requirement, workload, prepared_start);
         let mut owners = match build {
             FreshEndurancePhaseBuild::Ready(fresh) => {
                 match PhaseOwners::from_fresh(
@@ -1203,7 +1209,7 @@ mod tests {
     use mondrian_platform::{EndurancePhaseTerminalStatus, EnduranceQualificationProfile};
 
     use super::*;
-    use crate::app::endurance_workload::EnduranceWorkloadCapability;
+    use crate::app::endurance_workload::EndurancePreStartCapability;
 
     #[derive(Default)]
     struct TestClock(AtomicU64);
@@ -1231,26 +1237,30 @@ mod tests {
     }
 
     struct TestFactory {
-        inventory: EnduranceWorkloadCapabilityInventory,
+        inventory: EndurancePreStartCapabilityInventory,
         build_calls: Rc<Cell<u32>>,
         fail_build: bool,
     }
 
     impl FreshEndurancePhaseFactory for TestFactory {
-        fn capability_inventory(
+        fn pre_start_capability_inventory(
             &mut self,
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
-        ) -> Result<EnduranceWorkloadCapabilityInventory, EnduranceCampaignError> {
+        ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError> {
             Ok(self.inventory.clone())
         }
 
         fn build_phase(
             &mut self,
-            _requirement: &EndurancePhaseRequirement,
-            _workload: &PreparedEnduranceWorkload,
+            requirement: &EndurancePhaseRequirement,
+            workload: &PreparedEnduranceWorkload,
+            prepared_start: PreparedEndurancePhaseStart,
         ) -> FreshEndurancePhaseBuild {
             self.build_calls.set(self.build_calls.get() + 1);
+            assert_eq!(prepared_start.phase_id(), requirement.phase_id);
+            assert_eq!(prepared_start.workload_id(), workload.workload_id());
+            assert_eq!(prepared_start.kind(), requirement.kind);
             assert!(self.fail_build, "test factory has no success composition");
             FreshEndurancePhaseBuild::failed(AppState::new(), "injected phase setup failure")
         }
@@ -1294,7 +1304,7 @@ mod tests {
         let (requirement, workload) = continuous_export_contract();
         let build_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
-            inventory: EnduranceWorkloadCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([]),
             build_calls: Rc::clone(&build_calls),
             fail_build: false,
         };
@@ -1318,9 +1328,9 @@ mod tests {
         let (requirement, workload) = continuous_export_contract();
         let build_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
-            inventory: EnduranceWorkloadCapabilityInventory::new([
-                EnduranceWorkloadCapability::FrozenExportFixture,
-                EnduranceWorkloadCapability::IndependentExportVerifier,
+            inventory: EndurancePreStartCapabilityInventory::new([
+                EndurancePreStartCapability::FrozenExportFixturePrepared,
+                EndurancePreStartCapability::IndependentExportVerifierPrepared,
             ]),
             build_calls: Rc::clone(&build_calls),
             fail_build: true,
@@ -1373,7 +1383,7 @@ mod tests {
     fn overdue_zero_cadence_settles_and_snapshots_instead_of_failing() {
         let clock = Arc::new(TestClock(AtomicU64::new(10_500)));
         let factory = TestFactory {
-            inventory: EnduranceWorkloadCapabilityInventory::new([]),
+            inventory: EndurancePreStartCapabilityInventory::new([]),
             build_calls: Rc::new(Cell::new(0)),
             fail_build: false,
         };

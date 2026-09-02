@@ -37,7 +37,9 @@ The implementation is split at existing authority boundaries:
   closure.
 - `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
   composition over fresh `AppState` owners. A machine factory must prove the
-  complete capability inventory before App creation, then provide the exact
+  complete side-effect-free pre-start inventory before App creation. The
+  runtime then creates an opaque phase/workload-bound token consumed by exactly
+  one factory build call. The factory provides the exact
   Project fixture, Reference device/request, Export request, and one distinct
   seek target per recovery cycle. The runtime retains every partial owner,
   pumps Timeline → Reference → Export, enforces
@@ -260,8 +262,10 @@ reopen executable), the concrete fresh-App three-phase runtime, and
 deterministic software tests. A
 valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
-Audio Device, physical Reference provider, external lock, independent verifier,
-or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
+prepared Audio Device contract, discovered physical Reference provider/mode,
+external-reference signal preflight, pinned independent verifier, or prepared
+recovery owner. These facts do not claim an open device or continuous lock.
+Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. The machine-specific factory and unified high-level
 validation executable remain explicit follow-on work, as do the real vendor
@@ -271,6 +275,17 @@ execution or hardware HITL evidence. Until the machine factory, canonical
 fixture composition, and physical providers exist, physical phases must be
 admitted as `NotRun`; profile prose is not evidence that a runnable 72-hour
 producer exists.
+
+After factory composition creates owners, the realtime start boundary drains
+the opened Reference Session's initial provider-status events and accepts an
+opaque physical-start proof only when the live diagnostics identify the exact
+non-simulated hardware provider, stable device ID and generation, runtime
+availability, positive external-reference lock, and zero lock loss. The same
+facts are checked in `Priming` and again after the Session enters `Running`.
+Failure here is a started-owner failure requiring consuming cleanup; it can
+never be relabelled `NotRun`. Every subsequent sample independently requires
+hardware-backed output and current lock, so preflight cannot stand in for
+continuous evidence.
 
 ## Commercial profile
 
