@@ -830,7 +830,7 @@ mod tests {
 
     fn empty_export_snapshot() -> ExportEnduranceSnapshot {
         ExportEnduranceSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             observed_at_us: 0,
             shutdown_requested: false,
             worker_running: true,
@@ -846,6 +846,10 @@ mod tests {
             pending_jobs: 0,
             active_jobs: 0,
             worker_failed: false,
+            audio_source_owners_started: 0,
+            audio_source_owners_closed: 0,
+            audio_source_owner_failures: 0,
+            active_audio_source_owners: 0,
         }
     }
 
@@ -1025,7 +1029,7 @@ mod tests {
                     .report(),
                 reference_output: ReferenceOutputDiagnostics::default(),
                 export: ExportEnduranceSnapshot {
-                    schema_version: 1,
+                    schema_version: 2,
                     observed_at_us: 0,
                     shutdown_requested: self.shutdown,
                     worker_running: !self.shutdown,
@@ -1049,6 +1053,10 @@ mod tests {
                     pending_jobs: 0,
                     active_jobs: 0,
                     worker_failed: false,
+                    audio_source_owners_started: self.verified_exports,
+                    audio_source_owners_closed: self.verified_exports,
+                    audio_source_owner_failures: 0,
+                    active_audio_source_owners: 0,
                 },
                 capture_facts: EnduranceCaptureFacts::default(),
             })
@@ -1065,7 +1073,7 @@ mod tests {
                     playback_workers_terminated: true,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 3,
+                        schema_version: 4,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -1076,6 +1084,10 @@ mod tests {
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: self.phase_elapsed_us() / 60_000_000,
+                        audio_source_owners_started: self.verified_exports,
+                        audio_source_owners_closed: self.verified_exports,
+                        audio_source_owner_failures: 0,
+                        active_audio_source_owners: 0,
                     },
                 },
                 Vec::new(),
@@ -1123,7 +1135,7 @@ mod tests {
                     playback_workers_terminated: !self.cleanup_incomplete,
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 3,
+                        schema_version: 4,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -1134,6 +1146,10 @@ mod tests {
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,
+                        audio_source_owners_started: 0,
+                        audio_source_owners_closed: 0,
+                        audio_source_owner_failures: 0,
+                        active_audio_source_owners: 0,
                     },
                 },
                 Vec::new(),
@@ -1195,7 +1211,7 @@ mod tests {
     #[test]
     fn incomplete_cleanup_retains_joined_late_export_receipt() {
         let export = ExportQueueShutdownEvidence {
-            schema_version: 3,
+            schema_version: 4,
             worker_started: true,
             worker_start_failed: false,
             worker_terminated: true,
@@ -1206,6 +1222,10 @@ mod tests {
             pending_jobs: 0,
             active_jobs: 0,
             activity_events: 9,
+            audio_source_owners_started: 1,
+            audio_source_owners_closed: 1,
+            audio_source_owner_failures: 0,
+            active_audio_source_owners: 0,
         };
         let closure = EnduranceRuntimeClosure {
             status: EndurancePhaseTerminalStatus::Completed,
@@ -1378,7 +1398,7 @@ mod tests {
                     ),
                     supervised_child_processes_remaining: 0,
                     export: ExportQueueShutdownEvidence {
-                        schema_version: 3,
+                        schema_version: 4,
                         worker_started: true,
                         worker_terminated: true,
                         worker_start_failed: false,
@@ -1389,6 +1409,10 @@ mod tests {
                         pending_jobs: 0,
                         active_jobs: 0,
                         activity_events: 0,
+                        audio_source_owners_started: 0,
+                        audio_source_owners_closed: 0,
+                        audio_source_owner_failures: 0,
+                        active_audio_source_owners: 0,
                     },
                 },
                 Vec::new(),

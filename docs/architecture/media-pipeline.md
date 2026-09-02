@@ -196,6 +196,16 @@ potentially blocking decoder close runs on a coordinator; timeout or spawn
 failure retains unresolved ownership and fails closed rather than blocking the
 qualification caller. `shutdown_and_wait` remains an explicit unbounded seam
 for callers that deliberately require it.
+
+Each Export attempt lazily creates at most one job-scoped cache using its frozen
+resource policy. The executor surrounds the complete job—including all audio
+stems—with a panic boundary, then signals and consumes that cache against a
+fixed two-second absolute deadline before returning or resuming the panic. A
+cache retained by any reader/Runtime cannot be uniquely consumed: the exact
+external reference count is recorded and Queue lifecycle evidence remains
+permanently dirty. Published namespace outcomes are not rewritten after the
+fact, but dirty cleanup is independently latched so no later Queue shutdown or
+endurance sample can present the process as clean.
 The resulting `AudioSourceCacheShutdownEvidence` records any decode leaders
 seen at the boundary, releases PCM/failure residency, removes every decoder
 Session, kills and waits each remaining FFmpeg child, and joins its stdout and

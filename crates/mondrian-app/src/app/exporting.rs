@@ -480,7 +480,7 @@ mod tests {
         let diagnostics = state.export_queue_diagnostics();
         let endurance = state.export_endurance_snapshot(17);
 
-        assert_eq!(endurance.schema_version, 1);
+        assert_eq!(endurance.schema_version, 2);
         assert_eq!(endurance.observed_at_us, 17);
         assert_eq!(endurance.admissions, diagnostics.admissions);
         assert_eq!(endurance.rejections, diagnostics.rejections);
@@ -501,6 +501,10 @@ mod tests {
             endurance.worker_failed,
             diagnostics.worker_failure.is_some()
         );
+        assert_eq!(endurance.audio_source_owners_started, 0);
+        assert_eq!(endurance.audio_source_owners_closed, 0);
+        assert_eq!(endurance.audio_source_owner_failures, 0);
+        assert_eq!(endurance.active_audio_source_owners, 0);
     }
 
     fn tt(frame: i64, time_base: mondrian_core::Rational) -> mondrian_core::TimelineTime {

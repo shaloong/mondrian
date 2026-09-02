@@ -362,7 +362,7 @@ fn capture_endurance_sample(
 ) -> Result<EnduranceSample, EnduranceCaptureError> {
     if playback.schema_version != mondrian_playback::PLAYBACK_EVIDENCE_SCHEMA_VERSION
         || reference.schema_version != 1
-        || export.schema_version != 1
+        || export.schema_version != 2
         || export.observed_at_us != timing.completed_at_us
         || facts.schema_version != 1
         || facts.observed_at_us != timing.completed_at_us
@@ -384,6 +384,7 @@ fn capture_endurance_sample(
     let fatal_errors = facts
         .fatal_errors
         .checked_add(u64::from(export.worker_failed))
+        .and_then(|value| value.checked_add(export.audio_source_owner_failures))
         .and_then(|value| value.checked_add(reference_terminal_failure))
         .ok_or(EnduranceCaptureError::CounterOverflow)?;
     let queue_depth = facts
@@ -391,6 +392,7 @@ fn capture_endurance_sample(
         .checked_add(reference.outstanding_frames)
         .and_then(|value| value.checked_add(export.pending_jobs))
         .and_then(|value| value.checked_add(export.active_jobs))
+        .and_then(|value| value.checked_add(export.active_audio_source_owners))
         .ok_or(EnduranceCaptureError::CounterOverflow)?;
     Ok(EnduranceSample {
         sequence: timing.sequence,
@@ -760,7 +762,7 @@ impl EndurancePhaseCapture {
             )
             || export.pending_jobs != 0
             || export.active_jobs != 0
-            || export.schema_version != 3
+            || export.schema_version != 4
             || !export.all_resources_released()
             || !last.export_shutdown_requested
             || last.export_worker_running
@@ -1225,7 +1227,7 @@ mod tests {
         );
         let reference = ReferenceOutputDiagnostics::default();
         let export = ExportEnduranceSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             observed_at_us: 1,
             shutdown_requested: false,
             worker_running: true,
@@ -1241,6 +1243,10 @@ mod tests {
             pending_jobs: 0,
             active_jobs: 0,
             worker_failed: false,
+            audio_source_owners_started: 5,
+            audio_source_owners_closed: 2,
+            audio_source_owner_failures: 2,
+            active_audio_source_owners: 3,
         };
         let sample = capture_endurance_sample(
             EnduranceSampleTiming {
@@ -1263,6 +1269,8 @@ mod tests {
         assert_eq!(sample.counters.export_frames, 10);
         assert_eq!(sample.counters.export_activity_events, 4);
         assert_eq!(sample.counters.export_artifacts_verified, 1);
+        assert_eq!(sample.counters.fatal_errors, 2);
+        assert_eq!(sample.gauges.queue_depth, 3);
         assert_eq!(sample.process_memory.observed_process_count, 2);
     }
 
@@ -1469,7 +1477,7 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 3,
+                    schema_version: 4,
                     worker_started: true,
                     worker_start_failed: false,
                     worker_terminated: true,
@@ -1480,6 +1488,10 @@ mod tests {
                     pending_jobs: 0,
                     active_jobs: 0,
                     activity_events: 1,
+                    audio_source_owners_started: 1,
+                    audio_source_owners_closed: 1,
+                    audio_source_owner_failures: 0,
+                    active_audio_source_owners: 0,
                 },
             ),
             Err(EnduranceCaptureError::InvalidTerminal)
@@ -1492,7 +1504,7 @@ mod tests {
                 0,
                 &reference,
                 ExportQueueShutdownEvidence {
-                    schema_version: 3,
+                    schema_version: 4,
                     worker_started: true,
                     worker_terminated: true,
                     worker_start_failed: false,
@@ -1503,6 +1515,10 @@ mod tests {
                     pending_jobs: 0,
                     active_jobs: 0,
                     activity_events: 1,
+                    audio_source_owners_started: 1,
+                    audio_source_owners_closed: 1,
+                    audio_source_owner_failures: 0,
+                    active_audio_source_owners: 0,
                 },
             )
             .expect("finish executed phase");

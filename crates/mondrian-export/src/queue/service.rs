@@ -27,7 +27,10 @@ use crate::{
     validate_timeline_export_execution_snapshot_with_audio_selection,
 };
 
-use super::{ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure, JobExecutionResult};
+use super::{
+    ExportExecutionOwnerEvent, ExportExecutor, ExportJobDiagnostics, ExportPublicationFailure,
+    JobExecutionResult,
+};
 
 /// Maximum number of admitted jobs that may be pending or executing.
 pub const EXPORT_IN_FLIGHT_CAPACITY: usize = 64;
@@ -693,6 +696,14 @@ pub struct ExportEnduranceSnapshot {
     pub active_jobs: u64,
     /// Whether worker startup failed.
     pub worker_failed: bool,
+    /// Job-scoped decoded-audio source owners created since Queue start.
+    pub audio_source_owners_started: u64,
+    /// Job-scoped decoded-audio source owners closed since Queue start.
+    pub audio_source_owners_closed: u64,
+    /// Audio-source closures that retained or abandoned resources.
+    pub audio_source_owner_failures: u64,
+    /// Audio-source owners currently live inside an executing job.
+    pub active_audio_source_owners: u64,
 }
 
 /// Terminal evidence returned by explicit queue retirement.
@@ -727,6 +738,14 @@ pub struct ExportQueueShutdownEvidence {
     pub active_jobs: u64,
     /// Final activity-event count.
     pub activity_events: u64,
+    /// Job-scoped decoded-audio source owners created over Queue lifetime.
+    pub audio_source_owners_started: u64,
+    /// Job-scoped decoded-audio source owners closed over Queue lifetime.
+    pub audio_source_owners_closed: u64,
+    /// Audio-source closures that retained or abandoned resources.
+    pub audio_source_owner_failures: u64,
+    /// Audio-source owners still live after Queue retirement.
+    pub active_audio_source_owners: u64,
 }
 
 impl ExportQueueShutdownEvidence {
@@ -736,7 +755,7 @@ impl ExportQueueShutdownEvidence {
     /// normal worker termination, even when no jobs were admitted.
     #[must_use]
     pub const fn all_resources_released(&self) -> bool {
-        self.schema_version == 3
+        self.schema_version == 4
             && self.worker_started
             && !self.worker_start_failed
             && self.worker_terminated
@@ -746,6 +765,9 @@ impl ExportQueueShutdownEvidence {
             && !self.worker_owner_abandoned
             && self.pending_jobs == 0
             && self.active_jobs == 0
+            && self.audio_source_owners_started == self.audio_source_owners_closed
+            && self.audio_source_owner_failures == 0
+            && self.active_audio_source_owners == 0
     }
 }
 
@@ -760,6 +782,9 @@ struct ExportQueueCounters {
     cancellations: u64,
     rendered_frames: u64,
     durable_artifacts: u64,
+    audio_source_owners_started: u64,
+    audio_source_owners_closed: u64,
+    audio_source_owner_failures: u64,
 }
 
 struct ExportJobEntry {
@@ -789,6 +814,7 @@ struct ExportQueueState {
     worker_timed_out: bool,
     worker_detached: bool,
     worker_owner_abandoned: bool,
+    active_audio_source_owners: u64,
 }
 
 struct RenderQueueInner {
@@ -856,6 +882,34 @@ fn mark_export_worker_owner_abandoned(inner: &RenderQueueInner, detail: &str) {
     state.worker_owner_abandoned = true;
     if state.worker_failure.is_none() {
         state.worker_failure = Some(detail.to_owned());
+    }
+    inner.mark_diagnostics_changed_locked(&state);
+    drop(state);
+    inner.wake.notify_all();
+}
+
+fn update_execution_owner_event(inner: &RenderQueueInner, event: ExportExecutionOwnerEvent) {
+    let mut state = inner.state.lock();
+    match event {
+        ExportExecutionOwnerEvent::AudioSourceStarted => {
+            state.counters.audio_source_owners_started =
+                state.counters.audio_source_owners_started.saturating_add(1);
+            state.active_audio_source_owners = state.active_audio_source_owners.saturating_add(1);
+        }
+        ExportExecutionOwnerEvent::AudioSourceClosed { all_resources_released } => {
+            state.counters.audio_source_owners_closed =
+                state.counters.audio_source_owners_closed.saturating_add(1);
+            if state.active_audio_source_owners == 0 {
+                state.counters.audio_source_owner_failures =
+                    state.counters.audio_source_owner_failures.saturating_add(1);
+            } else {
+                state.active_audio_source_owners -= 1;
+            }
+            if !all_resources_released {
+                state.counters.audio_source_owner_failures =
+                    state.counters.audio_source_owner_failures.saturating_add(1);
+            }
+        }
     }
     inner.mark_diagnostics_changed_locked(&state);
     drop(state);
@@ -1595,7 +1649,7 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportEnduranceSnapshot {
-            schema_version: 1,
+            schema_version: 2,
             observed_at_us,
             shutdown_requested: state.shutdown_requested,
             worker_running: state.worker_running,
@@ -1611,6 +1665,10 @@ impl RenderQueue {
             pending_jobs,
             active_jobs,
             worker_failed: state.worker_failure.is_some(),
+            audio_source_owners_started: state.counters.audio_source_owners_started,
+            audio_source_owners_closed: state.counters.audio_source_owners_closed,
+            audio_source_owner_failures: state.counters.audio_source_owner_failures,
+            active_audio_source_owners: state.active_audio_source_owners,
         }
     }
 
@@ -1756,7 +1814,7 @@ impl RenderQueue {
             })
             .count() as u64;
         ExportQueueShutdownEvidence {
-            schema_version: 3,
+            schema_version: 4,
             worker_started: state.worker_started,
             worker_start_failed: state.worker_start_failed,
             worker_terminated: state.worker_terminated,
@@ -1767,6 +1825,10 @@ impl RenderQueue {
             pending_jobs,
             active_jobs,
             activity_events: state.activity_events,
+            audio_source_owners_started: state.counters.audio_source_owners_started,
+            audio_source_owners_closed: state.counters.audio_source_owners_closed,
+            audio_source_owner_failures: state.counters.audio_source_owner_failures,
+            active_audio_source_owners: state.active_audio_source_owners,
         }
     }
 
@@ -1860,6 +1922,10 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
         let mut report_diagnostics = move |diagnostics: ExportJobDiagnostics| {
             update_job_diagnostics(&diagnostics_inner, job_id, generation, diagnostics);
         };
+        let owner_inner = Arc::clone(&inner);
+        let mut report_owner = move |event: ExportExecutionOwnerEvent| {
+            update_execution_owner_event(&owner_inner, event);
+        };
         let execution_gate = ExportExecutionGate::for_attempt(
             Arc::clone(&inner),
             job_id,
@@ -1873,6 +1939,7 @@ fn export_worker_loop(inner: Arc<RenderQueueInner>, executor: Arc<dyn ExportExec
                 &execution_gate,
                 &mut report,
                 &mut report_diagnostics,
+                &mut report_owner,
             )
         })) {
             Ok(outcome) => ExportWorkerOutcome::Execution(outcome),
@@ -2257,7 +2324,7 @@ mod shutdown_evidence_contract_tests {
     #[test]
     fn shutdown_evidence_requires_started_terminated_worker_and_empty_workset() {
         let clean = ExportQueueShutdownEvidence {
-            schema_version: 3,
+            schema_version: 4,
             worker_started: true,
             worker_start_failed: false,
             worker_terminated: true,
@@ -2268,11 +2335,15 @@ mod shutdown_evidence_contract_tests {
             pending_jobs: 0,
             active_jobs: 0,
             activity_events: 0,
+            audio_source_owners_started: 1,
+            audio_source_owners_closed: 1,
+            audio_source_owner_failures: 0,
+            active_audio_source_owners: 0,
         };
 
         assert!(clean.all_resources_released());
         assert!(
-            !ExportQueueShutdownEvidence { schema_version: 2, ..clean }.all_resources_released()
+            !ExportQueueShutdownEvidence { schema_version: 3, ..clean }.all_resources_released()
         );
         assert!(!ExportQueueShutdownEvidence { pending_jobs: 1, ..clean }.all_resources_released());
         assert!(!ExportQueueShutdownEvidence { active_jobs: 1, ..clean }.all_resources_released());
@@ -2304,12 +2375,24 @@ mod shutdown_evidence_contract_tests {
             !ExportQueueShutdownEvidence { worker_owner_abandoned: true, ..clean }
                 .all_resources_released()
         );
+        assert!(
+            !ExportQueueShutdownEvidence { audio_source_owners_closed: 0, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { audio_source_owner_failures: 1, ..clean }
+                .all_resources_released()
+        );
+        assert!(
+            !ExportQueueShutdownEvidence { active_audio_source_owners: 1, ..clean }
+                .all_resources_released()
+        );
     }
 
     #[test]
-    fn shutdown_evidence_schema_three_round_trips_exact_worker_facts() {
+    fn shutdown_evidence_schema_four_round_trips_exact_owner_facts() {
         let evidence = ExportQueueShutdownEvidence {
-            schema_version: 3,
+            schema_version: 4,
             worker_started: false,
             worker_start_failed: true,
             worker_terminated: false,
@@ -2320,6 +2403,10 @@ mod shutdown_evidence_contract_tests {
             pending_jobs: 0,
             active_jobs: 0,
             activity_events: 7,
+            audio_source_owners_started: 1,
+            audio_source_owners_closed: 1,
+            audio_source_owner_failures: 1,
+            active_audio_source_owners: 0,
         };
 
         let encoded = serde_json::to_string(&evidence).expect("serialize shutdown evidence");
@@ -2330,6 +2417,7 @@ mod shutdown_evidence_contract_tests {
         assert!(encoded.contains("\"worker_started\":false"));
         assert!(encoded.contains("\"worker_start_failed\":true"));
         assert!(encoded.contains("\"worker_owner_abandoned\":true"));
+        assert!(encoded.contains("\"audio_source_owner_failures\":1"));
     }
 
     #[test]

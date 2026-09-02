@@ -805,7 +805,7 @@ mod tests {
         assert!(evidence.app_owner_consumed);
         assert!(evidence.project.all_resources_released());
         assert!(evidence.reference_output.all_resources_released());
-        assert_eq!(evidence.export.schema_version, 3);
+        assert_eq!(evidence.export.schema_version, 4);
         assert!(evidence.export.worker_started);
         assert!(!evidence.export.worker_start_failed);
         assert!(evidence.export.worker_terminated);

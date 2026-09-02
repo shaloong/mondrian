@@ -21,6 +21,9 @@ use crate::queue::{
 enum GateOutcome {
     Complete,
     Fail(String),
+    AudioOwnerClean,
+    AudioOwnerDirty,
+    AudioOwnerUnclosed,
     PublicationBeforeNamespace,
     PublicationDurabilityUnconfirmed,
     PublicationNamespaceIndeterminate,
@@ -91,6 +94,7 @@ impl ExportExecutor for DropProbeExecutor {
         _execution_gate: &ExportExecutionGate,
         _report: &mut dyn FnMut(ExportProgress),
         _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        _report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
     ) -> JobExecutionResult {
         panic!("spawn-failure executor must never execute")
     }
@@ -113,6 +117,7 @@ impl ExportExecutor for BlockingDropExecutor {
         _execution_gate: &ExportExecutionGate,
         _report: &mut dyn FnMut(ExportProgress),
         _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        _report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
     ) -> JobExecutionResult {
         panic!("destructor-order executor must never execute")
     }
@@ -195,6 +200,7 @@ impl ExportExecutor for GateExecutor {
         execution_gate: &ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        report_owner: &mut dyn FnMut(super::ExportExecutionOwnerEvent),
     ) -> JobExecutionResult {
         let _finished = GateExecutionFinished(self);
         report(ExportProgress::preparing(0.1));
@@ -233,6 +239,24 @@ impl ExportExecutor for GateExecutor {
                 }
             }
             GateOutcome::Fail(detail) => JobExecutionResult::Failed(detail),
+            GateOutcome::AudioOwnerClean => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceClosed {
+                    all_resources_released: true,
+                });
+                JobExecutionResult::Failed("synthetic owner lifecycle completed".to_owned())
+            }
+            GateOutcome::AudioOwnerDirty => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceClosed {
+                    all_resources_released: false,
+                });
+                JobExecutionResult::Failed("synthetic dirty owner lifecycle".to_owned())
+            }
+            GateOutcome::AudioOwnerUnclosed => {
+                report_owner(super::ExportExecutionOwnerEvent::AudioSourceStarted);
+                JobExecutionResult::Failed("synthetic unclosed owner lifecycle".to_owned())
+            }
             GateOutcome::PublicationBeforeNamespace => {
                 JobExecutionResult::PublicationFailed(ExportPublicationFailure::BeforeNamespace {
                     output_path: job.config.output_path.clone(),
@@ -994,6 +1018,53 @@ fn endurance_snapshot_retains_cumulative_frames_and_durable_artifacts() {
     assert!(shutdown.worker_terminated);
     assert_eq!(shutdown.pending_jobs, 0);
     assert_eq!(shutdown.active_jobs, 0);
+}
+
+#[test]
+fn audio_source_owner_lifecycle_is_latched_into_endurance_and_shutdown_evidence() {
+    fn execute_owner_outcome(
+        outcome: GateOutcome,
+        output_name: &str,
+    ) -> (ExportEnduranceSnapshot, ExportQueueShutdownEvidence) {
+        let backend = GateExecutor::new([outcome]);
+        let queue = RenderQueue::new_with_executor(backend.clone());
+        queue
+            .enqueue(RenderJob::new(dummy_config(output_name)))
+            .expect("enqueue owner lifecycle export");
+        backend.wait_started(1);
+        backend.release(1);
+        backend.wait_finished(1);
+        wait_diagnostics(&queue, |diagnostics| diagnostics.failures == 1);
+        let snapshot = queue.endurance_snapshot(42);
+        let shutdown = queue.shutdown_and_wait(Duration::from_secs(2));
+        (snapshot, shutdown)
+    }
+
+    let (clean, clean_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerClean, "owner-clean.mp4");
+    assert_eq!(clean.schema_version, 2);
+    assert_eq!(clean.audio_source_owners_started, 1);
+    assert_eq!(clean.audio_source_owners_closed, 1);
+    assert_eq!(clean.audio_source_owner_failures, 0);
+    assert_eq!(clean.active_audio_source_owners, 0);
+    assert_eq!(clean_shutdown.schema_version, 4);
+    assert!(clean_shutdown.all_resources_released());
+
+    let (dirty, dirty_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerDirty, "owner-dirty.mp4");
+    assert_eq!(dirty.audio_source_owners_started, 1);
+    assert_eq!(dirty.audio_source_owners_closed, 1);
+    assert_eq!(dirty.audio_source_owner_failures, 1);
+    assert_eq!(dirty.active_audio_source_owners, 0);
+    assert!(!dirty_shutdown.all_resources_released());
+
+    let (unclosed, unclosed_shutdown) =
+        execute_owner_outcome(GateOutcome::AudioOwnerUnclosed, "owner-unclosed.mp4");
+    assert_eq!(unclosed.audio_source_owners_started, 1);
+    assert_eq!(unclosed.audio_source_owners_closed, 0);
+    assert_eq!(unclosed.audio_source_owner_failures, 0);
+    assert_eq!(unclosed.active_audio_source_owners, 1);
+    assert!(!unclosed_shutdown.all_resources_released());
 }
 
 #[test]

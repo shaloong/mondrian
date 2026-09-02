@@ -705,6 +705,17 @@ versioned manifest before Storage atomically publishes the complete sibling
 directory. Cancellation, a missing output, or one invalid file rejects the
 whole artifact; no partial stem package is visible at the destination.
 
+All stem Runtimes are retained only after a measurement pass proves their
+aggregate occurrence, fixed-residency, and prepared-plan footprint fits the
+single job grant. PCM execution is block-interleaved across outputs, with blocks
+split at the shared source-cache window boundary, so every output consumes the
+same fingerprinted decode window before bounded LRU pressure can advance to the
+next window. One job-scoped `AudioSourceCache` is reused by ordinary mixdown,
+professional delivery, and every stem; it is never recreated per output. Cache
+entry/byte limits remain hard policy, so an exceptionally undersized grant may
+still evict and re-decode rather than exceeding residency, but normal multi-stem
+execution does not scale source decoding linearly with output count.
+
 Offline export enters one fresh epoch at its exact sample-range start. Realtime
 Playback carries its generation on every PCM work request: the first admitted
 window is `Enter`, later windows are `Continue`, and the Timeline Adapter rejects

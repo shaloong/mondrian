@@ -22,7 +22,7 @@ atomically closes admission and requests cancellation before the App starts
 joining any owner. `RenderQueue` retains the dedicated worker's `JoinHandle`;
 the later authoritative `shutdown_until` call consumes that ownership against
 the App-wide absolute monotonic deadline instead of granting Export a renewed
-relative timeout. Schema-3 shutdown evidence distinguishes successful worker
+relative timeout. Schema-4 shutdown evidence distinguishes successful worker
 start and normal join from an outer worker panic, deadline miss, handle detach,
 and any worker-owned executor, hook, factory-error payload, or opaque panic
 payload deliberately abandoned because its destructor is not safe on a caller
@@ -49,6 +49,13 @@ finished handle without blocking or detaches an active one, and is never a
 consuming qualification receipt. One product coordinator exclusively owns the
 consuming call; sequential repeats observe latched facts, while concurrent
 consumers are outside the qualification contract and cannot supply clean proof.
+
+The Queue also inventories every lazily created job-scoped decoded-audio owner.
+`started`, `closed`, dirty-closure, and currently active counts share the Queue
+mutex with job and worker state. Clean shutdown additionally requires exact
+started/closed equality, zero dirty closures, and zero active owners. An
+executor panic cannot bypass this boundary: the production executor closes its
+audio owner before rethrowing to the Queue's per-job panic isolation.
 
 `mondrian-export` also owns an independent single-file artifact verifier for
 that post-publication boundary. It accepts only a direct regular file within an

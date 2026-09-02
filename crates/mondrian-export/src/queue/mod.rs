@@ -32,12 +32,16 @@ use crate::validator::{
     validate_export_output_cancellable, ExpectedStream, ExpectedVideoConstraints,
     ExportValidationExpectations,
 };
-use crate::{PreparedTimelineAudioOutputSnapshot, PreparedTimelineVisualSnapshot};
+use crate::{
+    PreparedTimelineAudioOutputSnapshot, PreparedTimelineAudioSnapshot,
+    PreparedTimelineVisualSnapshot,
+};
 use chrono::Utc;
 use mondrian_audio::{
     AudioContinuityEpoch, AudioDecodedSource, AudioLoudnessAnalyzer, AudioLoudnessReport,
     AudioMediaResolver, AudioProcessingMode, AudioProgramDeliveryRuntime, AudioProgramRuntime,
-    AudioRenderContract, AudioRenderRequest, ResolvedAudioSource,
+    AudioRenderContract, AudioRenderRequest, AudioRuntimeResourceFootprint,
+    AudioRuntimeResourceGrant, ResolvedAudioSource,
 };
 use mondrian_core::timeline_data::{AlphaInterpretation, TimelineClipExecutionRef};
 use mondrian_core::types::{AssetId, ColorEngine, ColorSpace, FramePosition, Rational};
@@ -51,7 +55,6 @@ use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
     EffectFrameExtent, EffectFrameTileF32, EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
 };
-use mondrian_media::AudioSourceCache;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
 use mondrian_media::{
@@ -62,6 +65,7 @@ use mondrian_media::{
     ResidentEncodeColorimetry, ResidentHevcEncoderConfig, SupervisedChild, SupervisedProcessError,
     SupervisedProcessPolicy, SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
+use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheShutdownEvidence};
 use mondrian_renderer::{
     color::{
         GpuColorBackendContext, GpuColorExecutionSession, GpuProgramInput, GpuProgramOutputError,
@@ -2236,6 +2240,12 @@ pub(crate) enum JobExecutionResult {
     Cancelled,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExportExecutionOwnerEvent {
+    AudioSourceStarted,
+    AudioSourceClosed { all_resources_released: bool },
+}
+
 /// Queue-internal execution adapter.
 ///
 /// Implementations must visit the supplied execution Gate at every declared
@@ -2250,6 +2260,7 @@ pub(crate) trait ExportExecutor: Send + Sync + 'static {
         execution_gate: &service::ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        report_owner: &mut dyn FnMut(ExportExecutionOwnerEvent),
     ) -> JobExecutionResult;
 }
 
@@ -2264,47 +2275,82 @@ impl ExportExecutor for FfmpegExportExecutor {
         execution_gate: &service::ExportExecutionGate,
         report: &mut dyn FnMut(ExportProgress),
         report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+        report_owner: &mut dyn FnMut(ExportExecutionOwnerEvent),
     ) -> JobExecutionResult {
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
-            return JobExecutionResult::Cancelled;
+        let mut audio_owner = ExportAudioSourceOwner::new(
+            execution_gate.resource_policy().audio_source_cache,
+            report_owner,
+        );
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            execute_ffmpeg_export_job(
+                job,
+                cancel,
+                execution_gate,
+                report,
+                report_diagnostics,
+                &mut audio_owner,
+            )
+        }));
+        let deadline = Instant::now()
+            .checked_add(EXPORT_AUDIO_SOURCE_SHUTDOWN_TIMEOUT)
+            .unwrap_or_else(Instant::now);
+        let audio_closure = audio_owner.shutdown_until(deadline);
+        match outcome {
+            Ok(outcome) => finish_export_with_audio_closure(outcome, audio_closure),
+            Err(payload) => std::panic::resume_unwind(payload),
         }
-        report(ExportProgress::preparing(0.01));
+    }
+}
 
-        let final_output = job.config.output_path.as_path();
-        if job.config.preset.audio_stem_format().is_some() {
-            return execute_audio_stems_export(
-                job,
-                final_output,
-                cancel,
-                execution_gate,
-                report,
-                report_diagnostics,
-            );
-        }
-        if job.config.preset.image_sequence_format().is_some() {
-            return execute_image_sequence_export(
-                job,
-                final_output,
-                cancel,
-                execution_gate,
-                report,
-                report_diagnostics,
-            );
-        }
-        if job.config.preset.professional_delivery().is_some() {
-            return execute_professional_delivery_export(
-                job,
-                final_output,
-                cancel,
-                execution_gate,
-                report,
-                report_diagnostics,
-            );
-        }
-        let staging = match OwnedPublicationFile::create_sibling(
+fn execute_ffmpeg_export_job(
+    job: &RenderJob,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+    report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
+) -> JobExecutionResult {
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::preparing(0.01));
+
+    let final_output = job.config.output_path.as_path();
+    if job.config.preset.audio_stem_format().is_some() {
+        return execute_audio_stems_export(
+            job,
             final_output,
-            &format!("export-{}", job.id()),
-        ) {
+            cancel,
+            execution_gate,
+            report,
+            report_diagnostics,
+            audio_owner,
+        );
+    }
+    if job.config.preset.image_sequence_format().is_some() {
+        return execute_image_sequence_export(
+            job,
+            final_output,
+            cancel,
+            execution_gate,
+            report,
+            report_diagnostics,
+            audio_owner,
+        );
+    }
+    if job.config.preset.professional_delivery().is_some() {
+        return execute_professional_delivery_export(
+            job,
+            final_output,
+            cancel,
+            execution_gate,
+            report,
+            report_diagnostics,
+            audio_owner,
+        );
+    }
+    let staging =
+        match OwnedPublicationFile::create_sibling(final_output, &format!("export-{}", job.id())) {
             Ok(staging) => staging,
             Err(error) => {
                 return JobExecutionResult::Failed(format!(
@@ -2313,64 +2359,62 @@ impl ExportExecutor for FfmpegExportExecutor {
                 ));
             }
         };
-        let partial_output = staging.path().to_path_buf();
-        let reservation = staging.release_for_external_writer();
-        let mut validation_contract = None;
-        let outcome = execute_timeline_export(
-            job,
-            &job.config.timeline,
-            partial_output.as_path(),
-            &mut validation_contract,
-            cancel,
-            execution_gate,
-            report,
-            report_diagnostics,
+    let partial_output = staging.path().to_path_buf();
+    let reservation = staging.release_for_external_writer();
+    let mut validation_contract = None;
+    let outcome = execute_timeline_export(
+        job,
+        &job.config.timeline,
+        partial_output.as_path(),
+        &mut validation_contract,
+        cancel,
+        execution_gate,
+        report,
+        report_diagnostics,
+        audio_owner,
+    );
+    if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
+        return outcome;
+    }
+    if cancel.is_canceled() {
+        return JobExecutionResult::Cancelled;
+    }
+    let staging = match reservation.reclaim() {
+        Ok(staging) => staging,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!(
+                "encoded export no longer names its reserved partial object {}: {error:#}",
+                partial_output.display()
+            ));
+        }
+    };
+    let Some(ProducedArtifactValidation::MediaFile(validation_expectations)) = validation_contract
+    else {
+        return JobExecutionResult::Failed(
+            "encoded media export completed without its media-file validation contract".to_owned(),
         );
-        if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
-            return outcome;
+    };
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::validating(0.99));
+    match validate_export_output_cancellable(staging.path(), &validation_expectations, cancel) {
+        Ok(_) => {}
+        Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
+        Err(error) => {
+            return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
         }
-        if cancel.is_canceled() {
-            return JobExecutionResult::Cancelled;
-        }
-        let staging = match reservation.reclaim() {
-            Ok(staging) => staging,
-            Err(error) => {
-                return JobExecutionResult::Failed(format!(
-                    "encoded export no longer names its reserved partial object {}: {error:#}",
-                    partial_output.display()
-                ));
-            }
-        };
-        let Some(ProducedArtifactValidation::MediaFile(validation_expectations)) =
-            validation_contract
-        else {
-            return JobExecutionResult::Failed(
-                "encoded media export completed without its media-file validation contract"
-                    .to_owned(),
-            );
-        };
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Validating, cancel) {
-            return JobExecutionResult::Cancelled;
-        }
-        report(ExportProgress::validating(0.99));
-        match validate_export_output_cancellable(staging.path(), &validation_expectations, cancel) {
-            Ok(_) => {}
-            Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
-            Err(error) => {
-                return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
-            }
-        }
-        if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
-            return JobExecutionResult::Failed(reason);
-        }
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
-            return JobExecutionResult::Cancelled;
-        }
-        report(ExportProgress::publishing(0.995));
-        match finalize_export_output(staging, final_output, job.config.output_policy) {
-            Ok(evidence) => JobExecutionResult::Published(evidence),
-            Err(failure) => JobExecutionResult::PublicationFailed(failure),
-        }
+    }
+    if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
+        return JobExecutionResult::Failed(reason);
+    }
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
+        return JobExecutionResult::Cancelled;
+    }
+    report(ExportProgress::publishing(0.995));
+    match finalize_export_output(staging, final_output, job.config.output_policy) {
+        Ok(evidence) => JobExecutionResult::Published(evidence),
+        Err(failure) => JobExecutionResult::PublicationFailed(failure),
     }
 }
 
@@ -2381,6 +2425,7 @@ fn execute_professional_delivery_export(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> JobExecutionResult {
     let Some(author_output) = job.config.preset.professional_delivery().cloned() else {
         return JobExecutionResult::Failed(
@@ -2505,6 +2550,7 @@ fn execute_professional_delivery_export(
         cancel,
         execution_gate,
         report,
+        audio_owner,
     ) {
         Ok(value) => value,
         Err(outcome) => return outcome,
@@ -2861,6 +2907,7 @@ fn render_professional_pcm24_wave(
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> Result<(PathBuf, AudioLoudnessReport), JobExecutionResult> {
     let raw_path = work.join("primary-audio.f32le");
     let wave_path = work.join("primary-audio.wav");
@@ -2884,7 +2931,7 @@ fn render_professional_pcm24_wave(
             range,
             sample_rate,
             AudioChannelLayout::Stereo,
-            execution_gate.resource_policy(),
+            audio_owner,
             cancel,
             execution_gate,
             report,
@@ -3312,6 +3359,7 @@ fn execute_audio_stems_export(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> JobExecutionResult {
     if job.config.output_policy != ExportOutputPolicy::CreateNew {
         return JobExecutionResult::Failed(
@@ -3371,64 +3419,23 @@ fn execute_audio_stems_export(
     let output_count = prepared_audio.output_count();
     let mut stems = Vec::with_capacity(output_count);
     let mut primary_analysis = None;
-    for (index, output) in prepared_audio.outputs().enumerate() {
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
-            return JobExecutionResult::Cancelled;
-        }
-        let temp = match tempfile::Builder::new()
-            .prefix("mondrian-export-stem-")
-            .suffix(".f32")
-            .tempfile()
-        {
-            Ok(temp) => temp,
-            Err(error) => {
-                return JobExecutionResult::Failed(format!(
-                    "failed to allocate stem PCM temporary file: {error}"
-                ));
-            }
-        };
-        let temp_path = temp.path().to_path_buf();
-        drop(temp);
-        let _temp_guard = ExportAudioTempFile::armed(&temp_path);
-        let mut analysis = None;
-        let progress_base = 0.02 + 0.70 * index as f32 / output_count.max(1) as f32;
-        let progress_span = 0.70 / output_count.max(1) as f32;
-        let mut stem_progress = |progress: ExportProgress| {
-            let local = ((progress.fraction - 0.02) / 0.14).clamp(0.0, 1.0);
-            report(ExportProgress::preparing(
-                progress_base + progress_span * local,
-            ));
-        };
-        match render_timeline_audio_to_pcm_f32(
-            &temp_path,
-            &job.config.timeline,
-            output,
-            range,
-            sample_rate,
-            channel_layout,
-            execution_gate.resource_policy(),
-            cancel,
-            execution_gate,
-            &mut stem_progress,
-            &mut analysis,
-        ) {
-            JobExecutionResult::ReversibleWorkCompleted => {}
-            JobExecutionResult::Cancelled => return JobExecutionResult::Cancelled,
-            JobExecutionResult::Failed(reason) => return JobExecutionResult::Failed(reason),
-            JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => {
-                return JobExecutionResult::Failed(
-                    "audio-stem render crossed publication authority".to_owned(),
-                );
-            }
-        }
-        let Some(analysis) = analysis else {
-            return JobExecutionResult::Failed(format!(
-                "Program Output {} completed without loudness evidence",
-                output.output_id()
-            ));
-        };
+    let rendered_stems = match render_audio_stems_to_pcm_f32(
+        &job.config.timeline,
+        prepared_audio,
+        range,
+        sample_rate,
+        channel_layout,
+        audio_owner,
+        cancel,
+        execution_gate,
+        report,
+    ) {
+        Ok(rendered) => rendered,
+        Err(outcome) => return outcome,
+    };
+    for (index, (output, rendered)) in prepared_audio.outputs().zip(rendered_stems).enumerate() {
         if index == 0 {
-            primary_analysis = Some(analysis);
+            primary_analysis = Some(rendered.loudness);
         }
         let file_name = stem_file_name(index, output.output_id());
         let output_path = stem_path(staging.path(), index, output.output_id());
@@ -3452,7 +3459,7 @@ fn execute_audio_stems_export(
             .arg("-ac")
             .arg(channel_layout.channel_count().to_string())
             .arg("-i")
-            .arg(&temp_path)
+            .arg(&rendered.path)
             .arg("-map")
             .arg("0:a:0")
             .arg("-c:a")
@@ -3498,7 +3505,7 @@ fn execute_audio_stems_export(
             output_id: output.output_id(),
             name: output.name().to_owned(),
             file_name,
-            loudness: analysis,
+            loudness: rendered.loudness,
         });
     }
     if let Some(audio) = primary_analysis {
@@ -3556,6 +3563,7 @@ fn execute_image_sequence_export(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> JobExecutionResult {
     if job.config.output_policy != ExportOutputPolicy::CreateNew {
         return JobExecutionResult::Failed(
@@ -3591,6 +3599,7 @@ fn execute_image_sequence_export(
         execution_gate,
         report,
         report_diagnostics,
+        audio_owner,
     );
     if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
         return outcome;
@@ -3764,6 +3773,7 @@ fn execute_timeline_export(
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> JobExecutionResult {
     let mut temp_audio_path_to_cleanup: Option<PathBuf> = None;
     let result = (|| {
@@ -3861,6 +3871,7 @@ fn execute_timeline_export(
             cancel,
             execution_gate,
             report,
+            audio_owner,
         );
         let audio_input = match audio_input {
             Ok(input) => input,
@@ -4932,6 +4943,7 @@ fn prepare_timeline_audio_input(
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> Result<TimelineAudioInput, JobExecutionResult> {
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
         return Err(JobExecutionResult::Cancelled);
@@ -4980,8 +4992,6 @@ fn prepare_timeline_audio_input(
     // first; the unique path keeps concurrent jobs and reruns isolated.
     drop(temp);
     let mut temp_guard = ExportAudioTempFile::armed(&temp_path);
-    let resource_policy = execution_gate.resource_policy();
-
     let mut analysis = None;
     match render_timeline_audio_to_pcm_f32(
         temp_path.as_path(),
@@ -4990,7 +5000,7 @@ fn prepare_timeline_audio_input(
         range,
         sample_rate,
         channel_layout,
-        resource_policy,
+        audio_owner,
         cancel,
         execution_gate,
         report,
@@ -5030,6 +5040,111 @@ struct ExportAudioTempFile {
     path: Option<PathBuf>,
 }
 
+const EXPORT_AUDIO_SOURCE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+const EXPORT_AUDIO_SOURCE_WINDOW_SECONDS: usize = 10;
+
+#[derive(Debug, Clone, Copy)]
+struct ExportAudioSourceClosureEvidence {
+    external_cache_references: usize,
+    cache: AudioSourceCacheShutdownEvidence,
+}
+
+impl ExportAudioSourceClosureEvidence {
+    fn all_resources_released(self) -> bool {
+        self.external_cache_references == 0 && self.cache.all_resources_released()
+    }
+}
+
+struct ExportAudioSourceOwner<'a> {
+    config: AudioSourceCacheConfig,
+    sample_rate: Option<u32>,
+    cache: Option<Arc<AudioSourceCache>>,
+    report_owner: &'a mut dyn FnMut(ExportExecutionOwnerEvent),
+}
+
+impl<'a> ExportAudioSourceOwner<'a> {
+    fn new(
+        config: AudioSourceCacheConfig,
+        report_owner: &'a mut dyn FnMut(ExportExecutionOwnerEvent),
+    ) -> Self {
+        Self {
+            config,
+            sample_rate: None,
+            cache: None,
+            report_owner,
+        }
+    }
+
+    fn cache(&mut self, sample_rate: u32) -> Result<Arc<AudioSourceCache>, String> {
+        if let Some(existing_rate) = self.sample_rate
+            && existing_rate != sample_rate
+        {
+            return Err(format!(
+                "export job attempted to reuse one audio source owner at {existing_rate} Hz and {sample_rate} Hz"
+            ));
+        }
+        if let Some(cache) = self.cache.as_ref() {
+            return Ok(Arc::clone(cache));
+        }
+        let cache = Arc::new(AudioSourceCache::new_bounded_with_sessions(
+            sample_rate,
+            EXPORT_AUDIO_SOURCE_WINDOW_SECONDS,
+            self.config.entry_capacity,
+            self.config.byte_budget,
+            self.config.decoder_session_capacity,
+        ));
+        self.sample_rate = Some(sample_rate);
+        self.cache = Some(Arc::clone(&cache));
+        (self.report_owner)(ExportExecutionOwnerEvent::AudioSourceStarted);
+        Ok(cache)
+    }
+
+    fn shutdown_until(mut self, deadline: Instant) -> Option<ExportAudioSourceClosureEvidence> {
+        let cache = self.cache.take()?;
+        cache.begin_shutdown();
+        let evidence = match Arc::try_unwrap(cache) {
+            Ok(cache) => ExportAudioSourceClosureEvidence {
+                external_cache_references: 0,
+                cache: cache.shutdown_until(deadline),
+            },
+            Err(cache) => {
+                let external_cache_references = Arc::strong_count(&cache).saturating_sub(1);
+                drop(cache);
+                ExportAudioSourceClosureEvidence {
+                    external_cache_references,
+                    cache: AudioSourceCacheShutdownEvidence::default(),
+                }
+            }
+        };
+        (self.report_owner)(ExportExecutionOwnerEvent::AudioSourceClosed {
+            all_resources_released: evidence.all_resources_released(),
+        });
+        Some(evidence)
+    }
+}
+
+fn finish_export_with_audio_closure(
+    outcome: JobExecutionResult,
+    audio_closure: Option<ExportAudioSourceClosureEvidence>,
+) -> JobExecutionResult {
+    let Some(audio_closure) = audio_closure else {
+        return outcome;
+    };
+    if audio_closure.all_resources_released() {
+        return outcome;
+    }
+    let detail = format!("export audio source closure was incomplete: {audio_closure:?}");
+    match outcome {
+        JobExecutionResult::Published(_) | JobExecutionResult::PublicationFailed(_) => outcome,
+        JobExecutionResult::Failed(reason) => {
+            JobExecutionResult::Failed(format!("{reason}; {detail}"))
+        }
+        JobExecutionResult::ReversibleWorkCompleted | JobExecutionResult::Cancelled => {
+            JobExecutionResult::Failed(detail)
+        }
+    }
+}
+
 impl ExportAudioTempFile {
     fn armed(path: &Path) -> Self {
         Self { path: Some(path.to_path_buf()) }
@@ -5054,6 +5169,304 @@ impl Drop for ExportAudioTempFile {
     }
 }
 
+fn prepare_timeline_audio_delivery(
+    timeline: &TimelineExportSnapshot,
+    prepared_audio: &PreparedTimelineAudioOutputSnapshot,
+    range: TimelineRenderRange,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+    cache: &Arc<AudioSourceCache>,
+    resource_grant: AudioRuntimeResourceGrant,
+) -> Result<AudioProgramDeliveryRuntime, String> {
+    let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(cache) };
+    let contract = AudioRenderContract {
+        sample_rate,
+        channel_layout: timeline.sequence.settings.audio_channel_layout,
+        max_block_frames: 16_384,
+        processing_mode: AudioProcessingMode::Offline,
+        processor_session_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
+        public_output_lookahead_budget_frames:
+            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
+        compensation_delay_scratch_budget_bytes:
+            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
+    };
+    let public_time_range = range.time_range()?;
+    let runtime =
+        AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
+            &timeline.sequence,
+            &timeline.sequences,
+            &resolver,
+            contract,
+            Some(prepared_audio.root_program().output_id()),
+            public_time_range,
+            prepared_audio.closure(),
+            resource_grant,
+        )
+        .map_err(|error| format!("编译导出音频 Program 失败（未使用降级混音）: {error}"))?;
+    if runtime.execution_demand() != prepared_audio.execution_demand() {
+        return Err(
+            "prepared audio Runtime execution demand differs from admitted root Program evidence"
+                .to_owned(),
+        );
+    }
+    AudioProgramDeliveryRuntime::prepare_standard(runtime, channel_layout)
+        .map_err(|error| format!("导出音频输出布局映射不可用: {error}"))
+}
+
+fn add_audio_runtime_footprint(
+    total: AudioRuntimeResourceFootprint,
+    next: AudioRuntimeResourceFootprint,
+) -> Option<AudioRuntimeResourceFootprint> {
+    Some(AudioRuntimeResourceFootprint {
+        runtime_occurrences: total.runtime_occurrences.checked_add(next.runtime_occurrences)?,
+        fixed_resident_bytes: total.fixed_resident_bytes.checked_add(next.fixed_resident_bytes)?,
+        prepared_logical_bytes: total
+            .prepared_logical_bytes
+            .checked_add(next.prepared_logical_bytes)?,
+        render_scratch_bytes: total.render_scratch_bytes.checked_add(next.render_scratch_bytes)?,
+        processor_session_bytes: total
+            .processor_session_bytes
+            .checked_add(next.processor_session_bytes)?,
+        compensation_delay_bytes: total
+            .compensation_delay_bytes
+            .checked_add(next.compensation_delay_bytes)?,
+        parameter_event_bytes: total
+            .parameter_event_bytes
+            .checked_add(next.parameter_event_bytes)?,
+        media_window_bytes: total.media_window_bytes.checked_add(next.media_window_bytes)?,
+        nested_window_bytes: total.nested_window_bytes.checked_add(next.nested_window_bytes)?,
+    })
+}
+
+fn validate_audio_runtime_footprint_grant(
+    footprint: AudioRuntimeResourceFootprint,
+    grant: AudioRuntimeResourceGrant,
+) -> Result<(), String> {
+    for (category, required, granted) in [
+        (
+            "runtime occurrences",
+            footprint.runtime_occurrences,
+            grant.max_runtime_occurrences,
+        ),
+        (
+            "fixed resident bytes",
+            footprint.fixed_resident_bytes,
+            grant.max_fixed_resident_bytes,
+        ),
+        (
+            "prepared logical bytes",
+            footprint.prepared_logical_bytes,
+            grant.max_prepared_logical_bytes,
+        ),
+    ] {
+        if required > granted {
+            return Err(format!(
+                "audio-stem aggregate {category} require {required}, exceeding job grant {granted}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+struct RenderedAudioStemPcm {
+    path: PathBuf,
+    _guard: ExportAudioTempFile,
+    loudness: AudioLoudnessReport,
+}
+
+fn render_audio_stems_to_pcm_f32(
+    timeline: &TimelineExportSnapshot,
+    prepared_audio: &PreparedTimelineAudioSnapshot,
+    range: TimelineRenderRange,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
+    cancel: &ExecutionCancellationToken,
+    execution_gate: &service::ExportExecutionGate,
+    report: &mut dyn FnMut(ExportProgress),
+) -> Result<Vec<RenderedAudioStemPcm>, JobExecutionResult> {
+    struct ActiveStemPcm {
+        path: PathBuf,
+        guard: ExportAudioTempFile,
+        writer: BufWriter<std::fs::File>,
+        delivery: AudioProgramDeliveryRuntime,
+        loudness: AudioLoudnessAnalyzer,
+    }
+
+    if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+        return Err(JobExecutionResult::Cancelled);
+    }
+    let cache = audio_owner.cache(sample_rate).map_err(JobExecutionResult::Failed)?;
+    let outputs = prepared_audio.outputs().collect::<Vec<_>>();
+    let resource_grant = execution_gate.resource_policy().audio_runtime_grant;
+
+    // Measure each immutable Runtime without retaining the others, then admit
+    // the aggregate before the simultaneously-live stem set is constructed.
+    let mut aggregate_footprint = AudioRuntimeResourceFootprint::default();
+    for output in &outputs {
+        let delivery = prepare_timeline_audio_delivery(
+            timeline,
+            output,
+            range,
+            sample_rate,
+            channel_layout,
+            &cache,
+            resource_grant,
+        )
+        .map_err(JobExecutionResult::Failed)?;
+        aggregate_footprint =
+            add_audio_runtime_footprint(aggregate_footprint, delivery.resource_footprint())
+                .ok_or_else(|| {
+                    JobExecutionResult::Failed(
+                        "audio-stem aggregate Runtime footprint exceeds addressable capacity"
+                            .to_owned(),
+                    )
+                })?;
+    }
+    validate_audio_runtime_footprint_grant(aggregate_footprint, resource_grant)
+        .map_err(JobExecutionResult::Failed)?;
+
+    let (start_sample, total_samples) =
+        timeline_audio_sample_range(range, sample_rate).map_err(JobExecutionResult::Failed)?;
+    let mut active = Vec::with_capacity(outputs.len());
+    for output in &outputs {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+            return Err(JobExecutionResult::Cancelled);
+        }
+        let temp = tempfile::Builder::new()
+            .prefix("mondrian-export-stem-")
+            .suffix(".f32")
+            .tempfile()
+            .map_err(|error| {
+                JobExecutionResult::Failed(format!(
+                    "failed to allocate stem PCM temporary file: {error}"
+                ))
+            })?;
+        let path = temp.path().to_path_buf();
+        drop(temp);
+        let guard = ExportAudioTempFile::armed(&path);
+        let file = std::fs::File::create(&path).map_err(|error| {
+            JobExecutionResult::Failed(format!(
+                "failed to create stem PCM temporary file {}: {error}",
+                path.display()
+            ))
+        })?;
+        let mut delivery = prepare_timeline_audio_delivery(
+            timeline,
+            output,
+            range,
+            sample_rate,
+            channel_layout,
+            &cache,
+            resource_grant,
+        )
+        .map_err(JobExecutionResult::Failed)?;
+        if delivery.requires_state_entry() {
+            delivery
+                .enter_state(AudioContinuityEpoch::new(1), start_sample)
+                .map_err(|error| {
+                    JobExecutionResult::Failed(format!(
+                        "failed to enter audio-stem continuity state: {error}"
+                    ))
+                })?;
+        }
+        let loudness =
+            AudioLoudnessAnalyzer::new(sample_rate, channel_layout).map_err(|error| {
+                JobExecutionResult::Failed(format!(
+                    "audio-stem loudness/true-peak contract is unavailable: {error}"
+                ))
+            })?;
+        active.push(ActiveStemPcm {
+            path,
+            guard,
+            writer: BufWriter::new(file),
+            delivery,
+            loudness,
+        });
+    }
+
+    let channels = channel_layout.channel_count();
+    let chunk_frames_target = (sample_rate as usize / 5).clamp(1_024, 16_384);
+    let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
+    let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
+    let mut rendered_samples = 0usize;
+    let cache_window_frames = usize::try_from(sample_rate)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(EXPORT_AUDIO_SOURCE_WINDOW_SECONDS)
+        .max(1);
+    let cache_window_frames_i64 = i64::try_from(cache_window_frames).unwrap_or(i64::MAX);
+    while rendered_samples < total_samples {
+        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
+            return Err(JobExecutionResult::Cancelled);
+        }
+        let rendered_samples_i64 = i64::try_from(rendered_samples).map_err(|_| {
+            JobExecutionResult::Failed("audio-stem sample position exceeds i64".to_owned())
+        })?;
+        let chunk_start = start_sample.checked_add(rendered_samples_i64).ok_or_else(|| {
+            JobExecutionResult::Failed("audio-stem sample position exceeds i64".to_owned())
+        })?;
+        let frames_to_cache_boundary = usize::try_from(
+            cache_window_frames_i64 - chunk_start.rem_euclid(cache_window_frames_i64),
+        )
+        .unwrap_or(usize::MAX)
+        .max(1);
+        let chunk_frames = (total_samples - rendered_samples)
+            .min(chunk_frames_target)
+            .min(frames_to_cache_boundary)
+            .max(1);
+        let chunk_samples = chunk_frames * channels;
+        for stem in &mut active {
+            stem.delivery
+                .render_into_cancellable(
+                    AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                    &mut pcm[..chunk_samples],
+                    cancel,
+                )
+                .map_err(|error| {
+                    if cancel.is_canceled() {
+                        JobExecutionResult::Cancelled
+                    } else {
+                        JobExecutionResult::Failed(format!(
+                            "audio-stem Program execution failed: {error}"
+                        ))
+                    }
+                })?;
+            stem.loudness.observe_interleaved(&pcm[..chunk_samples]).map_err(|error| {
+                JobExecutionResult::Failed(format!(
+                    "audio-stem loudness/true-peak analysis failed: {error}"
+                ))
+            })?;
+            sample_bytes.clear();
+            for sample in &pcm[..chunk_samples] {
+                sample_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            stem.writer.write_all(&sample_bytes).map_err(|error| {
+                JobExecutionResult::Failed(format!("failed to write stem PCM: {error}"))
+            })?;
+        }
+        rendered_samples += chunk_frames;
+        let ratio = rendered_samples as f32 / total_samples.max(1) as f32;
+        report(ExportProgress::preparing(
+            (0.02 + 0.70 * ratio).clamp(0.02, 0.72),
+        ));
+    }
+
+    let mut rendered = Vec::with_capacity(active.len());
+    for mut stem in active {
+        stem.writer.flush().map_err(|error| {
+            JobExecutionResult::Failed(format!("failed to flush stem PCM: {error}"))
+        })?;
+        let loudness = stem.loudness.finish().map_err(|error| {
+            JobExecutionResult::Failed(format!(
+                "failed to finish audio-stem loudness/true-peak analysis: {error}"
+            ))
+        })?;
+        rendered.push(RenderedAudioStemPcm { path: stem.path, _guard: stem.guard, loudness });
+    }
+    Ok(rendered)
+}
+
 fn render_timeline_audio_to_pcm_f32(
     output_path: &Path,
     timeline: &TimelineExportSnapshot,
@@ -5061,7 +5474,7 @@ fn render_timeline_audio_to_pcm_f32(
     range: TimelineRenderRange,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
-    resource_policy: service::ExportExecutionResourcePolicy,
+    audio_owner: &mut ExportAudioSourceOwner<'_>,
     cancel: &ExecutionCancellationToken,
     execution_gate: &service::ExportExecutionGate,
     report: &mut dyn FnMut(ExportProgress),
@@ -5080,158 +5493,121 @@ fn render_timeline_audio_to_pcm_f32(
             ));
         }
     };
-    let audio_cache = resource_policy.audio_source_cache;
-    let cache = Arc::new(AudioSourceCache::new_bounded_with_sessions(
-        sample_rate,
-        10,
-        audio_cache.entry_capacity,
-        audio_cache.byte_budget,
-        audio_cache.decoder_session_capacity,
-    ));
-    let resolver = ExportAudioMediaResolver { timeline, cache: Arc::clone(&cache) };
-    let program_channel_layout = timeline.sequence.settings.audio_channel_layout;
-    let contract = AudioRenderContract {
-        sample_rate,
-        channel_layout: program_channel_layout,
-        max_block_frames: 16_384,
-        processing_mode: AudioProcessingMode::Offline,
-        processor_session_scratch_budget_bytes:
-            AudioRenderContract::DEFAULT_PROCESSOR_SESSION_SCRATCH_BUDGET_BYTES,
-        public_output_lookahead_budget_frames:
-            AudioRenderContract::DEFAULT_PUBLIC_OUTPUT_LOOKAHEAD_BUDGET_FRAMES,
-        compensation_delay_scratch_budget_bytes:
-            AudioRenderContract::DEFAULT_COMPENSATION_DELAY_SCRATCH_BUDGET_BYTES,
-    };
-    let public_time_range = match range.time_range() {
-        Ok(range) => range,
+    let cache = match audio_owner.cache(sample_rate) {
+        Ok(cache) => cache,
         Err(error) => return JobExecutionResult::Failed(error),
     };
-    let runtime =
-        match AudioProgramRuntime::build_from_precompiled_closure_for_range_with_resource_grant(
-            &timeline.sequence,
-            &timeline.sequences,
-            &resolver,
-            contract,
-            Some(prepared_audio.root_program().output_id()),
-            public_time_range,
-            prepared_audio.closure(),
-            resource_policy.audio_runtime_grant,
+    {
+        let mut delivery = match prepare_timeline_audio_delivery(
+            timeline,
+            prepared_audio,
+            range,
+            sample_rate,
+            channel_layout,
+            &cache,
+            execution_gate.resource_policy().audio_runtime_grant,
         ) {
-            Ok(runtime) => runtime,
+            Ok(delivery) => delivery,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+
+        let (start_sample, total_samples) = match timeline_audio_sample_range(range, sample_rate) {
+            Ok(sample_range) => sample_range,
+            Err(error) => return JobExecutionResult::Failed(error),
+        };
+        let mut loudness = match AudioLoudnessAnalyzer::new(sample_rate, channel_layout) {
+            Ok(analyzer) => analyzer,
             Err(error) => {
                 return JobExecutionResult::Failed(format!(
-                    "编译导出音频 Program 失败（未使用降级混音）: {error}"
+                    "导出音频响度/真峰值分析合同不可用: {error}"
                 ));
             }
         };
-    if runtime.execution_demand() != prepared_audio.execution_demand() {
-        return JobExecutionResult::Failed(
-            "prepared audio Runtime execution demand differs from admitted root Program evidence"
-                .to_owned(),
-        );
-    }
-    let mut delivery = match AudioProgramDeliveryRuntime::prepare_standard(runtime, channel_layout)
-    {
-        Ok(delivery) => delivery,
-        Err(error) => {
-            return JobExecutionResult::Failed(format!("导出音频输出布局映射不可用: {error}"));
+        if total_samples == 0 {
+            return match loudness.finish() {
+                Ok(report) => {
+                    *analysis_out = Some(report);
+                    JobExecutionResult::ReversibleWorkCompleted
+                }
+                Err(error) => JobExecutionResult::Failed(format!(
+                    "完成空导出音频响度/真峰值分析失败: {error}"
+                )),
+            };
         }
-    };
-
-    let (start_sample, total_samples) = match timeline_audio_sample_range(range, sample_rate) {
-        Ok(sample_range) => sample_range,
-        Err(error) => return JobExecutionResult::Failed(error),
-    };
-    let mut loudness = match AudioLoudnessAnalyzer::new(sample_rate, channel_layout) {
-        Ok(analyzer) => analyzer,
-        Err(error) => {
-            return JobExecutionResult::Failed(format!(
-                "导出音频响度/真峰值分析合同不可用: {error}"
-            ));
-        }
-    };
-    if total_samples == 0 {
-        return match loudness.finish() {
-            Ok(report) => {
-                *analysis_out = Some(report);
-                JobExecutionResult::ReversibleWorkCompleted
-            }
-            Err(error) => {
-                JobExecutionResult::Failed(format!("完成空导出音频响度/真峰值分析失败: {error}"))
-            }
-        };
-    }
-    if delivery.requires_state_entry()
-        && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
-    {
-        return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
-    }
-
-    let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
-    let mut writer = BufWriter::new(file);
-    let mut rendered_samples = 0usize;
-    let channels = channel_layout.channel_count();
-    let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
-    let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
-
-    while rendered_samples < total_samples {
-        if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
-            return JobExecutionResult::Cancelled;
+        if delivery.requires_state_entry()
+            && let Err(error) = delivery.enter_state(AudioContinuityEpoch::new(1), start_sample)
+        {
+            return JobExecutionResult::Failed(format!("进入导出音频连续性状态失败: {error}"));
         }
 
-        let remaining = total_samples - rendered_samples;
-        let chunk_frames = remaining.min(chunk_frames_target).max(1);
-        let rendered_samples_i64 = match i64::try_from(rendered_samples) {
-            Ok(value) => value,
-            Err(_) => {
-                return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
-            }
-        };
-        let chunk_start = match start_sample.checked_add(rendered_samples_i64) {
-            Some(value) => value,
-            None => {
-                return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
-            }
-        };
-        let chunk_samples = chunk_frames * channels;
-        if let Err(error) = delivery.render_into_cancellable(
-            AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
-            &mut pcm[..chunk_samples],
-            cancel,
-        ) {
-            if cancel.is_canceled() {
+        let chunk_frames_target = (sample_rate as usize / 5).clamp(1024, 16_384);
+        let mut writer = BufWriter::new(file);
+        let mut rendered_samples = 0usize;
+        let channels = channel_layout.channel_count();
+        let mut sample_bytes = Vec::<u8>::with_capacity(chunk_frames_target * channels * 4);
+        let mut pcm = vec![0.0_f32; chunk_frames_target * channels];
+
+        while rendered_samples < total_samples {
+            if !execution_gate.wait_at_boundary(ExportProgressPhase::Preparing, cancel) {
                 return JobExecutionResult::Cancelled;
             }
-            return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
-        }
-        if let Err(error) = loudness.observe_interleaved(&pcm[..chunk_samples]) {
-            return JobExecutionResult::Failed(format!("导出音频响度/真峰值分析失败: {error}"));
-        }
-        sample_bytes.clear();
-        sample_bytes.reserve(chunk_samples * 4);
-        for sample in &pcm[..chunk_samples] {
-            sample_bytes.extend_from_slice(&sample.to_le_bytes());
-        }
-        if let Err(err) = writer.write_all(&sample_bytes) {
-            return JobExecutionResult::Failed(format!("写入临时音频文件失败: {}", err));
+
+            let remaining = total_samples - rendered_samples;
+            let chunk_frames = remaining.min(chunk_frames_target).max(1);
+            let rendered_samples_i64 = match i64::try_from(rendered_samples) {
+                Ok(value) => value,
+                Err(_) => {
+                    return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
+                }
+            };
+            let chunk_start = match start_sample.checked_add(rendered_samples_i64) {
+                Some(value) => value,
+                None => {
+                    return JobExecutionResult::Failed("导出音频样本位置超出支持范围".to_owned());
+                }
+            };
+            let chunk_samples = chunk_frames * channels;
+            if let Err(error) = delivery.render_into_cancellable(
+                AudioRenderRequest { start_sample: chunk_start, frames: chunk_frames },
+                &mut pcm[..chunk_samples],
+                cancel,
+            ) {
+                if cancel.is_canceled() {
+                    return JobExecutionResult::Cancelled;
+                }
+                return JobExecutionResult::Failed(format!("执行导出音频 Program 失败: {error}"));
+            }
+            if let Err(error) = loudness.observe_interleaved(&pcm[..chunk_samples]) {
+                return JobExecutionResult::Failed(format!("导出音频响度/真峰值分析失败: {error}"));
+            }
+            sample_bytes.clear();
+            sample_bytes.reserve(chunk_samples * 4);
+            for sample in &pcm[..chunk_samples] {
+                sample_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            if let Err(err) = writer.write_all(&sample_bytes) {
+                return JobExecutionResult::Failed(format!("写入临时音频文件失败: {}", err));
+            }
+
+            rendered_samples += chunk_frames;
+            let ratio = rendered_samples as f32 / total_samples as f32;
+            let progress = (0.02 + 0.14 * ratio).clamp(0.02, 0.16);
+            report(ExportProgress::preparing(progress));
         }
 
-        rendered_samples += chunk_frames;
-        let ratio = rendered_samples as f32 / total_samples as f32;
-        let progress = (0.02 + 0.14 * ratio).clamp(0.02, 0.16);
-        report(ExportProgress::preparing(progress));
-    }
-
-    if let Err(err) = writer.flush() {
-        return JobExecutionResult::Failed(format!("刷新临时音频文件失败: {}", err));
-    }
-    *analysis_out = match loudness.finish() {
-        Ok(report) => Some(report),
-        Err(error) => {
-            return JobExecutionResult::Failed(format!("完成导出音频响度/真峰值分析失败: {error}"));
+        if let Err(err) = writer.flush() {
+            return JobExecutionResult::Failed(format!("刷新临时音频文件失败: {}", err));
         }
-    };
-    JobExecutionResult::ReversibleWorkCompleted
+        *analysis_out = match loudness.finish() {
+            Ok(report) => Some(report),
+            Err(error) => {
+                return JobExecutionResult::Failed(format!(
+                    "完成导出音频响度/真峰值分析失败: {error}"
+                ));
+            }
+        };
+        JobExecutionResult::ReversibleWorkCompleted
+    }
 }
 
 fn timeline_audio_sample_range(
@@ -10397,6 +10773,7 @@ mod tests {
             execution_gate: &service::ExportExecutionGate,
             report: &mut dyn FnMut(ExportProgress),
             _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+            _report_owner: &mut dyn FnMut(ExportExecutionOwnerEvent),
         ) -> JobExecutionResult {
             self.calls.fetch_add(1, Ordering::Relaxed);
             report(ExportProgress::encoding(0.2));
@@ -10434,6 +10811,7 @@ mod tests {
             execution_gate: &service::ExportExecutionGate,
             report: &mut dyn FnMut(ExportProgress),
             report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+            _report_owner: &mut dyn FnMut(ExportExecutionOwnerEvent),
         ) -> JobExecutionResult {
             if !execution_gate.wait_at_boundary(ExportProgressPhase::Rendering, cancel) {
                 return JobExecutionResult::Cancelled;
@@ -10470,6 +10848,7 @@ mod tests {
             execution_gate: &service::ExportExecutionGate,
             _report: &mut dyn FnMut(ExportProgress),
             _report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
+            _report_owner: &mut dyn FnMut(ExportExecutionOwnerEvent),
         ) -> JobExecutionResult {
             let call = self.calls.fetch_add(1, Ordering::Relaxed);
             let before = execution_gate.resource_policy();
@@ -10527,6 +10906,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |_| {},
+            &mut |_| {},
         );
 
         assert!(matches!(result, JobExecutionResult::Published(_)));
@@ -10573,6 +10953,7 @@ mod tests {
                 &job,
                 &ExecutionCancellationToken::new(),
                 &open_execution_gate(),
+                &mut |_| {},
                 &mut |_| {},
                 &mut |_| {},
             );
@@ -10632,6 +11013,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |_| {},
+            &mut |_| {},
         );
 
         assert!(
@@ -10657,6 +11039,151 @@ mod tests {
     }
 
     #[test]
+    fn audio_stem_block_interleave_reuses_bounded_decode_windows_across_outputs() {
+        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+            eprintln!("skipping audio-stem decode-sharing test: FFmpeg unavailable");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("temporary stem source parent");
+        let source_path = directory.path().join("twenty-one-seconds.wav");
+        let sample_rate = 48_000_u32;
+        let sample_frames = usize::try_from(sample_rate).expect("sample rate") * 21;
+        let data_bytes = u32::try_from(sample_frames * 2 * 4).expect("short WAV payload");
+        let mut wave = BufWriter::new(
+            std::fs::File::create(&source_path).expect("create test float WAV source"),
+        );
+        wave.write_all(b"RIFF").expect("write RIFF tag");
+        wave.write_all(&(36_u32 + data_bytes).to_le_bytes()).expect("write RIFF extent");
+        wave.write_all(b"WAVEfmt ").expect("write WAVE/fmt tags");
+        wave.write_all(&16_u32.to_le_bytes()).expect("write fmt size");
+        wave.write_all(&3_u16.to_le_bytes()).expect("write IEEE-float format");
+        wave.write_all(&2_u16.to_le_bytes()).expect("write channel count");
+        wave.write_all(&sample_rate.to_le_bytes()).expect("write sample rate");
+        wave.write_all(&(sample_rate * 8).to_le_bytes()).expect("write byte rate");
+        wave.write_all(&8_u16.to_le_bytes()).expect("write block align");
+        wave.write_all(&32_u16.to_le_bytes()).expect("write bit depth");
+        wave.write_all(b"data").expect("write data tag");
+        wave.write_all(&data_bytes.to_le_bytes()).expect("write data extent");
+        let silence = vec![0_u8; 64 * 1024];
+        let mut remaining = usize::try_from(data_bytes).expect("payload usize");
+        while remaining > 0 {
+            let count = remaining.min(silence.len());
+            wave.write_all(&silence[..count]).expect("write PCM payload");
+            remaining -= count;
+        }
+        wave.flush().expect("flush float WAV source");
+        drop(wave);
+
+        let asset_id = AssetId::new();
+        let component_id = AudioSourceComponentId::primary();
+        let mut timeline = timeline_input_with_output_color(ColorSpace::Rec709);
+        timeline.sequence.settings.audio_sample_rate = sample_rate;
+        let time_base = timeline.sequence.time_base();
+        let track_id = timeline.sequence.audio_tracks[0].id;
+        timeline
+            .sequence
+            .add_media_audio_clip(
+                track_id,
+                Clip::new(asset_id, TimelineTime::ZERO, tt(525, time_base))
+                    .expect("21-second audio Clip"),
+                component_id,
+            )
+            .expect("add media audio Clip");
+        let alternate_output = mondrian_core::ProgramOutputId::new();
+        timeline.sequence.audio_program.outputs.push(
+            mondrian_timeline::audio::AudioProgramOutput {
+                id: alternate_output,
+                name: "Shared Decode Stem".to_owned(),
+                main_source: mondrian_timeline::audio::ProgramOutputMainSource::RoutedInputs,
+                strip: mondrian_timeline::audio::AudioChannelStrip::default(),
+            },
+        );
+        timeline
+            .sequence
+            .audio_program
+            .routes
+            .push(mondrian_timeline::audio::AudioRoute::new(
+                mondrian_timeline::audio::AudioRouteSource::Track {
+                    track_id,
+                    port: mondrian_timeline::audio::AudioChannelStripOutputPort::PostMute,
+                },
+                mondrian_timeline::audio::AudioRouteDestination::Output(alternate_output),
+            ));
+        let fingerprint = MediaFileFingerprint::capture(&source_path);
+        let mut dependency =
+            test_media_dependency(source_path, None, AssetMediaInterpretation::default(), None);
+        dependency.audio_components.insert(
+            component_id,
+            mondrian_media::AudioSourceSelection::new(
+                0,
+                mondrian_media::info::ChannelLayout::Stereo,
+                fingerprint,
+            ),
+        );
+        timeline.media.insert(asset_id, dependency);
+        refresh_test_execution_snapshot_with_audio_selection(
+            &mut timeline,
+            crate::preset::ExportAudioProgramSelection::All,
+        );
+        let delivery = crate::delivery::resolve_export_delivery(
+            &crate::preset::ExportPreset::audio_stems_pcm24(),
+            &timeline.sequence.settings,
+            &timeline.color_environment,
+        )
+        .expect("resolve stem delivery");
+        let range = compute_timeline_render_range_for_delivery(&timeline, &delivery)
+            .expect("resolve stem range");
+        let prepared_audio = timeline
+            .prepared_execution()
+            .and_then(|execution| execution.audio())
+            .expect("prepared all-output audio closure");
+        assert_eq!(prepared_audio.output_count(), 2);
+
+        let mut events = Vec::new();
+        let (diagnostics, closure) = {
+            let mut report_owner = |event| events.push(event);
+            let mut owner = ExportAudioSourceOwner::new(
+                // Two retained windows cover the current/next boundary while the
+                // 21-second source still exceeds the complete cache working set.
+                AudioSourceCacheConfig::new(2, 8 * 1024 * 1024, 1),
+                &mut report_owner,
+            );
+            let rendered = render_audio_stems_to_pcm_f32(
+                &timeline,
+                prepared_audio,
+                range,
+                sample_rate,
+                AudioChannelLayout::Stereo,
+                &mut owner,
+                &ExecutionCancellationToken::new(),
+                &open_execution_gate(),
+                &mut |_| {},
+            )
+            .expect("render interleaved stem PCM");
+            assert_eq!(rendered.len(), 2);
+            let cache = owner.cache(sample_rate).expect("inspect shared job cache");
+            let diagnostics = cache.diagnostics();
+            drop(cache);
+            drop(rendered);
+            let closure = owner
+                .shutdown_until(Instant::now() + Duration::from_secs(2))
+                .expect("close used stem owner");
+            (diagnostics, closure)
+        };
+
+        assert!(diagnostics.hits > 0, "{diagnostics:?}");
+        assert!(
+            diagnostics.decode_successes <= 4,
+            "21 seconds span three ten-second windows; two outputs must not decode each window independently: {diagnostics:?}"
+        );
+        assert!(closure.all_resources_released(), "{closure:?}");
+        assert_eq!(
+            events.last(),
+            Some(&ExportExecutionOwnerEvent::AudioSourceClosed { all_resources_released: true })
+        );
+    }
+
+    #[test]
     fn ffmpeg_executor_publishes_probe_qualified_h264_media() {
         if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
             eprintln!("skipping H.264 integration test: FFmpeg unavailable");
@@ -10675,6 +11202,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |diagnostics| latest_diagnostics = Some(diagnostics),
+            &mut |_| {},
         );
 
         assert!(
@@ -10729,6 +11257,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |diagnostics| latest_diagnostics = Some(diagnostics),
+            &mut |_| {},
         );
 
         assert!(
@@ -10765,6 +11294,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |diagnostics| blocked_diagnostics = Some(diagnostics),
+            &mut |_| {},
         );
         assert!(
             matches!(blocked, JobExecutionResult::Failed(_)),
@@ -10829,6 +11359,7 @@ mod tests {
                 &job,
                 &ExecutionCancellationToken::new(),
                 &open_execution_gate(),
+                &mut |_| {},
                 &mut |_| {},
                 &mut |_| {},
             );
@@ -10962,6 +11493,7 @@ mod tests {
             &open_execution_gate(),
             &mut |_| {},
             &mut |diagnostics| latest_diagnostics = Some(diagnostics),
+            &mut |_| {},
         );
 
         assert!(
@@ -16226,6 +16758,89 @@ mod tests {
             assert!(b > 0, "B channel should be nonzero in rgba64le");
             assert_eq!(a, u16::MAX, "alpha should be 1.0 in rgba64le");
         }
+    }
+}
+
+#[cfg(test)]
+mod audio_source_owner_tests {
+    use super::*;
+
+    #[test]
+    fn unused_owner_emits_no_lifecycle_and_needs_no_receipt() {
+        let mut events = Vec::new();
+        let closure = {
+            let mut report = |event| events.push(event);
+            ExportAudioSourceOwner::new(
+                AudioSourceCacheConfig::new(16, 64 * 1024 * 1024, 2),
+                &mut report,
+            )
+            .shutdown_until(Instant::now() + Duration::from_secs(1))
+        };
+
+        assert!(closure.is_none());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn job_owner_closes_nested_audio_cache_with_exact_lifecycle_events() {
+        let mut events = Vec::new();
+        let closure = {
+            let mut report = |event| events.push(event);
+            let mut owner = ExportAudioSourceOwner::new(
+                AudioSourceCacheConfig::new(16, 64 * 1024 * 1024, 2),
+                &mut report,
+            );
+            let cache = owner.cache(48_000).expect("create job audio cache");
+            drop(cache);
+            owner
+                .shutdown_until(Instant::now() + Duration::from_secs(1))
+                .expect("used owner closure")
+        };
+
+        assert_eq!(closure.cache.schema_version, 5);
+        assert!(closure.all_resources_released(), "{closure:?}");
+        assert_eq!(
+            events,
+            vec![
+                ExportExecutionOwnerEvent::AudioSourceStarted,
+                ExportExecutionOwnerEvent::AudioSourceClosed { all_resources_released: true },
+            ]
+        );
+    }
+
+    #[test]
+    fn retained_cache_reference_is_reported_dirty_and_cannot_be_hidden_by_outcome() {
+        let mut events = Vec::new();
+        let retained_cache;
+        let closure = {
+            let mut report = |event| events.push(event);
+            let mut owner = ExportAudioSourceOwner::new(
+                AudioSourceCacheConfig::new(16, 64 * 1024 * 1024, 2),
+                &mut report,
+            );
+            retained_cache = owner.cache(48_000).expect("create retained job audio cache");
+            owner
+                .shutdown_until(Instant::now() + Duration::from_secs(1))
+                .expect("used owner closure")
+        };
+
+        assert_eq!(closure.external_cache_references, 1);
+        assert!(!closure.all_resources_released());
+        assert_eq!(
+            events,
+            vec![
+                ExportExecutionOwnerEvent::AudioSourceStarted,
+                ExportExecutionOwnerEvent::AudioSourceClosed { all_resources_released: false },
+            ]
+        );
+        assert!(matches!(
+            finish_export_with_audio_closure(
+                JobExecutionResult::ReversibleWorkCompleted,
+                Some(closure),
+            ),
+            JobExecutionResult::Failed(_)
+        ));
+        drop(retained_cache);
     }
 }
 
