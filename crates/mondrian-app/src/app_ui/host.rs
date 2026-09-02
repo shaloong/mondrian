@@ -83,6 +83,8 @@ use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRe
 use mondrian_editor_state::Action;
 
 const WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
+#[cfg(feature = "validation")]
+const VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Window-host commands produced while draining app UI actions.
 ///
@@ -323,6 +325,27 @@ impl AppUiHost {
     /// Read-only access to the current app state.
     pub fn app_state(&self) -> Ref<'_, AppState> {
         self.app_state.borrow()
+    }
+
+    /// Close UI-only execution services and return the exact App owner used by
+    /// a validation Window session.
+    ///
+    /// The returned state remains live so a higher-level endurance owner can
+    /// resume the same Timeline generation or consume its full App shutdown.
+    #[cfg(feature = "validation")]
+    pub(crate) fn into_validation_app_state(self) -> (AppState, Option<String>) {
+        let deadline = Instant::now() + VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT;
+        self.waveform_service.begin_shutdown();
+        let preview = self.preview_service.shutdown_until(deadline);
+        let waveform = self.waveform_service.shutdown_until(deadline);
+        let failure = if !preview.all_workers_terminated() || !waveform.all_resources_released() {
+            Some(format!(
+                "Window validation UI services did not close cleanly: preview={preview:?}, waveform={waveform:?}"
+            ))
+        } else {
+            None
+        };
+        (self.app_state.into_inner(), failure)
     }
 
     /// Get the Project engine and machine-local Viewer display policy.
@@ -4173,6 +4196,23 @@ mod tests {
             waveform_shutdown.all_resources_released(),
             "{waveform_shutdown:#?}"
         );
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn validation_host_returns_app_owner_after_closing_ui_services() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+
+        let (state, ui_service_failure) = host.into_validation_app_state();
+
+        assert!(ui_service_failure.is_none(), "{ui_service_failure:?}");
+        let shutdown = state.shutdown_for_endurance(
+            Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("test shutdown deadline"),
+        );
+        assert!(shutdown.all_resources_released(), "{shutdown:#?}");
     }
 
     #[test]

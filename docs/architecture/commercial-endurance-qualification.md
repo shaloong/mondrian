@@ -425,7 +425,12 @@ therefore accepts `Ready` or `Degraded` only when GPU working composition was
 actually executed, an external texture batch was submitted, no external
 texture failed, and the exact picture contract matches after reopen. This does
 not claim native decoder-surface residency, physical Reference Output, final
-App-wide shutdown closure, or a 72-hour campaign.
+72-hour campaign, or hardware qualification. The Window owner now returns the
+same `AppState` after bounded Window Preview and Waveform closure. The narrow
+runner consumes that state through the full App endurance shutdown and rejects
+the otherwise valid Surface receipt if any UI or App owner remains detached;
+the concrete campaign runtime can instead resume the same settled Timeline
+owner after the Window operation.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

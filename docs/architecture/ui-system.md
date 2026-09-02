@@ -1742,6 +1742,17 @@ the same active Sequence/frame/color/display contract. A Headless surface, a
 successful `configure`, a reused Device generation, or a CPU-only raster is not
 Surface reopen evidence.
 
+The validation event loop retains a consuming host-return guard around
+`AppUiHost`. Every exit path first closes the Window-owned production Preview
+with one bounded synchronous receipt and closes Waveform against the same UI
+deadline, then returns the exact `AppState` that entered the Window. A rejected
+or failed reopen therefore cannot silently drop the campaign's Project,
+Preview, Audio, Export, or cache owners. The narrow standalone runner consumes
+that returned state through `shutdown_for_endurance`; a higher-level campaign
+runtime may instead resume its settled persistent Timeline owner. Returning a
+receipt while a Window Preview worker, Basic Title task, visual/CPU fallback,
+render-cache worker, or Waveform owner detached is forbidden.
+
 One non-renewing five-second lifecycle deadline revokes publication authority
 but does not free submitted resources. Timeout/cancellation enters
 non-reusable quarantine and defers runtime clear/reset; the device worker keeps
