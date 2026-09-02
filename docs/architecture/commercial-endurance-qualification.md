@@ -42,8 +42,10 @@ The implementation is split at existing authority boundaries:
 - `mondrian-app::app::endurance_export` captures one ordinary immutable
   Timeline Export configuration and exclusively drives its fresh Queue through
   strictly serial create-only publication, independent verification, and exact
-  terminal-history cleanup. It does not recapture author state between jobs or
-  reinterpret the Export executor.
+  terminal-history cleanup. Its explicit recovery substate can cancel exactly
+  one running reversible attempt and prove a distinct verified retry without
+  changing ordinary Continuous Export cancellation semantics. It does not
+  recapture author state between jobs or reinterpret the Export executor.
 - the PowerShell verifier owns external trust anchors, link-free file closure,
   immutable-byte checks, a bounded replay process, and create-only output.
 
@@ -391,14 +393,13 @@ requires unchanged GPU-device-loss, aggregate fatal, and Export-failure
 counters. Decision digests bind the exact coordinator revision, pressure
 source, trim, Frame Store budgets, and Viewer idle-release request.
 
-The receipt schema and verifier deliberately recognize all four ordered steps,
-but production constructors for surface/device reopen and Export cancel/retry
-remain closed until their real owner operations return sealed facts.
-Surface/device reopen still needs a consuming Window surface/device owner with
-actual generation identities; Export cancel/retry needs a recovery mode in the
-frozen Export state machine. Protocol support is not operation qualification,
-and an incomplete concrete runtime must fail capability admission rather than
-fabricate either receipt.
+The receipt schema and verifier deliberately recognize all four ordered steps.
+Seek, Export cancel/retry, and Cache Pressure now have production constructors
+that accept only opaque facts returned by their real operation owners.
+Surface/device reopen remains closed until a consuming Window surface/device
+owner returns actual replacement generation identities. Protocol support is
+not operation qualification, and an incomplete concrete runtime must fail
+capability admission rather than fabricate that receipt.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported
@@ -420,9 +421,26 @@ contamination, verification failure, cleanup mismatch, or checked counter
 overflow permanently faults the phase. The concrete runtime must hold the owner
 only for the Export interval and drop it before consuming the complete
 `AppState`; otherwise its extra Queue `Arc` is residual ownership, not clean
-shutdown evidence. Concurrent Recovery deliberately uses a separate retry
-owner because its workload requires cancellation and cannot weaken this phase's
-contract.
+shutdown evidence.
+
+Concurrent Recovery enters an explicit substate on that same frozen owner; no
+ordinary poll can infer or request cancellation. The substate waits for the
+exact owned Job to report `Running`, `executed`, and `Reversible`, snapshots the
+cumulative Queue counters, and accepts only `ExportCancelOutcome::Requested`.
+Pending work is not cancellation evidence and a race into `Committing` fails
+closed. It then requires the same Job generation and route to terminate as
+`Canceled` + `NotPublished`, with user-initiated terminal evidence, no artifact
+publication evidence, exactly one new cancellation, no too-late increment, and
+exactly one terminal-history removal. The retry must have a different Job ID,
+strictly newer generation, different monotonically numbered `CreateNew` path,
+and complete as exact durable publication. Only the independent full-stream
+EOF verification receipt can close the retry and seal both the artifact event
+and Export recovery receipt. Retry failure/cancellation, verifier failure,
+identity drift, residual Queue ownership, or counter drift permanently faults
+the owner. A close request received before cancellation authority is asserted
+withdraws the recovery request and lets the original attempt finish; after an
+accepted cancellation, close must finish the distinct retry rather than leave
+the system degraded.
 
 The independent Export receipt is produced only after a bounded regular-file
 check, encoded-byte hash, typed container/stream probe, and a separate FFmpeg

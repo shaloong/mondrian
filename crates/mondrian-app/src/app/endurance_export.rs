@@ -4,17 +4,26 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use mondrian_core::{JobId, SequenceId};
+use mondrian_core::{
+    ExecutionDeadlineStatus, ExecutionPriority, ExecutionTerminalDisposition,
+    ExecutionTerminalEvidence, JobId, SequenceId,
+};
 use mondrian_export::preset::{
     ExportConfig, ExportOutputPolicy, ExportPreset, TimelineExportRange,
 };
 use mondrian_export::queue::{
-    ExportArtifactPublicationEvidence, ExportPublicationState, JobStatus, RenderJob, RenderQueue,
+    ExportArtifactPublicationEvidence, ExportCancelOutcome, ExportPublicationState,
+    ExportQueueDiagnostics, JobStatus, RenderJob, RenderQueue,
 };
-use mondrian_export::{verify_export_artifact, IndependentExportArtifactPolicy};
+use mondrian_export::{
+    verify_export_artifact, IndependentExportArtifactPolicy, IndependentExportArtifactReceipt,
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::endurance_campaign::EnduranceCampaignEvent;
+use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::exporting::{export_preset_extension, TimelineExportRequest};
 use super::AppState;
 
@@ -95,10 +104,47 @@ impl FrozenExportPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FrozenExportAttemptObservation {
-    Active,
-    Completed { output_path: PathBuf },
+    Pending {
+        generation: u64,
+        output_path: PathBuf,
+        executed: bool,
+        publication: ExportPublicationState,
+    },
+    Running {
+        generation: u64,
+        output_path: PathBuf,
+        executed: bool,
+        publication: ExportPublicationState,
+    },
+    Cancelling {
+        generation: u64,
+        output_path: PathBuf,
+        executed: bool,
+        publication: ExportPublicationState,
+    },
+    Completed {
+        generation: u64,
+        output_path: PathBuf,
+    },
     Failed(String),
-    Cancelled,
+    Cancelled(FrozenCancelledExportTerminal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrozenCancelledExportTerminal {
+    job_id: JobId,
+    generation: u64,
+    output_path: PathBuf,
+    executed: bool,
+    publication: ExportPublicationState,
+    terminal_evidence: Option<ExecutionTerminalEvidence>,
+    artifact_publication: Option<ExportArtifactPublicationEvidence>,
+}
+
+struct VerifiedFrozenExportArtifact {
+    event: EnduranceCampaignEvent,
+    artifact_sha256: String,
+    validation_report_sha256: String,
 }
 
 trait FrozenExportBackend {
@@ -110,7 +156,9 @@ trait FrozenExportBackend {
         id: JobId,
         output_path: &Path,
         completed_at_us: u64,
-    ) -> Result<EnduranceCampaignEvent, String>;
+    ) -> Result<VerifiedFrozenExportArtifact, String>;
+    fn diagnostics(&self) -> ExportQueueDiagnostics;
+    fn cancel(&mut self, id: JobId) -> ExportCancelOutcome;
     fn clear_terminal_history(&mut self) -> usize;
 }
 
@@ -135,20 +183,49 @@ impl FrozenExportBackend for ProductionFrozenExportBackend {
             .into_iter()
             .find(|snapshot| snapshot.id == id)
             .ok_or_else(|| format!("phase-owned Export job {id} disappeared"))?;
+        let generation = snapshot.generation;
+        let output_path = snapshot.output_path.clone();
+        let executed = snapshot.executed;
+        let publication = snapshot.publication;
         match snapshot.status {
-            JobStatus::Pending | JobStatus::Running { .. } | JobStatus::Cancelling { .. } => {
-                Ok(FrozenExportAttemptObservation::Active)
-            }
+            JobStatus::Pending => Ok(FrozenExportAttemptObservation::Pending {
+                generation,
+                output_path,
+                executed,
+                publication,
+            }),
+            JobStatus::Running { .. } => Ok(FrozenExportAttemptObservation::Running {
+                generation,
+                output_path,
+                executed,
+                publication,
+            }),
+            JobStatus::Cancelling { .. } => Ok(FrozenExportAttemptObservation::Cancelling {
+                generation,
+                output_path,
+                executed,
+                publication,
+            }),
             JobStatus::Failed(error) => {
                 Ok(FrozenExportAttemptObservation::Failed(error.to_string()))
             }
-            JobStatus::Cancelled => Ok(FrozenExportAttemptObservation::Cancelled),
+            JobStatus::Cancelled => Ok(FrozenExportAttemptObservation::Cancelled(
+                FrozenCancelledExportTerminal {
+                    job_id: snapshot.id,
+                    generation,
+                    output_path,
+                    executed,
+                    publication,
+                    terminal_evidence: snapshot.terminal_evidence,
+                    artifact_publication: snapshot.artifact_publication,
+                },
+            )),
             JobStatus::Completed => match (snapshot.publication, snapshot.artifact_publication) {
                 (
                     ExportPublicationState::Published,
                     Some(ExportArtifactPublicationEvidence::Durable { output_path }),
                 ) if output_path == snapshot.output_path => {
-                    Ok(FrozenExportAttemptObservation::Completed { output_path })
+                    Ok(FrozenExportAttemptObservation::Completed { generation, output_path })
                 }
                 _ => Err(format!(
                     "phase-owned Export job {id} completed without exact durable publication"
@@ -162,21 +239,37 @@ impl FrozenExportBackend for ProductionFrozenExportBackend {
         id: JobId,
         output_path: &Path,
         completed_at_us: u64,
-    ) -> Result<EnduranceCampaignEvent, String> {
+    ) -> Result<VerifiedFrozenExportArtifact, String> {
         let receipt = verify_export_artifact(
             output_path,
             format!("endurance-export-{id}"),
             self.verification_policy,
         )
         .map_err(|error| error.to_string())?;
-        Ok(EnduranceCampaignEvent::export_artifact_verified(
-            completed_at_us,
-            &receipt,
-        ))
+        Ok(verified_artifact(completed_at_us, &receipt))
+    }
+
+    fn diagnostics(&self) -> ExportQueueDiagnostics {
+        self.queue.diagnostics()
+    }
+
+    fn cancel(&mut self, id: JobId) -> ExportCancelOutcome {
+        self.queue.cancel(id)
     }
 
     fn clear_terminal_history(&mut self) -> usize {
         self.queue.clear_terminal_history()
+    }
+}
+
+fn verified_artifact(
+    completed_at_us: u64,
+    receipt: &IndependentExportArtifactReceipt,
+) -> VerifiedFrozenExportArtifact {
+    VerifiedFrozenExportArtifact {
+        event: EnduranceCampaignEvent::export_artifact_verified(completed_at_us, receipt),
+        artifact_sha256: receipt.report().artifact_sha256.clone(),
+        validation_report_sha256: receipt.validation_report_sha256().to_owned(),
     }
 }
 
@@ -186,12 +279,91 @@ struct ActiveFrozenExportAttempt {
     output_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+enum FrozenExportRecovery {
+    Running {
+        cycle_index: u32,
+    },
+    Cancelled {
+        cycle_index: u32,
+        cancelled_job_id: JobId,
+        cancelled_generation: u64,
+        cancelled_output_path: PathBuf,
+        cancellation_requests_before: u64,
+        cancellations_before: u64,
+        too_late_before: u64,
+    },
+    Retry {
+        cycle_index: u32,
+        cancelled_job_id: JobId,
+        cancelled_generation: u64,
+        cancelled_output_path: PathBuf,
+        cancelled_terminal_sha256: String,
+        cancellation_requests_before: u64,
+        cancellations_before: u64,
+        cancellations_after: u64,
+        too_late_before: u64,
+    },
+}
+
+/// Owner-derived facts accepted by the central recovery receipt sealer.
+pub(super) struct ExportCancelRetryFacts {
+    cycle_index: u32,
+    operation_id: String,
+    cancelled_job_id: String,
+    retry_job_id: String,
+    cancellation_count_before: u64,
+    cancellation_count_after: u64,
+    cancelled_terminal_sha256: String,
+    retry_artifact_sha256: String,
+    retry_validation_report_sha256: String,
+}
+
+impl ExportCancelRetryFacts {
+    pub(super) const fn cycle_index(&self) -> u32 {
+        self.cycle_index
+    }
+
+    pub(super) fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    pub(super) fn cancelled_job_id(&self) -> &str {
+        &self.cancelled_job_id
+    }
+
+    pub(super) fn retry_job_id(&self) -> &str {
+        &self.retry_job_id
+    }
+
+    pub(super) const fn cancellation_count_before(&self) -> u64 {
+        self.cancellation_count_before
+    }
+
+    pub(super) const fn cancellation_count_after(&self) -> u64 {
+        self.cancellation_count_after
+    }
+
+    pub(super) fn cancelled_terminal_sha256(&self) -> &str {
+        &self.cancelled_terminal_sha256
+    }
+
+    pub(super) fn retry_artifact_sha256(&self) -> &str {
+        &self.retry_artifact_sha256
+    }
+
+    pub(super) fn retry_validation_report_sha256(&self) -> &str {
+        &self.retry_validation_report_sha256
+    }
+}
+
 struct FrozenRepeatedExportState<B> {
     plan: FrozenExportPlan,
     backend: B,
     active: Option<ActiveFrozenExportAttempt>,
     next_ordinal: u64,
     verified_artifacts: u64,
+    recovery: Option<FrozenExportRecovery>,
     closing: bool,
     fault: Option<String>,
 }
@@ -219,6 +391,22 @@ impl FrozenRepeatedExportPhase {
         completed_at_us: u64,
     ) -> Result<Vec<EnduranceCampaignEvent>, FrozenRepeatedExportError> {
         self.state.poll(completed_at_us)
+    }
+
+    /// Request one controlled cancellation and distinct verified retry.
+    ///
+    /// Cancellation is not asserted until a later poll observes the exact
+    /// phase-owned attempt executing inside the reversible publication region.
+    pub fn begin_cancel_retry_recovery(
+        &mut self,
+        cycle_index: u32,
+    ) -> Result<(), FrozenRepeatedExportError> {
+        self.state.begin_cancel_retry_recovery(cycle_index)
+    }
+
+    /// Whether one controlled cancellation/retry operation is incomplete.
+    pub const fn cancel_retry_recovery_in_progress(&self) -> bool {
+        self.state.cancel_retry_recovery_in_progress()
     }
 
     /// Stop new admission while allowing the active attempt to publish and verify.
@@ -251,6 +439,7 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
             active: None,
             next_ordinal: 1,
             verified_artifacts: 0,
+            recovery: None,
             closing: false,
             fault: None,
         };
@@ -265,6 +454,9 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
     ) -> Result<Vec<EnduranceCampaignEvent>, FrozenRepeatedExportError> {
         if let Some(detail) = &self.fault {
             return Err(FrozenRepeatedExportError::Faulted(detail.clone()));
+        }
+        if self.recovery.is_some() {
+            return self.poll_cancel_retry_recovery(completed_at_us);
         }
         let Some(active) = self.active.clone() else {
             if !self.closing {
@@ -281,20 +473,22 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
         let observation =
             self.backend.observe(active.id).map_err(|detail| self.latch_fault(detail))?;
         match observation {
-            FrozenExportAttemptObservation::Active => Ok(Vec::new()),
+            FrozenExportAttemptObservation::Pending { .. }
+            | FrozenExportAttemptObservation::Running { .. }
+            | FrozenExportAttemptObservation::Cancelling { .. } => Ok(Vec::new()),
             FrozenExportAttemptObservation::Failed(detail) => {
                 Err(self.latch_fault(format!("phase-owned Export failed: {detail}")))
             }
-            FrozenExportAttemptObservation::Cancelled => {
+            FrozenExportAttemptObservation::Cancelled(_) => {
                 Err(self.latch_fault("continuous Export attempt was cancelled".to_owned()))
             }
-            FrozenExportAttemptObservation::Completed { output_path } => {
+            FrozenExportAttemptObservation::Completed { generation: _, output_path } => {
                 if output_path != active.output_path {
                     return Err(self.latch_fault(
                         "durable Export path differs from the admitted attempt".to_owned(),
                     ));
                 }
-                let event = self
+                let verified = self
                     .backend
                     .verify(active.id, &output_path, completed_at_us)
                     .map_err(|detail| self.latch_fault(detail))?;
@@ -309,14 +503,329 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
                     self.verified_artifacts.checked_add(1).ok_or_else(|| {
                         self.latch_fault("verified Export artifact counter overflow".to_owned())
                     })?;
-                Ok(vec![event])
+                Ok(vec![verified.event])
             }
+        }
+    }
+
+    fn poll_cancel_retry_recovery(
+        &mut self,
+        completed_at_us: u64,
+    ) -> Result<Vec<EnduranceCampaignEvent>, FrozenRepeatedExportError> {
+        let recovery = self
+            .recovery
+            .take()
+            .ok_or_else(|| self.latch_fault("Export cancel/retry state disappeared".to_owned()))?;
+        let active = self.active.clone().ok_or_else(|| {
+            self.latch_fault("Export cancel/retry lost its active attempt".to_owned())
+        })?;
+        if self.backend.retained_jobs() != 1 {
+            return Err(self.latch_fault(
+                "Export cancel/retry requires exactly one retained owned job".to_owned(),
+            ));
+        }
+        let observation =
+            self.backend.observe(active.id).map_err(|detail| self.latch_fault(detail))?;
+
+        match recovery {
+            FrozenExportRecovery::Running { cycle_index } => match observation {
+                FrozenExportAttemptObservation::Pending {
+                    generation,
+                    output_path,
+                    executed,
+                    publication,
+                } => {
+                    validate_active_attempt(
+                        &active,
+                        generation,
+                        &output_path,
+                        executed,
+                        publication,
+                        false,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    self.recovery = Some(FrozenExportRecovery::Running { cycle_index });
+                    Ok(Vec::new())
+                }
+                FrozenExportAttemptObservation::Running {
+                    generation,
+                    output_path,
+                    executed,
+                    publication,
+                } => {
+                    validate_active_attempt(
+                        &active,
+                        generation,
+                        &output_path,
+                        executed,
+                        publication,
+                        true,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    let before = self.backend.diagnostics();
+                    if before.committing != 0 || before.cancelling != 0 {
+                        return Err(self.latch_fault(
+                            "Export cancel/retry observed a contaminated or irreversible queue"
+                                .to_owned(),
+                        ));
+                    }
+                    match self.backend.cancel(active.id) {
+                        ExportCancelOutcome::Requested => {}
+                        outcome => {
+                            return Err(self.latch_fault(format!(
+                                "Export cancel/retry cancellation was not accepted: {outcome:?}"
+                            )));
+                        }
+                    }
+                    self.recovery = Some(FrozenExportRecovery::Cancelled {
+                        cycle_index,
+                        cancelled_job_id: active.id,
+                        cancelled_generation: generation,
+                        cancelled_output_path: active.output_path,
+                        cancellation_requests_before: before.cancellation_requests,
+                        cancellations_before: before.cancellations,
+                        too_late_before: before.too_late_cancellation_requests,
+                    });
+                    Ok(Vec::new())
+                }
+                FrozenExportAttemptObservation::Cancelling { .. } => Err(self.latch_fault(
+                    "phase-owned Export was cancelling before recovery asserted authority"
+                        .to_owned(),
+                )),
+                FrozenExportAttemptObservation::Completed { .. } => Err(self.latch_fault(
+                    "phase-owned Export completed before controlled cancellation".to_owned(),
+                )),
+                FrozenExportAttemptObservation::Failed(detail) => Err(self.latch_fault(format!(
+                    "phase-owned Export failed before controlled cancellation: {detail}"
+                ))),
+                FrozenExportAttemptObservation::Cancelled(_) => Err(self.latch_fault(
+                    "phase-owned Export was cancelled outside recovery authority".to_owned(),
+                )),
+            },
+            FrozenExportRecovery::Cancelled {
+                cycle_index,
+                cancelled_job_id,
+                cancelled_generation,
+                cancelled_output_path,
+                cancellation_requests_before,
+                cancellations_before,
+                too_late_before,
+            } => match observation {
+                FrozenExportAttemptObservation::Cancelling {
+                    generation,
+                    output_path,
+                    executed,
+                    publication,
+                } => {
+                    validate_cancel_pending_attempt(
+                        cancelled_job_id,
+                        cancelled_generation,
+                        &cancelled_output_path,
+                        &active,
+                        generation,
+                        &output_path,
+                        executed,
+                        publication,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    self.recovery = Some(FrozenExportRecovery::Cancelled {
+                        cycle_index,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        cancelled_output_path,
+                        cancellation_requests_before,
+                        cancellations_before,
+                        too_late_before,
+                    });
+                    Ok(Vec::new())
+                }
+                FrozenExportAttemptObservation::Cancelled(terminal) => {
+                    validate_cancelled_terminal(
+                        &terminal,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        &cancelled_output_path,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    let after = self.backend.diagnostics();
+                    if after.cancellation_requests != cancellation_requests_before.saturating_add(1)
+                        || after.cancellations != cancellations_before.saturating_add(1)
+                        || after.too_late_cancellation_requests != too_late_before
+                        || after.terminal != 1
+                        || after.pending != 0
+                        || after.running != 0
+                        || after.cancelling != 0
+                        || after.committing != 0
+                    {
+                        return Err(self.latch_fault(
+                            "Export cancellation counters or terminal gauges did not close exactly"
+                                .to_owned(),
+                        ));
+                    }
+                    let cancelled_terminal_sha256 = canonical_cancelled_terminal_sha256(&terminal)
+                        .map_err(|detail| self.latch_fault(detail))?;
+                    let removed = self.backend.clear_terminal_history();
+                    if removed != 1 || self.backend.retained_jobs() != 0 {
+                        return Err(self.latch_fault(format!(
+                            "cancelled Export cleanup removed {removed} jobs or retained ownership"
+                        )));
+                    }
+                    self.active = None;
+                    self.enqueue_next()?;
+                    let retry = self.active.clone().ok_or_else(|| {
+                        self.latch_fault("Export retry admission lost its identity".to_owned())
+                    })?;
+                    if retry.id == cancelled_job_id || retry.output_path == cancelled_output_path {
+                        return Err(self.latch_fault(
+                            "Export retry reused the cancelled identity or output path".to_owned(),
+                        ));
+                    }
+                    self.recovery = Some(FrozenExportRecovery::Retry {
+                        cycle_index,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        cancelled_output_path,
+                        cancelled_terminal_sha256,
+                        cancellation_requests_before,
+                        cancellations_before,
+                        cancellations_after: after.cancellations,
+                        too_late_before,
+                    });
+                    Ok(Vec::new())
+                }
+                FrozenExportAttemptObservation::Pending { .. }
+                | FrozenExportAttemptObservation::Running { .. } => Err(self.latch_fault(
+                    "accepted Export cancellation regressed to a non-cancelling state".to_owned(),
+                )),
+                FrozenExportAttemptObservation::Completed { .. } => Err(self.latch_fault(
+                    "accepted Export cancellation crossed into publication".to_owned(),
+                )),
+                FrozenExportAttemptObservation::Failed(detail) => Err(self.latch_fault(format!(
+                    "cancelled Export failed instead of reaching Canceled: {detail}"
+                ))),
+            },
+            FrozenExportRecovery::Retry {
+                cycle_index,
+                cancelled_job_id,
+                cancelled_generation,
+                cancelled_output_path,
+                cancelled_terminal_sha256,
+                cancellation_requests_before,
+                cancellations_before,
+                cancellations_after,
+                too_late_before,
+            } => match observation {
+                FrozenExportAttemptObservation::Pending { generation, output_path, .. }
+                | FrozenExportAttemptObservation::Running { generation, output_path, .. } => {
+                    validate_retry_identity(
+                        &active,
+                        generation,
+                        &output_path,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        &cancelled_output_path,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    self.recovery = Some(FrozenExportRecovery::Retry {
+                        cycle_index,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        cancelled_output_path,
+                        cancelled_terminal_sha256,
+                        cancellation_requests_before,
+                        cancellations_before,
+                        cancellations_after,
+                        too_late_before,
+                    });
+                    Ok(Vec::new())
+                }
+                FrozenExportAttemptObservation::Completed { generation, output_path } => {
+                    validate_retry_identity(
+                        &active,
+                        generation,
+                        &output_path,
+                        cancelled_job_id,
+                        cancelled_generation,
+                        &cancelled_output_path,
+                    )
+                    .map_err(|detail| self.latch_fault(detail))?;
+                    let verified = self
+                        .backend
+                        .verify(active.id, &output_path, completed_at_us)
+                        .map_err(|detail| self.latch_fault(detail))?;
+                    let removed = self.backend.clear_terminal_history();
+                    if removed != 1 {
+                        return Err(self.latch_fault(format!(
+                            "retry Export terminal cleanup removed {removed} jobs"
+                        )));
+                    }
+                    let final_diagnostics = self.backend.diagnostics();
+                    if self.backend.retained_jobs() != 0
+                        || final_diagnostics.cancellation_requests
+                            != cancellation_requests_before.saturating_add(1)
+                        || final_diagnostics.cancellations != cancellations_after
+                        || final_diagnostics.cancellations != cancellations_before.saturating_add(1)
+                        || final_diagnostics.too_late_cancellation_requests != too_late_before
+                        || final_diagnostics.terminal != 0
+                        || final_diagnostics.pending != 0
+                        || final_diagnostics.running != 0
+                        || final_diagnostics.cancelling != 0
+                        || final_diagnostics.committing != 0
+                    {
+                        return Err(self.latch_fault(
+                            "Export retry left residual jobs or changed cancellation evidence"
+                                .to_owned(),
+                        ));
+                    }
+                    let retry_job_id = active.id.to_string();
+                    let facts = ExportCancelRetryFacts {
+                        cycle_index,
+                        operation_id: format!(
+                            "export.c{cycle_index}.{}.{}",
+                            cancelled_job_id, active.id
+                        ),
+                        cancelled_job_id: cancelled_job_id.to_string(),
+                        retry_job_id,
+                        cancellation_count_before: cancellations_before,
+                        cancellation_count_after: cancellations_after,
+                        cancelled_terminal_sha256,
+                        retry_artifact_sha256: verified.artifact_sha256,
+                        retry_validation_report_sha256: verified.validation_report_sha256,
+                    };
+                    let receipt =
+                        EnduranceRecoveryOperationReceipt::from_export_cancel_retry_facts(facts)
+                            .map_err(|error| {
+                                self.latch_fault(format!(
+                                    "seal Export cancel/retry recovery receipt: {error}"
+                                ))
+                            })?;
+                    self.active = None;
+                    self.verified_artifacts =
+                        self.verified_artifacts.checked_add(1).ok_or_else(|| {
+                            self.latch_fault("verified Export artifact counter overflow".to_owned())
+                        })?;
+                    Ok(vec![
+                        verified.event,
+                        EnduranceCampaignEvent::recovery_step_completed(completed_at_us, &receipt),
+                    ])
+                }
+                FrozenExportAttemptObservation::Cancelling { .. }
+                | FrozenExportAttemptObservation::Cancelled(_) => {
+                    Err(self.latch_fault("distinct Export retry was cancelled".to_owned()))
+                }
+                FrozenExportAttemptObservation::Failed(detail) => {
+                    Err(self.latch_fault(format!("distinct Export retry failed: {detail}")))
+                }
+            },
         }
     }
 
     /// Stop new admission while allowing the active attempt to publish and verify.
     fn begin_close(&mut self) {
         self.closing = true;
+        if matches!(self.recovery, Some(FrozenExportRecovery::Running { .. })) {
+            self.recovery = None;
+        }
     }
 
     /// Whether no current attempt or terminal queue evidence remains.
@@ -330,6 +839,36 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
     /// Number of independently verified artifacts completed by this phase owner.
     const fn verified_artifacts(&self) -> u64 {
         self.verified_artifacts
+    }
+
+    const fn cancel_retry_recovery_in_progress(&self) -> bool {
+        self.recovery.is_some()
+    }
+
+    fn begin_cancel_retry_recovery(
+        &mut self,
+        cycle_index: u32,
+    ) -> Result<(), FrozenRepeatedExportError> {
+        if let Some(detail) = &self.fault {
+            return Err(FrozenRepeatedExportError::Faulted(detail.clone()));
+        }
+        if self.closing {
+            return Err(self.latch_fault(
+                "cannot begin Export cancel/retry while the phase is closing".to_owned(),
+            ));
+        }
+        if self.recovery.is_some() {
+            return Err(
+                self.latch_fault("an Export cancel/retry recovery is already active".to_owned())
+            );
+        }
+        if self.active.is_none() {
+            return Err(self.latch_fault(
+                "Export cancel/retry requires one admitted phase-owned attempt".to_owned(),
+            ));
+        }
+        self.recovery = Some(FrozenExportRecovery::Running { cycle_index });
+        Ok(())
     }
 
     fn enqueue_next(&mut self) -> Result<(), FrozenRepeatedExportError> {
@@ -354,6 +893,135 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
         self.fault = Some(detail.clone());
         FrozenRepeatedExportError::Faulted(detail)
     }
+}
+
+fn validate_active_attempt(
+    active: &ActiveFrozenExportAttempt,
+    generation: u64,
+    output_path: &Path,
+    executed: bool,
+    publication: ExportPublicationState,
+    require_executed: bool,
+) -> Result<(), String> {
+    if generation == 0 || output_path != active.output_path {
+        return Err("phase-owned Export active identity changed".to_owned());
+    }
+    if publication != ExportPublicationState::Reversible {
+        return Err("phase-owned Export is outside reversible publication authority".to_owned());
+    }
+    if require_executed && !executed {
+        return Err("phase-owned Export reported Running without execution evidence".to_owned());
+    }
+    if !require_executed && executed {
+        return Err("phase-owned Export reported Pending after execution began".to_owned());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_cancel_pending_attempt(
+    cancelled_job_id: JobId,
+    cancelled_generation: u64,
+    cancelled_output_path: &Path,
+    active: &ActiveFrozenExportAttempt,
+    generation: u64,
+    output_path: &Path,
+    executed: bool,
+    publication: ExportPublicationState,
+) -> Result<(), String> {
+    if active.id != cancelled_job_id
+        || active.output_path != cancelled_output_path
+        || generation != cancelled_generation
+        || output_path != cancelled_output_path
+        || !executed
+        || publication != ExportPublicationState::Reversible
+    {
+        return Err(
+            "cancelling Export no longer matches its admitted reversible attempt".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_cancelled_terminal(
+    terminal: &FrozenCancelledExportTerminal,
+    cancelled_job_id: JobId,
+    cancelled_generation: u64,
+    cancelled_output_path: &Path,
+) -> Result<(), String> {
+    let Some(evidence) = terminal.terminal_evidence else {
+        return Err("cancelled Export lacks terminal execution evidence".to_owned());
+    };
+    if terminal.job_id != cancelled_job_id
+        || terminal.generation != cancelled_generation
+        || terminal.output_path != cancelled_output_path
+        || !terminal.executed
+        || terminal.publication != ExportPublicationState::NotPublished
+        || terminal.artifact_publication.is_some()
+        || evidence.generation != cancelled_generation
+        || evidence.priority != ExecutionPriority::UserInitiated
+        || evidence.disposition != ExecutionTerminalDisposition::Canceled
+        || evidence.deadline != ExecutionDeadlineStatus::NotApplicable
+    {
+        return Err(
+            "cancelled Export terminal is not exact Canceled/NotPublished evidence".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_retry_identity(
+    retry: &ActiveFrozenExportAttempt,
+    retry_generation: u64,
+    retry_output_path: &Path,
+    cancelled_job_id: JobId,
+    cancelled_generation: u64,
+    cancelled_output_path: &Path,
+) -> Result<(), String> {
+    if retry.id == cancelled_job_id
+        || retry.output_path == cancelled_output_path
+        || retry.output_path != retry_output_path
+        || retry_generation <= cancelled_generation
+        || retry_generation == 0
+    {
+        return Err(
+            "Export retry did not use a distinct newer identity and create-only path".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalCancelledExportTerminal<'a> {
+    schema_version: u32,
+    job_id: String,
+    generation: u64,
+    output_path: &'a Path,
+    executed: bool,
+    publication: ExportPublicationState,
+    terminal_evidence: ExecutionTerminalEvidence,
+    artifact_publication_absent: bool,
+}
+
+fn canonical_cancelled_terminal_sha256(
+    terminal: &FrozenCancelledExportTerminal,
+) -> Result<String, String> {
+    let evidence = terminal
+        .terminal_evidence
+        .ok_or_else(|| "cancelled Export lacks terminal evidence for hashing".to_owned())?;
+    let canonical = CanonicalCancelledExportTerminal {
+        schema_version: 1,
+        job_id: terminal.job_id.to_string(),
+        generation: terminal.generation,
+        output_path: &terminal.output_path,
+        executed: terminal.executed,
+        publication: terminal.publication,
+        terminal_evidence: evidence,
+        artifact_publication_absent: terminal.artifact_publication.is_none(),
+    };
+    let bytes = serde_json::to_vec(&canonical).map_err(|error| error.to_string())?;
+    Ok(Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Stable repeated-Export phase failure.
@@ -481,15 +1149,33 @@ mod tests {
                 .last()
                 .map(|config| config.output_path.clone())
                 .ok_or_else(|| "missing fake config".to_owned())?;
+            let generation = u64::try_from(self.configs.len())
+                .map_err(|_| "fake generation overflow".to_owned())?;
             Ok(match self.terminal {
                 FakeTerminal::Completed => {
-                    FrozenExportAttemptObservation::Completed { output_path: path }
+                    FrozenExportAttemptObservation::Completed { generation, output_path: path }
                 }
                 FakeTerminal::Failed => {
                     FrozenExportAttemptObservation::Failed("injected failure".to_owned())
                 }
-                FakeTerminal::Cancelled => FrozenExportAttemptObservation::Cancelled,
+                FakeTerminal::Cancelled => {
+                    FrozenExportAttemptObservation::Cancelled(FrozenCancelledExportTerminal {
+                        job_id: id,
+                        generation,
+                        output_path: path,
+                        executed: true,
+                        publication: ExportPublicationState::NotPublished,
+                        terminal_evidence: Some(ExecutionTerminalEvidence {
+                            generation,
+                            priority: ExecutionPriority::UserInitiated,
+                            disposition: ExecutionTerminalDisposition::Canceled,
+                            deadline: ExecutionDeadlineStatus::NotApplicable,
+                        }),
+                        artifact_publication: None,
+                    })
+                }
                 FakeTerminal::WrongPath => FrozenExportAttemptObservation::Completed {
+                    generation,
                     output_path: path.with_extension("wrong"),
                 },
             })
@@ -500,17 +1186,232 @@ mod tests {
             id: JobId,
             _output_path: &Path,
             completed_at_us: u64,
-        ) -> Result<EnduranceCampaignEvent, String> {
+        ) -> Result<VerifiedFrozenExportArtifact, String> {
             if self.verify_fails {
                 return Err("injected verifier failure".to_owned());
             }
-            Ok(EnduranceCampaignEvent::test_export_artifact_verified(
-                completed_at_us,
-                format!("fake-{id}"),
-                SHA,
-                "fake-verifier",
-                SHA,
-            ))
+            Ok(VerifiedFrozenExportArtifact {
+                event: EnduranceCampaignEvent::test_export_artifact_verified(
+                    completed_at_us,
+                    format!("fake-{id}"),
+                    SHA,
+                    "fake-verifier",
+                    SHA,
+                ),
+                artifact_sha256: SHA.to_owned(),
+                validation_report_sha256: SHA.to_owned(),
+            })
+        }
+
+        fn diagnostics(&self) -> ExportQueueDiagnostics {
+            ExportQueueDiagnostics {
+                terminal: usize::from(
+                    self.active.is_some() && !matches!(self.terminal, FakeTerminal::Failed),
+                ),
+                ..ExportQueueDiagnostics::default()
+            }
+        }
+
+        fn cancel(&mut self, _id: JobId) -> ExportCancelOutcome {
+            ExportCancelOutcome::AlreadyTerminal
+        }
+
+        fn clear_terminal_history(&mut self) -> usize {
+            self.active = None;
+            self.cleanup_count
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum RecoveryFakeStage {
+        Pending,
+        Running,
+        Cancelling,
+        Cancelled,
+        Completed,
+        Failed,
+    }
+
+    struct RecoveryFakeBackend {
+        configs: Vec<ExportConfig>,
+        ids: Vec<JobId>,
+        active: Option<JobId>,
+        stage: RecoveryFakeStage,
+        initial_stage: RecoveryFakeStage,
+        retry_stage: RecoveryFakeStage,
+        cancel_outcome: ExportCancelOutcome,
+        cancellation_requests: u64,
+        cancellations: u64,
+        too_late_cancellations: u64,
+        terminal_executed: bool,
+        cleanup_count: usize,
+        verify_fails: bool,
+    }
+
+    impl RecoveryFakeBackend {
+        fn successful() -> Self {
+            Self {
+                configs: Vec::new(),
+                ids: Vec::new(),
+                active: None,
+                stage: RecoveryFakeStage::Pending,
+                initial_stage: RecoveryFakeStage::Running,
+                retry_stage: RecoveryFakeStage::Completed,
+                cancel_outcome: ExportCancelOutcome::Requested,
+                cancellation_requests: 11,
+                cancellations: 7,
+                too_late_cancellations: 3,
+                terminal_executed: true,
+                cleanup_count: 1,
+                verify_fails: false,
+            }
+        }
+
+        fn generation(&self) -> Result<u64, String> {
+            u64::try_from(self.configs.len()).map_err(|_| "fake generation overflow".to_owned())
+        }
+
+        fn output_path(&self) -> Result<PathBuf, String> {
+            self.configs
+                .last()
+                .map(|config| config.output_path.clone())
+                .ok_or_else(|| "missing recovery fake config".to_owned())
+        }
+    }
+
+    impl FrozenExportBackend for RecoveryFakeBackend {
+        fn retained_jobs(&self) -> usize {
+            usize::from(self.active.is_some())
+        }
+
+        fn enqueue(&mut self, config: ExportConfig) -> Result<JobId, String> {
+            let id = JobId::new();
+            self.configs.push(config);
+            self.ids.push(id);
+            self.active = Some(id);
+            self.stage = if self.configs.len() == 1 {
+                self.initial_stage
+            } else {
+                self.retry_stage
+            };
+            Ok(id)
+        }
+
+        fn observe(&mut self, id: JobId) -> Result<FrozenExportAttemptObservation, String> {
+            if self.active != Some(id) {
+                return Err("unknown recovery fake attempt".to_owned());
+            }
+            let generation = self.generation()?;
+            let output_path = self.output_path()?;
+            Ok(match self.stage {
+                RecoveryFakeStage::Pending => FrozenExportAttemptObservation::Pending {
+                    generation,
+                    output_path,
+                    executed: false,
+                    publication: ExportPublicationState::Reversible,
+                },
+                RecoveryFakeStage::Running => FrozenExportAttemptObservation::Running {
+                    generation,
+                    output_path,
+                    executed: true,
+                    publication: ExportPublicationState::Reversible,
+                },
+                RecoveryFakeStage::Cancelling => FrozenExportAttemptObservation::Cancelling {
+                    generation,
+                    output_path,
+                    executed: true,
+                    publication: ExportPublicationState::Reversible,
+                },
+                RecoveryFakeStage::Cancelled => {
+                    FrozenExportAttemptObservation::Cancelled(FrozenCancelledExportTerminal {
+                        job_id: id,
+                        generation,
+                        output_path,
+                        executed: self.terminal_executed,
+                        publication: ExportPublicationState::NotPublished,
+                        terminal_evidence: Some(ExecutionTerminalEvidence {
+                            generation,
+                            priority: ExecutionPriority::UserInitiated,
+                            disposition: ExecutionTerminalDisposition::Canceled,
+                            deadline: ExecutionDeadlineStatus::NotApplicable,
+                        }),
+                        artifact_publication: None,
+                    })
+                }
+                RecoveryFakeStage::Completed => {
+                    FrozenExportAttemptObservation::Completed { generation, output_path }
+                }
+                RecoveryFakeStage::Failed => {
+                    FrozenExportAttemptObservation::Failed("injected retry failure".to_owned())
+                }
+            })
+        }
+
+        fn verify(
+            &mut self,
+            id: JobId,
+            _output_path: &Path,
+            completed_at_us: u64,
+        ) -> Result<VerifiedFrozenExportArtifact, String> {
+            if self.verify_fails {
+                return Err("injected recovery verifier failure".to_owned());
+            }
+            Ok(VerifiedFrozenExportArtifact {
+                event: EnduranceCampaignEvent::test_export_artifact_verified(
+                    completed_at_us,
+                    format!("recovery-{id}"),
+                    SHA,
+                    "fake-verifier",
+                    SHA,
+                ),
+                artifact_sha256: SHA.to_owned(),
+                validation_report_sha256: SHA.to_owned(),
+            })
+        }
+
+        fn diagnostics(&self) -> ExportQueueDiagnostics {
+            ExportQueueDiagnostics {
+                pending: usize::from(
+                    self.active.is_some() && self.stage == RecoveryFakeStage::Pending,
+                ),
+                running: usize::from(
+                    self.active.is_some() && self.stage == RecoveryFakeStage::Running,
+                ),
+                cancelling: usize::from(
+                    self.active.is_some() && self.stage == RecoveryFakeStage::Cancelling,
+                ),
+                terminal: usize::from(
+                    self.active.is_some()
+                        && matches!(
+                            self.stage,
+                            RecoveryFakeStage::Cancelled
+                                | RecoveryFakeStage::Completed
+                                | RecoveryFakeStage::Failed
+                        ),
+                ),
+                cancellation_requests: self.cancellation_requests,
+                too_late_cancellation_requests: self.too_late_cancellations,
+                cancellations: self.cancellations,
+                ..ExportQueueDiagnostics::default()
+            }
+        }
+
+        fn cancel(&mut self, id: JobId) -> ExportCancelOutcome {
+            if self.active != Some(id) {
+                return ExportCancelOutcome::NotFound;
+            }
+            match self.cancel_outcome {
+                ExportCancelOutcome::Requested => {
+                    self.cancellation_requests = self.cancellation_requests.saturating_add(1);
+                    self.cancellations = self.cancellations.saturating_add(1);
+                    self.stage = RecoveryFakeStage::Cancelled;
+                }
+                ExportCancelOutcome::TooLateCommitting => {
+                    self.too_late_cancellations = self.too_late_cancellations.saturating_add(1);
+                }
+                _ => {}
+            }
+            self.cancel_outcome
         }
 
         fn clear_terminal_history(&mut self) -> usize {
@@ -649,5 +1550,119 @@ mod tests {
         let policy = IndependentExportArtifactPolicy::new(1, Duration::from_secs(1))
             .expect("nonzero test policy");
         assert_eq!(policy.maximum_artifact_bytes(), 1);
+    }
+
+    #[test]
+    fn controlled_cancel_waits_for_running_then_retries_with_distinct_verified_artifact() {
+        let (_directory, plan) = test_plan();
+        let mut phase =
+            FrozenRepeatedExportState::start_with_backend(plan, RecoveryFakeBackend::successful())
+                .expect("start recovery phase");
+        phase.begin_cancel_retry_recovery(4).expect("request controlled recovery");
+
+        assert!(phase.poll(10).expect("assert cancellation").is_empty());
+        assert!(phase.cancel_retry_recovery_in_progress());
+        assert_eq!(phase.backend.cancellations, 8);
+        assert_eq!(phase.backend.configs.len(), 1);
+
+        assert!(phase.poll(20).expect("close cancelled terminal").is_empty());
+        assert_eq!(phase.backend.configs.len(), 2);
+        assert_ne!(phase.backend.ids[0], phase.backend.ids[1]);
+        assert_ne!(
+            phase.backend.configs[0].output_path,
+            phase.backend.configs[1].output_path
+        );
+        assert!(phase
+            .backend
+            .configs
+            .iter()
+            .all(|config| config.output_policy == ExportOutputPolicy::CreateNew));
+
+        let events = phase.poll(30).expect("verify distinct retry");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            EnduranceCampaignEvent::ExportArtifactVerified(_)
+        ));
+        let (cycle_index, step, receipt_json, receipt_sha256) =
+            events[1].test_recovery_receipt().expect("second event must seal recovery");
+        assert_eq!(cycle_index, 4);
+        assert_eq!(
+            step,
+            super::super::endurance_qualification::EnduranceRecoveryStep::ExportCancelRetry
+        );
+        let receipt =
+            EnduranceRecoveryOperationReceipt::parse_and_validate(receipt_json, receipt_sha256)
+                .expect("externally replayable recovery receipt");
+        assert_eq!(receipt.cycle_index(), 4);
+        assert!(!phase.cancel_retry_recovery_in_progress());
+        assert_eq!(phase.verified_artifacts(), 1);
+        assert_eq!(phase.backend.retained_jobs(), 0);
+    }
+
+    #[test]
+    fn close_before_cancel_authority_never_cancels_the_active_export() {
+        let (_directory, plan) = test_plan();
+        let mut backend = RecoveryFakeBackend::successful();
+        backend.initial_stage = RecoveryFakeStage::Pending;
+        let mut phase = FrozenRepeatedExportState::start_with_backend(plan, backend)
+            .expect("start pending phase");
+        phase.begin_cancel_retry_recovery(0).expect("request recovery");
+        phase.begin_close();
+        assert!(!phase.cancel_retry_recovery_in_progress());
+        assert_eq!(phase.backend.cancellations, 7);
+
+        phase.backend.stage = RecoveryFakeStage::Completed;
+        assert_eq!(phase.poll(10).expect("verify closing attempt").len(), 1);
+        assert!(phase.is_quiescent());
+        assert_eq!(phase.backend.cancellations, 7);
+    }
+
+    #[test]
+    fn cancel_retry_faults_on_too_late_invalid_terminal_cleanup_retry_or_verifier() {
+        let (_directory, plan) = test_plan();
+        let mut backend = RecoveryFakeBackend::successful();
+        backend.cancel_outcome = ExportCancelOutcome::TooLateCommitting;
+        let mut phase = FrozenRepeatedExportState::start_with_backend(plan, backend)
+            .expect("start too-late phase");
+        phase.begin_cancel_retry_recovery(0).expect("request too-late recovery");
+        assert!(phase.poll(10).is_err());
+        assert!(phase.poll(11).is_err());
+
+        let (_directory, plan) = test_plan();
+        let mut backend = RecoveryFakeBackend::successful();
+        backend.terminal_executed = false;
+        let mut phase = FrozenRepeatedExportState::start_with_backend(plan, backend)
+            .expect("start invalid-terminal phase");
+        phase.begin_cancel_retry_recovery(0).expect("request invalid-terminal recovery");
+        assert!(phase.poll(10).is_ok());
+        assert!(phase.poll(20).is_err());
+
+        let (_directory, plan) = test_plan();
+        let mut backend = RecoveryFakeBackend::successful();
+        backend.cleanup_count = 0;
+        let mut phase = FrozenRepeatedExportState::start_with_backend(plan, backend)
+            .expect("start cleanup-failure phase");
+        phase.begin_cancel_retry_recovery(0).expect("request cleanup-failure recovery");
+        assert!(phase.poll(10).is_ok());
+        assert!(phase.poll(20).is_err());
+
+        for verifier_fails in [false, true] {
+            let (_directory, plan) = test_plan();
+            let mut backend = RecoveryFakeBackend::successful();
+            backend.retry_stage = if verifier_fails {
+                RecoveryFakeStage::Completed
+            } else {
+                RecoveryFakeStage::Failed
+            };
+            backend.verify_fails = verifier_fails;
+            let mut phase = FrozenRepeatedExportState::start_with_backend(plan, backend)
+                .expect("start retry-failure phase");
+            phase.begin_cancel_retry_recovery(0).expect("request retry-failure recovery");
+            assert!(phase.poll(10).is_ok());
+            assert!(phase.poll(20).is_ok());
+            assert!(phase.poll(30).is_err());
+            assert!(phase.poll(31).is_err());
+        }
     }
 }

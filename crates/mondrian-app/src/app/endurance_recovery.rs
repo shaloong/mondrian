@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::endurance_export::ExportCancelRetryFacts;
 use super::endurance_playback::{CachePressureRecoveryFacts, SeekRecoveryFacts};
 use super::endurance_qualification::EnduranceRecoveryStep;
 
@@ -302,6 +303,23 @@ impl EnduranceRecoveryOperationReceipt {
             export_failures_after: facts.export_failures_after(),
             pressure_decision_sha256: facts.pressure_decision_sha256().to_owned(),
             recovered_decision_sha256: facts.recovered_decision_sha256().to_owned(),
+        })
+    }
+
+    pub(super) fn from_export_cancel_retry_facts(
+        facts: ExportCancelRetryFacts,
+    ) -> Result<Self, EnduranceRecoveryReceiptError> {
+        Self::seal(EnduranceRecoveryOperationEvidence::ExportCancelRetry {
+            schema_version: RECOVERY_RECEIPT_SCHEMA_VERSION,
+            cycle_index: facts.cycle_index(),
+            operation_id: facts.operation_id().to_owned(),
+            cancelled_job_id: facts.cancelled_job_id().to_owned(),
+            retry_job_id: facts.retry_job_id().to_owned(),
+            cancellation_count_before: facts.cancellation_count_before(),
+            cancellation_count_after: facts.cancellation_count_after(),
+            cancelled_terminal_sha256: facts.cancelled_terminal_sha256().to_owned(),
+            retry_artifact_sha256: facts.retry_artifact_sha256().to_owned(),
+            retry_validation_report_sha256: facts.retry_validation_report_sha256().to_owned(),
         })
     }
 

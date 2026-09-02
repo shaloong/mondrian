@@ -831,12 +831,33 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     assert!(output_path.is_file());
 
     std::fs::remove_file(&output_path).expect("remove first test report");
-    let phase = &mut run.phases[1];
+    let phase = run
+        .phases
+        .iter_mut()
+        .find(|phase| phase.terminal.counters.recovery_cycles != 0)
+        .expect("concurrent recovery phase");
     let raw_path = evidence_directory.join(&phase.producer.raw_evidence_file_name);
     let mut raw: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&raw_path).expect("read raw evidence"))
             .expect("parse raw evidence");
-    raw["events"] = serde_json::json!([]);
+    let events = raw["events"].as_array_mut().expect("producer events array");
+    let export_recovery = events
+        .iter_mut()
+        .find(|event| {
+            event["kind"] == "recovery_step_completed" && event["step"] == "export_cancel_retry"
+        })
+        .expect("Export cancel/retry recovery event");
+    let mut receipt: serde_json::Value = serde_json::from_str(
+        export_recovery["operation_receipt_json"]
+            .as_str()
+            .expect("embedded Export recovery receipt"),
+    )
+    .expect("parse embedded Export recovery receipt");
+    receipt["cancellation_count_after"] = receipt["cancellation_count_before"].clone();
+    let receipt_json = serde_json::to_string(&receipt).expect("serialize tampered receipt");
+    export_recovery["operation_receipt_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(receipt_json.as_bytes())));
+    export_recovery["operation_receipt_json"] = serde_json::json!(receipt_json);
     std::fs::write(
         &raw_path,
         serde_json::to_vec_pretty(&raw).expect("serialize tampered raw evidence"),
@@ -848,8 +869,6 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::from_slice(&std::fs::read(&report_path).expect("read producer report"))
             .expect("parse producer report");
     producer_report["raw_evidence_sha256"] = serde_json::json!(phase.producer.raw_evidence_sha256);
-    producer_report["event_count"] = serde_json::json!(0);
-    producer_report["verified_export_artifacts"] = serde_json::json!(0);
     std::fs::write(
         &report_path,
         serde_json::to_vec_pretty(&producer_report).expect("serialize producer report"),
@@ -864,6 +883,6 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     let status = verifier.status().expect("rerun PowerShell verifier");
     assert!(
         !status.success(),
-        "semantic evidence substitution must fail"
+        "rehash-consistent Export cancel/retry leaf substitution must fail"
     );
 }

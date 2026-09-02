@@ -618,6 +618,19 @@ impl EnduranceCampaignEvent {
             validation_report_sha256: validation_report_sha256.into(),
         })
     }
+
+    #[cfg(test)]
+    pub(super) fn test_recovery_receipt(&self) -> Option<(u32, EnduranceRecoveryStep, &str, &str)> {
+        let Self::RecoveryStepCompleted(event) = self else {
+            return None;
+        };
+        Some((
+            event.cycle_index,
+            event.step,
+            &event.operation_receipt_json,
+            &event.operation_receipt_sha256,
+        ))
+    }
 }
 
 /// Coordinator-bound projection of product-owned diagnostics at one cadence.
