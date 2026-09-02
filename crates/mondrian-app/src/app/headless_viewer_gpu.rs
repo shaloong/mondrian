@@ -7,7 +7,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(any(test, feature = "validation"))]
+#[cfg(test)]
 use std::time::Duration;
 use std::time::Instant;
 
@@ -574,11 +574,11 @@ impl Drop for HeadlessViewerGpuAdapter {
 }
 
 impl HeadlessViewerGpuAdapter {
-    /// Retire all accepted GPU work and synchronously reclaim the progress domain.
+    /// Retire all accepted GPU work against one caller-owned absolute deadline.
     #[cfg(any(test, feature = "validation"))]
-    pub(crate) fn shutdown_and_wait(
+    pub(crate) fn shutdown_until(
         mut self,
-        timeout: Duration,
+        deadline: Instant,
     ) -> ViewerGpuDeviceProgressShutdownEvidence {
         let Some((progress, retirement)) = self.take_generation_retirement() else {
             return ViewerGpuDeviceProgressShutdownEvidence {
@@ -592,7 +592,7 @@ impl HeadlessViewerGpuAdapter {
                 generation_terminal_kind: None,
             };
         };
-        progress.retire_device_generation_and_wait(retirement, timeout)
+        progress.retire_device_generation_until(retirement, deadline)
     }
 
     fn take_generation_retirement(

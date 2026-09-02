@@ -423,6 +423,16 @@ impl FrozenRepeatedExportPhase {
     pub const fn verified_artifacts(&self) -> u64 {
         self.state.verified_artifacts()
     }
+
+    /// Close the legal between-attempt gap before a controlled recovery.
+    ///
+    /// Callers must first perform one ordinary poll so an already completed
+    /// attempt is verified and removed before this admits its successor.
+    pub fn ensure_attempt_admitted_for_recovery(
+        &mut self,
+    ) -> Result<(), FrozenRepeatedExportError> {
+        self.state.ensure_attempt_admitted_for_recovery()
+    }
 }
 
 impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
@@ -843,6 +853,28 @@ impl<B: FrozenExportBackend> FrozenRepeatedExportState<B> {
 
     const fn cancel_retry_recovery_in_progress(&self) -> bool {
         self.recovery.is_some()
+    }
+
+    fn ensure_attempt_admitted_for_recovery(&mut self) -> Result<(), FrozenRepeatedExportError> {
+        if let Some(detail) = &self.fault {
+            return Err(FrozenRepeatedExportError::Faulted(detail.clone()));
+        }
+        if self.closing || self.recovery.is_some() {
+            return Err(self.latch_fault(
+                "cannot admit an Export recovery attempt while closing or already recovering"
+                    .to_owned(),
+            ));
+        }
+        if self.active.is_none() {
+            self.enqueue_next()?;
+        }
+        if self.backend.retained_jobs() != 1 {
+            return Err(self.latch_fault(
+                "Export recovery admission did not retain exactly one phase-owned attempt"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn begin_cancel_retry_recovery(
@@ -1471,6 +1503,25 @@ mod tests {
             .configs
             .iter()
             .all(|config| config.output_policy == ExportOutputPolicy::CreateNew));
+    }
+
+    #[test]
+    fn recovery_admission_closes_the_verified_between_attempt_gap() {
+        let (_directory, plan) = test_plan();
+        let mut phase = FrozenRepeatedExportState::start_with_backend(plan, FakeBackend::clean())
+            .expect("start phase");
+
+        assert_eq!(phase.poll(10).expect("verify first attempt").len(), 1);
+        assert!(phase.active.is_none());
+        assert_eq!(phase.backend.retained_jobs(), 0);
+
+        phase
+            .ensure_attempt_admitted_for_recovery()
+            .expect("admit successor at recovery boundary");
+
+        assert!(phase.active.is_some());
+        assert_eq!(phase.backend.retained_jobs(), 1);
+        assert_eq!(phase.backend.configs.len(), 2);
     }
 
     #[test]

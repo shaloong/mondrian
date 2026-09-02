@@ -54,6 +54,27 @@ pub struct PersistentReferenceOutputPump {
 }
 
 impl PersistentReferenceOutputPump {
+    /// Nanosecond scheduling interval derived from the exact rational picture cadence.
+    pub(crate) fn cadence_interval(&self) -> Result<std::time::Duration, String> {
+        let rate = self.request.signal.frame_rate;
+        let numerator = u128::try_from(rate.num)
+            .map_err(|_| "Reference frame-rate numerator must be positive".to_owned())?;
+        let denominator = u128::try_from(rate.den)
+            .map_err(|_| "Reference frame-rate denominator must be positive".to_owned())?;
+        if numerator == 0 || denominator == 0 {
+            return Err("Reference frame rate must be nonzero".to_owned());
+        }
+        let nanoseconds = 1_000_000_000_u128
+            .checked_mul(denominator)
+            .and_then(|value| value.checked_div(numerator))
+            .ok_or_else(|| "Reference frame interval overflowed".to_owned())?
+            .max(1);
+        Ok(std::time::Duration::from_nanos(
+            u64::try_from(nanoseconds)
+                .map_err(|_| "Reference frame interval exceeds u64".to_owned())?,
+        ))
+    }
+
     /// Freeze the active Timeline and prepare all software owners before opening hardware.
     pub fn prepare(
         app: &AppState,

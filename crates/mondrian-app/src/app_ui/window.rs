@@ -298,6 +298,16 @@ struct AppUiSurfaceDeviceReopenValidation {
     state: AppUiSurfaceDeviceReopenValidationState,
     result: Arc<Mutex<Option<Result<EnduranceRecoveryOperationReceipt, String>>>>,
     deadline: Instant,
+    recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+    recovery_pump_return:
+        Rc<RefCell<Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>>>,
+}
+
+#[cfg(feature = "validation")]
+impl Drop for AppUiSurfaceDeviceReopenValidation {
+    fn drop(&mut self) {
+        *self.recovery_pump_return.borrow_mut() = self.recovery_pump.take();
+    }
 }
 
 #[cfg(feature = "validation")]
@@ -1665,6 +1675,11 @@ fn synchronize_playback_thread_scheduling(host: &AppUiHost, session: &mut AppUiW
     }
 }
 
+#[cfg(feature = "validation")]
+const fn validation_window_advances_playback(surface_reopen_active: bool) -> bool {
+    !surface_reopen_active
+}
+
 fn poll_window_background_tasks(
     host: &mut AppUiHost,
     session: &mut AppUiWindowSession,
@@ -2143,7 +2158,7 @@ pub fn run_app_ui_surface_device_reopen_validation(
         operation_id,
         timeout,
     );
-    let AppUiSurfaceDeviceReopenRun { app_state, result } = run;
+    let AppUiSurfaceDeviceReopenRun { app_state, result, recovery_pump: _ } = run;
     let (shutdown_deadline, deadline_failure) =
         match Instant::now().checked_add(Duration::from_secs(30)) {
             Some(deadline) => (deadline, None),
@@ -2171,6 +2186,8 @@ pub fn run_app_ui_surface_device_reopen_validation(
 pub(crate) struct AppUiSurfaceDeviceReopenRun {
     pub(crate) app_state: AppState,
     pub(crate) result: Result<EnduranceRecoveryOperationReceipt, String>,
+    pub(crate) recovery_pump:
+        Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
 }
 
 #[cfg(feature = "validation")]
@@ -2180,26 +2197,65 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
     operation_id: String,
     timeout: Duration,
 ) -> AppUiSurfaceDeviceReopenRun {
+    run_app_ui_surface_device_reopen_validation_returning_state_inner(
+        initial_state,
+        None,
+        cycle_index,
+        operation_id,
+        timeout,
+    )
+}
+
+#[cfg(feature = "validation")]
+pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state_with_pump(
+    initial_state: AppState,
+    recovery_pump: crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump,
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+) -> AppUiSurfaceDeviceReopenRun {
+    run_app_ui_surface_device_reopen_validation_returning_state_inner(
+        initial_state,
+        Some(recovery_pump),
+        cycle_index,
+        operation_id,
+        timeout,
+    )
+}
+
+#[cfg(feature = "validation")]
+fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
+    initial_state: AppState,
+    recovery_pump: Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
+    cycle_index: u32,
+    operation_id: String,
+    timeout: Duration,
+) -> AppUiSurfaceDeviceReopenRun {
     if timeout.is_zero() {
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            recovery_pump,
         };
     }
     let Some(deadline) = Instant::now().checked_add(timeout) else {
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            recovery_pump,
         };
     };
     let result = Arc::new(Mutex::new(None));
     let returned_state: AppUiValidationReturnSlot = Rc::new(RefCell::new(None));
+    let recovery_pump_return = Rc::new(RefCell::new(None));
     let validation = AppUiSurfaceDeviceReopenValidation {
         state: AppUiSurfaceDeviceReopenValidationState::AwaitingOriginalPicture(
             AppUiSurfaceDeviceReopenRequest { cycle_index, operation_id },
         ),
         result: Arc::clone(&result),
         deadline,
+        recovery_pump,
+        recovery_pump_return: Rc::clone(&recovery_pump_return),
     };
     let ui_result = run_app_ui_with_initial_state(
         initial_state,
@@ -2207,6 +2263,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
         Some(Rc::clone(&returned_state)),
     );
     let returned = returned_state.borrow_mut().take();
+    let recovery_pump = recovery_pump_return.borrow_mut().take();
     let AppUiValidationReturnedState { app_state, ui_service_failure } = returned
         .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
     let operation_result = match (
@@ -2224,7 +2281,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
         }),
         (Ok(()), None, Err(_)) => Err("Surface/device reopen result lock poisoned".to_owned()),
     };
-    AppUiSurfaceDeviceReopenRun { app_state, result: operation_result }
+    AppUiSurfaceDeviceReopenRun { app_state, result: operation_result, recovery_pump }
 }
 
 fn run_app_ui_with_initial_state(
@@ -2878,27 +2935,72 @@ fn run_app_ui_with_initial_state(
 
             Event::AboutToWait => {
                 #[cfg(feature = "validation")]
-                if let Some(validation) = surface_reopen_validation.as_ref()
-                    && Instant::now() >= validation.deadline
-                {
-                    publish_surface_reopen_validation_failure(
-                        validation,
-                        "Surface/device reopen validation deadline elapsed",
-                    );
-                    elwt.exit();
-                    return;
+                if let Some(validation) = surface_reopen_validation.as_mut() {
+                    if Instant::now() >= validation.deadline {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            "Surface/device reopen validation deadline elapsed",
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    let pump_result = validation
+                        .recovery_pump
+                        .as_mut()
+                        .map_or(Ok(()), |pump| {
+                            host.with_validation_app_state_mut(|app| pump.pump_window(app))
+                        });
+                    if let Err(detail) = pump_result {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            format!("Surface recovery companion pump failed: {detail}"),
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    if Instant::now() >= validation.deadline {
+                        publish_surface_reopen_validation_failure(
+                            validation,
+                            "Surface/device reopen validation deadline elapsed during companion pumping",
+                        );
+                        elwt.exit();
+                        return;
+                    }
+                    if let Some(pump) = validation.recovery_pump.as_ref() {
+                        elwt.set_control_flow(control_flow_wake_no_later_than(
+                            elwt.control_flow(),
+                            pump.next_pump_at(),
+                        ));
+                    }
                 }
-                synchronize_playback_thread_scheduling(&host, &mut session);
                 session
                     .ui_runtime
                     .drive_timers(&session.window, &mut session.router, elwt);
-                let playback_now = Instant::now();
                 let playback_clock_started = Instant::now();
-                let playback_changed = host.advance_playback_clock(
-                    playback_now,
-                    session.current_bounds.get(),
-                );
-                synchronize_playback_thread_scheduling(&host, &mut session);
+                #[cfg(feature = "validation")]
+                let playback_changed = if !validation_window_advances_playback(
+                    surface_reopen_validation.is_some(),
+                ) {
+                    false
+                } else {
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    let changed = host.advance_playback_clock(
+                        Instant::now(),
+                        session.current_bounds.get(),
+                    );
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    changed
+                };
+                #[cfg(not(feature = "validation"))]
+                let playback_changed = {
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    let changed = host.advance_playback_clock(
+                        Instant::now(),
+                        session.current_bounds.get(),
+                    );
+                    synchronize_playback_thread_scheduling(&host, &mut session);
+                    changed
+                };
                 session.event_loop_telemetry.record_stage_duration(
                     AppUiEventLoopStage::AdvancePlaybackClock,
                     playback_clock_started.elapsed(),
@@ -9723,5 +9825,12 @@ mod tests {
                 .expect("test shutdown deadline"),
         );
         assert!(shutdown.all_resources_released(), "{shutdown:#?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn surface_reopen_window_does_not_advance_settled_playback() {
+        assert!(!validation_window_advances_playback(true));
+        assert!(validation_window_advances_playback(false));
     }
 }

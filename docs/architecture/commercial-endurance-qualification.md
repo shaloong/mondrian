@@ -35,6 +35,15 @@ The implementation is split at existing authority boundaries:
   the concrete runtime remains the authority for pumping real product work,
   coordinator-bounded owner snapshots, typed semantic events, and synchronous
   closure.
+- `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
+  composition over fresh `AppState` owners. A machine factory must prove the
+  complete capability inventory before App creation, then provide the exact
+  Project fixture, Reference device/request, Export request, and one distinct
+  seek target per recovery cycle. The runtime retains every partial owner,
+  pumps Timeline → Reference → Export, enforces
+  Seek → Surface/Device → Export Cancel/Retry → Cache Pressure, and consumes
+  each phase under one shutdown deadline. The runtime and serial supervisor
+  share one monotonic clock authority.
 - `mondrian-app::app::endurance_workload` owns the bounded regular-file read,
   SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
   duration/counter validation, plus the exact pre-start capability inventory.
@@ -244,19 +253,21 @@ owner-consuming cleanup, typed workload preparation/NotRun admission, the
 phase-scoped frozen repeated-Export owner, the persistent production Timeline
 picture/audio phase owner, the canonical persistent Reference clean-feed pump,
 all four real recovery operation owners (including a narrow real-window Surface
-reopen executable), and deterministic software tests. A
+reopen executable), the concrete fresh-App three-phase runtime, and
+deterministic software tests. A
 valid contract can become `NotRun` only when a
 pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
 Audio Device, physical Reference provider, external lock, independent verifier,
 or exact recovery driver. Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
-not absent prerequisites. It does **not** yet supply the concrete three-phase
-`EnduranceCampaignRuntime`: real vendor bridge/hardware validation, four-step
-orchestration, and the unified high-level validation executable remain explicit
-follow-on work. This App owner-closure work is a COL-047 prerequisite, not 72h
-execution or hardware HITL evidence. Until that runtime and its physical
-providers exist, physical phases must be admitted as `NotRun`; profile prose is not evidence that a runnable
-72-hour producer exists.
+not absent prerequisites. The machine-specific factory and unified high-level
+validation executable remain explicit follow-on work, as do the real vendor
+bridge and hardware validation. This App owner-closure work is a COL-047
+prerequisite, not 72h
+execution or hardware HITL evidence. Until the machine factory, canonical
+fixture composition, and physical providers exist, physical phases must be
+admitted as `NotRun`; profile prose is not evidence that a runnable 72-hour
+producer exists.
 
 ## Commercial profile
 
@@ -454,6 +465,26 @@ only for the Export interval and drop it before consuming the complete
 `AppState`; otherwise its extra Queue `Arc` is residual ownership, not clean
 shutdown evidence.
 
+The concrete runtime leaves every realtime phase settled across the
+supervisor's `snapshot` call and resumes only when the next `pump_until`
+begins. Surface reopen takes the sole App owner only after settlement and
+restores the returned owner before inspecting operation success, so a failed
+Window operation still has consuming shutdown authority. The validation Window
+does not advance the settled Timeline transport. Instead, it temporarily owns
+the phase Reference and Export pumps, services them at the declared Reference
+cadence inside `AboutToWait`, and returns both owners with the App; the real
+Surface operation therefore cannot starve physical output or repeated Export.
+Export cancel/retry is polled until both its independent artifact event and
+recovery receipt close before Cache Pressure can start. Phase shutdown stops all admission first,
+drains repeated Export, drops the Export and Reference owners that retain App
+`Arc`s, and only then consumes Headless execution plus App.
+
+The App shutdown receipt also carries the Export owner's post-join endurance
+snapshot. The runtime terminalizes its last live snapshot with that exact Queue
+snapshot, terminal Reference diagnostics, and post-retirement Headless facts;
+it never fabricates `shutdown_requested`, `worker_running`, or
+`worker_terminated` fields from the coarse shutdown receipt.
+
 Concurrent Recovery enters an explicit substate on that same frozen owner; no
 ordinary poll can infer or request cancellation. The substate waits for the
 exact owned Job to report `Running`, `executed`, and `Reversible`, snapshots the
@@ -522,7 +553,10 @@ HITL and must be captured on the approved physical rig; `NotRun` can never be
 promoted to success.
 
 The current Windows development machine can close source, unit, integration,
-and headless GPU software gates only. Release transfer must separately execute
+headless GPU software gates, and the local real-winit Surface/Device reopen
+operation. That Window receipt is software-operation evidence, not HDR/P3,
+physical Reference Output, external-lock, or soak qualification. Release
+transfer must separately execute
 the native `cfg` build/test matrix and endurance capture on physical macOS and
 Linux hosts, preserving each platform's scheduler, filesystem identity,
 process-tree memory metric, audio-device Adapter, decoder/encoder runtime, GPU

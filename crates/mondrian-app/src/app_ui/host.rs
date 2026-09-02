@@ -327,6 +327,16 @@ impl AppUiHost {
         self.app_state.borrow()
     }
 
+    /// Temporarily lend the exact validation App owner to a phase-local pump.
+    #[cfg(feature = "validation")]
+    pub(crate) fn with_validation_app_state_mut<T>(
+        &self,
+        operation: impl FnOnce(&mut AppState) -> T,
+    ) -> T {
+        let mut state = self.app_state.borrow_mut();
+        operation(&mut state)
+    }
+
     /// Close UI-only execution services and return the exact App owner used by
     /// a validation Window session.
     ///

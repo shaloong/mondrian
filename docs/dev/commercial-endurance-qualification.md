@@ -119,7 +119,7 @@ raw checked-in workload contract bytes. Submit each owner observation through
 `EndurancePhaseCapture::capture_and_push`; direct sample insertion is not a
 public producer seam. The campaign coordinator routes sealed Export events into
 the crate-private artifact recorder. The recovery recorder accepts only a
-sealed canonical schema-2 receipt and checks its embedded JSON, SHA-256, exact
+sealed canonical schema-3 receipt and checks its embedded JSON, SHA-256, exact
 cycle/step, and unique operation ID. The seek receipt can only be returned by
 `PersistentTimelinePlaybackPhase::recover_seek`, after the real typed product
 seek closes one exact Ready target under Audio Device Clock and the frozen
@@ -129,9 +129,10 @@ acceptable substitute. Cache pressure can only be returned by
 Critical and Nominal decisions to the settled Preview/GPU pair, requires
 nonzero media-cache byte retirement, then proves the same exact Ready picture
 and unchanged GPU/Preview/Audio/background/Export failure ledgers. Nominal is
-attempted even when Critical application fails. Surface/device reopen and
-Export cancel/retry still have no production receipt constructor; a runtime
-must keep those capabilities absent until their real operation owners exist.
+attempted even when Critical application fails. Surface/device reopen is
+sealed only by the real winit Window generation owner, and Export cancel/retry
+only by the frozen repeated-Export recovery substate; the concrete runtime
+forwards those owner receipts unchanged.
 The supervisor
 automatically seals and publishes full
 chunks and generates the raw producer JSON plus normalized report. Finish
@@ -185,11 +186,11 @@ uses `run_endurance_campaign` internally. Its concrete
 `EnduranceCampaignRuntime` must pump the actual owners until each absolute
 campaign deadline, return one coordinator-bounded capture envelope, and
 synchronously close Playback/Preview/Audio/GPU/Reference/Export before the
-coordinator takes the final sample. That concrete three-phase runtime and thin
-validation executable are not implemented at this checkpoint; its Continuous
-Export leaf must compose the existing frozen repeated-Export owner rather than
-reimplementing the loop, and its realtime leaves must compose the existing
-persistent Timeline phase owner. The coordinator owns cadence and native
+coordinator takes the final sample. The validation-only concrete three-phase
+runtime now composes the existing frozen repeated-Export, persistent Timeline,
+canonical Reference, and real Window Surface owners. The remaining thin
+validation executable must provide the machine-specific fresh-App factory and
+call that runtime; it must not reimplement its loop. The coordinator owns cadence and native
 `ProductProcessTree` probing, phase order, and evidence publication. If a
 physical provider or required fixture is absent, `begin_phase` must return the
 typed `NotRun` receipt created by prepared-workload admission before starting

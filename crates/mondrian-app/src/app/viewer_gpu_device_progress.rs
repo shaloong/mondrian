@@ -792,12 +792,23 @@ impl ViewerGpuDeviceProgressOwner {
     /// Transfer the retirement envelope and wait within an explicit bound.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retire_device_generation_and_wait(
-        mut self,
+        self,
         retirement: impl ViewerGpuDeviceGenerationRetirement,
         timeout: Duration,
     ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+        self.retire_device_generation_until(retirement, deadline)
+    }
+
+    /// Transfer the retirement envelope and wait against one caller-owned deadline.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn retire_device_generation_until(
+        mut self,
+        retirement: impl ViewerGpuDeviceGenerationRetirement,
+        deadline: Instant,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
         let handoff = self.worker.enqueue_generation_retirement(Box::new(retirement));
-        self.worker.shutdown_and_wait(true, handoff, timeout)
+        self.worker.shutdown_until(true, handoff, deadline)
     }
 }
 
@@ -914,12 +925,23 @@ where
         })
     }
 
-    #[cfg(any(test, feature = "validation"))]
+    #[cfg(test)]
     fn shutdown_and_wait(
         &mut self,
         retirement_requested: bool,
         retirement_handoff_accepted: bool,
         timeout: Duration,
+    ) -> ViewerGpuDeviceProgressShutdownEvidence {
+        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
+        self.shutdown_until(retirement_requested, retirement_handoff_accepted, deadline)
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn shutdown_until(
+        &mut self,
+        retirement_requested: bool,
+        retirement_handoff_accepted: bool,
+        deadline: Instant,
     ) -> ViewerGpuDeviceProgressShutdownEvidence {
         let Some(join_handle) = self.join_handle.take() else {
             return ViewerGpuDeviceProgressShutdownEvidence {
@@ -934,7 +956,10 @@ where
             };
         };
         drop(self.command_sender.take());
-        match self.exit_receiver.recv_timeout(timeout) {
+        match self
+            .exit_receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        {
             Ok(retirement_completed) => {
                 let worker_panicked = join_handle.join().is_err();
                 ViewerGpuDeviceProgressShutdownEvidence {
@@ -2242,7 +2267,8 @@ mod tests {
             require_device_lost: false,
         }));
 
-        let evidence = worker.shutdown_and_wait(true, handoff, Duration::from_millis(10));
+        let evidence =
+            worker.shutdown_until(true, handoff, Instant::now() + Duration::from_millis(10));
 
         assert!(evidence.timed_out);
         assert!(!evidence.worker_terminated);

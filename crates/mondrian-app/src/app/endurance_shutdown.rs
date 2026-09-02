@@ -286,6 +286,8 @@ pub struct AppEnduranceShutdownEvidence {
     pub reference_output: ReferenceOutputModuleShutdownReceipt,
     /// Export queue consuming worker evidence.
     pub export: ExportQueueShutdownEvidence,
+    /// Export owner diagnostics captured after the consuming Queue join.
+    pub export_terminal_snapshot: mondrian_export::ExportEnduranceSnapshot,
     /// Realtime Audio render/output consuming evidence.
     pub audio: AudioPlaybackShutdownEvidence,
     /// Decoded Audio Source Cache and FFmpeg child/pump evidence.
@@ -678,6 +680,7 @@ impl AppState {
 
         let audio = self.shutdown_audio_playback_until(deadline);
         let export = self.render_queue.shutdown_until(deadline);
+        let export_terminal_snapshot = self.render_queue.endurance_snapshot(0);
         let proxy_generation = self.proxy_generation.finish_endurance_shutdown(deadline);
         let media_import = self.media_import.finish_endurance_shutdown(deadline);
         let media_asset_mutation = self.media_asset_mutations.finish_endurance_shutdown(deadline);
@@ -728,6 +731,7 @@ impl AppState {
             project,
             reference_output,
             export,
+            export_terminal_snapshot,
             audio,
             audio_source_cache,
             execution_memory_observer,
@@ -815,6 +819,11 @@ mod tests {
         assert!(!evidence.export.worker_owner_abandoned);
         assert_eq!(evidence.export.pending_jobs, 0);
         assert_eq!(evidence.export.active_jobs, 0);
+        assert!(evidence.export_terminal_snapshot.shutdown_requested);
+        assert!(!evidence.export_terminal_snapshot.worker_running);
+        assert!(evidence.export_terminal_snapshot.worker_terminated);
+        assert_eq!(evidence.export_terminal_snapshot.pending_jobs, 0);
+        assert_eq!(evidence.export_terminal_snapshot.active_jobs, 0);
         assert!(evidence.audio.all_workers_terminated());
         assert!(evidence.audio_source_cache.all_resources_released());
         assert!(evidence.project_persistence.lifecycle_closed());

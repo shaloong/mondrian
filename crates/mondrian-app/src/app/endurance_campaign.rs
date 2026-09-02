@@ -385,21 +385,72 @@ impl EnduranceExecutionOwners {
 
     /// Stop Preview and the App State's actual Audio owner, then retire GPU.
     pub fn shutdown_and_wait(
-        mut self,
-        mut app: AppState,
+        self,
+        app: AppState,
         gpu_timeout: Duration,
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
         let deadline = Instant::now().checked_add(gpu_timeout).unwrap_or_else(Instant::now);
+        self.shutdown_until(app, deadline)
+    }
+
+    /// Consume all realtime/App owners against one caller-owned absolute deadline.
+    pub(crate) fn shutdown_until(
+        mut self,
+        mut app: AppState,
+        deadline: Instant,
+    ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
         let transport_shutdown_failed = app.is_playing() && app.pause().is_err();
-        let (mut preview_owner, gpu_owner) = self
-            .realtime
-            .take()
-            .ok_or_else(|| {
-                EnduranceCampaignError::Runtime(
-                    "Headless realtime execution session is missing".to_owned(),
-                )
-            })?
-            .into_shutdown_owners();
+        let Some(realtime) = self.realtime.take() else {
+            app.begin_endurance_shutdown();
+            let app = app.shutdown_for_endurance(deadline);
+            let (app_background, terminal_projection_failure) =
+                match app.background_terminal_snapshot() {
+                    Ok(snapshot) => (Some(snapshot), None),
+                    Err(error) => (
+                        None,
+                        Some(format!("capture App background terminal snapshot: {error}")),
+                    ),
+                };
+            let preview = PreviewRuntimeShutdownEvidence {
+                schema_version: 2,
+                unverified_async_reaps: 1,
+                ..PreviewRuntimeShutdownEvidence::default()
+            };
+            let gpu = EnduranceGpuShutdownEvidence {
+                worker_started: false,
+                worker_terminated: false,
+                worker_panicked: false,
+                timed_out: false,
+                retirement_handoff_accepted: false,
+                retirement_completed: false,
+                device_loss_count: 0,
+                fatal_error_count: 1,
+            };
+            let terminal_owner_snapshot = HeadlessEnduranceOwnerSnapshot::failed_capture()
+                .fail_closed_after_shutdown(HeadlessEnduranceShutdownProjection {
+                    playback_owner_consumed: true,
+                    preview_closed: false,
+                    audio_closed: app.audio.all_workers_terminated(),
+                    app_residual_owners_closed: app.all_residual_owner_resources_released(),
+                    app_background,
+                    gpu_closed: false,
+                    gpu_device_losses: 0,
+                    gpu_fatal_errors: 1,
+                    transport_shutdown_failed,
+                });
+            return Ok(EnduranceExecutionOwnerClosure {
+                preview,
+                app,
+                gpu,
+                owner_snapshot_failure: Some(
+                    "Headless realtime execution session was missing during consuming shutdown"
+                        .to_owned(),
+                ),
+                terminal_projection_failure,
+                terminal_owner_snapshot,
+            });
+        };
+        let (mut preview_owner, gpu_owner) = realtime.into_shutdown_owners();
         let (owner_snapshot, owner_snapshot_failure) =
             match capture_headless_endurance_owner_snapshot(&preview_owner, &gpu_owner, &app) {
                 Ok(snapshot) => (snapshot, None),
@@ -410,7 +461,7 @@ impl EnduranceExecutionOwners {
             };
         preview_owner.begin_endurance_shutdown();
         app.begin_endurance_shutdown();
-        let gpu = gpu_owner.shutdown_and_wait(deadline.saturating_duration_since(Instant::now()));
+        let gpu = gpu_owner.shutdown_until(deadline);
         let preview = preview_owner.shutdown_until(deadline);
         let app = app.shutdown_for_endurance(deadline);
         let device_loss_count = u64::from(
@@ -667,6 +718,25 @@ impl EnduranceRuntimeSnapshot {
             capture_facts: EnduranceCaptureFacts::for_continuous_export(),
         }
     }
+
+    /// Replace live diagnostics with facts captured by the consuming terminal
+    /// owners while preserving the phase identity and playback evidence.
+    pub(crate) fn terminalize(
+        mut self,
+        reference_output: ReferenceOutputDiagnostics,
+        export: ExportEnduranceSnapshot,
+        capture_facts: EnduranceCaptureFacts,
+    ) -> Self {
+        self.reference_output = reference_output;
+        self.export = export;
+        self.capture_facts = capture_facts;
+        self
+    }
+
+    pub(crate) fn with_capture_facts(mut self, capture_facts: EnduranceCaptureFacts) -> Self {
+        self.capture_facts = capture_facts;
+        self
+    }
 }
 
 /// Typed terminal closure for the currently evidenced software and Export owners.
@@ -715,6 +785,7 @@ pub trait EnduranceCampaignRuntime {
         &mut self,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
+        phase_started_at_run_us: u64,
     ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError>;
 
     /// Pump real product work until the absolute campaign deadline is reached.
@@ -790,8 +861,9 @@ where
             &request.evidence_directory,
             workload_path,
         )?;
-        let admission = match runtime.begin_phase(requirement, &workload) {
+        let admission = match runtime.begin_phase(requirement, &workload, started_at_run_us) {
             Ok(admission) => admission,
+            Err(primary @ EnduranceCampaignError::PreStartRuntime(_)) => return Err(primary),
             Err(primary) => return Err(cleanup_started_phase(runtime, primary)),
         };
         match admission {
@@ -1039,6 +1111,9 @@ pub enum EnduranceCampaignError {
     /// Concrete product runtime rejected or failed one operation.
     #[error("endurance product runtime failed: {0}")]
     Runtime(String),
+    /// Read-only machine preflight failed before any phase owner was created.
+    #[error("endurance product pre-start inspection failed: {0}")]
+    PreStartRuntime(String),
     /// A phase workload path was absent.
     #[error("endurance workload is missing for phase '{0}'")]
     MissingWorkload(String),
@@ -1257,9 +1332,10 @@ mod tests {
             &mut self,
             requirement: &EndurancePhaseRequirement,
             workload: &PreparedEnduranceWorkload,
+            phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             self.kind = Some(requirement.kind);
-            self.phase_started_at_us = self.clock.elapsed_us();
+            self.phase_started_at_us = phase_started_at_run_us;
             self.verified_exports = 0;
             self.shutdown = false;
             Ok(
@@ -1382,6 +1458,7 @@ mod tests {
             &mut self,
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
+            _phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             unreachable!("cleanup test never admits a phase")
         }
@@ -1584,6 +1661,7 @@ mod tests {
 
     #[derive(Clone, Copy)]
     enum CampaignFailpoint {
+        PreStart,
         Begin,
         Pump,
         Event,
@@ -1607,10 +1685,19 @@ mod tests {
             &mut self,
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
+            _phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             self.begin_calls += 1;
-            if matches!(self.failpoint, CampaignFailpoint::Begin) {
-                return Err(EnduranceCampaignError::Runtime("begin".to_owned()));
+            match self.failpoint {
+                CampaignFailpoint::PreStart => {
+                    return Err(EnduranceCampaignError::PreStartRuntime(
+                        "pre-start".to_owned(),
+                    ));
+                }
+                CampaignFailpoint::Begin => {
+                    return Err(EnduranceCampaignError::Runtime("begin".to_owned()));
+                }
+                _ => {}
             }
             Ok(EndurancePhaseAdmission::Started)
         }
@@ -1769,6 +1856,30 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn coordinator_does_not_cleanup_a_pre_start_failure_without_owners() {
+        let (_temporary, request, _profile, _evidence) = campaign_fixture();
+        let clock = FakeClock::default();
+        let mut runtime = FailpointRuntime {
+            clock: &clock,
+            failpoint: CampaignFailpoint::PreStart,
+            begin_calls: 0,
+            shutdown_calls: 0,
+            snapshot_calls: 0,
+            snapshots_at_shutdown: None,
+        };
+
+        let result = run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock);
+
+        assert!(matches!(
+            result,
+            Err(EnduranceCampaignError::PreStartRuntime(ref detail)) if detail == "pre-start"
+        ));
+        assert_eq!(runtime.begin_calls, 1);
+        assert_eq!(runtime.shutdown_calls, 0);
+        assert_eq!(runtime.snapshot_calls, 0);
     }
 
     #[test]

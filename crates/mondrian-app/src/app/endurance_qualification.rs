@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
+use super::endurance_shutdown::AppBackgroundEnduranceSnapshot;
 use super::headless_realtime_playback::HeadlessEnduranceOwnerSnapshot;
 
 /// Additional gauges and independently verified facts owned by the Headless
@@ -94,6 +95,31 @@ impl EnduranceCaptureFacts {
             gpu_device_losses: 0,
             fatal_errors: 0,
         }
+    }
+
+    /// Preserve auxiliary App queues/resources/failures for an Export-only phase.
+    pub(crate) fn from_app_background(
+        background: AppBackgroundEnduranceSnapshot,
+    ) -> Result<Self, String> {
+        let totals = background.totals()?;
+        Ok(Self {
+            schema_version: 1,
+            observed_at_us: 0,
+            playback_pending: 0,
+            other_queue_depth: totals.queue_depth,
+            owned_resource_units: totals.owned_resource_units,
+            recovery_failures: 0,
+            gpu_device_losses: 0,
+            fatal_errors: totals
+                .cumulative_failures
+                .checked_add(totals.worker_health_failures)
+                .ok_or_else(|| "App background fatal count overflowed u64".to_owned())?,
+        })
+    }
+
+    /// Fail closed when Export-only App background projection cannot be sealed.
+    pub(crate) const fn failed_continuous_export() -> Self {
+        Self { fatal_errors: 1, ..Self::for_continuous_export() }
     }
 
     /// Assign the supervisor's capture-envelope completion stamp.
