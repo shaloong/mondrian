@@ -58,6 +58,8 @@ use crate::app::viewer_gpu_submission::{
 };
 use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
+#[cfg(feature = "validation")]
+use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
     AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
 };
@@ -315,7 +317,7 @@ impl Drop for AppUiSurfaceDeviceReopenValidation {
 #[cfg(feature = "validation")]
 struct AppUiValidationReturnedState {
     app_state: AppState,
-    ui_service_failure: Option<String>,
+    ui_shutdown: Option<AppUiServiceShutdownEvidence>,
 }
 
 #[cfg(feature = "validation")]
@@ -325,17 +327,22 @@ struct AppUiHostSessionOwner {
     host: Option<AppUiHost>,
     #[cfg(feature = "validation")]
     validation_return: Option<AppUiValidationReturnSlot>,
+    #[cfg(feature = "validation")]
+    validation_shutdown_deadline: Option<Instant>,
 }
 
 impl AppUiHostSessionOwner {
     fn new(
         host: AppUiHost,
         #[cfg(feature = "validation")] validation_return: Option<AppUiValidationReturnSlot>,
+        #[cfg(feature = "validation")] validation_shutdown_deadline: Option<Instant>,
     ) -> Self {
         Self {
             host: Some(host),
             #[cfg(feature = "validation")]
             validation_return,
+            #[cfg(feature = "validation")]
+            validation_shutdown_deadline,
         }
     }
 }
@@ -368,14 +375,16 @@ impl Drop for AppUiHostSessionOwner {
                 tracing::error!("validation Window lost its App UI host before state return");
                 return;
             };
-            let (app_state, ui_service_failure) = host.into_validation_app_state();
+            let deadline = self.validation_shutdown_deadline.take().unwrap_or_else(Instant::now);
+            let (app_state, ui_shutdown) = host.into_validation_app_state_until(deadline);
             let mut returned = return_slot.borrow_mut();
             if returned.is_some() {
                 tracing::error!("validation Window attempted to return AppState more than once");
                 drop(app_state);
                 return;
             }
-            *returned = Some(AppUiValidationReturnedState { app_state, ui_service_failure });
+            *returned =
+                Some(AppUiValidationReturnedState { app_state, ui_shutdown: Some(ui_shutdown) });
         }
     }
 }
@@ -2345,6 +2354,7 @@ fn finish_surface_device_validation<T>(
 pub(crate) struct AppUiSurfaceDeviceReopenRun {
     pub(crate) app_state: AppState,
     pub(crate) result: Result<EnduranceRecoveryOperationReceipt, String>,
+    pub(crate) ui_shutdown: Option<AppUiServiceShutdownEvidence>,
     pub(crate) recovery_pump:
         Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
 }
@@ -2360,6 +2370,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            ui_shutdown: None,
             recovery_pump: None,
         };
     }
@@ -2367,6 +2378,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            ui_shutdown: None,
             recovery_pump: None,
         };
     }
@@ -2378,6 +2390,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
                 result: Err(format!(
                     "could not create the Surface validation event loop: {error}"
                 )),
+                ui_shutdown: None,
                 recovery_pump: None,
             };
         }
@@ -2405,6 +2418,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
+            ui_shutdown: None,
             recovery_pump,
         };
     }
@@ -2412,6 +2426,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
         return AppUiSurfaceDeviceReopenRun {
             app_state: initial_state,
             result: Err("Surface/device reopen validation deadline overflow".to_owned()),
+            ui_shutdown: None,
             recovery_pump,
         };
     };
@@ -2435,8 +2450,17 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
     );
     let returned = returned_state.borrow_mut().take();
     let recovery_pump = recovery_pump_return.borrow_mut().take();
-    let AppUiValidationReturnedState { app_state, ui_service_failure } = returned
+    let AppUiValidationReturnedState { app_state, ui_shutdown } = returned
         .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
+    let ui_service_failure = match ui_shutdown {
+        Some(evidence) if evidence.all_resources_released() => None,
+        Some(evidence) => Some(format!(
+            "Window validation UI services did not close cleanly: {evidence:?}"
+        )),
+        None => {
+            Some("Window validation UI services returned no typed shutdown evidence".to_owned())
+        }
+    };
     let operation_result = match (
         ui_result.map_err(|error| error.to_string()),
         ui_service_failure,
@@ -2452,7 +2476,12 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
         }),
         (Ok(()), None, Err(_)) => Err("Surface/device reopen result lock poisoned".to_owned()),
     };
-    AppUiSurfaceDeviceReopenRun { app_state, result: operation_result, recovery_pump }
+    AppUiSurfaceDeviceReopenRun {
+        app_state,
+        result: operation_result,
+        ui_shutdown,
+        recovery_pump,
+    }
 }
 
 fn run_app_ui_with_initial_state(
@@ -2485,13 +2514,16 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let platform = SystemPlatformService;
     let tracing_guard = init_product_tracing(&platform);
     #[cfg(feature = "validation")]
+    let validation_shutdown_deadline =
+        surface_reopen_validation.as_ref().map(|validation| validation.deadline);
+    #[cfg(feature = "validation")]
     let background_runtime = match build_app_ui_background_runtime() {
         Ok(runtime) => runtime,
         Err(error) => {
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: initial_state,
-                    ui_service_failure: None,
+                    ui_shutdown: None,
                 });
             }
             return Err(error.into());
@@ -2504,6 +2536,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
         AppUiHost::new(initial_state),
         #[cfg(feature = "validation")]
         validation_return,
+        #[cfg(feature = "validation")]
+        validation_shutdown_deadline,
     );
 
     tracing::info!("Mondrian app UI starting");

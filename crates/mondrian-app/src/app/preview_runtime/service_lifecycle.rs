@@ -213,7 +213,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }),
         );
         evidence.record(self.title_task.borrow_mut().shutdown_and_wait());
-        evidence.record(self.timeline_render_cache.borrow_mut().shutdown_and_wait());
+        let render_cache = self.timeline_render_cache.borrow_mut().shutdown_and_wait();
+        evidence.record(render_cache.aggregate_outcome);
+        evidence.timeline_render_cache = render_cache;
         evidence
     }
 
@@ -262,7 +264,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }),
         );
         evidence.record(self.title_task.borrow_mut().shutdown_until(deadline));
-        evidence.record(self.timeline_render_cache.borrow_mut().shutdown_until(deadline));
+        let render_cache = self.timeline_render_cache.borrow_mut().shutdown_until(deadline);
+        evidence.record(render_cache.aggregate_outcome);
+        evidence.timeline_render_cache = render_cache;
         evidence
     }
 

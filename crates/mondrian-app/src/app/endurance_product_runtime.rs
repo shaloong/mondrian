@@ -525,9 +525,18 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
             operation_id,
             timeout,
         );
+        let result = match run.ui_shutdown {
+            Some(evidence) if evidence.all_resources_released() => run.result,
+            Some(evidence) => Err(format!(
+                "Window Surface recovery returned incomplete UI shutdown evidence: {evidence:?}"
+            )),
+            None => {
+                Err("Window Surface recovery returned no typed UI shutdown evidence".to_owned())
+            }
+        };
         EnduranceSurfaceReopenRun {
             app_state: run.app_state,
-            result: run.result,
+            result,
             recovery_pump: run.recovery_pump.expect("Window driver supplied a recovery pump"),
         }
     }
@@ -693,8 +702,8 @@ impl PhaseOwners {
         }
         match self.kind {
             EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery => {
-                let execution =
-                    EnduranceExecutionOwners::start().map_err(|error| error.to_string())?;
+                let execution = EnduranceExecutionOwners::start(self.app_ref()?)
+                    .map_err(|error| error.to_string())?;
                 self.execution = Some(execution);
                 let app = self.app.as_mut().ok_or("phase App owner is missing")?;
                 let execution = self.execution.as_mut().ok_or("execution owner disappeared")?;

@@ -13263,6 +13263,26 @@ fn synchronous_preview_shutdown_reclaims_complete_worker_inventory() {
 }
 
 #[test]
+fn preview_shutdown_rejects_required_render_cache_start_failure() {
+    let runtime = PreviewProductionRuntime::<()>::with_direct_worker_count_for_test(
+        preview_decode_cpu_budget(),
+        1,
+    );
+    *runtime.timeline_render_cache.borrow_mut() =
+        crate::app::preview_render_cache::PreviewTimelineRenderCache::with_start_failure_for_test(
+            "intentional render-cache start failure",
+        );
+
+    let evidence = runtime.shutdown_and_wait();
+
+    assert!(evidence.timeline_render_cache.required);
+    assert!(evidence.timeline_render_cache.start_failed);
+    assert!(evidence.timeline_render_cache.worker.is_none());
+    assert!(!evidence.timeline_render_cache.all_resources_released());
+    assert!(!evidence.all_workers_terminated());
+}
+
+#[test]
 fn synchronous_preview_shutdown_rejects_panicked_worker_as_complete() {
     let worker = std::thread::spawn(|| panic!("intentional Preview shutdown test panic"));
 

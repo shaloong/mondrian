@@ -99,6 +99,13 @@ return from an empty queue or object Drop. Ordinary `Drop` closes both channels,
 joins only an already-finished handle, and otherwise detaches immediately; it
 cannot freeze the UI thread or provide qualification evidence.
 
+Preview retains the cache service's exact startup and terminal evidence inside
+its own shutdown receipt. A production cache configuration is required: start
+failure, missing terminal evidence, panic, timeout, same-thread skip, or detach
+all make the aggregate Preview closure dirty. Unit-test Preview compositions
+may explicitly mark the cache as not required, but production cannot infer
+`NeverStarted` from a failed startup.
+
 The App Adapter retains at most one verified working hit for immediate
 promotion and a bounded negative-identity set to prevent UI poll storms. A hit
 is uploaded as one identity working layer, then follows the ordinary Viewer

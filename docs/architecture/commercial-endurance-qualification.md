@@ -208,7 +208,11 @@ execution, CPU fallback, lazily-started Basic Title, and Timeline render-cache
 workers. It distinguishes never-started owners from joined termination, panic,
 same-thread detachment, and workers previously transferred to the ordinary UI
 asynchronous reaper; only an exact, panic-free, fully synchronous inventory
-closure may set the campaign's Playback/Preview worker-return fact.
+closure may set the campaign's Playback/Preview worker-return fact. The
+Timeline render-cache is also retained as typed nested evidence: production
+Preview requires a successfully started cache worker and its exact terminal
+receipt. A configured cache start failure is not equivalent to a cache that was
+never required, and cannot disappear into Preview's aggregate worker counts.
 
 Audio closure is similarly owner-derived: `AudioPlayback` joins its PCM render
 worker and asks the concrete output Adapter to join every device-lifecycle
@@ -235,14 +239,18 @@ The App-owned product Waveform service now has its own schema-1 consuming-style
 receipt over the analysis worker, request/publication backlog, external cache
 references, and nested schema-5 Audio Source closure; its Timeline adapter is
 weak and cannot prolong those owners. Normal `AppUiHost` quit consumes that
-receipt under a fixed deadline. The concrete three-phase campaign runtime must
-instantiate and include the same receipt in its shutdown window before COL-047
-can claim complete product-domain closure; the current `AppState`-only owner
-group does not fabricate a Waveform owner or infer closure from zero demand.
+receipt under a fixed deadline. Realtime endurance phases now instantiate the
+same product Waveform owner, bind it to the exact phase Asset Library, signal it
+alongside Preview and App, and retain its typed receipt in the upper owner
+closure. A clean App receipt or zero Waveform demand cannot substitute for that
+receipt.
 
 The validation-only `EnduranceExecutionOwners` group composes the production
-Headless Preview and Viewer GPU owners with the exact Audio owner embedded in
-the phase's `AppState`. It never starts a sidecar Audio instance. Its consuming
+Headless Preview, product Waveform, and Viewer GPU owners with the exact Audio
+owner embedded in the phase's `AppState`. It never starts a sidecar Audio
+instance. Preview, Waveform, and App close admission before any join; GPU,
+Preview including render cache, Waveform including its Audio Source Cache, and
+App then all spend from the same caller-owned absolute deadline. Its consuming
 close takes the complete `AppState`, so the Playback binding or an App-owned
 auxiliary worker cannot survive a nominally clean terminal projection; a
 transport pause failure is latched as fatal evidence while cleanup continues.
@@ -266,6 +274,15 @@ join is merged into the terminal counters rather than being frozen only before
 teardown. A timeout detaches the still-authoritative progress worker so that it can
 finish safe retirement, but it is terminal campaign failure evidence: it never
 claims that a GPU/native owner returned or that its admission slot was freed.
+
+Validation Window sessions use the operation's original absolute deadline for
+both Window Preview and Waveform teardown. The host returns their typed
+receipts with the exact entering `AppState`; it does not create a fresh UI
+timeout after rendering completed or reduce dirty evidence to a string. The
+Surface driver rejects a missing or dirty UI receipt before accepting the
+operation result. Standalone validation may subsequently consume the returned
+App under its separately declared outer lifecycle budget, while a campaign
+resumes that same App owner.
 
 The software owner group starts one paired Headless realtime session without
 admitting a phase or entering native playback scheduling. Inside that group,

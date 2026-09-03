@@ -33,7 +33,7 @@ use crate::app::preview_execution::{
 };
 use crate::app::preview_runtime::{
     PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationState,
-    PreviewVisualGpuCompletionDisposition,
+    PreviewRuntimeShutdownEvidence, PreviewVisualGpuCompletionDisposition,
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
@@ -55,7 +55,7 @@ use crate::app::ui_actions::{
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_SCOPES_SETTINGS_CHANGED, APP_SHELL_WINDOW_DRAG,
     APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
-use crate::app::waveform_service::AudioWaveformService;
+use crate::app::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
 use crate::app::{
     discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate,
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
@@ -83,7 +83,7 @@ use crate::app_ui::startup::{AppUiStartupScreen, StartupRecentProject, StartupRe
 use mondrian_editor_state::Action;
 
 const WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
-#[cfg(feature = "validation")]
+#[cfg(all(feature = "validation", test))]
 const VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Window-host commands produced while draining app UI actions.
@@ -343,19 +343,18 @@ impl AppUiHost {
     /// The returned state remains live so a higher-level endurance owner can
     /// resume the same Timeline generation or consume its full App shutdown.
     #[cfg(feature = "validation")]
-    pub(crate) fn into_validation_app_state(self) -> (AppState, Option<String>) {
-        let deadline = Instant::now() + VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT;
+    pub(crate) fn into_validation_app_state_until(
+        mut self,
+        deadline: Instant,
+    ) -> (AppState, AppUiServiceShutdownEvidence) {
+        self.preview_service.begin_endurance_shutdown();
         self.waveform_service.begin_shutdown();
         let preview = self.preview_service.shutdown_until(deadline);
         let waveform = self.waveform_service.shutdown_until(deadline);
-        let failure = if !preview.all_workers_terminated() || !waveform.all_resources_released() {
-            Some(format!(
-                "Window validation UI services did not close cleanly: preview={preview:?}, waveform={waveform:?}"
-            ))
-        } else {
-            None
-        };
-        (self.app_state.into_inner(), failure)
+        (
+            self.app_state.into_inner(),
+            AppUiServiceShutdownEvidence { preview, waveform },
+        )
     }
 
     /// Get the Project engine and machine-local Viewer display policy.
@@ -2011,6 +2010,21 @@ impl AppUiHost {
                 "waveform service did not close cleanly before product exit"
             );
         }
+    }
+}
+
+/// Typed consuming closure for the execution services owned by one validation Window host.
+#[cfg(feature = "validation")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiServiceShutdownEvidence {
+    pub(crate) preview: PreviewRuntimeShutdownEvidence,
+    pub(crate) waveform: AudioWaveformShutdownEvidence,
+}
+
+#[cfg(feature = "validation")]
+impl AppUiServiceShutdownEvidence {
+    pub(crate) fn all_resources_released(self) -> bool {
+        self.preview.all_workers_terminated() && self.waveform.all_resources_released()
     }
 }
 
@@ -4214,15 +4228,55 @@ mod tests {
         let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
         let host = AppUiHost::new(AppState::new());
 
-        let (state, ui_service_failure) = host.into_validation_app_state();
+        let deadline = Instant::now()
+            .checked_add(VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT)
+            .expect("test UI shutdown deadline");
+        let (state, ui_shutdown) = host.into_validation_app_state_until(deadline);
 
-        assert!(ui_service_failure.is_none(), "{ui_service_failure:?}");
-        let shutdown = state.shutdown_for_endurance(
+        assert!(ui_shutdown.all_resources_released(), "{ui_shutdown:#?}");
+        let shutdown = state.shutdown_for_endurance(deadline);
+        assert!(shutdown.all_resources_released(), "{shutdown:#?}");
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn validation_host_does_not_renew_a_shared_shutdown_deadline() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let host = AppUiHost::new(AppState::new());
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(0);
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).expect("report slow Preview owner entry");
+            release_rx.recv().expect("release slow Preview owner");
+            finished_tx.send(()).expect("report slow Preview owner exit");
+        });
+        host.preview_service.retain_shutdown_worker_for_test(worker);
+        entered_rx.recv().expect("slow Preview owner entered");
+        let started = Instant::now();
+        let deadline = started
+            .checked_add(Duration::from_millis(10))
+            .expect("test UI shutdown deadline");
+
+        let (state, ui_shutdown) = host.into_validation_app_state_until(deadline);
+
+        assert_eq!(ui_shutdown.preview.worker_timeouts, 1);
+        assert_eq!(ui_shutdown.preview.worker_deadline_detachments, 1);
+        assert!(!ui_shutdown.all_resources_released());
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "UI shutdown renewed its caller-owned absolute deadline"
+        );
+        release_tx.send(()).expect("release detached Preview owner");
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached Preview owner exited");
+        let app_shutdown = state.shutdown_for_endurance(
             Instant::now()
                 .checked_add(Duration::from_secs(5))
-                .expect("test shutdown deadline"),
+                .expect("App cleanup deadline"),
         );
-        assert!(shutdown.all_resources_released(), "{shutdown:#?}");
+        assert!(app_shutdown.all_resources_released(), "{app_shutdown:#?}");
     }
 
     #[test]

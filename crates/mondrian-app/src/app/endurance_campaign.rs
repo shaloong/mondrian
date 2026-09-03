@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
@@ -43,6 +44,7 @@ use super::headless_realtime_playback::{
 };
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
 use super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
+use super::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
 use super::AppState;
 
 /// Public projection of bounded Headless GPU retirement evidence.
@@ -85,6 +87,8 @@ pub struct EnduranceExecutionOwnerClosure {
     pub preview: PreviewRuntimeShutdownEvidence,
     /// Complete consuming inventory for every owner embedded in AppState.
     pub app: AppEnduranceShutdownEvidence,
+    /// Complete consuming inventory for the product Waveform owner.
+    pub waveform: AudioWaveformShutdownEvidence,
     /// Bounded GPU progress and generation-retirement evidence.
     pub gpu: EnduranceGpuShutdownEvidence,
     /// Owner snapshot failure retained after consuming cleanup completed.
@@ -99,6 +103,7 @@ impl EnduranceExecutionOwnerClosure {
     pub fn all_workers_terminated(&self) -> bool {
         self.preview.all_workers_terminated()
             && self.app.all_resources_released()
+            && self.waveform.all_resources_released()
             && self.gpu.all_resources_retired()
     }
 
@@ -131,6 +136,7 @@ fn retain_terminal_owner_projection(
 /// Validation owner group using the production Headless Preview/GPU and Audio paths.
 pub struct EnduranceExecutionOwners {
     realtime: Option<HeadlessRealtimePlaybackSession>,
+    waveform: Arc<AudioWaveformService>,
 }
 
 #[derive(Default)]
@@ -180,10 +186,12 @@ pub(super) struct EnduranceCachePressureObservation {
 
 impl EnduranceExecutionOwners {
     /// Start real software execution owners without admitting a campaign phase.
-    pub fn start() -> Result<Self, EnduranceCampaignError> {
+    pub fn start(app: &AppState) -> Result<Self, EnduranceCampaignError> {
         let realtime = HeadlessRealtimePlaybackSession::new()
             .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
-        Ok(Self { realtime: Some(realtime) })
+        let waveform = AudioWaveformService::new();
+        waveform.set_library(app.asset_library_handle());
+        Ok(Self { realtime: Some(realtime), waveform })
     }
 
     pub(super) fn begin_realtime_window(
@@ -404,7 +412,9 @@ impl EnduranceExecutionOwners {
     ) -> Result<EnduranceExecutionOwnerClosure, EnduranceCampaignError> {
         let transport_shutdown_failed = app.is_playing() && app.pause().is_err();
         let Some(realtime) = self.realtime.take() else {
+            self.waveform.begin_shutdown();
             app.begin_endurance_shutdown();
+            let waveform = self.waveform.shutdown_until(deadline);
             let app = app.shutdown_for_endurance(deadline);
             let (app_background, terminal_projection_failure) =
                 match app.background_terminal_snapshot() {
@@ -444,6 +454,7 @@ impl EnduranceExecutionOwners {
             return Ok(EnduranceExecutionOwnerClosure {
                 preview,
                 app,
+                waveform,
                 gpu,
                 owner_snapshot_failure: Some(
                     "Headless realtime execution session was missing during consuming shutdown"
@@ -463,9 +474,11 @@ impl EnduranceExecutionOwners {
                 ),
             };
         preview_owner.begin_endurance_shutdown();
+        self.waveform.begin_shutdown();
         app.begin_endurance_shutdown();
         let gpu = gpu_owner.shutdown_until(deadline);
         let preview = preview_owner.shutdown_until(deadline);
+        let waveform = self.waveform.shutdown_until(deadline);
         let app = app.shutdown_for_endurance(deadline);
         let device_loss_count = u64::from(
             gpu.generation_terminal_kind == Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost),
@@ -499,7 +512,8 @@ impl EnduranceExecutionOwners {
                     playback_owner_consumed: true,
                     preview_closed: preview.all_workers_terminated(),
                     audio_closed: app.audio.all_workers_terminated(),
-                    app_residual_owners_closed: app.all_residual_owner_resources_released(),
+                    app_residual_owners_closed: app.all_residual_owner_resources_released()
+                        && waveform.all_resources_released(),
                     app_background,
                     gpu_closed: gpu.all_resources_retired(),
                     gpu_device_losses: gpu.device_loss_count,
@@ -511,6 +525,7 @@ impl EnduranceExecutionOwners {
         Ok(EnduranceExecutionOwnerClosure {
             preview,
             app,
+            waveform,
             gpu,
             owner_snapshot_failure,
             terminal_projection_failure,
@@ -1282,7 +1297,7 @@ mod tests {
         let mut state = AppState::new();
         state.set_playback_frame_running(0);
         assert!(state.is_playing());
-        let mut owners = EnduranceExecutionOwners::start().expect("start execution owners");
+        let mut owners = EnduranceExecutionOwners::start(&state).expect("start execution owners");
         {
             let realtime = owners.realtime.as_mut().expect("paired realtime session");
             realtime.begin_realtime(&state, None).expect("begin realtime residency");
@@ -1297,6 +1312,7 @@ mod tests {
             .expect("close active execution owners");
 
         assert!(closure.preview.all_workers_terminated());
+        assert!(closure.waveform.all_resources_released());
         assert!(closure.app.audio.all_workers_terminated());
         assert!(closure.app.all_resources_released());
         assert!(closure.gpu.all_resources_retired());

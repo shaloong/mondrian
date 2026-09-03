@@ -348,6 +348,9 @@ pub struct PreviewRuntimeShutdownEvidence {
     pub worker_timeouts: u32,
     /// Worker handles detached after the shared qualification deadline.
     pub worker_deadline_detachments: u32,
+    /// Exact startup and terminal evidence for the persistent Timeline render cache.
+    pub(crate) timeline_render_cache:
+        crate::app::preview_render_cache::PreviewTimelineRenderCacheShutdownEvidence,
 }
 
 impl PreviewRuntimeShutdownEvidence {
@@ -360,6 +363,7 @@ impl PreviewRuntimeShutdownEvidence {
             && self.unverified_async_reaps == 0
             && self.worker_timeouts == 0
             && self.worker_deadline_detachments == 0
+            && self.timeline_render_cache.all_resources_released()
     }
 
     fn record(&mut self, outcome: PreviewOwnedWorkerShutdown) {
@@ -923,6 +927,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             PreviewDecodeAccessMode::ScrubCursor,
             None,
         );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retain_shutdown_worker_for_test(&self, worker: JoinHandle<()>) {
+        self.workers.borrow_mut().push(worker);
     }
 
     #[cfg(test)]
