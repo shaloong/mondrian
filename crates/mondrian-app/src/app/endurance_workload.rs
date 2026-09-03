@@ -22,17 +22,17 @@ const PLAYBACK_REFERENCE_WORKLOAD_ID: &str = "mondrian-col047/playback-reference
 const CONTINUOUS_EXPORT_WORKLOAD_ID: &str = "mondrian-col047/continuous-export/v1";
 const CONCURRENT_RECOVERY_WORKLOAD_ID: &str = "mondrian-col047/concurrent-recovery/v1";
 
-/// One side-effect-free prerequisite that can be prepared before phase owners start.
+/// One side-effect-free prerequisite observable before phase owners start.
 ///
 /// These variants never claim that a device Session is open or that a signal
 /// remains locked. Dynamic provider/readback facts are proved by the started
 /// product owners after this admission boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EndurancePreStartCapability {
-    /// Exact Timeline picture/audio fixture was validated without starting playback.
-    TimelinePlaybackFixturePrepared,
-    /// Immutable Sequence/source Export fixture was validated without starting a job.
-    FrozenExportFixturePrepared,
+    /// Timeline picture/audio fixture bindings were declared and are reachable for later build.
+    TimelinePlaybackFixtureDeclared,
+    /// Sequence/source Export fixture bindings were declared for later exact build validation.
+    FrozenExportFixtureDeclared,
     /// One exact audio-device contract was prepared without opening its stream.
     AudioOutputDevicePrepared,
     /// Physical provider/runtime/device/mode discovery was prepared without a Session.
@@ -176,7 +176,7 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
+                        EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
                         EndurancePreStartCapability::AudioOutputDevicePrepared,
                         EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
                         EndurancePreStartCapability::ExternalReferenceSignalPreflight,
@@ -192,7 +192,7 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EndurancePreStartCapability::FrozenExportFixturePrepared,
+                        EndurancePreStartCapability::FrozenExportFixtureDeclared,
                         EndurancePreStartCapability::IndependentExportVerifierPrepared,
                     ],
                     recovery_cycle_count: 0,
@@ -206,8 +206,8 @@ impl PreparedEnduranceWorkload {
                     workload_id: contract.workload_id,
                     kind: requirement.kind,
                     required_capabilities: vec![
-                        EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
-                        EndurancePreStartCapability::FrozenExportFixturePrepared,
+                        EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
+                        EndurancePreStartCapability::FrozenExportFixtureDeclared,
                         EndurancePreStartCapability::AudioOutputDevicePrepared,
                         EndurancePreStartCapability::PhysicalReferenceProviderPrepared,
                         EndurancePreStartCapability::ExternalReferenceSignalPreflight,
@@ -243,7 +243,7 @@ impl PreparedEnduranceWorkload {
         self.recovery_cycle_count
     }
 
-    /// Prepare a bound factory token only when every pre-start fact was observed.
+    /// Prepare a bound factory token only when every declaration/pre-start fact was observed.
     pub fn prepare_start(
         &self,
         inventory: &EndurancePreStartCapabilityInventory,
@@ -658,8 +658,8 @@ mod tests {
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed recovery workload");
         let inventory = EndurancePreStartCapabilityInventory::new([
-            EndurancePreStartCapability::TimelinePlaybackFixturePrepared,
-            EndurancePreStartCapability::FrozenExportFixturePrepared,
+            EndurancePreStartCapability::TimelinePlaybackFixtureDeclared,
+            EndurancePreStartCapability::FrozenExportFixtureDeclared,
         ]);
 
         let receipt = workload
@@ -693,7 +693,7 @@ mod tests {
             PreparedEnduranceWorkload::load(&requirement, &workload_path(requirement.kind))
                 .expect("typed Export workload");
         let inventory = EndurancePreStartCapabilityInventory::new([
-            EndurancePreStartCapability::FrozenExportFixturePrepared,
+            EndurancePreStartCapability::FrozenExportFixtureDeclared,
             EndurancePreStartCapability::IndependentExportVerifierPrepared,
         ]);
         let prepared = workload.prepare_start(&inventory).expect("prepared start");

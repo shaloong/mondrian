@@ -351,10 +351,17 @@ all four real recovery operation owners (including a narrow real-window Surface
 reopen executable), the concrete fresh-App three-phase runtime, and
 deterministic software tests. A
 valid contract can become `NotRun` only when a
-pre-start inventory names one or more missing Timeline/frozen-Export fixtures,
+pre-start inventory names one or more missing Timeline/frozen-Export fixture bindings,
 prepared Audio Device contract, discovered physical Reference provider/mode,
 external-reference signal preflight, pinned independent verifier, or prepared
-recovery owner. These facts do not claim an open device or continuous lock.
+recovery owner. Timeline/Export entries at this first stage prove only that the
+machine-plan bindings are declared and reachable without creating an App; they
+do not claim that a live Project Session or production dependency closure has
+already been prepared. After the one-use token is issued, build installs the
+exact Project in a fresh App, prepares/revalidates the source inventory, and can
+return Ready only through `PreparedEndurancePhaseAuthority`. Failure of those
+exact semantic checks is a hard setup failure with consuming cleanup, not
+`NotRun`. Other pre-start facts do not claim an open device or continuous lock.
 Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. The machine-specific factory and unified high-level

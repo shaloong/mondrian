@@ -1641,7 +1641,7 @@ mod tests {
         let build_calls = Rc::new(Cell::new(0));
         let factory = TestFactory {
             inventory: EndurancePreStartCapabilityInventory::new([
-                EndurancePreStartCapability::FrozenExportFixturePrepared,
+                EndurancePreStartCapability::FrozenExportFixtureDeclared,
                 EndurancePreStartCapability::IndependentExportVerifierPrepared,
             ]),
             build_calls: Rc::clone(&build_calls),
