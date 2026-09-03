@@ -198,6 +198,7 @@ impl PreparedEnduranceRunRequest {
     }
 
     /// Transfer the checked request into the serial campaign coordinator.
+    #[cfg(feature = "validation")]
     pub(crate) fn into_campaign_request(self) -> EnduranceCampaignRequest {
         self.request
     }

@@ -84,7 +84,10 @@ The implementation is split at existing authority boundaries:
   pumps Timeline → Reference → Export, enforces
   Seek → Surface/Device → Export Cancel/Retry → Cache Pressure, and consumes
   each phase under one shutdown deadline. The runtime and serial supervisor
-  share one monotonic clock authority.
+  share one monotonic clock authority. This runtime and its exact FFmpeg
+  toolchain adapter compile only with the App `validation` feature; ordinary
+  unit-test builds do not accidentally enable a partially configured
+  qualification composition.
 - `mondrian-app::app::project_lifecycle` supplies the validation-only exact
   Project-fixture install seam used by that factory. Its public input is the
   already prepared machine plan, never a caller-assembled path/hash pair. It

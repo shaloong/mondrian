@@ -724,6 +724,7 @@ impl EnduranceRuntimeSnapshot {
 
     /// Replace live diagnostics with facts captured by the consuming terminal
     /// owners while preserving the phase identity and playback evidence.
+    #[cfg(feature = "validation")]
     pub(crate) fn terminalize(
         mut self,
         reference_output: ReferenceOutputDiagnostics,
@@ -736,6 +737,7 @@ impl EnduranceRuntimeSnapshot {
         self
     }
 
+    #[cfg(feature = "validation")]
     pub(crate) fn with_capture_facts(mut self, capture_facts: EnduranceCaptureFacts) -> Self {
         self.capture_facts = capture_facts;
         self

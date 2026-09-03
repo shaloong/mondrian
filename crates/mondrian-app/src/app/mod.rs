@@ -112,13 +112,13 @@ mod dynamic_hdr_authoring;
 pub mod endurance_campaign;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_export;
-#[cfg(any(test, feature = "validation"))]
+#[cfg(feature = "validation")]
 pub mod endurance_ffmpeg_toolchain;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_machine_plan;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_playback;
-#[cfg(any(test, feature = "validation"))]
+#[cfg(feature = "validation")]
 pub mod endurance_product_runtime;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_qualification;

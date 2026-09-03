@@ -64,6 +64,7 @@ pub struct PhysicalReferenceStartEvidence {
 
 impl PersistentReferenceOutputPump {
     /// Nanosecond scheduling interval derived from the exact rational picture cadence.
+    #[cfg(feature = "validation")]
     pub(crate) fn cadence_interval(&self) -> Result<std::time::Duration, String> {
         let rate = self.request.signal.frame_rate;
         let numerator = u128::try_from(rate.num)

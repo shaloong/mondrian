@@ -791,6 +791,7 @@ impl ViewerGpuDeviceProgressOwner {
 
     /// Transfer the retirement envelope and wait within an explicit bound.
     #[cfg(any(test, feature = "validation"))]
+    #[cfg(feature = "validation")]
     pub(crate) fn retire_device_generation_and_wait(
         self,
         retirement: impl ViewerGpuDeviceGenerationRetirement,

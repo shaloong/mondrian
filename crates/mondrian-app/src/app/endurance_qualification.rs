@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
+#[cfg(feature = "validation")]
 use super::endurance_shutdown::AppBackgroundEnduranceSnapshot;
 use super::headless_realtime_playback::HeadlessEnduranceOwnerSnapshot;
 
@@ -98,6 +99,7 @@ impl EnduranceCaptureFacts {
     }
 
     /// Preserve auxiliary App queues/resources/failures for an Export-only phase.
+    #[cfg(feature = "validation")]
     pub(crate) fn from_app_background(
         background: AppBackgroundEnduranceSnapshot,
     ) -> Result<Self, String> {
@@ -118,6 +120,7 @@ impl EnduranceCaptureFacts {
     }
 
     /// Fail closed when Export-only App background projection cannot be sealed.
+    #[cfg(feature = "validation")]
     pub(crate) const fn failed_continuous_export() -> Self {
         Self { fatal_errors: 1, ..Self::for_continuous_export() }
     }
