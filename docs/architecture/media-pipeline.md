@@ -145,6 +145,10 @@ exFAT, and any other unsupported or unobservable filesystem produce a partial
 value. Partial evidence may remain useful for diagnostics, but
 `MediaFileFingerprint::authorizes_reuse()` is false and every reuse or
 stream-binding boundary fails closed instead of falling back to path/size/mtime.
+Admission code that already owns a native file object uses
+`MediaFileFingerprint::capture_open_file`; this exact-handle form prevents a
+hash, filesystem revision observation, and retained execution lease from being
+silently assembled from different pathname opens.
 
 ## Bounded audio source windows
 

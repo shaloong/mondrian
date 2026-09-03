@@ -702,6 +702,11 @@ opens the source with read sharing only for the retained lifetime. macOS/Linux
 currently fail closed; their later native Adapter must prove that no pathname
 replacement or in-place writer can invalidate the hash-to-consumption object
 guarantee before their endurance run.
+Successful Exact installation returns private-construction evidence over the
+machine-plan digest, archive path/hash, installed Project/document and root
+Sequence/revision, process-local Session/Author Generation, and extracted live
+Library revision. External-source admission revalidates that evidence; an
+ordinary Open or any later author/Library mutation cannot reuse it.
 Building a candidate therefore leaves the previous Session and its library
 untouched; a failed extraction, SQLite open, or Session construction removes
 only the uninstalled candidate. Candidate rollback also retains weak lifetime

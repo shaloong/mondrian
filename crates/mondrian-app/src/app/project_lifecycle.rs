@@ -59,6 +59,80 @@ enum ProjectArchiveInstallPolicy {
     },
 }
 
+/// Unforgeable receipt for one exact machine-plan Project installation.
+///
+/// Downstream endurance fixture admission must revalidate this receipt against
+/// the live App session. A Project edit, navigation replacement, or Session
+/// handoff therefore invalidates the receipt instead of silently qualifying a
+/// different author snapshot.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedEnduranceProjectFixture {
+    machine_plan_sha256: String,
+    project_path: PathBuf,
+    project_archive_sha256: String,
+    project_id: ProjectId,
+    document_revision: u64,
+    asset_library_revision: u64,
+    root_sequence_id: SequenceId,
+    root_sequence_revision: mondrian_core::SequenceRevision,
+    authoring_session_id: AuthoringSessionId,
+    author_generation: u64,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl PreparedEnduranceProjectFixture {
+    /// SHA-256 of the exact prepared machine plan that authorized installation.
+    pub fn machine_plan_sha256(&self) -> &str {
+        &self.machine_plan_sha256
+    }
+
+    /// Canonical Project archive path admitted from the machine plan.
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
+    /// Approved Project archive content identity.
+    pub fn project_archive_sha256(&self) -> &str {
+        &self.project_archive_sha256
+    }
+
+    /// Project identity installed into the App session.
+    pub const fn project_id(&self) -> ProjectId {
+        self.project_id
+    }
+
+    /// Exact Project document revision installed from the archive.
+    pub const fn document_revision(&self) -> u64 {
+        self.document_revision
+    }
+
+    /// Exact live Asset Library revision extracted from the archive.
+    pub const fn asset_library_revision(&self) -> u64 {
+        self.asset_library_revision
+    }
+
+    /// Root Sequence selected by the machine plan.
+    pub const fn root_sequence_id(&self) -> SequenceId {
+        self.root_sequence_id
+    }
+
+    /// Exact root Sequence author revision.
+    pub const fn root_sequence_revision(&self) -> mondrian_core::SequenceRevision {
+        self.root_sequence_revision
+    }
+
+    /// Process-local Authoring Session identity that owns the fixture.
+    pub const fn authoring_session_id(&self) -> AuthoringSessionId {
+        self.authoring_session_id
+    }
+
+    /// Author generation at exact installation; later edits invalidate it.
+    pub const fn author_generation(&self) -> u64 {
+        self.author_generation
+    }
+}
+
 impl ProjectArchiveInstallPolicy {
     const fn opens_canonical_project(self) -> bool {
         !matches!(self, Self::RecoveredProduct)
@@ -729,9 +803,28 @@ impl AppState {
     pub fn open_endurance_project_fixture(
         &mut self,
         machine_plan: &PreparedCommercialEnduranceMachinePlan,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<PreparedEnduranceProjectFixture> {
         let project = &machine_plan.plan().project;
-        self.open_endurance_project_fixture_binding(&project.project, project.sequence_id)
+        self.open_endurance_project_fixture_binding(&project.project, project.sequence_id)?;
+        let session = self
+            .authoring
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("exact endurance Project install created no Session"))?;
+        let sequence = session.active_sequence().ok_or_else(|| {
+            anyhow::anyhow!("exact endurance Project install created no active Sequence")
+        })?;
+        Ok(PreparedEnduranceProjectFixture {
+            machine_plan_sha256: machine_plan.sha256().to_owned(),
+            project_path: session.project_file().to_path_buf(),
+            project_archive_sha256: project.project.sha256.clone(),
+            project_id: session.project_id(),
+            document_revision: session.document().document_revision,
+            asset_library_revision: session.asset_library().database_revision()?,
+            root_sequence_id: sequence.id,
+            root_sequence_revision: sequence.revision,
+            authoring_session_id: session.session_id(),
+            author_generation: session.author_generation().get(),
+        })
     }
 
     #[cfg(any(test, feature = "validation"))]
@@ -1608,10 +1701,8 @@ fn hash_endurance_project_open_file(file: &mut fs::File) -> anyhow::Result<Strin
 
 #[cfg(all(windows, any(test, feature = "validation")))]
 fn open_endurance_project_read_handle(path: &Path) -> std::io::Result<fs::File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-
-    fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(path)
+    super::project_runtime::open_direct_read_file(path, "endurance Project archive")
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(test)]

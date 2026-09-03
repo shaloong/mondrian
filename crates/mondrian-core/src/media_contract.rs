@@ -101,6 +101,17 @@ impl MediaFileFingerprint {
             .unwrap_or_default()
     }
 
+    /// Capture revision evidence from the caller's already-open file object.
+    ///
+    /// This is the exact-handle form of [`Self::capture`]. It is intended for
+    /// admission paths that must hash bytes, observe filesystem identity, and
+    /// retain one object without reopening a mutable pathname between those
+    /// operations. An unsupported filesystem or failed metadata query returns
+    /// incomplete evidence that does not authorize reuse.
+    pub fn capture_open_file(file: &File) -> Self {
+        Self::from_open_file(file).unwrap_or_default()
+    }
+
     /// Build portable metadata evidence the caller already fetched.
     ///
     /// On platforms where `Metadata` exposes object identity and change time,

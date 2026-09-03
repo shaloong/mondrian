@@ -86,6 +86,23 @@ consuming shutdown. The current non-Windows implementation rejects this call;
 add and qualify the recorded immutable-object native Adapter on macOS and Linux
 before treating this seam as campaign authority.
 
+Retain the `PreparedEnduranceProjectFixture` returned by that call and pass it
+with the same prepared machine plan to
+`PreparedEnduranceSourceInventory::prepare`. The complete ordered profile
+topology is sealed into that prepared plan at load time; callers cannot supply
+a phase subset. The strict schema-1 inventory
+binds the Project archive hash, Project/document, root Sequence/revision, exact
+per-phase Sequence/media closure, and one canonical path/length/SHA-256 record
+for every source in the phase union. The App recomputes Playback, Export, and
+Recovery closures through the production Export dependency compiler; the
+machine factory must not walk Tracks or Clips. Keep the returned source,
+inventory, and parsed Export-preset handles alive until all consuming phase
+owners shut down. Reachable proxy-mode Assets, stale probes, changed content,
+extra/missing sources, unknown fields, noncanonical paths, or stale Project or
+Library evidence are hard invalid-input failures, not `NotRun`. This source
+lease is currently Windows-only; macOS/Linux remain fail-closed pending
+descriptor-based decode and immutable-object qualification.
+
 ## Capture protocol
 
 Use the validation App composition with the production Playback, Preview,

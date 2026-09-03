@@ -242,6 +242,7 @@ pub struct CommercialEnduranceMachinePlan {
 pub struct PreparedCommercialEnduranceMachinePlan {
     plan: CommercialEnduranceMachinePlan,
     sha256: String,
+    phase_requirements: Vec<mondrian_platform::EndurancePhaseRequirement>,
 }
 
 impl PreparedCommercialEnduranceMachinePlan {
@@ -251,6 +252,8 @@ impl PreparedCommercialEnduranceMachinePlan {
         profile: &EnduranceQualificationProfile,
         recovery_cycle_count: u32,
     ) -> Result<Self, CommercialEnduranceMachinePlanError> {
+        mondrian_platform::PreparedEnduranceQualification::compile(profile.clone())
+            .map_err(|error| CommercialEnduranceMachinePlanError::Profile(error.to_string()))?;
         let metadata = fs::symlink_metadata(path)
             .map_err(|error| CommercialEnduranceMachinePlanError::Read(error.to_string()))?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -293,6 +296,7 @@ impl PreparedCommercialEnduranceMachinePlan {
         Ok(Self {
             plan,
             sha256: format!("{:x}", Sha256::digest(bytes)),
+            phase_requirements: profile.phases.clone(),
         })
     }
 
@@ -304,6 +308,14 @@ impl PreparedCommercialEnduranceMachinePlan {
     /// Lowercase SHA-256 of the exact approved JSON bytes.
     pub fn sha256(&self) -> &str {
         &self.sha256
+    }
+
+    /// Complete ordered profile topology used to validate this machine plan.
+    ///
+    /// Downstream fixture admission consumes this sealed list instead of a
+    /// caller-supplied phase slice that could omit required work.
+    pub fn phase_requirements(&self) -> &[mondrian_platform::EndurancePhaseRequirement] {
+        &self.phase_requirements
     }
 }
 
@@ -485,6 +497,9 @@ fn validate_sha256(
 /// Structural or profile-binding failure in an approved machine plan.
 #[derive(Debug, Error)]
 pub enum CommercialEnduranceMachinePlanError {
+    /// Supplied profile was not a complete compiled commercial qualification.
+    #[error("commercial endurance profile is invalid: {0}")]
+    Profile(String),
     /// Machine-plan path could not be inspected or read.
     #[error("could not read commercial endurance machine plan: {0}")]
     Read(String),

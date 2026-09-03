@@ -332,7 +332,7 @@ fn validate_absolute_normalized_path(
     Ok(())
 }
 
-fn is_portable_ordinary_path_component(component: &std::ffi::OsStr) -> bool {
+pub(super) fn is_portable_ordinary_path_component(component: &std::ffi::OsStr) -> bool {
     let Some(component) = component.to_str() else {
         return false;
     };

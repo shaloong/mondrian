@@ -52,6 +52,24 @@ The implementation is split at existing authority boundaries:
   rejected. Raw `EnduranceCampaignRequest` construction and the serial
   coordinator remain crate-private, so product callers cannot bypass this
   preflight.
+- `mondrian-app::app::endurance_source_inventory` owns the strict bounded
+  schema-1 external-media closure. The complete compiled profile topology is
+  sealed into the prepared machine plan, so callers cannot reduce the phase
+  set. It accepts only the typed receipt returned by
+  exact Project installation, revalidates Session, Author Generation, Project,
+  Sequence, and live Asset Library revision, and recomputes every phase through
+  `prepare_timeline_export_dependencies_with_audio_selection`. Playback uses
+  Entire Sequence plus the primary Audio Program; Continuous Export uses its
+  machine-plan range and same-read prepared preset; Concurrent Recovery uses
+  the union of both. Declared sources must be the exact canonical union.
+  Reachable retired records resolve through `AssetLibrary::get_asset`, while a
+  reachable proxy-mode Asset is rejected. Preparation validates the live
+  Project/Session/Library both before and after source capture, retains the
+  receipt, and exposes a mandatory revalidation seam for phase-owner admission.
+  Windows fingerprints and hashes each
+  canonical direct source from one read-only-sharing object and retains it with
+  the inventory and Export-preset handles. macOS/Linux fail closed until their
+  descriptor-based immutable-source Adapters are qualified.
 - `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
   composition over fresh `AppState` owners. A machine factory must prove the
   complete side-effect-free pre-start inventory before App creation. The
@@ -76,6 +94,10 @@ The implementation is split at existing authority boundaries:
   Session with empty History and deliberately skips ordinary product track
   repair, so qualification cannot mutate a deficient fixture into eligibility.
   Candidate failure resumes the old generation before old-Session retirement.
+  Success returns private-construction typed evidence binding the machine-plan
+  digest, canonical archive path/hash, Project/document, root Sequence/revision,
+  Authoring Session/Generation, and extracted Asset Library revision. Any later
+  author or Library mutation invalidates downstream fixture preparation.
   Windows denies write and delete sharing for the retained install lifetime;
   macOS and Linux currently fail closed until an equivalent native
   immutable-object Adapter and transfer qualification cell exist.

@@ -128,6 +128,8 @@ pub mod endurance_reference_output;
 pub mod endurance_run_request;
 mod endurance_shutdown;
 #[cfg(any(test, feature = "validation"))]
+pub mod endurance_source_inventory;
+#[cfg(any(test, feature = "validation"))]
 pub mod endurance_workload;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
@@ -186,6 +188,8 @@ pub(crate) mod preview_work_notification;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;
+#[cfg(any(test, feature = "validation"))]
+pub use project_lifecycle::PreparedEnduranceProjectFixture;
 pub(crate) use project_lifecycle::ProjectClosePoll;
 mod project_persistence;
 mod project_recovery;
