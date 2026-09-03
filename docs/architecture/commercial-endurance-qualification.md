@@ -379,14 +379,26 @@ exact semantic checks is a hard setup failure with consuming cleanup, not
 Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
 not absent prerequisites. The Continuous Export machine factory is concrete;
-the physical phase factory and unified high-level validation executable remain
-explicit follow-on work, as do the real vendor
+the physical phase factory remains explicit follow-on work, as do the real vendor
 bridge and hardware validation. This App owner-closure work is a COL-047
 prerequisite, not 72h
 execution or hardware HITL evidence. Until the machine factory, canonical
 fixture composition, and physical providers exist, physical phases must be
 admitted as `NotRun`; profile prose is not evidence that a runnable 72-hour
 producer exists.
+
+`mondrian-endurance <run-request.json>` is the single strict campaign
+entrypoint. It admits `PreparedEnduranceRunRequest`, prepares the exact FFmpeg
+factory before any App, uses one process-monotonic clock plus the native
+product-process-tree memory probe, and lets the serial coordinator publish only
+to the create-only routes sealed in the request. The current concrete factory
+runs Continuous Export and records the two physical phases as typed `NotRun`;
+it therefore cannot produce a complete physical qualification. The companion
+`--self-test <run-request.json> <create-only-report.json>` stops after strict
+request and exact FFmpeg preparation. Its report hard-codes
+`qualifying: false` and states that no App, phase, physical output, or duration
+was exercised; it is machine-readiness evidence only and cannot be replayed as
+a campaign manifest.
 
 After factory composition creates owners, the realtime start boundary drains
 the opened Reference Session's initial provider-status events and accepts an

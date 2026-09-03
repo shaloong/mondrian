@@ -310,6 +310,11 @@ impl<F> PreparedEnduranceMachinePhaseFactory<F> {
         Ok(Self { inner, ffmpeg })
     }
 
+    /// Canonical exact-runtime receipt retained by this campaign factory.
+    pub fn ffmpeg_toolchain_receipt_sha256(&self) -> &str {
+        self.ffmpeg.toolchain_receipt_sha256()
+    }
+
     fn validate_machine_plan(
         &self,
         machine_plan: &PreparedCommercialEnduranceMachinePlan,

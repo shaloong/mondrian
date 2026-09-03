@@ -33,6 +33,13 @@ required-features = ["validation"]
 test = false
 bench = false
 
+[[bin]]
+name = "mondrian-endurance"
+path = "src/bin/mondrian_endurance.rs"
+required-features = ["validation"]
+test = false
+bench = false
+
 # Developer gallery for reusable app UI widgets.
 [[bin]]
 name = "ui_demo"
