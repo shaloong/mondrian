@@ -219,6 +219,16 @@ programmatic disable. App panel Adapters select the policy; they must not
 simulate author-transaction coalescing outside the Widget or turn each typed
 character into Undo/Author Generation history.
 
+Widget text measurement uses one thread-local owner shared by ordinary
+Label/Button layout and TextInput/NumberInput geometry. Numeric-control
+construction can already measure text before the first layout pass; it must
+not create a second system-font catalog and measurement atlas. The shared
+module retains the same cosmic-text shaping and font fallback. Its exact-size
+seam preserves TextInput's caller-supplied size, while ordinary label
+measurement keeps its existing minimum-size policy. This is measurement-owner
+reuse within one UI thread, not a process-global lock or a change to the
+separate text rasterization owner's lifetime.
+
 Timeline Track Targeting and Sync-Lock are editor interaction policy, not
 renderable Sequence fields. `TimelineTargetingState` is keyed by stable
 Sequence/Track identity in the open editor Session and stores only exceptions

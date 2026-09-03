@@ -17,9 +17,12 @@ suite:
 - App UI cold root construction measured 14,609 ms against 10,000 ms; its
   remaining six cases passed. An unchanged release-binary repeat measured
   6,673 ms and passed all seven cases. Retain both samples: this is variable
-  cold-start cost, not a proven fix. Two independently initialized widget font
-  measurement owners are a concrete candidate; separate their initialization
-  from model/layout and machine-load effects before qualifying an optimization.
+  cold-start cost, not a proven latency fix. A deterministic NumberInput/Label
+  regression confirmed two independent widget font-measurement initializations.
+  These now share one thread-local owner, with exact-size/shaping parity and
+  all 1,003 Widgets tests passing. The modified App release smoke still needs
+  a new measurement; do not close its cold-start gate from the unchanged-binary
+  repeat or the initialization-count test alone.
 - Decode/cache proved real persistent publication and a new request-local
   lookup/hit. Its render maximum was 64,201 us against 50,000 us: preparation
   2,157 us, composite 4,723 us, CPU output boundary 57,321 us. The boundary
@@ -40,8 +43,10 @@ COL-031 or COL-047 reference-machine result. Raw local reports are under
 
 Remaining local COL-047 implementation/validation blocks:
 
-1. Resolve the two observed performance problems above; retain failed samples
-   alongside subsequent measurements.
+1. Rerun the modified App release UI gate and diagnose the CPU output-boundary
+   cost with explicit cold/warm owner observations before selecting its fix.
+   Retain failed samples alongside subsequent measurements; diagnostic warm
+   frames must never replace the formal smoke's first-frame budget.
 2. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
    consume them through the shared shutdown deadline, rather than returning
    only an error and later reporting App-only closure.
