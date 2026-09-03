@@ -52,7 +52,10 @@ The implementation is split at existing authority boundaries:
   data streams, reserved DOS device names, and trailing-dot/space aliases are
   rejected. Raw `EnduranceCampaignRequest` construction and the serial
   coordinator remain crate-private, so product callers cannot bypass this
-  preflight.
+  preflight. Admission retains the already parsed
+  `PreparedCommercialEnduranceMachinePlan` inside the prepared request; the
+  coordinator moves that same typed value into the runtime and never reopens or
+  reparses the machine-plan pathname after admission.
 - `mondrian-app::app::endurance_source_inventory` owns the strict bounded
   schema-1 external-media closure. The complete compiled profile topology is
   sealed into the prepared machine plan, so callers cannot reduce the phase

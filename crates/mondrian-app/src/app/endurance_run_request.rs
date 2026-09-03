@@ -171,7 +171,7 @@ impl PreparedEnduranceRunRequest {
         let request = EnduranceCampaignRequest {
             profile,
             identity,
-            machine_plan_path,
+            machine_plan,
             capture_authority_manifest_path: capture_authority_path,
             capture_authority_sha256: raw.capture_authority.sha256,
             evidence_directory,
@@ -184,6 +184,11 @@ impl PreparedEnduranceRunRequest {
     /// SHA-256 of the exact strict request JSON bytes.
     pub fn request_sha256(&self) -> &str {
         &self.request_sha256
+    }
+
+    /// Borrow the exact typed machine plan admitted from the request binding.
+    pub const fn machine_plan(&self) -> &PreparedCommercialEnduranceMachinePlan {
+        &self.request.machine_plan
     }
 
     /// Borrow the prepared campaign request.
@@ -542,7 +547,7 @@ mod tests {
 
     #[test]
     fn request_loader_closes_profile_plan_authority_and_workloads() {
-        let (_temporary, request_path) = write_fixture();
+        let (temporary, request_path) = write_fixture();
         let prepared = PreparedEnduranceRunRequest::load(&request_path)
             .expect("prepare exact endurance request");
 
@@ -551,6 +556,12 @@ mod tests {
         assert_eq!(prepared.request().workload_contracts.len(), 3);
         assert_eq!(prepared.request().identity.machine_plan_sha256.len(), 64);
         assert_eq!(prepared.request().capture_authority_sha256.len(), 64);
+
+        let admitted_sha256 = prepared.machine_plan().sha256().to_owned();
+        fs::write(temporary.path().join("machine-plan.json"), b"{}")
+            .expect("replace plan path after admission");
+        assert_eq!(prepared.machine_plan().sha256(), admitted_sha256);
+        assert_eq!(prepared.request().machine_plan.sha256(), admitted_sha256);
     }
 
     #[test]

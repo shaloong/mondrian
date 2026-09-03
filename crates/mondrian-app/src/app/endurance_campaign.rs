@@ -827,8 +827,8 @@ pub(crate) struct EnduranceCampaignRequest {
     pub profile: EnduranceQualificationProfile,
     /// Exact release and machine identity.
     pub identity: EnduranceRunIdentity,
-    /// Exact bounded machine-local fixture/device/execution plan.
-    pub machine_plan_path: PathBuf,
+    /// Exact bounded machine-local fixture/device/execution plan admitted with the request.
+    pub machine_plan: PreparedCommercialEnduranceMachinePlan,
     /// Pre-issued capture authority manifest.
     pub capture_authority_manifest_path: PathBuf,
     /// Externally approved SHA-256 of the exact capture-authority bytes.
@@ -854,27 +854,10 @@ where
     C: EnduranceCampaignClock,
 {
     validate_workload_map(&request.profile, &request.workload_contracts)?;
-    let recovery_requirement = request
-        .profile
-        .phases
-        .iter()
-        .find(|phase| phase.kind == EndurancePhaseKind::ConcurrentRecovery)
-        .ok_or(EnduranceCampaignError::WorkloadClosure)?;
-    let recovery_workload_path =
-        request.workload_contracts.get(&recovery_requirement.phase_id).ok_or_else(|| {
-            EnduranceCampaignError::MissingWorkload(recovery_requirement.phase_id.clone())
-        })?;
-    let recovery_workload =
-        PreparedEnduranceWorkload::load(recovery_requirement, recovery_workload_path)?;
-    let machine_plan = PreparedCommercialEnduranceMachinePlan::load(
-        &request.machine_plan_path,
-        &request.profile,
-        recovery_workload.recovery_cycle_count(),
-    )?;
-    if machine_plan.sha256() != request.identity.machine_plan_sha256 {
+    if request.machine_plan.sha256() != request.identity.machine_plan_sha256 {
         return Err(EnduranceCampaignError::MachinePlanIdentityMismatch);
     }
-    runtime.bind_machine_plan(machine_plan)?;
+    runtime.bind_machine_plan(request.machine_plan)?;
     let profile = request.profile.clone();
     let mut capture = EnduranceRunCapture::new(
         request.profile,
@@ -1742,7 +1725,8 @@ mod tests {
                 environment_before_sha256: SHA.to_owned(),
                 environment_after_sha256: SHA.to_owned(),
             },
-            machine_plan_path: machine_plan,
+            machine_plan: PreparedCommercialEnduranceMachinePlan::load(&machine_plan, &profile, 24)
+                .expect("prepare exact machine plan"),
             capture_authority_manifest_path: authority,
             capture_authority_sha256,
             evidence_directory: evidence.clone(),
