@@ -22,12 +22,16 @@ use super::endurance_campaign::{
     EnduranceRuntimeSnapshot,
 };
 use super::endurance_export::{FrozenRepeatedExportPhase, FrozenRepeatedExportRequest};
+use super::endurance_ffmpeg_toolchain::PreparedEnduranceFfmpegToolchain;
 use super::endurance_machine_plan::PreparedCommercialEnduranceMachinePlan;
 use super::endurance_playback::PersistentTimelinePlaybackPhase;
 use super::endurance_qualification::EnduranceCaptureFacts;
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::endurance_reference_output::PersistentReferenceOutputPump;
 use super::endurance_run_request::PreparedEnduranceRunRequest;
+use super::endurance_source_inventory::{
+    EnduranceSourceInventoryError, PreparedEnduranceSourceInventory,
+};
 use super::endurance_workload::{
     EndurancePhaseAdmission, EndurancePreStartCapabilityInventory, PreparedEndurancePhaseStart,
     PreparedEnduranceWorkload,
@@ -84,6 +88,8 @@ enum FreshEndurancePhaseInputs {
     PlaybackReference(Box<EnduranceReferenceOutputPlan>),
     ContinuousExport(Box<FrozenRepeatedExportRequest>),
     ConcurrentRecovery(Box<FreshConcurrentRecoveryInputs>),
+    #[cfg(test)]
+    Test(EndurancePhaseKind),
 }
 
 struct FreshConcurrentRecoveryInputs {
@@ -92,9 +98,75 @@ struct FreshConcurrentRecoveryInputs {
     seek_targets: Vec<i64>,
 }
 
+enum EndurancePhaseSourceAuthority {
+    Qualified(Box<PreparedEnduranceSourceInventory>),
+    #[cfg(test)]
+    Test,
+}
+
+/// Exact machine-plan and external-source authority retained by one phase.
+///
+/// Production construction requires the inventory derived from the same live
+/// App and prepared machine plan. The runtime additionally requires pointer
+/// identity with its bound plan before any phase owner may start.
+pub struct PreparedEndurancePhaseAuthority {
+    machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
+    sources: EndurancePhaseSourceAuthority,
+}
+
+impl PreparedEndurancePhaseAuthority {
+    /// Bind retained source objects to the exact plan and unchanged live App.
+    pub fn new(
+        app_state: &AppState,
+        machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
+        sources: PreparedEnduranceSourceInventory,
+    ) -> Result<Self, EnduranceSourceInventoryError> {
+        sources.validate_current(app_state, machine_plan.as_ref())?;
+        Ok(Self {
+            machine_plan,
+            sources: EndurancePhaseSourceAuthority::Qualified(Box::new(sources)),
+        })
+    }
+
+    /// Exact prepared plan retained for the complete phase lifetime.
+    pub fn machine_plan(&self) -> &Arc<PreparedCommercialEnduranceMachinePlan> {
+        &self.machine_plan
+    }
+
+    /// Exact retained external-source inventory.
+    pub fn source_inventory(&self) -> &PreparedEnduranceSourceInventory {
+        match &self.sources {
+            EndurancePhaseSourceAuthority::Qualified(sources) => sources,
+            #[cfg(test)]
+            EndurancePhaseSourceAuthority::Test => {
+                unreachable!("test-only phase authority has no source inventory")
+            }
+        }
+    }
+
+    fn validate_current(&self, app_state: &AppState) -> Result<(), EnduranceSourceInventoryError> {
+        match &self.sources {
+            EndurancePhaseSourceAuthority::Qualified(sources) => {
+                sources.validate_current(app_state, self.machine_plan.as_ref())
+            }
+            #[cfg(test)]
+            EndurancePhaseSourceAuthority::Test => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    fn test(machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>) -> Self {
+        Self {
+            machine_plan,
+            sources: EndurancePhaseSourceAuthority::Test,
+        }
+    }
+}
+
 /// Fresh App owner plus all machine-composed inputs for one exact phase.
 pub struct FreshEndurancePhase {
     app_state: AppState,
+    authority: PreparedEndurancePhaseAuthority,
     inputs: FreshEndurancePhaseInputs,
 }
 
@@ -102,18 +174,25 @@ impl FreshEndurancePhase {
     /// Compose a fresh Playback + physical Reference phase.
     pub fn playback_reference(
         app_state: AppState,
+        authority: PreparedEndurancePhaseAuthority,
         reference: EnduranceReferenceOutputPlan,
     ) -> Self {
         Self {
             app_state,
+            authority,
             inputs: FreshEndurancePhaseInputs::PlaybackReference(Box::new(reference)),
         }
     }
 
     /// Compose a fresh repeated Export phase.
-    pub fn continuous_export(app_state: AppState, export: FrozenRepeatedExportRequest) -> Self {
+    pub fn continuous_export(
+        app_state: AppState,
+        authority: PreparedEndurancePhaseAuthority,
+        export: FrozenRepeatedExportRequest,
+    ) -> Self {
         Self {
             app_state,
+            authority,
             inputs: FreshEndurancePhaseInputs::ContinuousExport(Box::new(export)),
         }
     }
@@ -121,12 +200,14 @@ impl FreshEndurancePhase {
     /// Compose a fresh overlapping Playback/Reference/Export recovery phase.
     pub fn concurrent_recovery(
         app_state: AppState,
+        authority: PreparedEndurancePhaseAuthority,
         reference: EnduranceReferenceOutputPlan,
         export: FrozenRepeatedExportRequest,
         seek_targets: Vec<i64>,
     ) -> Self {
         Self {
             app_state,
+            authority,
             inputs: FreshEndurancePhaseInputs::ConcurrentRecovery(Box::new(
                 FreshConcurrentRecoveryInputs { reference, export, seek_targets },
             )),
@@ -142,24 +223,38 @@ impl FreshEndurancePhase {
             FreshEndurancePhaseInputs::ConcurrentRecovery(_) => {
                 EndurancePhaseKind::ConcurrentRecovery
             }
+            #[cfg(test)]
+            FreshEndurancePhaseInputs::Test(kind) => kind,
         }
     }
 }
 
-/// Factory result that always returns an App owner, including setup failure.
+/// Factory result distinguishing pre-owner rejection from retained setup failure.
 pub enum FreshEndurancePhaseBuild {
+    /// Exact authority changed before any App or worker owner was created.
+    Rejected {
+        /// Stable operator-facing failure detail.
+        detail: String,
+    },
     /// Every machine-specific input was prepared.
     Ready(Box<FreshEndurancePhase>),
     /// Setup failed after fresh App creation; the runtime must still consume it.
     Failed {
         /// Fresh owner retained for exactly-once shutdown.
         app_state: Box<AppState>,
+        /// Any exact source authority already prepared before later setup failed.
+        authority: Option<Box<PreparedEndurancePhaseAuthority>>,
         /// Stable operator-facing failure detail.
         detail: String,
     },
 }
 
 impl FreshEndurancePhaseBuild {
+    /// Reject a build before creating an App or worker owner.
+    pub fn rejected(detail: impl Into<String>) -> Self {
+        Self::Rejected { detail: detail.into() }
+    }
+
     /// Retain a fully composed fresh phase behind one bounded owner payload.
     pub fn ready(phase: FreshEndurancePhase) -> Self {
         Self::Ready(Box::new(phase))
@@ -169,8 +264,61 @@ impl FreshEndurancePhaseBuild {
     pub fn failed(app_state: AppState, detail: impl Into<String>) -> Self {
         Self::Failed {
             app_state: Box::new(app_state),
+            authority: None,
             detail: detail.into(),
         }
+    }
+
+    /// Preserve a fresh App and its exact source leases after later setup fails.
+    pub fn failed_with_authority(
+        app_state: AppState,
+        authority: PreparedEndurancePhaseAuthority,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self::Failed {
+            app_state: Box::new(app_state),
+            authority: Some(Box::new(authority)),
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Factory authority prepared before any machine-specific App or worker owner.
+///
+/// Construction installs and retains the exact FFmpeg closure first, then
+/// invokes the supplied side-effect-free factory builder. The public campaign
+/// entrypoint accepts only this prepared wrapper.
+pub struct PreparedEnduranceMachinePhaseFactory<F> {
+    inner: F,
+    ffmpeg: PreparedEnduranceFfmpegToolchain,
+}
+
+impl<F> PreparedEnduranceMachinePhaseFactory<F> {
+    /// Prepare exact process media authority before constructing the phase factory.
+    pub fn prepare<B>(
+        request: &PreparedEnduranceRunRequest,
+        build: B,
+    ) -> Result<Self, EnduranceCampaignError>
+    where
+        B: FnOnce(&PreparedEnduranceFfmpegToolchain) -> Result<F, EnduranceCampaignError>,
+    {
+        let ffmpeg = PreparedEnduranceFfmpegToolchain::prepare_and_install(request.machine_plan())
+            .map_err(|error| {
+                runtime_error(format!("prepare exact endurance FFmpeg authority: {error}"))
+            })?;
+        let inner = build(&ffmpeg)?;
+        Ok(Self { inner, ffmpeg })
+    }
+
+    fn validate_machine_plan(
+        &self,
+        machine_plan: &PreparedCommercialEnduranceMachinePlan,
+    ) -> Result<(), EnduranceCampaignError> {
+        self.ffmpeg.validate_machine_plan(machine_plan).map_err(|error| {
+            runtime_error(format!(
+                "revalidate exact endurance FFmpeg authority: {error}"
+            ))
+        })
     }
 }
 
@@ -193,11 +341,39 @@ pub trait FreshEndurancePhaseFactory {
     /// the exact phase/workload whose complete pre-start inventory was checked.
     fn build_phase(
         &mut self,
-        machine_plan: &PreparedCommercialEnduranceMachinePlan,
+        machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
         prepared_start: PreparedEndurancePhaseStart,
     ) -> FreshEndurancePhaseBuild;
+}
+
+impl<F> FreshEndurancePhaseFactory for PreparedEnduranceMachinePhaseFactory<F>
+where
+    F: FreshEndurancePhaseFactory,
+{
+    fn pre_start_capability_inventory(
+        &mut self,
+        machine_plan: &PreparedCommercialEnduranceMachinePlan,
+        requirement: &EndurancePhaseRequirement,
+        workload: &PreparedEnduranceWorkload,
+    ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError> {
+        self.validate_machine_plan(machine_plan)?;
+        self.inner.pre_start_capability_inventory(machine_plan, requirement, workload)
+    }
+
+    fn build_phase(
+        &mut self,
+        machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
+        requirement: &EndurancePhaseRequirement,
+        workload: &PreparedEnduranceWorkload,
+        prepared_start: PreparedEndurancePhaseStart,
+    ) -> FreshEndurancePhaseBuild {
+        if let Err(error) = self.validate_machine_plan(machine_plan.as_ref()) {
+            return FreshEndurancePhaseBuild::rejected(error.to_string());
+        }
+        self.inner.build_phase(machine_plan, requirement, workload, prepared_start)
+    }
 }
 
 /// App-consuming Surface/Device reopen result.
@@ -361,6 +537,7 @@ enum RuntimeState {
 struct PhaseOwners {
     kind: EndurancePhaseKind,
     app: Option<AppState>,
+    authority: Option<PreparedEndurancePhaseAuthority>,
     execution: Option<EnduranceExecutionOwners>,
     timeline: Option<PersistentTimelinePlaybackPhase>,
     reference: Option<PersistentReferenceOutputPump>,
@@ -378,12 +555,22 @@ struct PhaseOwners {
 
 impl PhaseOwners {
     fn from_fresh(
+        machine_plan: &Arc<PreparedCommercialEnduranceMachinePlan>,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
         phase_started_us: u64,
         fresh: FreshEndurancePhase,
     ) -> Result<Box<Self>, (Box<Self>, String)> {
         let actual = fresh.kind();
+        let authority_failure = if !Arc::ptr_eq(machine_plan, fresh.authority.machine_plan()) {
+            Some("fresh endurance phase did not retain the runtime-bound machine plan".to_owned())
+        } else {
+            fresh
+                .authority
+                .validate_current(&fresh.app_state)
+                .err()
+                .map(|error| format!("fresh endurance source authority is stale: {error}"))
+        };
         let (reference_plan, export_request, seek_targets) = match fresh.inputs {
             FreshEndurancePhaseInputs::PlaybackReference(reference) => {
                 (Some(*reference), None, VecDeque::new())
@@ -395,10 +582,13 @@ impl PhaseOwners {
                 let FreshConcurrentRecoveryInputs { reference, export, seek_targets } = *inputs;
                 (Some(reference), Some(export), seek_targets.into())
             }
+            #[cfg(test)]
+            FreshEndurancePhaseInputs::Test(_) => (None, None, VecDeque::new()),
         };
         let owners = Self {
             kind: requirement.kind,
             app: Some(fresh.app_state),
+            authority: Some(fresh.authority),
             execution: None,
             timeline: None,
             reference: None,
@@ -413,6 +603,9 @@ impl PhaseOwners {
             settled: false,
             fault: None,
         };
+        if let Some(detail) = authority_failure {
+            return Err((Box::new(owners), detail));
+        }
         if actual != requirement.kind {
             return Err((
                 Box::new(owners),
@@ -438,6 +631,7 @@ impl PhaseOwners {
     fn failed_before_start(
         kind: EndurancePhaseKind,
         app_state: AppState,
+        authority: Option<PreparedEndurancePhaseAuthority>,
         phase_started_us: u64,
         minimum_duration_us: u64,
         recovery_cycle_count: u32,
@@ -446,6 +640,7 @@ impl PhaseOwners {
         Self {
             kind,
             app: Some(app_state),
+            authority,
             execution: None,
             timeline: None,
             reference: None,
@@ -468,6 +663,11 @@ impl PhaseOwners {
         workload: &PreparedEnduranceWorkload,
         timeouts: EnduranceProductRuntimeTimeouts,
     ) -> Result<(), String> {
+        if let (Some(authority), Some(app)) = (&self.authority, &self.app) {
+            authority
+                .validate_current(app)
+                .map_err(|error| format!("endurance source authority is stale: {error}"))?;
+        }
         if self.kind == EndurancePhaseKind::ConcurrentRecovery {
             let last_content_frame = self
                 .app_ref()?
@@ -809,7 +1009,7 @@ pub(crate) struct ProductEnduranceCampaignRuntime<F, S, C> {
     surface: S,
     clock: Arc<C>,
     timeouts: Option<EnduranceProductRuntimeTimeouts>,
-    machine_plan: Option<PreparedCommercialEnduranceMachinePlan>,
+    machine_plan: Option<Arc<PreparedCommercialEnduranceMachinePlan>>,
     state: RuntimeState,
 }
 
@@ -834,7 +1034,7 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
 /// Linux native behavior remain transfer qualification cells.
 pub fn run_product_endurance_campaign<F, S, C, P>(
     prepared_request: PreparedEnduranceRunRequest,
-    factory: F,
+    factory: PreparedEnduranceMachinePhaseFactory<F>,
     surface: S,
     clock: Arc<C>,
     process_memory: &P,
@@ -845,6 +1045,7 @@ where
     C: EnduranceCampaignClock,
     P: ProcessMemoryProbe,
 {
+    factory.validate_machine_plan(prepared_request.machine_plan())?;
     let request = prepared_request.into_campaign_request();
     let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
     run_endurance_campaign(request, &mut runtime, process_memory, clock.as_ref())
@@ -872,7 +1073,7 @@ where
             Duration::from_millis(planned.surface_reopen_ms),
             Duration::from_millis(planned.shutdown_ms),
         )?;
-        self.machine_plan = Some(machine_plan);
+        self.machine_plan = Some(Arc::new(machine_plan));
         self.timeouts = Some(timeouts);
         Ok(())
     }
@@ -900,24 +1101,34 @@ where
         let timeouts = self.timeouts.ok_or_else(|| {
             runtime_error("commercial endurance machine-plan timeouts are missing")
         })?;
-        let machine_plan = self
-            .machine_plan
-            .as_ref()
-            .ok_or_else(|| runtime_error("commercial endurance machine plan is not bound"))?;
+        let machine_plan = Arc::clone(
+            self.machine_plan
+                .as_ref()
+                .ok_or_else(|| runtime_error("commercial endurance machine plan is not bound"))?,
+        );
 
         let inventory = self
             .factory
-            .pre_start_capability_inventory(machine_plan, requirement, workload)
+            .pre_start_capability_inventory(machine_plan.as_ref(), requirement, workload)
             .map_err(|error| EnduranceCampaignError::PreStartRuntime(error.to_string()))?;
         let prepared_start = match workload.prepare_start(&inventory) {
             Ok(prepared_start) => prepared_start,
             Err(not_run) => return Ok(EndurancePhaseAdmission::NotRun(not_run)),
         };
 
-        let build = self.factory.build_phase(machine_plan, requirement, workload, prepared_start);
+        let build = self.factory.build_phase(
+            Arc::clone(&machine_plan),
+            requirement,
+            workload,
+            prepared_start,
+        );
         let mut owners = match build {
+            FreshEndurancePhaseBuild::Rejected { detail } => {
+                return Err(EnduranceCampaignError::PreStartRuntime(detail));
+            }
             FreshEndurancePhaseBuild::Ready(fresh) => {
                 match PhaseOwners::from_fresh(
+                    &machine_plan,
                     requirement,
                     workload,
                     phase_started_at_run_us,
@@ -931,10 +1142,11 @@ where
                     }
                 }
             }
-            FreshEndurancePhaseBuild::Failed { app_state, detail } => {
+            FreshEndurancePhaseBuild::Failed { app_state, authority, detail } => {
                 let owners = PhaseOwners::failed_before_start(
                     requirement.kind,
                     *app_state,
+                    authority.map(|authority| *authority),
                     phase_started_at_run_us,
                     requirement.minimum_duration_us,
                     workload.recovery_cycle_count(),
@@ -1284,7 +1496,7 @@ mod tests {
 
         fn build_phase(
             &mut self,
-            machine_plan: &PreparedCommercialEnduranceMachinePlan,
+            machine_plan: Arc<PreparedCommercialEnduranceMachinePlan>,
             requirement: &EndurancePhaseRequirement,
             workload: &PreparedEnduranceWorkload,
             prepared_start: PreparedEndurancePhaseStart,
@@ -1329,17 +1541,7 @@ mod tests {
     fn bind_test_machine_plan(
         runtime: &mut ProductEnduranceCampaignRuntime<TestFactory, ForbiddenSurface, TestClock>,
     ) -> tempfile::TempDir {
-        let temporary = tempfile::tempdir().expect("temporary machine plan");
-        let path = temporary.path().join("machine-plan.json");
-        let profile = qualification_profile();
-        crate::app::endurance_machine_plan::write_test_machine_plan(
-            &path,
-            temporary.path(),
-            &profile,
-            24,
-        );
-        let prepared = PreparedCommercialEnduranceMachinePlan::load(&path, &profile, 24)
-            .expect("prepare test machine plan");
+        let (temporary, prepared) = prepared_test_machine_plan();
         runtime.bind_machine_plan(prepared).expect("bind exact test plan");
         assert_eq!(
             runtime.timeouts,
@@ -1354,6 +1556,59 @@ mod tests {
             )
         );
         temporary
+    }
+
+    fn prepared_test_machine_plan() -> (tempfile::TempDir, PreparedCommercialEnduranceMachinePlan) {
+        let temporary = tempfile::tempdir().expect("temporary machine plan");
+        let path = temporary.path().join("machine-plan.json");
+        let profile = qualification_profile();
+        crate::app::endurance_machine_plan::write_test_machine_plan(
+            &path,
+            temporary.path(),
+            &profile,
+            24,
+        );
+        let prepared = PreparedCommercialEnduranceMachinePlan::load(&path, &profile, 24)
+            .expect("prepare test machine plan");
+        (temporary, prepared)
+    }
+
+    #[test]
+    fn fresh_phase_rejects_a_cloned_plan_authority_and_retains_it_for_cleanup() {
+        let (requirement, workload) = continuous_export_contract();
+        let (_temporary, prepared) = prepared_test_machine_plan();
+        let runtime_plan = Arc::new(prepared);
+        let cloned_plan = Arc::new((*runtime_plan).clone());
+        let fresh = FreshEndurancePhase {
+            app_state: AppState::new(),
+            authority: PreparedEndurancePhaseAuthority::test(Arc::clone(&cloned_plan)),
+            inputs: FreshEndurancePhaseInputs::Test(requirement.kind),
+        };
+
+        let (owners, detail) =
+            match PhaseOwners::from_fresh(&runtime_plan, &requirement, &workload, 0, fresh) {
+                Err(failure) => failure,
+                Ok(_) => panic!("a digest-equal clone is not the runtime-bound authority"),
+            };
+
+        assert!(detail.contains("runtime-bound machine plan"));
+        assert!(owners.authority.is_some());
+        assert!(Arc::ptr_eq(
+            owners.authority.as_ref().expect("retained failed authority").machine_plan(),
+            &cloned_plan
+        ));
+
+        let matching = FreshEndurancePhase {
+            app_state: AppState::new(),
+            authority: PreparedEndurancePhaseAuthority::test(Arc::clone(&runtime_plan)),
+            inputs: FreshEndurancePhaseInputs::Test(requirement.kind),
+        };
+        let owners = PhaseOwners::from_fresh(&runtime_plan, &requirement, &workload, 0, matching)
+            .unwrap_or_else(|(_, detail)| panic!("matching authority rejected: {detail}"));
+        assert!(Arc::ptr_eq(
+            owners.authority.as_ref().expect("retained ready authority").machine_plan(),
+            &runtime_plan
+        ));
     }
 
     #[test]
@@ -1427,6 +1682,7 @@ mod tests {
         let owners = PhaseOwners::failed_before_start(
             EndurancePhaseKind::ContinuousExport,
             AppState::new(),
+            None,
             9_500,
             1,
             0,
@@ -1447,6 +1703,7 @@ mod tests {
         let mut owners = PhaseOwners::failed_before_start(
             EndurancePhaseKind::ContinuousExport,
             AppState::new(),
+            None,
             10_000,
             1,
             0,

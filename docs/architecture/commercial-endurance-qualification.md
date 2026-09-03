@@ -78,9 +78,21 @@ The implementation is split at existing authority boundaries:
   composition over fresh `AppState` owners. A machine factory must prove the
   complete side-effect-free pre-start inventory before App creation. The
   runtime then creates an opaque phase/workload-bound token consumed by exactly
-  one factory build call. The factory provides the exact
+  one factory build call. The public campaign entrypoint accepts only a
+  `PreparedEnduranceMachinePhaseFactory`: it prepares and process-installs the
+  exact FFmpeg closure before invoking the machine-factory builder, retains
+  that receipt across the campaign, and revalidates it at each pre-start/build
+  boundary. The runtime retains the machine plan in one `Arc`; build receives
+  that exact Arc rather than a cloneable digest-equivalent value. The factory provides the exact
   Project fixture, Reference device/request, Export request, and one distinct
-  seek target per recovery cycle. The runtime retains every partial owner,
+  seek target per recovery cycle. Every Ready phase must also carry a
+  `PreparedEndurancePhaseAuthority` containing the same plan Arc and its
+  `PreparedEnduranceSourceInventory`. Owner admission rejects a separately
+  cloned plan even when its bytes are equal, revalidates the inventory against
+  the fresh live App, and retains the Project/source/preset leases until after
+  all phase and App workers have completed consuming shutdown. Setup failures
+  after inventory preparation retain that authority through the same cleanup
+  path. The runtime retains every partial owner,
   pumps Timeline → Reference → Export, enforces
   Seek → Surface/Device → Export Cancel/Retry → Cache Pressure, and consumes
   each phase under one shutdown deadline. The runtime and serial supervisor
