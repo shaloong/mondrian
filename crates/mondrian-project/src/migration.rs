@@ -28,8 +28,7 @@ impl JsonMigrationRegistry {
 
     pub fn migrate(&self, mut value: Value) -> anyhow::Result<Value> {
         self.validate_registry()?;
-        let mut version = json_version(&value, self.version_field)
-            .with_context(|| format!("invalid {} version", self.domain))?;
+        let mut version = self.source_version(&value)?;
         if version > self.current_version {
             anyhow::bail!(
                 "unsupported {} version: {} (current {})",
@@ -65,6 +64,11 @@ impl JsonMigrationRegistry {
             version = migrated_version;
         }
         Ok(value)
+    }
+
+    pub fn source_version(&self, value: &Value) -> anyhow::Result<u32> {
+        json_version(value, self.version_field)
+            .with_context(|| format!("invalid {} version", self.domain))
     }
 
     fn validate_registry(&self) -> anyhow::Result<()> {

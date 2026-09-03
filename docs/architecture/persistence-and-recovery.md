@@ -685,6 +685,23 @@ machine can admit the configured limit under concurrent workload. The candidate
 Project ID and schema are verified before SQLite is opened. Once opened, that
 directory is immutable for the complete
 `Arc<AssetLibrary>` lifetime: it is never renamed, replaced, or unlinked.
+Commercial-endurance fixture installation strengthens this same open path
+without creating a second Project parser. The public seam derives Project path,
+digest, and Sequence only from a prepared machine plan, and pauses the previous
+Persistence Generation before it touches the filesystem. One canonical direct file object is
+retained across bounded whole-file SHA-256, rewind, `PreparedProjectArchive`
+preparation, and extraction. Its active Sequence ID must match the machine plan
+and must already own at least one video and one audio Track. The loader retains
+the Project document schema observed before registered migration; Exact policy
+requires that source schema and the declared Library schema to be current.
+Unlike canonical UI
+Open and Recovery, this policy never invokes `ensure_minimum_tracks`; the
+installed Session begins saved at Author Generation 1 with empty Undo/Redo, or
+the complete candidate is rejected before the previous Session retires. Windows
+opens the source with read sharing only for the retained lifetime. macOS/Linux
+currently fail closed; their later native Adapter must prove that no pathname
+replacement or in-place writer can invalidate the hash-to-consumption object
+guarantee before their endurance run.
 Building a candidate therefore leaves the previous Session and its library
 untouched; a failed extraction, SQLite open, or Session construction removes
 only the uninstalled candidate. Candidate rollback also retains weak lifetime

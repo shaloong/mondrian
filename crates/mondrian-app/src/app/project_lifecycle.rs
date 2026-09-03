@@ -1,3 +1,7 @@
+#[cfg(any(test, feature = "validation"))]
+use super::endurance_machine_plan::{
+    EnduranceMachineFileBinding, PreparedCommercialEnduranceMachinePlan,
+};
 use super::project_library_generation::{
     collect_retired_project_libraries, protected_project_library_paths,
     retained_project_runtime_lease, sweep_orphaned_project_libraries,
@@ -26,9 +30,15 @@ use super::*;
 use anyhow::Context;
 #[cfg(test)]
 use mondrian_project::load_project_archive;
+#[cfg(any(test, feature = "validation"))]
+use mondrian_project::LoadedProjectArchive;
 use mondrian_project::{
     PreparedProjectArchive, ProjectArchivePublication, ProjectArchiveReadBudget, ProjectDocument,
 };
+#[cfg(all(windows, any(test, feature = "validation")))]
+use sha2::{Digest, Sha256};
+#[cfg(all(windows, any(test, feature = "validation")))]
+use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PersistenceCompletionDisposition {
@@ -37,6 +47,26 @@ enum PersistenceCompletionDisposition {
     SatisfiedByNewerPublication,
     IgnoredSupersededDestination,
     IgnoredStaleSession,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectArchiveInstallPolicy {
+    CanonicalProduct,
+    RecoveredProduct,
+    #[cfg(any(test, feature = "validation"))]
+    ExactEnduranceFixture {
+        expected_sequence_id: SequenceId,
+    },
+}
+
+impl ProjectArchiveInstallPolicy {
+    const fn opens_canonical_project(self) -> bool {
+        !matches!(self, Self::RecoveredProduct)
+    }
+
+    const fn repairs_minimum_tracks(self) -> bool {
+        matches!(self, Self::CanonicalProduct | Self::RecoveredProduct)
+    }
 }
 
 /// App-owned pending close operation over one exact persistence generation.
@@ -536,7 +566,7 @@ impl AppState {
         self.open_prepared_project_archive_in_runtime(
             candidate.project_file,
             prepared,
-            false,
+            ProjectArchiveInstallPolicy::RecoveredProduct,
             runtime_lease,
             handoff,
         )?;
@@ -566,8 +596,23 @@ impl AppState {
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
         let mut archive_handle = fs::File::open(archive_file)?;
-        let prepared = PreparedProjectArchive::from_open_file(
+        self.open_project_archive_from_open_file(
+            project_file,
             &mut archive_handle,
+            ProjectArchiveInstallPolicy::CanonicalProduct,
+            handoff,
+        )
+    }
+
+    fn open_project_archive_from_open_file(
+        &mut self,
+        project_file: PathBuf,
+        archive_handle: &mut fs::File,
+        install_policy: ProjectArchiveInstallPolicy,
+        handoff: &mut Option<ProjectPersistencePauseToken>,
+    ) -> anyhow::Result<()> {
+        let prepared = PreparedProjectArchive::from_open_file(
+            archive_handle,
             ProjectArchiveReadBudget::default(),
         )?;
         if self.active_sequence().is_some() {
@@ -589,7 +634,7 @@ impl AppState {
         self.open_prepared_project_archive_in_runtime(
             project_file,
             prepared,
-            true,
+            install_policy,
             runtime_lease,
             handoff,
         )
@@ -599,7 +644,7 @@ impl AppState {
         &mut self,
         project_file: PathBuf,
         prepared: PreparedProjectArchive<'_>,
-        opens_canonical_project: bool,
+        install_policy: ProjectArchiveInstallPolicy,
         runtime_lease: Arc<ProjectRuntimeLease>,
         handoff: &mut Option<ProjectPersistencePauseToken>,
     ) -> anyhow::Result<()> {
@@ -622,8 +667,14 @@ impl AppState {
                 mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION
             );
         }
+        #[cfg(any(test, feature = "validation"))]
+        if let ProjectArchiveInstallPolicy::ExactEnduranceFixture { expected_sequence_id } =
+            install_policy
+        {
+            validate_exact_endurance_project(&loaded, expected_sequence_id)?;
+        }
         let asset_library = library_generation.open()?;
-        let session = if opens_canonical_project {
+        let session = if install_policy.opens_canonical_project() {
             AuthoringSession::open_saved(
                 loaded.document,
                 project_file.clone(),
@@ -663,8 +714,85 @@ impl AppState {
         self.media_asset_mutations.bind_project(Some(project_id));
         self.settle_preview_access_source();
         self.dragging_asset = None;
-        self.ensure_minimum_tracks();
+        if install_policy.repairs_minimum_tracks() {
+            self.ensure_minimum_tracks();
+        }
         Ok(())
+    }
+
+    /// Install the exact Project fixture bound by a commercial endurance machine plan.
+    ///
+    /// The archive namespace is resolved once. Its retained file object is
+    /// hashed, rewound, parsed, and extracted without reopening the path.
+    /// Unlike ordinary product open, this path never repairs author state.
+    #[cfg(any(test, feature = "validation"))]
+    pub fn open_endurance_project_fixture(
+        &mut self,
+        machine_plan: &PreparedCommercialEnduranceMachinePlan,
+    ) -> anyhow::Result<()> {
+        let project = &machine_plan.plan().project;
+        self.open_endurance_project_fixture_binding(&project.project, project.sequence_id)
+    }
+
+    #[cfg(any(test, feature = "validation"))]
+    fn open_endurance_project_fixture_binding(
+        &mut self,
+        binding: &EnduranceMachineFileBinding,
+        expected_sequence_id: SequenceId,
+    ) -> anyhow::Result<()> {
+        #[cfg(not(windows))]
+        {
+            let _ = (binding, expected_sequence_id);
+            anyhow::bail!(
+                "exact endurance Project install requires a qualified native immutable-object Adapter on this platform"
+            );
+        }
+
+        #[cfg(windows)]
+        {
+            if !binding.path.is_absolute()
+                || binding.path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+                || binding.sha256.len() != 64
+                || !binding
+                    .sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                anyhow::bail!("endurance Project binding is not canonical");
+            }
+
+            let mut handoff = self.begin_project_session_handoff()?;
+            let result = (|| {
+                let link = fs::symlink_metadata(&binding.path)?;
+                if link.file_type().is_symlink() || !link.file_type().is_file() {
+                    anyhow::bail!("endurance Project binding is not a direct regular file");
+                }
+                let canonical = mondrian_assets::canonical_native_path(&binding.path)?;
+                if canonical != binding.path {
+                    anyhow::bail!("endurance Project path is not canonical");
+                }
+                let mut archive_handle = open_endurance_project_read_handle(&canonical)?;
+                let observed_sha256 = hash_endurance_project_open_file(&mut archive_handle)?;
+                if observed_sha256 != binding.sha256 {
+                    anyhow::bail!("endurance Project archive differs from its machine-plan digest");
+                }
+                self.open_project_archive_from_open_file(
+                    canonical,
+                    &mut archive_handle,
+                    ProjectArchiveInstallPolicy::ExactEnduranceFixture { expected_sequence_id },
+                    &mut handoff,
+                )
+            })();
+            match result {
+                Ok(()) => Ok(()),
+                Err(error) => Err(self.resume_handoff_after_error(handoff, error)),
+            }
+        }
     }
 
     pub fn open_project_file(&mut self, project_file: PathBuf) -> anyhow::Result<()> {
@@ -1408,6 +1536,84 @@ impl AppState {
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
+fn validate_exact_endurance_project(
+    loaded: &LoadedProjectArchive,
+    expected_sequence_id: SequenceId,
+) -> anyhow::Result<()> {
+    if loaded.source_document_schema_version != mondrian_project::PROJECT_DOCUMENT_SCHEMA_VERSION {
+        anyhow::bail!(
+            "endurance Project document schema v{} does not match required v{}",
+            loaded.source_document_schema_version,
+            mondrian_project::PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+    }
+    if loaded.library_schema_version != mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION {
+        anyhow::bail!(
+            "endurance Project Asset Library schema v{} does not match required v{}",
+            loaded.library_schema_version,
+            mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION
+        );
+    }
+    let sequence = loaded
+        .document
+        .sequences
+        .active()
+        .filter(|sequence| sequence.id == expected_sequence_id)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "endurance Project active Sequence does not match machine plan: expected {expected_sequence_id}"
+            )
+        })?;
+    if sequence.video_tracks.is_empty() || sequence.audio_tracks.is_empty() {
+        anyhow::bail!(
+            "endurance Project active Sequence {expected_sequence_id} requires authored video and audio Tracks"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(windows, any(test, feature = "validation")))]
+fn hash_endurance_project_open_file(file: &mut fs::File) -> anyhow::Result<String> {
+    let maximum = ProjectArchiveReadBudget::DEFAULT.max_archive_bytes;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum {
+        anyhow::bail!("endurance Project archive exceeds its fixed admission budget");
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut digest = Sha256::new();
+    let mut observed = 0_u64;
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        observed = observed
+            .checked_add(u64::try_from(read).map_err(|_| {
+                anyhow::anyhow!("endurance Project read length does not fit in u64")
+            })?)
+            .ok_or_else(|| anyhow::anyhow!("endurance Project read length overflowed u64"))?;
+        if observed > maximum {
+            anyhow::bail!("endurance Project archive exceeds its fixed admission budget");
+        }
+        digest.update(&buffer[..read]);
+    }
+    if observed != metadata.len() {
+        anyhow::bail!("endurance Project archive changed while it was hashed");
+    }
+    file.seek(SeekFrom::Start(0))?;
+    Ok(format!("{:x}", digest.finalize()))
+}
+
+#[cfg(all(windows, any(test, feature = "validation")))]
+fn open_endurance_project_read_handle(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+    fs::OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(path)
+}
+
 #[cfg(test)]
 mod persistence_lifecycle_tests {
     use super::*;
@@ -1456,6 +1662,56 @@ mod persistence_lifecycle_tests {
         ))
     }
 
+    #[cfg(windows)]
+    fn endurance_file_binding(path: &Path) -> EnduranceMachineFileBinding {
+        let path = mondrian_assets::canonical_native_path(path).expect("canonical fixture path");
+        let bytes = fs::read(&path).expect("read fixture bytes");
+        EnduranceMachineFileBinding {
+            path,
+            sha256: format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    #[cfg(windows)]
+    fn prepared_endurance_machine_plan(
+        root: &Path,
+        project: &EnduranceMachineFileBinding,
+        sequence_id: SequenceId,
+    ) -> PreparedCommercialEnduranceMachinePlan {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let profile: mondrian_platform::EnduranceQualificationProfile = serde_json::from_slice(
+            &fs::read(
+                workspace_root.join("tests/validation/commercial-endurance-qualification.json"),
+            )
+            .expect("read endurance profile"),
+        )
+        .expect("parse endurance profile");
+        let plan_path = root.join("machine-plan.json");
+        crate::app::endurance_machine_plan::write_test_machine_plan(&plan_path, root, &profile, 24);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&plan_path).expect("read machine plan"))
+                .expect("parse machine plan");
+        value["project"]["project"]["path"] =
+            serde_json::to_value(&project.path).expect("serialize Project path");
+        value["project"]["project"]["sha256"] = serde_json::json!(project.sha256);
+        value["project"]["sequence_id"] =
+            serde_json::to_value(sequence_id).expect("serialize Sequence ID");
+        for export in value["exports"].as_array_mut().expect("Export plan array") {
+            export["sequence_id"] =
+                serde_json::to_value(sequence_id).expect("serialize Export Sequence ID");
+        }
+        fs::write(
+            &plan_path,
+            serde_json::to_vec_pretty(&value).expect("serialize prepared machine plan"),
+        )
+        .expect("write prepared machine plan");
+        PreparedCommercialEnduranceMachinePlan::load(&plan_path, &profile, 24)
+            .expect("load prepared machine plan")
+    }
+
     fn test_state(root: &Path) -> AppState {
         let document = ProjectDocument::new(
             "Persistence Lifecycle",
@@ -1479,6 +1735,269 @@ mod persistence_lifecycle_tests {
         state.authoring = Some(session);
         state.project_runtime_lease = Some(lease);
         state
+    }
+
+    #[test]
+    fn exact_endurance_project_policy_rejects_document_or_library_migration() {
+        let sequence = Sequence::new("Current Exact Sequence");
+        let sequence_id = sequence.id;
+        let document = ProjectDocument::new(
+            "Exact Schema Policy",
+            SequenceCollection::new(sequence),
+            mondrian_core::ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
+            ProjectSettings::default(),
+        );
+        let migrated_document = LoadedProjectArchive {
+            document: document.clone(),
+            source_document_schema_version: mondrian_project::PROJECT_DOCUMENT_SCHEMA_VERSION - 1,
+            library_schema_version: mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION,
+        };
+        assert!(
+            validate_exact_endurance_project(&migrated_document, sequence_id)
+                .expect_err("migrated Project document must not qualify as exact")
+                .to_string()
+                .contains("document schema")
+        );
+
+        let migrated_library = LoadedProjectArchive {
+            document,
+            source_document_schema_version: mondrian_project::PROJECT_DOCUMENT_SCHEMA_VERSION,
+            library_schema_version: mondrian_assets::ASSET_LIBRARY_SCHEMA_VERSION - 1,
+        };
+        assert!(
+            validate_exact_endurance_project(&migrated_library, sequence_id)
+                .expect_err("migrated Asset Library must not qualify as exact")
+                .to_string()
+                .contains("Asset Library schema")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn endurance_project_fixture_open_preserves_exact_author_state() {
+        let root = unique_root("exact-endurance-project");
+        let project_file = root.join("project.mdp");
+        let mut authored = AppState::new();
+        authored
+            .create_new_project_at(
+                project_file.clone(),
+                "Exact Endurance Project",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect("create exact Project fixture");
+        let sequence_id = authored.active_sequence().expect("active Sequence").id;
+        authored
+            .rename_sequence(sequence_id, "Qualified Sequence")
+            .expect("advance the authored Sequence revision");
+        authored.save_project_file().expect("save authored fixture");
+        let document_revision = authored
+            .authoring
+            .as_ref()
+            .expect("authored session")
+            .document()
+            .document_revision;
+        let sequence_revision = authored.active_sequence().expect("active Sequence").revision;
+        let runtime_root = authored
+            .authoring
+            .as_ref()
+            .expect("authored session")
+            .runtime_root()
+            .to_path_buf();
+        authored.close_project().expect("close fixture authoring Session");
+        drop(authored);
+
+        let binding = endurance_file_binding(&project_file);
+        let machine_plan = prepared_endurance_machine_plan(&root, &binding, sequence_id);
+        let archive_before = fs::read(&binding.path).expect("read archive before exact open");
+        let mut rejected = AppState::new();
+        let mut wrong_digest = binding.clone();
+        wrong_digest.sha256 = "0".repeat(64);
+        assert!(rejected
+            .open_endurance_project_fixture_binding(&wrong_digest, sequence_id)
+            .expect_err("wrong Project digest must fail closed")
+            .to_string()
+            .contains("differs from its machine-plan digest"));
+        assert!(!rejected.has_open_project());
+        assert!(rejected
+            .open_endurance_project_fixture_binding(&binding, SequenceId::new())
+            .expect_err("wrong active Sequence must fail closed")
+            .to_string()
+            .contains("active Sequence does not match machine plan"));
+        assert!(!rejected.has_open_project());
+        drop(rejected);
+
+        let mut opened = AppState::new();
+        opened
+            .open_endurance_project_fixture(&machine_plan)
+            .expect("install exact endurance Project fixture");
+
+        let session = opened.authoring.as_ref().expect("exact fixture Session");
+        let sequence = session.active_sequence().expect("exact active Sequence");
+        assert_eq!(sequence.id, sequence_id);
+        assert_eq!(sequence.name, "Qualified Sequence");
+        assert_eq!(sequence.revision, sequence_revision);
+        assert_eq!(session.document().document_revision, document_revision);
+        assert_eq!(session.author_generation().get(), 1);
+        assert_eq!(
+            session.saved_generation().map(|generation| generation.get()),
+            Some(1)
+        );
+        assert!(!session.is_dirty());
+        let history = session.history().diagnostics();
+        assert_eq!(history.undo_entries, 0);
+        assert_eq!(history.redo_entries, 0);
+        assert_eq!(
+            fs::read(&binding.path).expect("read archive after exact open"),
+            archive_before
+        );
+
+        opened.close_project().expect("close exact fixture Session");
+        drop(opened);
+        let _ = fs::remove_dir_all(runtime_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn endurance_project_fixture_rejects_missing_tracks_without_repair() {
+        let root = unique_root("invalid-endurance-project");
+        fs::create_dir_all(&root).expect("create fixture root");
+        let mut sequence = Sequence::new("Missing Audio Track");
+        let expected_sequence_id = sequence.id;
+        sequence.audio_tracks.clear();
+        sequence.audio_program =
+            mondrian_timeline::audio::AudioProgram::for_tracks(std::iter::empty::<TrackId>());
+        let document = ProjectDocument::new(
+            "Invalid Endurance Project",
+            SequenceCollection::new(sequence),
+            mondrian_core::ProjectColorEnvironment::default(),
+            SequenceSettings::default(),
+            ProjectSettings::default(),
+        );
+        let fixture_library_root = root.join("fixture-library");
+        let fixture_library =
+            AssetLibrary::open(fixture_library_root.clone()).expect("create fixture library");
+        let fixture_file = root.join("missing-track.mdp");
+        save_project_archive(&document, &fixture_library.database_path(), &fixture_file)
+            .expect("save structurally valid missing-Track fixture");
+        drop(fixture_library);
+        let binding = endurance_file_binding(&fixture_file);
+        let archive_before = fs::read(&binding.path).expect("read invalid archive before open");
+
+        let old_root = root.join("old-session");
+        let mut state = test_state(&old_root);
+        let old_session_id = state.authoring.as_ref().expect("old Session").session_id();
+        let error = state
+            .open_endurance_project_fixture_binding(&binding, expected_sequence_id)
+            .expect_err("missing authored Track must fail closed");
+        assert!(error.to_string().contains("requires authored video and audio Tracks"));
+        assert_eq!(
+            state.authoring.as_ref().expect("old Session remains").session_id(),
+            old_session_id
+        );
+        assert_eq!(
+            fs::read(&binding.path).expect("read invalid archive after rejection"),
+            archive_before
+        );
+        let old_sequence_id = state.active_sequence().expect("old Sequence remains").id;
+        state
+            .rename_sequence(old_sequence_id, "Persistence Resumed")
+            .expect("failed fixture install resumes authoring admission");
+        state
+            .save_project_file()
+            .expect("failed fixture install resumes persistence admission");
+
+        state.close_project().expect("close retained old Session");
+        drop(state);
+        let _ = fs::remove_dir_all(fixture_library_root);
+        let _ = fs::remove_dir_all(old_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn endurance_project_read_handle_excludes_writer_and_delete_sharing() {
+        let root = unique_root("endurance-project-read-sharing");
+        fs::create_dir_all(&root).expect("create sharing root");
+        let path = root.join("fixture.mdp");
+        fs::write(&path, b"fixture").expect("create sharing fixture");
+        let retained = open_endurance_project_read_handle(&path).expect("retain exact file object");
+
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        assert!(fs::remove_file(&path).is_err());
+
+        drop(retained);
+        fs::remove_file(&path).expect("sharing exclusion ends with retained handle");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn endurance_project_fixture_waits_for_in_flight_save_before_opening_source() {
+        let root = unique_root("endurance-project-in-flight-save");
+        let project_file = root.join("project.mdp");
+        let mut state = AppState::new();
+        state
+            .create_new_project_at(
+                project_file.clone(),
+                "In Flight Save",
+                1920,
+                1080,
+                Rational::new(25, 1),
+            )
+            .expect("create Project");
+        let sequence_id = state.active_sequence().expect("active Sequence").id;
+        let stale_binding = endurance_file_binding(&project_file);
+        let session_id = state.authoring.as_ref().expect("Session").session_id();
+        let runtime_root = state.authoring.as_ref().expect("Session").runtime_root().to_path_buf();
+        state
+            .rename_sequence(sequence_id, "Saved Before Exact Open")
+            .expect("create changed save payload");
+        let gate = state.project_persistence.gate_next_request();
+        state.request_project_save().expect("admit gated save");
+        gate.wait_until_running();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            gate.release();
+        });
+
+        let error = state
+            .open_endurance_project_fixture_binding(&stale_binding, sequence_id)
+            .expect_err("completed earlier save must invalidate the stale Project digest");
+        release.join().expect("release gated save");
+        assert!(error.to_string().contains("differs from its machine-plan digest"));
+        assert_eq!(
+            state.authoring.as_ref().expect("Session remains").session_id(),
+            session_id
+        );
+        assert_eq!(
+            state.active_sequence().expect("active Sequence remains").name,
+            "Saved Before Exact Open"
+        );
+        state
+            .save_project_file()
+            .expect("failed exact open resumes persistence admission");
+
+        state.close_project().expect("close retained Session");
+        drop(state);
+        let _ = fs::remove_dir_all(runtime_root);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn endurance_project_fixture_install_fails_closed_without_native_object_authority() {
+        let binding = EnduranceMachineFileBinding {
+            path: PathBuf::from("/tmp/endurance-project.mdp"),
+            sha256: "0".repeat(64),
+        };
+        let error = AppState::new()
+            .open_endurance_project_fixture_binding(&binding, SequenceId::new())
+            .expect_err("unqualified native object authority must fail closed");
+        assert!(error.to_string().contains("immutable-object Adapter"));
     }
 
     #[test]

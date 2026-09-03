@@ -72,6 +72,20 @@ replacement between separate hash and parse opens cannot be accepted. Only the
 prepared request can enter the public product runtime; do not construct a raw
 campaign request in a validation binary.
 
+For every admitted phase, the machine-specific factory must create a fresh
+`AppState` and call `open_endurance_project_fixture` with the exact
+`PreparedCommercialEnduranceMachinePlan` before it constructs Playback, Reference, or
+Export owners. Do not call ordinary `open_project_file`: ordinary Open may
+repair missing base Tracks and therefore changes the fixture being qualified.
+The exact seam requires a canonical direct regular file, lowercase SHA-256,
+current source Project/Library schemas, matching active Sequence, and pre-authored video plus audio Tracks. It hashes,
+parses, and extracts from one retained file object and returns a clean saved
+generation-1 Session with empty History. Any failure must return the fresh App
+through `FreshEndurancePhaseBuild::Failed` so the campaign still performs its
+consuming shutdown. The current non-Windows implementation rejects this call;
+add and qualify the recorded immutable-object native Adapter on macOS and Linux
+before treating this seam as campaign authority.
+
 ## Capture protocol
 
 Use the validation App composition with the production Playback, Preview,

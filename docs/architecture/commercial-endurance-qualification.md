@@ -63,6 +63,22 @@ The implementation is split at existing authority boundaries:
   Seek → Surface/Device → Export Cancel/Retry → Cache Pressure, and consumes
   each phase under one shutdown deadline. The runtime and serial supervisor
   share one monotonic clock authority.
+- `mondrian-app::app::project_lifecycle` supplies the validation-only exact
+  Project-fixture install seam used by that factory. Its public input is the
+  already prepared machine plan, never a caller-assembled path/hash pair. It
+  pauses any existing Project Persistence Generation before filesystem access,
+  resolves the canonical direct `.mdp` once, retains one file object, streams the machine-plan SHA-256
+  under the ordinary archive budget, rewinds that same object, and gives it to
+  `PreparedProjectArchive`; no pathname reopen separates identity approval from
+  parsing or extraction. The source Project document and Library schemas must
+  already be current; migration is ordinary compatibility, not exact evidence.
+  The active Sequence must equal the plan and already contain authored video and audio Tracks. This install is a saved generation-1
+  Session with empty History and deliberately skips ordinary product track
+  repair, so qualification cannot mutate a deficient fixture into eligibility.
+  Candidate failure resumes the old generation before old-Session retirement.
+  Windows denies write and delete sharing for the retained install lifetime;
+  macOS and Linux currently fail closed until an equivalent native
+  immutable-object Adapter and transfer qualification cell exist.
 - `mondrian-app::app::endurance_workload` owns the bounded regular-file read,
   SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
   duration/counter validation, plus the exact pre-start capability inventory.

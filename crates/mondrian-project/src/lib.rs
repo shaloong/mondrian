@@ -1099,6 +1099,8 @@ pub fn read_project_document_from_open_archive_with_budget(
 pub struct LoadedProjectArchive {
     /// Migrated and validated canonical project document.
     pub document: ProjectDocument,
+    /// Project document schema observed before any registered migration.
+    pub source_document_schema_version: u32,
     /// SQLite schema version declared by the archive manifest.
     pub library_schema_version: u32,
 }
@@ -1114,6 +1116,7 @@ pub struct PreparedProjectArchive<'archive> {
     archive: zip::ZipArchive<&'archive mut fs::File>,
     manifest: ProjectManifest,
     document: ProjectDocument,
+    source_document_schema_version: u32,
     budget: ProjectArchiveReadBudget,
 }
 
@@ -1128,8 +1131,15 @@ impl<'archive> PreparedProjectArchive<'archive> {
         let mut archive = zip::ZipArchive::new(&mut *file)?;
         validate_exact_archive_entry_set(&mut archive)?;
         validate_declared_archive_entry_budgets(&mut archive, budget)?;
-        let (manifest, document) = read_project_archive_metadata_from_zip(&mut archive, budget)?;
-        Ok(Self { archive, manifest, document, budget })
+        let (manifest, document, source_document_schema_version) =
+            read_project_archive_metadata_from_zip(&mut archive, budget)?;
+        Ok(Self {
+            archive,
+            manifest,
+            document,
+            source_document_schema_version,
+            budget,
+        })
     }
 
     /// Stable Project identity available before runtime authority is acquired.
@@ -1180,6 +1190,7 @@ impl<'archive> PreparedProjectArchive<'archive> {
 
         Ok(LoadedProjectArchive {
             document: self.document,
+            source_document_schema_version: self.source_document_schema_version,
             library_schema_version: self.manifest.library_schema_version,
         })
     }
@@ -1393,8 +1404,8 @@ fn save_project_archive_from_open_library_with_publication_impl(
 fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     budget: ProjectArchiveReadBudget,
-) -> anyhow::Result<(ProjectManifest, ProjectDocument)> {
-    let manifest = read_versioned_json_entry(
+) -> anyhow::Result<(ProjectManifest, ProjectDocument, u32)> {
+    let (manifest, _) = read_versioned_json_entry(
         archive,
         MANIFEST_ENTRY,
         PROJECT_FORMAT_VERSION,
@@ -1404,7 +1415,7 @@ fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
     )?;
     manifest.validate()?;
 
-    let document = read_versioned_json_entry(
+    let (document, source_document_schema_version) = read_versioned_json_entry(
         archive,
         PROJECT_ENTRY,
         PROJECT_DOCUMENT_SCHEMA_VERSION,
@@ -1413,7 +1424,11 @@ fn read_project_archive_metadata_from_zip<R: Read + std::io::Seek>(
         budget,
     )?;
     document.validate()?;
-    Ok((manifest, document.normalized()))
+    Ok((
+        manifest,
+        document.normalized(),
+        source_document_schema_version,
+    ))
 }
 
 fn read_versioned_json_entry<R, T>(
@@ -1423,7 +1438,7 @@ fn read_versioned_json_entry<R, T>(
     version: impl Fn(&T) -> u32,
     migrations: &JsonMigrationRegistry,
     budget: ProjectArchiveReadBudget,
-) -> anyhow::Result<T>
+) -> anyhow::Result<(T, u32)>
 where
     R: Read + Seek,
     T: DeserializeOwned,
@@ -1431,14 +1446,18 @@ where
     let current = read_json_entry::<_, T>(archive, entry_name, budget);
 
     match current {
-        Ok(value) if version(&value) == current_version => Ok(value),
+        Ok(value) if version(&value) == current_version => Ok((value, current_version)),
         Ok(_) | Err(_) => {
             // The current schema remains a direct typed streaming read. Only an
             // older, future, or malformed payload pays for the in-memory Value
             // needed by the explicit migration Registry Seam.
             let value = read_json_entry(archive, entry_name, budget)
                 .with_context(|| format!("invalid JSON in project archive entry: {entry_name}"))?;
-            Ok(serde_json::from_value(migrations.migrate(value)?)?)
+            let source_version = migrations.source_version(&value)?;
+            Ok((
+                serde_json::from_value(migrations.migrate(value)?)?,
+                source_version,
+            ))
         }
     }
 }
@@ -1878,6 +1897,10 @@ mod tests {
         let loaded =
             load_project_archive(&project_path, &runtime_library).expect("load project archive");
         assert_eq!(loaded.document.project_id, document.project_id);
+        assert_eq!(
+            loaded.source_document_schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
         assert_eq!(
             loaded.library_schema_version,
             PROJECT_LIBRARY_SCHEMA_VERSION
@@ -3266,6 +3289,46 @@ mod tests {
             .iter()
             .all(|sequence| sequence.dynamic_hdr
                 == mondrian_timeline::DynamicHdrAuthorState::default()));
+    }
+
+    #[test]
+    fn archive_load_reports_the_pre_migration_document_schema() {
+        let root = unique_temp_dir("source-document-schema");
+        let archive_path = root.join("schema-26.mdp");
+        let runtime = root.join("runtime");
+        let manifest = serde_json::to_vec_pretty(&ProjectManifest::default())
+            .expect("serialize current manifest");
+        let mut legacy = serde_json::to_value(test_document()).expect("serialize document");
+        legacy["schema_version"] = serde_json::json!(26);
+        for sequence in legacy["sequences"]["sequences"].as_array_mut().expect("Sequence array") {
+            sequence.as_object_mut().expect("Sequence object").remove("dynamic_hdr");
+        }
+        let project = serde_json::to_vec_pretty(&legacy).expect("serialize schema-26 document");
+        write_raw_stored_archive(
+            &archive_path,
+            &[
+                (MANIFEST_ENTRY, &manifest),
+                (PROJECT_ENTRY, &project),
+                (LIBRARY_ENTRY, b"sqlite schema fixture"),
+            ],
+        );
+
+        let loaded =
+            load_project_archive(&archive_path, &runtime).expect("migrate schema-26 archive");
+        assert_eq!(loaded.source_document_schema_version, 26);
+        assert_eq!(
+            loaded.document.schema_version,
+            PROJECT_DOCUMENT_SCHEMA_VERSION
+        );
+        assert!(loaded
+            .document
+            .sequences
+            .sequences
+            .iter()
+            .all(|sequence| sequence.dynamic_hdr
+                == mondrian_timeline::DynamicHdrAuthorState::default()));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
