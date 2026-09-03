@@ -57,6 +57,21 @@ from that plan; the campaign API has no parallel timeout argument. The external
 verifier hashes each bounded JSON input from the same handle bytes it parses and
 then requires every such observation to match the immutable replay snapshot.
 
+Prepare campaign input through
+`app::endurance_run_request::PreparedEnduranceRunRequest::load`. The strict
+schema-1 request must bind absolute regular-file paths and exact SHA-256 values
+for the profile, machine plan, capture authority, and every ordered workload.
+All path components must use the portable ordinary filename namespace;
+relative paths, parent traversal, NTFS alternate data streams, reserved DOS
+devices, and trailing-dot/space aliases are invalid.
+The identity's profile and machine-plan digests must match those bindings. The
+evidence directory must already exist as an empty real directory; the final
+manifest must not exist and must be outside the evidence directory. Admission
+hashes and parses the capture authority from the same bounded byte read, so a
+replacement between separate hash and parse opens cannot be accepted. Only the
+prepared request can enter the public product runtime; do not construct a raw
+campaign request in a validation binary.
+
 ## Capture protocol
 
 Use the validation App composition with the production Playback, Preview,

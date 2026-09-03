@@ -41,6 +41,17 @@ The implementation is split at existing authority boundaries:
   Export preset/range/output/QC/verifier limits, ordered recovery seek targets,
   pinned FFmpeg/FFprobe identities, and non-renewing timeouts. Its SHA-256 is
   computed from the original regular-file bytes, not caller-supplied fields.
+- `mondrian-app::app::endurance_run_request` is the only public campaign-input
+  admission seam. Its strict bounded schema-1 JSON binds the original profile,
+  machine-plan, capture-authority, and ordered workload bytes to the run
+  identity before it returns `PreparedEnduranceRunRequest`. It also requires an
+  existing empty evidence directory and a create-only manifest path outside
+  that directory. Every route uses an absolute normalized portable ordinary
+  namespace: relative/CWD-dependent paths, parent traversal, NTFS alternate
+  data streams, reserved DOS device names, and trailing-dot/space aliases are
+  rejected. Raw `EnduranceCampaignRequest` construction and the serial
+  coordinator remain crate-private, so product callers cannot bypass this
+  preflight.
 - `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
   composition over fresh `AppState` owners. A machine factory must prove the
   complete side-effect-free pre-start inventory before App creation. The

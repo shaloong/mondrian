@@ -18,8 +18,8 @@ use mondrian_reference_output::{ReferenceOutputDeviceDescriptor, ReferenceOutput
 
 use super::endurance_campaign::{
     run_endurance_campaign, EnduranceCampaignClock, EnduranceCampaignError, EnduranceCampaignEvent,
-    EnduranceCampaignRequest, EnduranceCampaignRuntime, EnduranceExecutionOwners,
-    EnduranceRuntimeClosure, EnduranceRuntimeSnapshot,
+    EnduranceCampaignRuntime, EnduranceExecutionOwners, EnduranceRuntimeClosure,
+    EnduranceRuntimeSnapshot,
 };
 use super::endurance_export::{FrozenRepeatedExportPhase, FrozenRepeatedExportRequest};
 use super::endurance_machine_plan::PreparedCommercialEnduranceMachinePlan;
@@ -27,6 +27,7 @@ use super::endurance_playback::PersistentTimelinePlaybackPhase;
 use super::endurance_qualification::EnduranceCaptureFacts;
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
 use super::endurance_reference_output::PersistentReferenceOutputPump;
+use super::endurance_run_request::PreparedEnduranceRunRequest;
 use super::endurance_workload::{
     EndurancePhaseAdmission, EndurancePreStartCapabilityInventory, PreparedEndurancePhaseStart,
     PreparedEnduranceWorkload,
@@ -832,7 +833,7 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
 /// current real-Window operation has local Windows evidence only; macOS and
 /// Linux native behavior remain transfer qualification cells.
 pub fn run_product_endurance_campaign<F, S, C, P>(
-    request: EnduranceCampaignRequest,
+    prepared_request: PreparedEnduranceRunRequest,
     factory: F,
     surface: S,
     clock: Arc<C>,
@@ -844,6 +845,7 @@ where
     C: EnduranceCampaignClock,
     P: ProcessMemoryProbe,
 {
+    let request = prepared_request.into_campaign_request();
     let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
     run_endurance_campaign(request, &mut runtime, process_memory, clock.as_ref())
 }

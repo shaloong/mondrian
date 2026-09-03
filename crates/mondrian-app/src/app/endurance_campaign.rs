@@ -822,7 +822,7 @@ pub trait EnduranceCampaignRuntime {
 
 /// Immutable inputs for one complete serial campaign.
 #[derive(Debug, Clone)]
-pub struct EnduranceCampaignRequest {
+pub(crate) struct EnduranceCampaignRequest {
     /// Compiled qualification profile.
     pub profile: EnduranceQualificationProfile,
     /// Exact release and machine identity.
@@ -831,6 +831,8 @@ pub struct EnduranceCampaignRequest {
     pub machine_plan_path: PathBuf,
     /// Pre-issued capture authority manifest.
     pub capture_authority_manifest_path: PathBuf,
+    /// Externally approved SHA-256 of the exact capture-authority bytes.
+    pub capture_authority_sha256: String,
     /// Create-only evidence directory.
     pub evidence_directory: PathBuf,
     /// Create-only final run manifest path.
@@ -840,7 +842,7 @@ pub struct EnduranceCampaignRequest {
 }
 
 /// Execute one serial campaign through the provided real product runtime.
-pub fn run_endurance_campaign<R, P, C>(
+pub(crate) fn run_endurance_campaign<R, P, C>(
     request: EnduranceCampaignRequest,
     runtime: &mut R,
     process_memory: &P,
@@ -878,6 +880,7 @@ where
         request.profile,
         request.identity,
         &request.capture_authority_manifest_path,
+        &request.capture_authority_sha256,
     )?;
 
     for requirement in &profile.phases {
@@ -1684,32 +1687,30 @@ mod tests {
             24,
         );
         let authority = temporary.path().join("authority.json");
-        std::fs::write(
-            &authority,
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version": 2,
-                "authority_id": "external-commercial-endurance-authority-v2",
-                "run_id": "campaign-test-run",
-                "profile_file_sha256": profile_file_sha256,
-                "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                "release_candidate_id": "mondrian-test-rc",
-                "product_artifact_sha256": SHA,
-                "runtime_image_sha256": SHA,
-                "build_provenance_sha256": SHA,
-                "machine_report_sha256": SHA,
-                "platform_cell_sha256": SHA,
-                "machine_plan_sha256": machine_plan_sha256,
-                "single_use_challenge": "campaign-test-challenge",
-                "phases": profile.phases.iter().map(|phase| serde_json::json!({
-                    "phase_id": phase.phase_id,
-                    "workload_sha256": phase.workload_sha256,
-                    "producer_owner": phase.producer_owner,
-                    "producer_verifier_id": phase.producer_verifier_id,
-                })).collect::<Vec<_>>()
-            }))
-            .expect("serialize authority"),
-        )
-        .expect("write authority");
+        let authority_bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "authority_id": "external-commercial-endurance-authority-v2",
+            "run_id": "campaign-test-run",
+            "profile_file_sha256": profile_file_sha256,
+            "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "release_candidate_id": "mondrian-test-rc",
+            "product_artifact_sha256": SHA,
+            "runtime_image_sha256": SHA,
+            "build_provenance_sha256": SHA,
+            "machine_report_sha256": SHA,
+            "platform_cell_sha256": SHA,
+            "machine_plan_sha256": machine_plan_sha256,
+            "single_use_challenge": "campaign-test-challenge",
+            "phases": profile.phases.iter().map(|phase| serde_json::json!({
+                "phase_id": phase.phase_id,
+                "workload_sha256": phase.workload_sha256,
+                "producer_owner": phase.producer_owner,
+                "producer_verifier_id": phase.producer_verifier_id,
+            })).collect::<Vec<_>>()
+        }))
+        .expect("serialize authority");
+        let capture_authority_sha256 = format!("{:x}", Sha256::digest(&authority_bytes));
+        std::fs::write(&authority, authority_bytes).expect("write authority");
         let workloads = profile
             .phases
             .iter()
@@ -1743,6 +1744,7 @@ mod tests {
             },
             machine_plan_path: machine_plan,
             capture_authority_manifest_path: authority,
+            capture_authority_sha256,
             evidence_directory: evidence.clone(),
             output_manifest_path: temporary.path().join("run.json"),
             workload_contracts: workloads,

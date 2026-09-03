@@ -1020,11 +1020,18 @@ impl EnduranceRunCapture {
         profile: EnduranceQualificationProfile,
         identity: EnduranceRunIdentity,
         capture_authority_manifest_path: &Path,
+        expected_capture_authority_sha256: &str,
     ) -> Result<Self, EnduranceCaptureError> {
         let prepared = PreparedEnduranceQualification::compile(profile.clone())
             .map_err(|error| EnduranceCaptureError::Profile(error.to_string()))?;
         let capture_authority = existing_regular_file(capture_authority_manifest_path)?;
-        let authority: EnduranceCaptureAuthority = read_bounded_json(&capture_authority)?;
+        let (authority, capture_authority_sha256): (EnduranceCaptureAuthority, String) =
+            read_bounded_json_with_sha256(&capture_authority)?;
+        if !valid_sha256(expected_capture_authority_sha256)
+            || capture_authority_sha256 != expected_capture_authority_sha256
+        {
+            return Err(EnduranceCaptureError::CaptureAuthorityMismatch);
+        }
         if authority.schema_version != 2
             || authority.authority_id != "external-commercial-endurance-authority-v2"
             || authority.run_id != identity.run_id
@@ -1054,7 +1061,7 @@ impl EnduranceRunCapture {
             profile,
             profile_sha256: prepared.profile_sha256().to_owned(),
             identity,
-            capture_authority_sha256: file_sha256(&capture_authority)?,
+            capture_authority_sha256,
             capture_authority_challenge: authority.single_use_challenge,
             next_phase_index: 0,
             previous_phase_end_us: None,
@@ -1184,7 +1191,7 @@ fn existing_regular_file(path: &Path) -> Result<PathBuf, EnduranceCaptureError> 
     Ok(absolute)
 }
 
-fn read_bounded_json<T>(path: &Path) -> Result<T, EnduranceCaptureError>
+fn read_bounded_json_with_sha256<T>(path: &Path) -> Result<(T, String), EnduranceCaptureError>
 where
     T: for<'de> Deserialize<'de>,
 {
@@ -1207,8 +1214,10 @@ where
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) != metadata.len() {
         return Err(EnduranceCaptureError::InvalidEvidencePath);
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| EnduranceCaptureError::Publication(error.to_string()))
+    let sha256 = format!("{:x}", Sha256::digest(&bytes));
+    let value = serde_json::from_slice(&bytes)
+        .map_err(|error| EnduranceCaptureError::Publication(error.to_string()))?;
+    Ok((value, sha256))
 }
 
 fn file_sha256(path: &Path) -> Result<String, EnduranceCaptureError> {
@@ -1624,7 +1633,12 @@ mod tests {
         )
         .expect("write mismatched authority");
         assert!(matches!(
-            EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority),
+            EnduranceRunCapture::new(
+                profile.clone(),
+                identity.clone(),
+                &authority,
+                &file_sha256(&authority).expect("authority hash"),
+            ),
             Err(EnduranceCaptureError::CaptureAuthorityMismatch)
         ));
         let mut incomplete_authority = authority_value(&identity.machine_plan_sha256);
@@ -1637,7 +1651,13 @@ mod tests {
             serde_json::to_vec(&incomplete_authority).expect("serialize incomplete authority"),
         )
         .expect("write incomplete authority");
-        assert!(EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority).is_err());
+        assert!(EnduranceRunCapture::new(
+            profile.clone(),
+            identity.clone(),
+            &authority,
+            &file_sha256(&authority).expect("authority hash"),
+        )
+        .is_err());
 
         let mut unknown_authority = authority_value(&identity.machine_plan_sha256);
         unknown_authority["unknown"] = serde_json::json!(true);
@@ -1646,7 +1666,13 @@ mod tests {
             serde_json::to_vec(&unknown_authority).expect("serialize unknown authority"),
         )
         .expect("write unknown authority");
-        assert!(EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority).is_err());
+        assert!(EnduranceRunCapture::new(
+            profile.clone(),
+            identity.clone(),
+            &authority,
+            &file_sha256(&authority).expect("authority hash"),
+        )
+        .is_err());
 
         let mut wrong_phase_authority = authority_value(&identity.machine_plan_sha256);
         wrong_phase_authority["phases"][0]["producer_owner"] = serde_json::json!("wrong-owner");
@@ -1656,7 +1682,12 @@ mod tests {
         )
         .expect("write wrong phase authority");
         assert!(matches!(
-            EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority),
+            EnduranceRunCapture::new(
+                profile.clone(),
+                identity.clone(),
+                &authority,
+                &file_sha256(&authority).expect("authority hash"),
+            ),
             Err(EnduranceCaptureError::CaptureAuthorityMismatch)
         ));
         std::fs::write(
@@ -1665,8 +1696,13 @@ mod tests {
                 .expect("serialize authority"),
         )
         .expect("write authority");
-        let mut capture =
-            EnduranceRunCapture::new(profile, identity, &authority).expect("start run capture");
+        let mut capture = EnduranceRunCapture::new(
+            profile,
+            identity,
+            &authority,
+            &file_sha256(&authority).expect("authority hash"),
+        )
+        .expect("start run capture");
 
         let mut first = capture
             .begin_phase(
