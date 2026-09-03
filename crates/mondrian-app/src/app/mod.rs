@@ -113,6 +113,8 @@ pub mod endurance_campaign;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_export;
 #[cfg(any(test, feature = "validation"))]
+pub mod endurance_machine_plan;
+#[cfg(any(test, feature = "validation"))]
 pub mod endurance_playback;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_product_runtime;

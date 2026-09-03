@@ -1,6 +1,6 @@
 {
-  "schema_version": 1,
-  "authority_id": "external-commercial-endurance-authority-v1",
+  "schema_version": 2,
+  "authority_id": "external-commercial-endurance-authority-v2",
   "execution_policy": "single-use-external-approval-required",
   "required_identity_fields": [
     "run_id",
@@ -12,6 +12,7 @@
     "build_provenance_sha256",
     "machine_report_sha256",
     "platform_cell_sha256",
+    "machine_plan_sha256",
     "single_use_challenge"
   ],
   "required_phase_binding_fields": [

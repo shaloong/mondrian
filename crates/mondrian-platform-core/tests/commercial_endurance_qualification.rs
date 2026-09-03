@@ -274,7 +274,7 @@ fn qualified_fixture() -> (
         manifests.push(manifest);
     }
     let run = EnduranceRunManifest {
-        schema_version: 1,
+        schema_version: 2,
         run_id: "commercial-run-001".to_owned(),
         profile_sha256: prepared.profile_sha256().to_owned(),
         source_revision: SOURCE.to_owned(),
@@ -284,6 +284,7 @@ fn qualified_fixture() -> (
         build_provenance_sha256: SHA.to_owned(),
         machine_report_sha256: SHA.to_owned(),
         platform_cell_sha256: SHA.to_owned(),
+        machine_plan_sha256: SHA.to_owned(),
         capture_authority_sha256: SHA.to_owned(),
         environment_before_sha256: SHA.to_owned(),
         environment_after_sha256: SHA.to_owned(),
@@ -308,6 +309,40 @@ fn complete_serial_campaign_qualifies_and_self_verifies() {
     assert_eq!(report.phases.len(), 3);
     assert!(report.phases.iter().all(|phase| phase.failed_checks.is_empty()));
     assert!(report.verify_evidence());
+}
+
+#[test]
+fn schema_two_machine_plan_identity_is_required_and_hashed_into_report() {
+    let (prepared, mut run, chunks) = qualified_fixture();
+    let expected_machine_plan = run.machine_plan_sha256.clone();
+    let mut report = prepared
+        .evaluate(run.clone(), |receipt| {
+            chunks
+                .get(&receipt.file_name)
+                .cloned()
+                .ok_or(EnduranceQualificationError::EmptyChunk)
+        })
+        .expect("evaluate schema-two run");
+    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.machine_plan_sha256, expected_machine_plan);
+    report.machine_plan_sha256 = "b".repeat(64);
+    assert!(!report.verify_evidence());
+
+    run.schema_version = 1;
+    assert!(matches!(
+        prepared.evaluate(run, |_| Err(EnduranceQualificationError::EmptyChunk)),
+        Err(EnduranceQualificationError::UnsupportedRunSchema { actual: 1 })
+    ));
+}
+
+#[test]
+fn malformed_machine_plan_digest_is_rejected_before_phase_replay() {
+    let (prepared, mut run, _) = qualified_fixture();
+    run.machine_plan_sha256 = "A".repeat(64);
+    assert!(matches!(
+        prepared.evaluate(run, |_| Err(EnduranceQualificationError::EmptyChunk)),
+        Err(EnduranceQualificationError::InvalidSha256 { field: "machine_plan_sha256" })
+    ));
 }
 
 #[test]
@@ -796,6 +831,13 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::to_vec_pretty(&profile()).expect("serialize profile"),
     )
     .expect("write profile");
+    let machine_plan_path = temporary.path().join("machine-plan.json");
+    std::fs::write(
+        &machine_plan_path,
+        br#"{"schema_version":1,"plan_id":"test-machine-plan"}"#,
+    )
+    .expect("write machine plan");
+    run.machine_plan_sha256 = file_sha256(&machine_plan_path);
     let authority_path = temporary.path().join("capture-authority.json");
     let authority_phases = run
         .phases
@@ -810,8 +852,8 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         })
         .collect::<Vec<_>>();
     let authority = serde_json::json!({
-        "schema_version": 1,
-        "authority_id": "external-commercial-endurance-authority-v1",
+        "schema_version": 2,
+        "authority_id": "external-commercial-endurance-authority-v2",
         "run_id": run.run_id,
         "profile_file_sha256": file_sha256(&profile_path),
         "source_revision": run.source_revision,
@@ -821,6 +863,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         "build_provenance_sha256": run.build_provenance_sha256,
         "machine_report_sha256": run.machine_report_sha256,
         "platform_cell_sha256": run.platform_cell_sha256,
+        "machine_plan_sha256": run.machine_plan_sha256,
         "single_use_challenge": authority_challenge,
         "phases": authority_phases,
     });
@@ -859,6 +902,10 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         .arg(&authority_path)
         .arg("-ExpectedCaptureAuthoritySha256")
         .arg(file_sha256(&authority_path))
+        .arg("-ExpectedMachinePlanPath")
+        .arg(&machine_plan_path)
+        .arg("-ExpectedMachinePlanSha256")
+        .arg(file_sha256(&machine_plan_path))
         .arg("-ExpectedSourceRevision")
         .arg(SOURCE)
         .arg("-ExpectedReleaseCandidateId")
@@ -880,6 +927,18 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     assert!(output_path.is_file());
 
     std::fs::remove_file(&output_path).expect("remove first test report");
+    let machine_plan_bytes = std::fs::read(&machine_plan_path).expect("read machine plan");
+    let mut tampered_machine_plan = machine_plan_bytes.clone();
+    tampered_machine_plan.push(b'\n');
+    std::fs::write(&machine_plan_path, tampered_machine_plan).expect("tamper machine plan");
+    let status = verifier.status().expect("rerun verifier with tampered machine plan");
+    assert!(!status.success(), "machine-plan byte drift must fail");
+    assert!(
+        !output_path.exists(),
+        "rejected plan drift must not publish a report"
+    );
+    std::fs::write(&machine_plan_path, machine_plan_bytes).expect("restore machine plan");
+
     let recovery_phase = run
         .phases
         .iter()

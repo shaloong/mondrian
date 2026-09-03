@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const PROFILE_SCHEMA_VERSION: u32 = 1;
-const RUN_SCHEMA_VERSION: u32 = 1;
+const RUN_SCHEMA_VERSION: u32 = 2;
 const CHUNK_SCHEMA_VERSION: u32 = 1;
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const HARD_MAX_PHASES: usize = 8;
 const HARD_MAX_CHUNKS_PER_PHASE: usize = 2_048;
 const HARD_MAX_SAMPLES_PER_CHUNK: usize = 256;
@@ -299,6 +299,7 @@ impl PreparedEnduranceQualification {
             build_provenance_sha256: run.build_provenance_sha256,
             machine_report_sha256: run.machine_report_sha256,
             platform_cell_sha256: run.platform_cell_sha256,
+            machine_plan_sha256: run.machine_plan_sha256,
             capture_authority_sha256: run.capture_authority_sha256,
             status,
             missing_phases,
@@ -681,7 +682,7 @@ pub struct EndurancePhaseManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnduranceRunManifest {
-    /// Run schema. Version 1 is required.
+    /// Run schema. Version 2 is required.
     pub schema_version: u32,
     /// Unique run identity.
     pub run_id: String,
@@ -701,6 +702,8 @@ pub struct EnduranceRunManifest {
     pub machine_report_sha256: String,
     /// SHA-256 of the admitted COL-046 platform/display row.
     pub platform_cell_sha256: String,
+    /// SHA-256 of the exact machine-local Project/device/execution plan.
+    pub machine_plan_sha256: String,
     /// SHA-256 of the externally approved single-use capture authority manifest.
     pub capture_authority_sha256: String,
     /// Environment identity before the first phase.
@@ -805,6 +808,8 @@ pub struct EnduranceQualificationReport {
     pub machine_report_sha256: String,
     /// Admitted platform/display row SHA-256.
     pub platform_cell_sha256: String,
+    /// Exact machine-local Project/device/execution plan SHA-256.
+    pub machine_plan_sha256: String,
     /// Approved single-use capture authority manifest SHA-256.
     pub capture_authority_sha256: String,
     /// Aggregate status.
@@ -1552,6 +1557,7 @@ fn validate_run_header(
         ("build_provenance_sha256", &run.build_provenance_sha256),
         ("machine_report_sha256", &run.machine_report_sha256),
         ("platform_cell_sha256", &run.platform_cell_sha256),
+        ("machine_plan_sha256", &run.machine_plan_sha256),
         ("capture_authority_sha256", &run.capture_authority_sha256),
         ("environment_before_sha256", &run.environment_before_sha256),
         ("environment_after_sha256", &run.environment_after_sha256),
@@ -1757,7 +1763,7 @@ pub enum EnduranceQualificationError {
     #[error("unsupported endurance profile schema {actual}; expected 1")]
     UnsupportedProfileSchema { actual: u32 },
     /// Unsupported run schema.
-    #[error("unsupported endurance run schema {actual}; expected 1")]
+    #[error("unsupported endurance run schema {actual}; expected 2")]
     UnsupportedRunSchema { actual: u32 },
     /// Empty or placeholder identity.
     #[error("invalid endurance identity field '{field}'")]

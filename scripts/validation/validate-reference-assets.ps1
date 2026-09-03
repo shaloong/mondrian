@@ -135,8 +135,23 @@ if (@($enduranceProfile.phases | Where-Object {
 }).Count -ne 0) {
     Add-Issue "error" "endurance-profile.terminal" "Every endurance phase must require quiescence and worker shutdown"
 }
-if ($enduranceAuthorityContract.schema_version -ne 1 -or
-    $enduranceAuthorityContract.authority_id -ne "external-commercial-endurance-authority-v1" -or
+$enduranceAuthorityIdentityFields = @($enduranceAuthorityContract.required_identity_fields | ForEach-Object { [string]$_ })
+$requiredEnduranceAuthorityIdentityFields = @(
+    "build_provenance_sha256",
+    "machine_plan_sha256",
+    "machine_report_sha256",
+    "platform_cell_sha256",
+    "product_artifact_sha256",
+    "profile_file_sha256",
+    "release_candidate_id",
+    "run_id",
+    "runtime_image_sha256",
+    "single_use_challenge",
+    "source_revision"
+)
+if ($enduranceAuthorityContract.schema_version -ne 2 -or
+    $enduranceAuthorityContract.authority_id -ne "external-commercial-endurance-authority-v2" -or
+    @(Compare-Object $requiredEnduranceAuthorityIdentityFields ($enduranceAuthorityIdentityFields | Sort-Object)).Count -ne 0 -or
     $enduranceAuthorityContract.owner_evidence_files_required -ne $true -or
     $enduranceAuthorityContract.raw_evidence_files_required -ne $true -or
     $enduranceAuthorityContract.create_only_capture_required -ne $true -or

@@ -19,6 +19,9 @@ use mondrian_reference_output::ReferenceOutputDiagnostics;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use super::endurance_machine_plan::{
+    CommercialEnduranceMachinePlanError, PreparedCommercialEnduranceMachinePlan,
+};
 use super::endurance_qualification::{
     EnduranceCaptureError, EnduranceCaptureFacts, EndurancePhaseCapture, EnduranceRecoveryStep,
     EnduranceRunCapture, EnduranceRunIdentity, EnduranceSampleTiming,
@@ -776,6 +779,12 @@ impl EnduranceRuntimeClosure {
 
 /// Product-owned execution surface consumed by the serial supervisor.
 pub trait EnduranceCampaignRuntime {
+    /// Bind the exact validated plan before any phase owner can be created.
+    fn bind_machine_plan(
+        &mut self,
+        machine_plan: PreparedCommercialEnduranceMachinePlan,
+    ) -> Result<(), EnduranceCampaignError>;
+
     /// Admit and start one exact checked-in workload.
     ///
     /// An error may follow partial owner creation. The supervisor will invoke
@@ -818,6 +827,8 @@ pub struct EnduranceCampaignRequest {
     pub profile: EnduranceQualificationProfile,
     /// Exact release and machine identity.
     pub identity: EnduranceRunIdentity,
+    /// Exact bounded machine-local fixture/device/execution plan.
+    pub machine_plan_path: PathBuf,
     /// Pre-issued capture authority manifest.
     pub capture_authority_manifest_path: PathBuf,
     /// Create-only evidence directory.
@@ -841,6 +852,27 @@ where
     C: EnduranceCampaignClock,
 {
     validate_workload_map(&request.profile, &request.workload_contracts)?;
+    let recovery_requirement = request
+        .profile
+        .phases
+        .iter()
+        .find(|phase| phase.kind == EndurancePhaseKind::ConcurrentRecovery)
+        .ok_or(EnduranceCampaignError::WorkloadClosure)?;
+    let recovery_workload_path =
+        request.workload_contracts.get(&recovery_requirement.phase_id).ok_or_else(|| {
+            EnduranceCampaignError::MissingWorkload(recovery_requirement.phase_id.clone())
+        })?;
+    let recovery_workload =
+        PreparedEnduranceWorkload::load(recovery_requirement, recovery_workload_path)?;
+    let machine_plan = PreparedCommercialEnduranceMachinePlan::load(
+        &request.machine_plan_path,
+        &request.profile,
+        recovery_workload.recovery_cycle_count(),
+    )?;
+    if machine_plan.sha256() != request.identity.machine_plan_sha256 {
+        return Err(EnduranceCampaignError::MachinePlanIdentityMismatch);
+    }
+    runtime.bind_machine_plan(machine_plan)?;
     let profile = request.profile.clone();
     let mut capture = EnduranceRunCapture::new(
         request.profile,
@@ -1114,6 +1146,12 @@ pub enum EnduranceCampaignError {
     /// Read-only machine preflight failed before any phase owner was created.
     #[error("endurance product pre-start inspection failed: {0}")]
     PreStartRuntime(String),
+    /// Bounded machine-plan JSON or its profile/workload binding was invalid.
+    #[error(transparent)]
+    MachinePlan(#[from] CommercialEnduranceMachinePlanError),
+    /// Machine-plan file bytes differed from the externally sealed identity.
+    #[error("commercial endurance machine plan differs from the sealed run identity")]
+    MachinePlanIdentityMismatch,
     /// A phase workload path was absent.
     #[error("endurance workload is missing for phase '{0}'")]
     MissingWorkload(String),
@@ -1305,6 +1343,7 @@ mod tests {
 
     struct FakeRuntime<'a> {
         clock: &'a FakeClock,
+        machine_plan_sha256: Option<String>,
         kind: Option<mondrian_platform::EndurancePhaseKind>,
         phase_started_at_us: u64,
         verified_exports: u64,
@@ -1315,6 +1354,7 @@ mod tests {
         fn new(clock: &'a FakeClock) -> Self {
             Self {
                 clock,
+                machine_plan_sha256: None,
                 kind: None,
                 phase_started_at_us: 0,
                 verified_exports: 0,
@@ -1328,12 +1368,21 @@ mod tests {
     }
 
     impl EnduranceCampaignRuntime for FakeRuntime<'_> {
+        fn bind_machine_plan(
+            &mut self,
+            machine_plan: PreparedCommercialEnduranceMachinePlan,
+        ) -> Result<(), EnduranceCampaignError> {
+            self.machine_plan_sha256 = Some(machine_plan.sha256().to_owned());
+            Ok(())
+        }
+
         fn begin_phase(
             &mut self,
             requirement: &EndurancePhaseRequirement,
             workload: &PreparedEnduranceWorkload,
             phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
+            assert!(self.machine_plan_sha256.is_some());
             self.kind = Some(requirement.kind);
             self.phase_started_at_us = phase_started_at_run_us;
             self.verified_exports = 0;
@@ -1457,6 +1506,13 @@ mod tests {
     }
 
     impl EnduranceCampaignRuntime for CleanupRuntime {
+        fn bind_machine_plan(
+            &mut self,
+            _machine_plan: PreparedCommercialEnduranceMachinePlan,
+        ) -> Result<(), EnduranceCampaignError> {
+            Ok(())
+        }
+
         fn begin_phase(
             &mut self,
             _requirement: &EndurancePhaseRequirement,
@@ -1611,18 +1667,47 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .expect("workspace root");
-        let profile: EnduranceQualificationProfile = serde_json::from_slice(
-            &std::fs::read(root.join("tests/validation/commercial-endurance-qualification.json"))
-                .expect("read profile"),
-        )
-        .expect("parse profile");
+        let profile_bytes =
+            std::fs::read(root.join("tests/validation/commercial-endurance-qualification.json"))
+                .expect("read profile");
+        let profile_file_sha256 = format!("{:x}", Sha256::digest(&profile_bytes));
+        let profile: EnduranceQualificationProfile =
+            serde_json::from_slice(&profile_bytes).expect("parse profile");
         let temporary = tempfile::tempdir().expect("temporary campaign root");
         let evidence = temporary.path().join("evidence");
         std::fs::create_dir(&evidence).expect("create evidence directory");
+        let machine_plan = temporary.path().join("machine-plan.json");
+        let machine_plan_sha256 = super::super::endurance_machine_plan::write_test_machine_plan(
+            &machine_plan,
+            temporary.path(),
+            &profile,
+            24,
+        );
         let authority = temporary.path().join("authority.json");
         std::fs::write(
             &authority,
-            br#"{"schema_version":1,"authority_id":"external-commercial-endurance-authority-v1","run_id":"campaign-test-run","single_use_challenge":"campaign-test-challenge"}"#,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 2,
+                "authority_id": "external-commercial-endurance-authority-v2",
+                "run_id": "campaign-test-run",
+                "profile_file_sha256": profile_file_sha256,
+                "source_revision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "release_candidate_id": "mondrian-test-rc",
+                "product_artifact_sha256": SHA,
+                "runtime_image_sha256": SHA,
+                "build_provenance_sha256": SHA,
+                "machine_report_sha256": SHA,
+                "platform_cell_sha256": SHA,
+                "machine_plan_sha256": machine_plan_sha256,
+                "single_use_challenge": "campaign-test-challenge",
+                "phases": profile.phases.iter().map(|phase| serde_json::json!({
+                    "phase_id": phase.phase_id,
+                    "workload_sha256": phase.workload_sha256,
+                    "producer_owner": phase.producer_owner,
+                    "producer_verifier_id": phase.producer_verifier_id,
+                })).collect::<Vec<_>>()
+            }))
+            .expect("serialize authority"),
         )
         .expect("write authority");
         let workloads = profile
@@ -1644,6 +1729,7 @@ mod tests {
             profile: profile.clone(),
             identity: EnduranceRunIdentity {
                 run_id: "campaign-test-run".to_owned(),
+                profile_file_sha256,
                 source_revision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
                 release_candidate_id: "mondrian-test-rc".to_owned(),
                 product_artifact_sha256: SHA.to_owned(),
@@ -1651,9 +1737,11 @@ mod tests {
                 build_provenance_sha256: SHA.to_owned(),
                 machine_report_sha256: SHA.to_owned(),
                 platform_cell_sha256: SHA.to_owned(),
+                machine_plan_sha256: machine_plan_sha256.clone(),
                 environment_before_sha256: SHA.to_owned(),
                 environment_after_sha256: SHA.to_owned(),
             },
+            machine_plan_path: machine_plan,
             capture_authority_manifest_path: authority,
             evidence_directory: evidence.clone(),
             output_manifest_path: temporary.path().join("run.json"),
@@ -1676,6 +1764,7 @@ mod tests {
 
     struct FailpointRuntime<'a> {
         clock: &'a FakeClock,
+        machine_plan_sha256: Option<String>,
         failpoint: CampaignFailpoint,
         begin_calls: u32,
         shutdown_calls: u32,
@@ -1684,12 +1773,21 @@ mod tests {
     }
 
     impl EnduranceCampaignRuntime for FailpointRuntime<'_> {
+        fn bind_machine_plan(
+            &mut self,
+            machine_plan: PreparedCommercialEnduranceMachinePlan,
+        ) -> Result<(), EnduranceCampaignError> {
+            self.machine_plan_sha256 = Some(machine_plan.sha256().to_owned());
+            Ok(())
+        }
+
         fn begin_phase(
             &mut self,
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
             _phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
+            assert!(self.machine_plan_sha256.is_some());
             self.begin_calls += 1;
             match self.failpoint {
                 CampaignFailpoint::PreStart => {
@@ -1815,6 +1913,7 @@ mod tests {
             let clock = FakeClock::default();
             let mut runtime = FailpointRuntime {
                 clock: &clock,
+                machine_plan_sha256: None,
                 failpoint,
                 begin_calls: 0,
                 shutdown_calls: 0,
@@ -1862,11 +1961,39 @@ mod tests {
     }
 
     #[test]
+    fn machine_plan_identity_mismatch_rejects_before_any_runtime_owner() {
+        let (_temporary, mut request, _profile, _evidence) = campaign_fixture();
+        request.identity.machine_plan_sha256 = "b".repeat(64);
+        let clock = FakeClock::default();
+        let mut runtime = FailpointRuntime {
+            clock: &clock,
+            machine_plan_sha256: None,
+            failpoint: CampaignFailpoint::Begin,
+            begin_calls: 0,
+            shutdown_calls: 0,
+            snapshot_calls: 0,
+            snapshots_at_shutdown: None,
+        };
+
+        let result = run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock);
+
+        assert!(matches!(
+            result,
+            Err(EnduranceCampaignError::MachinePlanIdentityMismatch)
+        ));
+        assert!(runtime.machine_plan_sha256.is_none());
+        assert_eq!(runtime.begin_calls, 0);
+        assert_eq!(runtime.shutdown_calls, 0);
+        assert_eq!(runtime.snapshot_calls, 0);
+    }
+
+    #[test]
     fn coordinator_does_not_cleanup_a_pre_start_failure_without_owners() {
         let (_temporary, request, _profile, _evidence) = campaign_fixture();
         let clock = FakeClock::default();
         let mut runtime = FailpointRuntime {
             clock: &clock,
+            machine_plan_sha256: None,
             failpoint: CampaignFailpoint::PreStart,
             begin_calls: 0,
             shutdown_calls: 0,

@@ -22,6 +22,7 @@ use super::endurance_campaign::{
     EnduranceRuntimeClosure, EnduranceRuntimeSnapshot,
 };
 use super::endurance_export::{FrozenRepeatedExportPhase, FrozenRepeatedExportRequest};
+use super::endurance_machine_plan::PreparedCommercialEnduranceMachinePlan;
 use super::endurance_playback::PersistentTimelinePlaybackPhase;
 use super::endurance_qualification::EnduranceCaptureFacts;
 use super::endurance_recovery::EnduranceRecoveryOperationReceipt;
@@ -180,6 +181,7 @@ pub trait FreshEndurancePhaseFactory {
     /// Observe all exact prerequisites without starting phase owners.
     fn pre_start_capability_inventory(
         &mut self,
+        machine_plan: &PreparedCommercialEnduranceMachinePlan,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
     ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError>;
@@ -190,6 +192,7 @@ pub trait FreshEndurancePhaseFactory {
     /// the exact phase/workload whose complete pre-start inventory was checked.
     fn build_phase(
         &mut self,
+        machine_plan: &PreparedCommercialEnduranceMachinePlan,
         requirement: &EndurancePhaseRequirement,
         workload: &PreparedEnduranceWorkload,
         prepared_start: PreparedEndurancePhaseStart,
@@ -804,22 +807,19 @@ pub(crate) struct ProductEnduranceCampaignRuntime<F, S, C> {
     factory: F,
     surface: S,
     clock: Arc<C>,
-    timeouts: EnduranceProductRuntimeTimeouts,
+    timeouts: Option<EnduranceProductRuntimeTimeouts>,
+    machine_plan: Option<PreparedCommercialEnduranceMachinePlan>,
     state: RuntimeState,
 }
 
 impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
-    fn new(
-        factory: F,
-        surface: S,
-        clock: Arc<C>,
-        timeouts: EnduranceProductRuntimeTimeouts,
-    ) -> Self {
+    fn new(factory: F, surface: S, clock: Arc<C>) -> Self {
         Self {
             factory,
             surface,
             clock,
-            timeouts,
+            timeouts: None,
+            machine_plan: None,
             state: RuntimeState::Empty,
         }
     }
@@ -836,7 +836,6 @@ pub fn run_product_endurance_campaign<F, S, C, P>(
     factory: F,
     surface: S,
     clock: Arc<C>,
-    timeouts: EnduranceProductRuntimeTimeouts,
     process_memory: &P,
 ) -> Result<EnduranceRunManifest, EnduranceCampaignError>
 where
@@ -845,8 +844,7 @@ where
     C: EnduranceCampaignClock,
     P: ProcessMemoryProbe,
 {
-    let mut runtime =
-        ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock), timeouts);
+    let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
     run_endurance_campaign(request, &mut runtime, process_memory, clock.as_ref())
 }
 
@@ -856,6 +854,27 @@ where
     S: EnduranceSurfaceReopenDriver,
     C: EnduranceCampaignClock,
 {
+    fn bind_machine_plan(
+        &mut self,
+        machine_plan: PreparedCommercialEnduranceMachinePlan,
+    ) -> Result<(), EnduranceCampaignError> {
+        if !matches!(self.state, RuntimeState::Empty) || self.machine_plan.is_some() {
+            return Err(runtime_error(
+                "commercial endurance machine plan must be bound exactly once before phase work",
+            ));
+        }
+        let planned = machine_plan.plan().timeouts;
+        let timeouts = EnduranceProductRuntimeTimeouts::new(
+            Duration::from_millis(planned.interval_ms),
+            Duration::from_millis(planned.recovery_ms),
+            Duration::from_millis(planned.surface_reopen_ms),
+            Duration::from_millis(planned.shutdown_ms),
+        )?;
+        self.machine_plan = Some(machine_plan);
+        self.timeouts = Some(timeouts);
+        Ok(())
+    }
+
     fn begin_phase(
         &mut self,
         requirement: &EndurancePhaseRequirement,
@@ -876,17 +895,24 @@ where
             RuntimeState::Empty | RuntimeState::Terminal(Some(_)) => {}
         }
         self.state = RuntimeState::Empty;
+        let timeouts = self.timeouts.ok_or_else(|| {
+            runtime_error("commercial endurance machine-plan timeouts are missing")
+        })?;
+        let machine_plan = self
+            .machine_plan
+            .as_ref()
+            .ok_or_else(|| runtime_error("commercial endurance machine plan is not bound"))?;
 
         let inventory = self
             .factory
-            .pre_start_capability_inventory(requirement, workload)
+            .pre_start_capability_inventory(machine_plan, requirement, workload)
             .map_err(|error| EnduranceCampaignError::PreStartRuntime(error.to_string()))?;
         let prepared_start = match workload.prepare_start(&inventory) {
             Ok(prepared_start) => prepared_start,
             Err(not_run) => return Ok(EndurancePhaseAdmission::NotRun(not_run)),
         };
 
-        let build = self.factory.build_phase(requirement, workload, prepared_start);
+        let build = self.factory.build_phase(machine_plan, requirement, workload, prepared_start);
         let mut owners = match build {
             FreshEndurancePhaseBuild::Ready(fresh) => {
                 match PhaseOwners::from_fresh(
@@ -916,7 +942,7 @@ where
                 return Err(runtime_error(detail));
             }
         };
-        if let Err(detail) = owners.start(requirement, workload, self.timeouts) {
+        if let Err(detail) = owners.start(requirement, workload, timeouts) {
             owners.fault = Some(detail.clone());
             self.state = RuntimeState::Owned(owners);
             return Err(runtime_error(detail));
@@ -929,6 +955,9 @@ where
         &mut self,
         deadline_run_us: u64,
     ) -> Result<Vec<EnduranceCampaignEvent>, EnduranceCampaignError> {
+        let timeouts = self.timeouts.ok_or_else(|| {
+            runtime_error("commercial endurance machine-plan timeouts are missing")
+        })?;
         let RuntimeState::Owned(owners) = &mut self.state else {
             return Err(runtime_error(
                 "no started endurance phase is available to pump",
@@ -951,11 +980,7 @@ where
 
         let mut events = Vec::new();
         while owners.recovery_due(deadline_run_us).map_err(runtime_error)? {
-            match owners.execute_recovery_cycle(
-                &mut self.surface,
-                self.clock.as_ref(),
-                self.timeouts,
-            ) {
+            match owners.execute_recovery_cycle(&mut self.surface, self.clock.as_ref(), timeouts) {
                 Ok(recovery_events) => events.extend(recovery_events),
                 Err(detail) => {
                     owners.fault = Some(detail.clone());
@@ -998,6 +1023,9 @@ where
         &mut self,
     ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>
     {
+        let timeouts = self.timeouts.ok_or_else(|| {
+            runtime_error("commercial endurance machine-plan timeouts are missing")
+        })?;
         let state = std::mem::replace(&mut self.state, RuntimeState::Terminal(None));
         let RuntimeState::Owned(mut owners) = state else {
             self.state = state;
@@ -1005,8 +1033,7 @@ where
                 "no owned endurance phase is available to shut down",
             ));
         };
-        let (deadline, deadline_failure) = match Instant::now().checked_add(self.timeouts.shutdown)
-        {
+        let (deadline, deadline_failure) = match Instant::now().checked_add(timeouts.shutdown) {
             Some(deadline) => (deadline, None),
             None => (
                 Instant::now(),
@@ -1245,19 +1272,23 @@ mod tests {
     impl FreshEndurancePhaseFactory for TestFactory {
         fn pre_start_capability_inventory(
             &mut self,
+            machine_plan: &PreparedCommercialEnduranceMachinePlan,
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
         ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError> {
+            assert_eq!(machine_plan.plan().schema_version, 1);
             Ok(self.inventory.clone())
         }
 
         fn build_phase(
             &mut self,
+            machine_plan: &PreparedCommercialEnduranceMachinePlan,
             requirement: &EndurancePhaseRequirement,
             workload: &PreparedEnduranceWorkload,
             prepared_start: PreparedEndurancePhaseStart,
         ) -> FreshEndurancePhaseBuild {
             self.build_calls.set(self.build_calls.get() + 1);
+            assert_eq!(machine_plan.plan().schema_version, 1);
             assert_eq!(prepared_start.phase_id(), requirement.phase_id);
             assert_eq!(prepared_start.workload_id(), workload.workload_id());
             assert_eq!(prepared_start.kind(), requirement.kind);
@@ -1270,12 +1301,16 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
 
-    fn continuous_export_contract() -> (EndurancePhaseRequirement, PreparedEnduranceWorkload) {
-        let profile: EnduranceQualificationProfile = serde_json::from_slice(
+    fn qualification_profile() -> EnduranceQualificationProfile {
+        serde_json::from_slice(
             &fs::read(root().join("tests/validation/commercial-endurance-qualification.json"))
                 .expect("checked-in endurance profile"),
         )
-        .expect("endurance profile schema");
+        .expect("endurance profile schema")
+    }
+
+    fn continuous_export_contract() -> (EndurancePhaseRequirement, PreparedEnduranceWorkload) {
+        let profile = qualification_profile();
         let requirement = profile
             .phases
             .into_iter()
@@ -1289,14 +1324,34 @@ mod tests {
         (requirement, workload)
     }
 
-    fn timeouts() -> EnduranceProductRuntimeTimeouts {
-        EnduranceProductRuntimeTimeouts::new(
-            Duration::from_secs(1),
-            Duration::from_secs(5),
-            Duration::from_secs(5),
-            Duration::from_secs(10),
-        )
-        .expect("test runtime timeouts")
+    fn bind_test_machine_plan(
+        runtime: &mut ProductEnduranceCampaignRuntime<TestFactory, ForbiddenSurface, TestClock>,
+    ) -> tempfile::TempDir {
+        let temporary = tempfile::tempdir().expect("temporary machine plan");
+        let path = temporary.path().join("machine-plan.json");
+        let profile = qualification_profile();
+        crate::app::endurance_machine_plan::write_test_machine_plan(
+            &path,
+            temporary.path(),
+            &profile,
+            24,
+        );
+        let prepared = PreparedCommercialEnduranceMachinePlan::load(&path, &profile, 24)
+            .expect("prepare test machine plan");
+        runtime.bind_machine_plan(prepared).expect("bind exact test plan");
+        assert_eq!(
+            runtime.timeouts,
+            Some(
+                EnduranceProductRuntimeTimeouts::new(
+                    Duration::from_millis(1_000),
+                    Duration::from_millis(60_000),
+                    Duration::from_millis(30_000),
+                    Duration::from_millis(60_000),
+                )
+                .expect("planned timeouts")
+            )
+        );
+        temporary
     }
 
     #[test]
@@ -1312,8 +1367,8 @@ mod tests {
             factory,
             ForbiddenSurface,
             Arc::new(TestClock::default()),
-            timeouts(),
         );
+        let _machine_plan = bind_test_machine_plan(&mut runtime);
 
         let admission =
             runtime.begin_phase(&requirement, &workload, 0).expect("typed NotRun admission");
@@ -1339,8 +1394,8 @@ mod tests {
             factory,
             ForbiddenSurface,
             Arc::new(TestClock::default()),
-            timeouts(),
         );
+        let _machine_plan = bind_test_machine_plan(&mut runtime);
 
         assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
         assert_eq!(build_calls.get(), 1);
@@ -1396,12 +1451,9 @@ mod tests {
             "temporary test state".to_owned(),
         );
         owners.fault = None;
-        let mut runtime = ProductEnduranceCampaignRuntime::new(
-            factory,
-            ForbiddenSurface,
-            Arc::clone(&clock),
-            timeouts(),
-        );
+        let mut runtime =
+            ProductEnduranceCampaignRuntime::new(factory, ForbiddenSurface, Arc::clone(&clock));
+        let _machine_plan = bind_test_machine_plan(&mut runtime);
         runtime.state = RuntimeState::Owned(Box::new(owners));
 
         assert!(runtime.pump_until(10_000).expect("late zero cadence").is_empty());

@@ -15,7 +15,11 @@ Adapter is never eligible evidence.
 - sufficient create-only evidence storage for 72 hours plus exports;
 - an externally approved `mondrian-endurance-replay` binary hash and exact
   checked-in profile-file hash;
-- an external `external-commercial-endurance-authority-v1` manifest with one
+- an exact bounded schema-1 machine plan whose original file SHA-256 binds the
+  canonical `.mdp`, external-source inventory, active Sequence, physical Audio
+  and Reference routes, Export plans, recovery targets, verifier tools, and
+  timeouts. Its Reference request must explicitly include the ANC policy;
+- an external `external-commercial-endurance-authority-v2` manifest with one
   single-use challenge, exact release bindings, and exact phase workload and
   producer bindings. Its bytes must be approved and pinned before capture.
 
@@ -38,11 +42,20 @@ $profileFileSha = (Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.To
 ```
 
 The capture authority must pin those two values plus source, release candidate,
-product artifact, runtime image, build provenance, machine report, and COL-046
-cell hashes before starting. Its `authority_id` is
-`external-commercial-endurance-authority-v1`; it carries a non-placeholder
+product artifact, runtime image, build provenance, machine report, COL-046
+cell, and machine-plan hashes before starting. Its `authority_id` is
+`external-commercial-endurance-authority-v2`; it carries a non-placeholder
 `single_use_challenge` and one phase binding for each exact workload digest,
 producer owner, and verifier identity.
+The App parses that complete strict schema before constructing a phase owner;
+missing or unknown identity/phase fields fail capture admission. The campaign
+then transfers the exact prepared machine-plan object into the runtime once,
+and the machine factory must derive preflight and phase construction from the
+same borrowed plan rather than a self-reported digest.
+Runtime cadence, recovery, Surface, and shutdown deadlines are likewise derived
+from that plan; the campaign API has no parallel timeout argument. The external
+verifier hashes each bounded JSON input from the same handle bytes it parses and
+then requires every such observation to match the immutable replay snapshot.
 
 ## Capture protocol
 
@@ -239,7 +252,7 @@ and terminal record must agree exactly.
 
 ## Manifest and directory closure
 
-The run manifest uses `EnduranceRunManifest` schema 1. Every chunk, normalized
+The run manifest and final report use schema 2. Every chunk, normalized
 owner report, and raw evidence receipt names one distinct leaf file. The
 evidence directory must contain exactly those files—no unrelated logs,
 subdirectories, links, partials, or extras. The supervisor derives producer
@@ -272,6 +285,8 @@ pwsh -File scripts/validation/verify-commercial-endurance-qualification.ps1 `
   -ExpectedProfileFileSha256 $profileFileSha `
   -ExpectedCaptureAuthorityPath E:/qualification/endurance/capture-authority.json `
   -ExpectedCaptureAuthoritySha256 '<64-hex>' `
+  -ExpectedMachinePlanPath E:/qualification/endurance/machine-plan.json `
+  -ExpectedMachinePlanSha256 '<64-hex>' `
   -ExpectedSourceRevision '<40-hex-clean-source>' `
   -ExpectedReleaseCandidateId 'mondrian-0.2.0-rc1' `
   -ExpectedProductArtifactSha256 '<64-hex>' `

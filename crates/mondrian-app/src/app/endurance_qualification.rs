@@ -378,6 +378,31 @@ fn valid_evidence_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+fn valid_capture_authority_identity(identity: &EnduranceRunIdentity) -> bool {
+    let source_revision = identity.source_revision.as_bytes();
+    valid_evidence_token(&identity.run_id)
+        && valid_evidence_token(&identity.release_candidate_id)
+        && !identity.run_id.to_ascii_lowercase().contains("placeholder")
+        && !identity.release_candidate_id.to_ascii_lowercase().contains("placeholder")
+        && source_revision.len() == 40
+        && source_revision
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        && [
+            &identity.profile_file_sha256,
+            &identity.product_artifact_sha256,
+            &identity.runtime_image_sha256,
+            &identity.build_provenance_sha256,
+            &identity.machine_report_sha256,
+            &identity.platform_cell_sha256,
+            &identity.machine_plan_sha256,
+            &identity.environment_before_sha256,
+            &identity.environment_after_sha256,
+        ]
+        .into_iter()
+        .all(|value| valid_sha256(value))
+}
+
 /// Monotonic timing assigned by the capture scheduler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnduranceSampleTiming {
@@ -630,6 +655,8 @@ impl EnduranceChunkRecorder {
 pub struct EnduranceRunIdentity {
     /// Unique campaign run identity.
     pub run_id: String,
+    /// SHA-256 of the exact raw qualification-profile file approved for capture.
+    pub profile_file_sha256: String,
     /// Clean lowercase Git source revision.
     pub source_revision: String,
     /// Exact release-candidate identity.
@@ -644,6 +671,8 @@ pub struct EnduranceRunIdentity {
     pub machine_report_sha256: String,
     /// Admitted COL-046 platform/display row SHA-256.
     pub platform_cell_sha256: String,
+    /// Exact machine-local Project/device/execution plan SHA-256.
+    pub machine_plan_sha256: String,
     /// Environment identity captured before phase one.
     pub environment_before_sha256: String,
     /// Environment identity captured after phase three.
@@ -651,11 +680,31 @@ pub struct EnduranceRunIdentity {
 }
 
 #[derive(Debug, Deserialize)]
-struct EnduranceCaptureAuthorityHeader {
+#[serde(deny_unknown_fields)]
+struct EnduranceCaptureAuthority {
     schema_version: u32,
     authority_id: String,
     run_id: String,
+    profile_file_sha256: String,
+    source_revision: String,
+    release_candidate_id: String,
+    product_artifact_sha256: String,
+    runtime_image_sha256: String,
+    build_provenance_sha256: String,
+    machine_report_sha256: String,
+    platform_cell_sha256: String,
+    machine_plan_sha256: String,
     single_use_challenge: String,
+    phases: Vec<EnduranceCaptureAuthorityPhase>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnduranceCaptureAuthorityPhase {
+    phase_id: String,
+    workload_sha256: String,
+    producer_owner: String,
+    producer_verifier_id: String,
 }
 
 /// Create-only, fixed-space recorder for one real product phase.
@@ -975,12 +1024,29 @@ impl EnduranceRunCapture {
         let prepared = PreparedEnduranceQualification::compile(profile.clone())
             .map_err(|error| EnduranceCaptureError::Profile(error.to_string()))?;
         let capture_authority = existing_regular_file(capture_authority_manifest_path)?;
-        let authority: EnduranceCaptureAuthorityHeader = read_bounded_json(&capture_authority)?;
-        if authority.schema_version != 1
-            || authority.authority_id != "external-commercial-endurance-authority-v1"
+        let authority: EnduranceCaptureAuthority = read_bounded_json(&capture_authority)?;
+        if authority.schema_version != 2
+            || authority.authority_id != "external-commercial-endurance-authority-v2"
             || authority.run_id != identity.run_id
-            || authority.single_use_challenge.trim().is_empty()
+            || authority.profile_file_sha256 != identity.profile_file_sha256
+            || authority.source_revision != identity.source_revision
+            || authority.release_candidate_id != identity.release_candidate_id
+            || authority.product_artifact_sha256 != identity.product_artifact_sha256
+            || authority.runtime_image_sha256 != identity.runtime_image_sha256
+            || authority.build_provenance_sha256 != identity.build_provenance_sha256
+            || authority.machine_report_sha256 != identity.machine_report_sha256
+            || authority.platform_cell_sha256 != identity.platform_cell_sha256
+            || authority.machine_plan_sha256 != identity.machine_plan_sha256
+            || !valid_capture_authority_identity(&identity)
+            || !valid_evidence_token(&authority.single_use_challenge)
             || authority.single_use_challenge.contains("placeholder")
+            || authority.phases.len() != profile.phases.len()
+            || authority.phases.iter().zip(&profile.phases).any(|(actual, expected)| {
+                actual.phase_id != expected.phase_id
+                    || actual.workload_sha256 != expected.workload_sha256
+                    || actual.producer_owner != expected.producer_owner
+                    || actual.producer_verifier_id != expected.producer_verifier_id
+            })
         {
             return Err(EnduranceCaptureError::CaptureAuthorityMismatch);
         }
@@ -1062,7 +1128,7 @@ impl EnduranceRunCapture {
             return Err(EnduranceCaptureError::PhaseOrder);
         }
         let manifest = EnduranceRunManifest {
-            schema_version: 1,
+            schema_version: 2,
             run_id: self.identity.run_id,
             profile_sha256: self.profile_sha256,
             source_revision: self.identity.source_revision,
@@ -1072,6 +1138,7 @@ impl EnduranceRunCapture {
             build_provenance_sha256: self.identity.build_provenance_sha256,
             machine_report_sha256: self.identity.machine_report_sha256,
             platform_cell_sha256: self.identity.platform_cell_sha256,
+            machine_plan_sha256: self.identity.machine_plan_sha256,
             capture_authority_sha256: self.capture_authority_sha256,
             environment_before_sha256: self.identity.environment_before_sha256,
             environment_after_sha256: self.identity.environment_after_sha256,
@@ -1497,44 +1564,109 @@ mod tests {
             .parent()
             .and_then(Path::parent)
             .expect("workspace root");
-        let profile: EnduranceQualificationProfile = serde_json::from_slice(
-            &std::fs::read(root.join("tests/validation/commercial-endurance-qualification.json"))
-                .expect("read profile"),
-        )
-        .expect("parse profile");
+        let profile_path = root.join("tests/validation/commercial-endurance-qualification.json");
+        let profile: EnduranceQualificationProfile =
+            serde_json::from_slice(&std::fs::read(&profile_path).expect("read profile"))
+                .expect("parse profile");
         let temporary = tempfile::tempdir().expect("temporary capture root");
         let evidence = temporary.path().join("evidence");
         std::fs::create_dir(&evidence).expect("create evidence directory");
         let authority = temporary.path().join("capture-authority.json");
+        let identity = EnduranceRunIdentity {
+            run_id: "capture-test-run".to_owned(),
+            profile_file_sha256: file_sha256(&profile_path).expect("profile file hash"),
+            source_revision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
+            release_candidate_id: "mondrian-test-rc".to_owned(),
+            product_artifact_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            runtime_image_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            build_provenance_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            machine_report_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            platform_cell_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            machine_plan_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .to_owned(),
+            environment_before_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+            environment_after_sha256:
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
+        };
+        let authority_value = |machine_plan_sha256: &str| {
+            serde_json::json!({
+                "schema_version": 2,
+                "authority_id": "external-commercial-endurance-authority-v2",
+                "run_id": identity.run_id,
+                "profile_file_sha256": identity.profile_file_sha256,
+                "source_revision": identity.source_revision,
+                "release_candidate_id": identity.release_candidate_id,
+                "product_artifact_sha256": identity.product_artifact_sha256,
+                "runtime_image_sha256": identity.runtime_image_sha256,
+                "build_provenance_sha256": identity.build_provenance_sha256,
+                "machine_report_sha256": identity.machine_report_sha256,
+                "platform_cell_sha256": identity.platform_cell_sha256,
+                "machine_plan_sha256": machine_plan_sha256,
+                "single_use_challenge": "test-challenge",
+                "phases": profile.phases.iter().map(|phase| serde_json::json!({
+                    "phase_id": phase.phase_id,
+                    "workload_sha256": phase.workload_sha256,
+                    "producer_owner": phase.producer_owner,
+                    "producer_verifier_id": phase.producer_verifier_id,
+                })).collect::<Vec<_>>(),
+            })
+        };
         std::fs::write(
             &authority,
-            br#"{"schema_version":1,"authority_id":"external-commercial-endurance-authority-v1","run_id":"capture-test-run","single_use_challenge":"test-challenge"}"#,
+            serde_json::to_vec(&authority_value(&"b".repeat(64)))
+                .expect("serialize mismatched authority"),
+        )
+        .expect("write mismatched authority");
+        assert!(matches!(
+            EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority),
+            Err(EnduranceCaptureError::CaptureAuthorityMismatch)
+        ));
+        let mut incomplete_authority = authority_value(&identity.machine_plan_sha256);
+        incomplete_authority
+            .as_object_mut()
+            .expect("authority object")
+            .remove("source_revision");
+        std::fs::write(
+            &authority,
+            serde_json::to_vec(&incomplete_authority).expect("serialize incomplete authority"),
+        )
+        .expect("write incomplete authority");
+        assert!(EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority).is_err());
+
+        let mut unknown_authority = authority_value(&identity.machine_plan_sha256);
+        unknown_authority["unknown"] = serde_json::json!(true);
+        std::fs::write(
+            &authority,
+            serde_json::to_vec(&unknown_authority).expect("serialize unknown authority"),
+        )
+        .expect("write unknown authority");
+        assert!(EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority).is_err());
+
+        let mut wrong_phase_authority = authority_value(&identity.machine_plan_sha256);
+        wrong_phase_authority["phases"][0]["producer_owner"] = serde_json::json!("wrong-owner");
+        std::fs::write(
+            &authority,
+            serde_json::to_vec(&wrong_phase_authority).expect("serialize wrong phase authority"),
+        )
+        .expect("write wrong phase authority");
+        assert!(matches!(
+            EnduranceRunCapture::new(profile.clone(), identity.clone(), &authority),
+            Err(EnduranceCaptureError::CaptureAuthorityMismatch)
+        ));
+        std::fs::write(
+            &authority,
+            serde_json::to_vec(&authority_value(&identity.machine_plan_sha256))
+                .expect("serialize authority"),
         )
         .expect("write authority");
-        let mut capture = EnduranceRunCapture::new(
-            profile,
-            EnduranceRunIdentity {
-                run_id: "capture-test-run".to_owned(),
-                source_revision: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-                release_candidate_id: "mondrian-test-rc".to_owned(),
-                product_artifact_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                runtime_image_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                build_provenance_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                machine_report_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                platform_cell_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                environment_before_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-                environment_after_sha256:
-                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            },
-            &authority,
-        )
-        .expect("start run capture");
+        let mut capture =
+            EnduranceRunCapture::new(profile, identity, &authority).expect("start run capture");
 
         let mut first = capture
             .begin_phase(
@@ -1659,6 +1791,11 @@ mod tests {
 
         let manifest_path = temporary.path().join("run-manifest.json");
         let manifest = capture.seal_manifest(&manifest_path).expect("seal manifest");
+        assert_eq!(manifest.schema_version, 2);
+        assert_eq!(
+            manifest.machine_plan_sha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
         assert_eq!(manifest.phases.len(), 3);
         assert_eq!(manifest.phases[0].chunks.len(), 1);
         assert!(evidence.join(&manifest.phases[0].chunks[0].file_name).is_file());

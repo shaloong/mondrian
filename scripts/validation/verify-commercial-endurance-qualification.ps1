@@ -7,6 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ExpectedProfileFileSha256,
     [Parameter(Mandatory = $true)][string]$ExpectedCaptureAuthorityPath,
     [Parameter(Mandatory = $true)][string]$ExpectedCaptureAuthoritySha256,
+    [Parameter(Mandatory = $true)][string]$ExpectedMachinePlanPath,
+    [Parameter(Mandatory = $true)][string]$ExpectedMachinePlanSha256,
     [Parameter(Mandatory = $true)][string]$ExpectedSourceRevision,
     [Parameter(Mandatory = $true)][string]$ExpectedReleaseCandidateId,
     [Parameter(Mandatory = $true)][string]$ExpectedProductArtifactSha256,
@@ -20,6 +22,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+$script:ObservedJsonHashes = [System.Collections.Generic.Dictionary[string,string]]::new(
+    [StringComparer]::Ordinal
+)
 
 function Assert-NoReparseAncestry([string]$Path, [string]$Description) {
     $current = Get-Item -LiteralPath ([IO.Path]::GetFullPath($Path)) -Force
@@ -56,11 +61,42 @@ function Resolve-ExistingDirectory([string]$Path, [string]$Description) {
 }
 
 function Read-BoundedJson([string]$Path, [string]$Description, [int64]$MaximumBytes = 8388608) {
-    $item = Get-Item -LiteralPath $Path -Force
-    if ($item.Length -le 0 -or $item.Length -gt $MaximumBytes) {
-        throw "$Description exceeds its bounded JSON size: $($item.Length) bytes"
+    $absolute = [IO.Path]::GetFullPath($Path)
+    $stream = [IO.FileStream]::new(
+        $absolute,
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read
+    )
+    try {
+        $length = $stream.Length
+        if ($length -le 0 -or $length -gt $MaximumBytes -or $length -gt [int]::MaxValue) {
+            throw "$Description exceeds its bounded JSON size: $length bytes"
+        }
+        $bytes = [byte[]]::new([int]$length)
+        $offset = 0
+        while ($offset -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $offset, $bytes.Length - $offset)
+            if ($read -eq 0) { throw "$Description changed while its bytes were read." }
+            $offset += $read
+        }
+        if ($stream.ReadByte() -ne -1 -or $stream.Length -ne $length) {
+            throw "$Description changed while its bytes were read."
+        }
     }
-    return Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    finally {
+        $stream.Dispose()
+    }
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = ([Convert]::ToHexString($algorithm.ComputeHash($bytes))).ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+    $script:ObservedJsonHashes[$absolute] = $digest
+    $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+    return $text | ConvertFrom-Json
 }
 
 function Assert-LowerSha256([string]$Value, [string]$Description) {
@@ -102,6 +138,19 @@ function Get-ClosureSnapshot([string[]]$Paths) {
     return @($rows | Sort-Object path)
 }
 
+function Assert-SnapshotAnchor(
+    [object[]]$Snapshot,
+    [string]$Path,
+    [string]$ExpectedSha256,
+    [string]$Description
+) {
+    $absolute = [IO.Path]::GetFullPath($Path)
+    $matches = @($Snapshot | Where-Object { [string]$_.path -ceq $absolute })
+    if ($matches.Count -ne 1 -or [string]$matches[0].sha256 -cne $ExpectedSha256) {
+        throw "$Description changed before the immutable replay snapshot."
+    }
+}
+
 function Assert-EvidenceDirectoryClosure([string]$Root, [string[]]$DeclaredNames) {
     $items = @(Get-ChildItem -LiteralPath $Root -Force)
     if (@($items | Where-Object { $_.PSIsContainer -or ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }).Count -ne 0) {
@@ -118,6 +167,7 @@ $manifestPath = Resolve-ExistingLeaf $RunManifestPath "Endurance run manifest"
 $chunkRoot = Resolve-ExistingDirectory $ChunkDirectory "Endurance chunk directory"
 $replayBinary = Resolve-ExistingLeaf $ReplayBinaryPath "Endurance replay binary"
 $captureAuthorityPath = Resolve-ExistingLeaf $ExpectedCaptureAuthorityPath "Capture authority manifest"
+$machinePlanPath = Resolve-ExistingLeaf $ExpectedMachinePlanPath "Commercial endurance machine plan"
 $output = [IO.Path]::GetFullPath($OutputPath)
 $outputParent = Resolve-ExistingDirectory (Split-Path -Parent $output) "Endurance report parent"
 if (Test-Path -LiteralPath $output) { throw "Endurance report output is create-only: $output" }
@@ -126,6 +176,7 @@ foreach ($pair in @(
     @($ReplayBinarySha256, "Replay binary SHA-256"),
     @($ExpectedProfileFileSha256, "Profile file SHA-256"),
     @($ExpectedCaptureAuthoritySha256, "Capture authority manifest SHA-256"),
+    @($ExpectedMachinePlanSha256, "Machine plan SHA-256"),
     @($ExpectedProductArtifactSha256, "Product artifact SHA-256"),
     @($ExpectedRuntimeImageSha256, "Runtime image SHA-256"),
     @($ExpectedBuildProvenanceSha256, "Build provenance SHA-256"),
@@ -144,13 +195,17 @@ if ((Get-LowerSha256 $profile) -cne $ExpectedProfileFileSha256) {
 if ((Get-LowerSha256 $captureAuthorityPath) -cne $ExpectedCaptureAuthoritySha256) {
     throw "Endurance capture authority differs from the external approved hash."
 }
+if ((Get-LowerSha256 $machinePlanPath) -cne $ExpectedMachinePlanSha256) {
+    throw "Endurance machine plan differs from the external approved hash."
+}
 
 $profileObject = Read-BoundedJson $profile "Endurance profile"
 $manifest = Read-BoundedJson $manifestPath "Endurance run manifest"
 $captureAuthority = Read-BoundedJson $captureAuthorityPath "Endurance capture authority"
-if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 1 -or
-    [int]$captureAuthority.schema_version -ne 1) {
-    throw "Endurance profile and run manifest must use schema 1."
+$machinePlan = Read-BoundedJson $machinePlanPath "Commercial endurance machine plan" 262144
+if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 2 -or
+    [int]$captureAuthority.schema_version -ne 2 -or [int]$machinePlan.schema_version -ne 1) {
+    throw "Endurance profile/machine plan must use schema 1 and run/authority must use schema 2."
 }
 $bindings = @(
     @([string]$manifest.source_revision, $ExpectedSourceRevision, "source revision"),
@@ -160,6 +215,7 @@ $bindings = @(
     @([string]$manifest.build_provenance_sha256, $ExpectedBuildProvenanceSha256, "build provenance"),
     @([string]$manifest.machine_report_sha256, $ExpectedMachineReportSha256, "machine report"),
     @([string]$manifest.platform_cell_sha256, $ExpectedPlatformCellSha256, "platform cell"),
+    @([string]$manifest.machine_plan_sha256, $ExpectedMachinePlanSha256, "machine plan"),
     @([string]$manifest.capture_authority_sha256, $ExpectedCaptureAuthoritySha256, "capture authority")
 )
 foreach ($binding in $bindings) {
@@ -176,7 +232,8 @@ foreach ($binding in @(
     @([string]$captureAuthority.runtime_image_sha256, $ExpectedRuntimeImageSha256, "authority runtime image"),
     @([string]$captureAuthority.build_provenance_sha256, $ExpectedBuildProvenanceSha256, "authority build provenance"),
     @([string]$captureAuthority.machine_report_sha256, $ExpectedMachineReportSha256, "authority machine report"),
-    @([string]$captureAuthority.platform_cell_sha256, $ExpectedPlatformCellSha256, "authority platform cell")
+    @([string]$captureAuthority.platform_cell_sha256, $ExpectedPlatformCellSha256, "authority platform cell"),
+    @([string]$captureAuthority.machine_plan_sha256, $ExpectedMachinePlanSha256, "authority machine plan")
 )) {
     if ([string]$binding[0] -cne [string]$binding[1]) {
         throw "Endurance $($binding[2]) differs from the sealed run."
@@ -186,7 +243,7 @@ if ([string]::IsNullOrWhiteSpace([string]$captureAuthority.single_use_challenge)
     [string]$captureAuthority.single_use_challenge -match 'placeholder') {
     throw "Endurance capture authority must carry a non-placeholder single-use challenge."
 }
-if ([string]$captureAuthority.authority_id -cne "external-commercial-endurance-authority-v1") {
+if ([string]$captureAuthority.authority_id -cne "external-commercial-endurance-authority-v2") {
     throw "Endurance capture authority uses an unapproved authority implementation."
 }
 if (@($captureAuthority.phases).Count -ne @($profileObject.phases).Count -or
@@ -512,8 +569,15 @@ foreach ($phase in @($manifest.phases)) {
         [void]$evidencePaths.Add($path)
     }
 }
-$replayInputs = @($profile, $manifestPath, $replayBinary, $captureAuthorityPath) + @($evidencePaths)
+$replayInputs = @($profile, $manifestPath, $replayBinary, $captureAuthorityPath, $machinePlanPath) + @($evidencePaths)
 $before = Get-ClosureSnapshot $replayInputs
+foreach ($observed in $script:ObservedJsonHashes.GetEnumerator()) {
+    Assert-SnapshotAnchor $before $observed.Key $observed.Value "Parsed endurance JSON input"
+}
+Assert-SnapshotAnchor $before $replayBinary $ReplayBinarySha256 "Endurance replay binary"
+Assert-SnapshotAnchor $before $profile $ExpectedProfileFileSha256 "Endurance profile"
+Assert-SnapshotAnchor $before $captureAuthorityPath $ExpectedCaptureAuthoritySha256 "Endurance capture authority"
+Assert-SnapshotAnchor $before $machinePlanPath $ExpectedMachinePlanSha256 "Endurance machine plan"
 
 $startInfo = [Diagnostics.ProcessStartInfo]::new()
 $startInfo.FileName = $replayBinary
@@ -551,9 +615,9 @@ Assert-EvidenceDirectoryClosure $chunkRoot @($declaredNames)
 $resolvedOutput = Resolve-ExistingLeaf $output "Endurance qualification report"
 $outputHashBefore = Get-LowerSha256 $resolvedOutput
 $report = Read-BoundedJson $resolvedOutput "Endurance qualification report"
-if ([int]$report.schema_version -ne 1 -or [string]$report.status -cne "qualified" -or
+if ([int]$report.schema_version -ne 2 -or [string]$report.status -cne "qualified" -or
     @($report.missing_phases).Count -ne 0 -or [string]$report.evidence_sha256 -notmatch '^[0-9a-f]{64}$') {
-    throw "Endurance replay output is not a complete qualified schema-1 report."
+    throw "Endurance replay output is not a complete qualified schema-2 report."
 }
 foreach ($binding in @(
     @([string]$report.run_id, [string]$manifest.run_id, "report run id"),
@@ -565,6 +629,7 @@ foreach ($binding in @(
     @([string]$report.build_provenance_sha256, $ExpectedBuildProvenanceSha256, "report build provenance"),
     @([string]$report.machine_report_sha256, $ExpectedMachineReportSha256, "report machine report"),
     @([string]$report.platform_cell_sha256, $ExpectedPlatformCellSha256, "report platform cell"),
+    @([string]$report.machine_plan_sha256, $ExpectedMachinePlanSha256, "report machine plan"),
     @([string]$report.capture_authority_sha256, $ExpectedCaptureAuthoritySha256, "report capture authority")
 )) {
     if ([string]$binding[0] -cne [string]$binding[1]) {

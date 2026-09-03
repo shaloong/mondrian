@@ -35,6 +35,12 @@ The implementation is split at existing authority boundaries:
   the concrete runtime remains the authority for pumping real product work,
   coordinator-bounded owner snapshots, typed semantic events, and synchronous
   closure.
+- `mondrian-app::app::endurance_machine_plan` owns the bounded schema-1 JSON
+  that binds the exact canonical Project and external-source inventory,
+  Sequence, physical Audio and Reference Output contracts, phase-specific
+  Export preset/range/output/QC/verifier limits, ordered recovery seek targets,
+  pinned FFmpeg/FFprobe identities, and non-renewing timeouts. Its SHA-256 is
+  computed from the original regular-file bytes, not caller-supplied fields.
 - `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
   composition over fresh `AppState` owners. A machine factory must prove the
   complete side-effect-free pre-start inventory before App creation. The
@@ -557,14 +563,34 @@ One run binds:
 - release candidate, package, and actually executed runtime image;
 - build provenance and machine report;
 - one admitted COL-046 platform/driver/display cell;
+- one exact machine-plan file digest. Before any phase owner is created, the
+  campaign verifies the actual bounded plan bytes against run identity and
+  moves the resulting typed prepared plan into the runtime exactly once. Every
+  factory preflight and phase build receives that same plan by reference rather
+  than reporting an independently chosen digest, and runtime interval,
+  recovery, Surface, and shutdown deadlines are derived exclusively from its
+  timeout fields. The machine-plan-specific
+  Reference request also requires an explicit ANC policy instead of inheriting
+  the production request's compatibility default;
 - one externally hash-approved single-use capture-authority manifest;
 - equal before/after environment identity;
 - exact workload, normalized owner-report, and raw-evidence files for every phase.
 
-`mondrian-endurance-replay` reads bounded regular files, replays the exact chunk
+Run manifests and qualification reports use schema 2; capture authorities use
+`external-commercial-endurance-authority-v2`. Older schema-1 evidence remains
+replayable only with its originally pinned replay/verifier binaries and is not
+silently upgraded. `mondrian-endurance-replay` reads bounded regular files,
+replays the exact chunk
 closure, requires a complete `Qualified` report, and creates a new report file.
-The external verifier independently pins the replay binary, profile bytes, and
-capture authority; checks its challenge and release/phase bindings; parses and
+Capture construction strictly parses every authority field and requires its raw
+profile digest, complete release/machine identities, machine-plan digest, and
+ordered phase workload/producer bindings to match before any owner can start.
+The external verifier independently pins the replay binary, profile bytes,
+machine-plan bytes, and capture authority; checks its challenge and the same
+release/machine-plan/phase bindings; rechecks those four approved file hashes in
+the immutable pre-replay closure snapshot; hashes every JSON file from the same
+bounded file-handle bytes it parses and requires those observations to match the
+complete pre-replay closure snapshot; parses and
 re-derives typed producer-event summaries; requires
 the evidence directory to contain exactly every declared chunk, owner report,
 and raw evidence file; rejects links/extra files/hash drift; re-enumerates the
