@@ -103,6 +103,17 @@ The implementation is split at existing authority boundaries:
   toolchain adapter compile only with the App `validation` feature; ordinary
   unit-test builds do not accidentally enable a partially configured
   qualification composition.
+- `mondrian-app::app::endurance_machine_factory` is the first concrete
+  machine composition. It is constructible only from the prepared FFmpeg
+  receipt and admits the hardware-independent Continuous Export phase. Its
+  side-effect-free pre-start checks only direct Project/inventory/preset/QC
+  bindings and the create-only output directory; build then creates a fresh
+  App, installs the exact Project, prepares the complete source inventory, and
+  projects the retained typed preset, optional QC profile, range, Sequence,
+  artifact route, and independent-decode bounds into one
+  `FrozenRepeatedExportRequest`. Playback/Reference and Concurrent Recovery
+  deliberately report incomplete capability inventories until a physical
+  Audio/Reference/external-lock factory exists.
 - `mondrian-app::app::project_lifecycle` supplies the validation-only exact
   Project-fixture install seam used by that factory. Its public input is the
   already prepared machine plan, never a caller-assembled path/hash pair. It
@@ -367,8 +378,9 @@ exact semantic checks is a hard setup failure with consuming cleanup, not
 `NotRun`. Other pre-start facts do not claim an open device or continuous lock.
 Bad bytes, wrong phase/kind, unknown fields/policies,
 digest drift, duration drift, and counter-policy drift are execution errors,
-not absent prerequisites. The machine-specific factory and unified high-level
-validation executable remain explicit follow-on work, as do the real vendor
+not absent prerequisites. The Continuous Export machine factory is concrete;
+the physical phase factory and unified high-level validation executable remain
+explicit follow-on work, as do the real vendor
 bridge and hardware validation. This App owner-closure work is a COL-047
 prerequisite, not 72h
 execution or hardware HITL evidence. Until the machine factory, canonical

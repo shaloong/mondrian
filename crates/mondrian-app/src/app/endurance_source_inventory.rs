@@ -1071,6 +1071,7 @@ mod tests {
     use mondrian_project::{save_project_archive, ProjectDocument};
     use mondrian_timeline::{Clip, Sequence, SequenceCollection, SequenceSettings};
     use std::fs::OpenOptions;
+    use std::sync::Arc;
 
     #[cfg(windows)]
     struct ExactFixture {
@@ -1379,7 +1380,47 @@ mod tests {
             .write(true)
             .open(&fixture.source_path)
             .expect("source write access returns after lease drop");
+        let plan = fixture.plan.clone();
         drop(fixture.app);
+
+        let requirement = profile()
+            .phases
+            .into_iter()
+            .find(|phase| phase.kind == EndurancePhaseKind::ContinuousExport)
+            .expect("Continuous Export requirement");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let workload = super::super::endurance_workload::PreparedEnduranceWorkload::load(
+            &requirement,
+            &workspace.join("tests/validation/endurance-workloads/continuous-export-v1.json"),
+        )
+        .expect("prepare Continuous Export workload");
+        let mut factory =
+            super::super::endurance_machine_factory::ContinuousExportEnduranceMachineFactory::test(
+                &plan,
+            );
+        let inventory = super::super::endurance_product_runtime::FreshEndurancePhaseFactory::pre_start_capability_inventory(
+            &mut factory,
+            &plan,
+            &requirement,
+            &workload,
+        )
+        .expect("pre-start exact Continuous Export factory");
+        let token = workload.prepare_start(&inventory).expect("admit Continuous Export factory");
+        let build =
+            super::super::endurance_product_runtime::FreshEndurancePhaseFactory::build_phase(
+                &mut factory,
+                Arc::new(plan),
+                &requirement,
+                &workload,
+                token,
+            );
+        assert!(matches!(
+            build,
+            super::super::endurance_product_runtime::FreshEndurancePhaseBuild::Ready(_)
+        ));
     }
 
     #[cfg(windows)]

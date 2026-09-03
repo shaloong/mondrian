@@ -114,6 +114,8 @@ pub mod endurance_campaign;
 pub mod endurance_export;
 #[cfg(feature = "validation")]
 pub mod endurance_ffmpeg_toolchain;
+#[cfg(feature = "validation")]
+pub mod endurance_machine_factory;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_machine_plan;
 #[cfg(any(test, feature = "validation"))]
