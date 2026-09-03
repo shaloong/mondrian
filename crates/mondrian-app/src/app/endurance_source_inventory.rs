@@ -1070,8 +1070,8 @@ mod tests {
     use mondrian_core::ColorSpace;
     use mondrian_project::{save_project_archive, ProjectDocument};
     use mondrian_timeline::{Clip, Sequence, SequenceCollection, SequenceSettings};
-    use std::fs::OpenOptions;
-    use std::sync::Arc;
+    #[cfg(all(windows, feature = "validation"))]
+    use std::{fs::OpenOptions, sync::Arc};
 
     #[cfg(windows)]
     struct ExactFixture {
@@ -1080,6 +1080,7 @@ mod tests {
         app: AppState,
         receipt: PreparedEnduranceProjectFixture,
         source_path: PathBuf,
+        #[cfg(feature = "validation")]
         broadcast_qc_path: PathBuf,
         source_id: AssetId,
     }
@@ -1293,6 +1294,7 @@ mod tests {
         let mut app = AppState::new();
         let receipt =
             app.open_endurance_project_fixture(&plan).expect("open exact Project fixture");
+        #[cfg(feature = "validation")]
         let broadcast_qc_path = mondrian_assets::canonical_native_path(
             &root.path().join("02-continuous-export-24h-qc.json"),
         )
@@ -1304,12 +1306,13 @@ mod tests {
             app,
             receipt,
             source_path,
+            #[cfg(feature = "validation")]
             broadcast_qc_path,
             source_id,
         }
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "validation"))]
     #[test]
     fn exact_inventory_closes_production_dependencies_and_retains_source_object() {
         let mut fixture = exact_fixture(false, false);

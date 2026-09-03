@@ -31,9 +31,11 @@ use crate::app::playback_preview::{
 use crate::app::preview_execution::{
     PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewOutputKey,
 };
+#[cfg(feature = "validation")]
+use crate::app::preview_runtime::PreviewRuntimeShutdownEvidence;
 use crate::app::preview_runtime::{
     PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationState,
-    PreviewRuntimeShutdownEvidence, PreviewVisualGpuCompletionDisposition,
+    PreviewVisualGpuCompletionDisposition,
 };
 use crate::app::preview_work_notification::PreviewWorkWatch;
 use crate::app::ui_actions::{
@@ -55,7 +57,9 @@ use crate::app::ui_actions::{
     APP_SHELL_RECOVER_PROJECT, APP_SHELL_SCOPES_SETTINGS_CHANGED, APP_SHELL_WINDOW_DRAG,
     APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
-use crate::app::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
+use crate::app::waveform_service::AudioWaveformService;
+#[cfg(feature = "validation")]
+use crate::app::waveform_service::AudioWaveformShutdownEvidence;
 use crate::app::{
     discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate,
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,

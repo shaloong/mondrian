@@ -244,7 +244,8 @@ impl ReferenceOutputShutdownCoordinatorFacts {
             && !self.timed_out
             && !self.detached
             && !self.owner_abandoned
-            && (!self.required || (self.spawned && self.joined))
+            && (!self.required || self.spawned)
+            && self.spawned == self.joined
     }
 }
 
@@ -974,6 +975,34 @@ mod tests {
         ReferenceOutputScan, ReferenceOutputSignal,
     };
     use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
+
+    #[test]
+    fn coordinator_closure_requires_exact_spawn_join_and_no_faults() {
+        for required in [false, true] {
+            for spawned in [false, true] {
+                for joined in [false, true] {
+                    let facts = ReferenceOutputShutdownCoordinatorFacts {
+                        required,
+                        spawned,
+                        joined,
+                        ..ReferenceOutputShutdownCoordinatorFacts::not_required()
+                    };
+                    assert_eq!(
+                        facts.lifecycle_closed(),
+                        (!required || spawned) && spawned == joined
+                    );
+                    for faulty in [
+                        ReferenceOutputShutdownCoordinatorFacts { panicked: true, ..facts },
+                        ReferenceOutputShutdownCoordinatorFacts { timed_out: true, ..facts },
+                        ReferenceOutputShutdownCoordinatorFacts { detached: true, ..facts },
+                        ReferenceOutputShutdownCoordinatorFacts { owner_abandoned: true, ..facts },
+                    ] {
+                        assert!(!faulty.lifecycle_closed());
+                    }
+                }
+            }
+        }
+    }
 
     fn request() -> ReferenceOutputOpenRequest {
         ReferenceOutputOpenRequest {

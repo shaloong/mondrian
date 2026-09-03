@@ -93,6 +93,12 @@ impl PreviewTimelineRenderCache {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn clear_memory_state_for_test(&mut self) {
+        self.ready = None;
+        self.negative.clear();
+    }
+
     pub(crate) fn request_lookup(
         &self,
         identity: TimelineRenderCacheIdentity,

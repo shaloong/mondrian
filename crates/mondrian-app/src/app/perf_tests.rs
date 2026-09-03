@@ -18,7 +18,9 @@ use super::playback_acceptance::{
     PROFESSIONAL_PLAYBACK_DECODE_P95_LIMIT_US, PROFESSIONAL_PLAYBACK_QUEUE_WAIT_P95_LIMIT_US,
     PROFESSIONAL_READY_TIMEOUT_MS, PROFESSIONAL_TOTAL_TIMEOUT_MS,
 };
-use super::playback_preview::{pump_playback_preview, PlaybackPreviewPumpOutcome};
+use super::playback_preview::{
+    pump_playback_preview, PlaybackPreviewAdapter, PlaybackPreviewPumpOutcome,
+};
 use super::*;
 #[path = "authoring_perf.rs"]
 mod authoring_perf;
@@ -47,8 +49,9 @@ use crate::app::preview_runtime::{
     PreviewDecodePerformancePolicy, PreviewDecodePerformanceReport,
     PreviewDecodePerformanceSeverity, PreviewDecodePerformanceVerdict,
     PreviewDecodeWorkClassProfiles, PreviewDecodeWorkLatencyBuckets,
-    PreviewDecodeWorkLatencyProfile, PreviewDiagnostics, PreviewRenderPerformanceReport,
-    PreviewRenderPerformanceSeverity, PreviewRenderPerformanceVerdict,
+    PreviewDecodeWorkLatencyProfile, PreviewDiagnostics, PreviewOwnedWorkerShutdown,
+    PreviewProductionRuntime, PreviewRenderPerformanceReport, PreviewRenderPerformanceSeverity,
+    PreviewRenderPerformanceVerdict, PreviewRuntimeShutdownEvidence,
     PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US, PREVIEW_DECODE_PERFORMANCE_REPORT_SCHEMA_VERSION,
     PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
 };
@@ -84,6 +87,7 @@ use mondrian_media::{
 };
 use mondrian_platform::{ProcessMemoryProbe, SystemPlatformService};
 use mondrian_playback::{PlaybackClockPhaseErrorSummary, PlaybackEvidenceReport};
+use mondrian_render_cache::TimelineRenderCacheDiagnostics;
 use mondrian_renderer::profile::{GpuTimestampSample, GpuTimestampStageDurations};
 use mondrian_renderer::{
     color::RenderColorStageDiagnostics, GpuCompositingDiagnostics,
@@ -130,6 +134,166 @@ struct PerfCaseReport {
 }
 
 #[derive(Debug, Serialize)]
+struct ProjectPerfCaseEvidence<'a> {
+    #[serde(flatten)]
+    case: &'a PerfCaseReport,
+    owner_closure: &'a PerfOwnerClosureReport,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfWorkerClosureReport {
+    domain: &'static str,
+    requested_workers: u32,
+    startup_attempted: bool,
+    started_workers: u32,
+    terminated_workers: u32,
+    panicked_workers: u32,
+    timed_out_workers: u32,
+    detached_workers: u32,
+    unexpected_worker_exits: u32,
+    queued_work_remaining: u64,
+    running_work_remaining: u64,
+    owned_resources_remaining: u64,
+    cumulative_failures: u64,
+    lifecycle_closed: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfProjectClosureReport {
+    session_was_open: bool,
+    pending_close_was_active: bool,
+    authoring_session_released: bool,
+    pending_close_released: bool,
+    runtime_lease_released: bool,
+    retired_library_generations_remaining: u32,
+    lifecycle_failure: Option<String>,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PerfAudioOutputClosureReport {
+    schema_version: u32,
+    workers_started: u32,
+    workers_terminated: u32,
+    worker_start_failures: u32,
+    worker_spawner_panics: u32,
+    worker_panics: u32,
+    current_thread_detachments: u32,
+    worker_owner_abandonments: u32,
+    worker_terminal_evidence_missing: u32,
+    all_workers_terminated: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PerfAudioClosureReport {
+    schema_version: u32,
+    render_workers_started: u32,
+    render_workers_terminated: u32,
+    render_worker_panics: u32,
+    render_worker_owner_abandonments: u32,
+    render_worker_terminal_evidence_missing: u32,
+    render_current_thread_detachments: u32,
+    render_retirement_workers_started: u32,
+    render_retirement_workers_terminated: u32,
+    render_retirement_worker_panics: u32,
+    render_retirement_worker_owner_abandonments: u32,
+    render_retirement_worker_terminal_evidence_missing: u32,
+    render_retirement_current_thread_detachments: u32,
+    output: PerfAudioOutputClosureReport,
+    foreign_owner_panics: u32,
+    foreign_owner_abandonments: u32,
+    shutdown_coordinators_started: u32,
+    shutdown_coordinators_terminated: u32,
+    shutdown_coordinator_start_failures: u32,
+    shutdown_coordinator_panics: u32,
+    shutdown_coordinator_timeouts: u32,
+    shutdown_coordinator_detachments: u32,
+    shutdown_coordinator_spawner_panics: u32,
+    shutdown_coordinator_owner_abandonments: u32,
+    shutdown_resource_facts_complete_at_deadline: bool,
+    shutdown_owner_lifetime_unresolved_at_deadline: bool,
+    all_workers_terminated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfAudioSourceClosureReport {
+    strong_references_before_consumption: u32,
+    strong_references_remaining: u32,
+    cache: Option<mondrian_media::AudioSourceCacheShutdownEvidence>,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfAppClosureReport {
+    app_owner_consumed: bool,
+    project: PerfProjectClosureReport,
+    reference_output: mondrian_reference_output::ReferenceOutputModuleShutdownReceipt,
+    reference_output_resources_released: bool,
+    export: mondrian_export::ExportQueueShutdownEvidence,
+    export_terminal_snapshot: mondrian_export::ExportEnduranceSnapshot,
+    export_resources_released: bool,
+    audio: PerfAudioClosureReport,
+    audio_source_cache: PerfAudioSourceClosureReport,
+    workers: Vec<PerfWorkerClosureReport>,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct PerfRenderCacheWorkerClosureReport {
+    worker_started: bool,
+    worker_terminated: bool,
+    worker_panicked: bool,
+    current_thread_skipped: bool,
+    timed_out: bool,
+    detached: bool,
+    all_workers_terminated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfPreviewClosureReport {
+    owner_slot: usize,
+    schema_version: u32,
+    workers_started: u32,
+    workers_terminated: u32,
+    worker_panics: u32,
+    current_thread_detachments: u32,
+    unverified_async_reaps: u32,
+    worker_timeouts: u32,
+    worker_deadline_detachments: u32,
+    render_cache_schema_version: u32,
+    render_cache_required: bool,
+    render_cache_start_failed: bool,
+    render_cache_worker: Option<PerfRenderCacheWorkerClosureReport>,
+    render_cache_aggregate_outcome: &'static str,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfGpuClosureReport {
+    worker_started: bool,
+    worker_terminated: bool,
+    worker_panicked: bool,
+    timed_out: bool,
+    retirement_requested: bool,
+    retirement_handoff_accepted: bool,
+    retirement_completed: bool,
+    generation_terminal_kind: Option<&'static str>,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PerfOwnerClosureReport {
+    schema_version: u32,
+    shared_deadline_budget_ms: u64,
+    preview_owner_count: usize,
+    gpu_owner_required: bool,
+    previews: Vec<PerfPreviewClosureReport>,
+    gpu: Option<PerfGpuClosureReport>,
+    app: PerfAppClosureReport,
+    all_resources_released: bool,
+}
+
+#[derive(Debug, Serialize)]
 struct AppUiScaleReport {
     scenario: &'static str,
     assets: usize,
@@ -143,6 +307,7 @@ struct AppUiScaleReport {
     preview_color_report: PreviewColorHealthReport,
     preview_playback_diagnostics: PreviewDiagnostics,
     preview_playback_color_report: PreviewColorHealthReport,
+    owner_closure: Option<PerfOwnerClosureReport>,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -171,6 +336,7 @@ struct PreviewMediaPerfReport {
     render_failure_codes: Vec<&'static str>,
     preview_decode_report: PreviewDecodePerformanceReport,
     preview_render_report: Option<PreviewRenderPerformanceReport>,
+    owner_closure: Option<PerfOwnerClosureReport>,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -1839,6 +2005,7 @@ struct PreviewMediaPlaybackPerfReport {
     playback_evidence: PlaybackEvidenceReport,
     process_memory_evidence: PreviewProcessMemoryEvidenceReport,
     native_video_gpu_timing: ProfessionalNativeVideoGpuTimingReport,
+    owner_closure: Option<PerfOwnerClosureReport>,
     cases: Vec<PerfCaseReport>,
 }
 
@@ -2361,6 +2528,494 @@ fn env_usize(key: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn perf_shutdown_budget_ms() -> u64 {
+    env_u64("MONDRIAN_PERF_SHUTDOWN_MS", 30_000).clamp(100, 120_000)
+}
+
+impl PerfWorkerClosureReport {
+    fn from_evidence(
+        domain: &'static str,
+        evidence: super::endurance_shutdown::EnduranceWorkerShutdownEvidence,
+    ) -> Self {
+        Self {
+            domain,
+            requested_workers: evidence.requested_workers,
+            startup_attempted: evidence.startup_attempted,
+            started_workers: evidence.started_workers,
+            terminated_workers: evidence.terminated_workers,
+            panicked_workers: evidence.panicked_workers,
+            timed_out_workers: evidence.timed_out_workers,
+            detached_workers: evidence.detached_workers,
+            unexpected_worker_exits: evidence.unexpected_worker_exits,
+            queued_work_remaining: evidence.queued_work_remaining,
+            running_work_remaining: evidence.running_work_remaining,
+            owned_resources_remaining: evidence.owned_resources_remaining,
+            cumulative_failures: evidence.cumulative_failures,
+            lifecycle_closed: evidence.lifecycle_closed(),
+        }
+    }
+}
+
+impl PerfAppClosureReport {
+    fn from_evidence(evidence: &super::endurance_shutdown::AppEnduranceShutdownEvidence) -> Self {
+        let workers = vec![
+            PerfWorkerClosureReport::from_evidence(
+                "execution_memory_observer",
+                evidence.execution_memory_observer,
+            ),
+            PerfWorkerClosureReport::from_evidence(
+                "project_persistence",
+                evidence.project_persistence,
+            ),
+            PerfWorkerClosureReport::from_evidence("audio_idle_warmup", evidence.audio_idle_warmup),
+            PerfWorkerClosureReport::from_evidence("media_import", evidence.media_import),
+            PerfWorkerClosureReport::from_evidence(
+                "media_asset_mutation",
+                evidence.media_asset_mutation,
+            ),
+            PerfWorkerClosureReport::from_evidence("visual_tracking", evidence.visual_tracking),
+            PerfWorkerClosureReport::from_evidence("proxy_generation", evidence.proxy_generation),
+        ];
+        let project = PerfProjectClosureReport {
+            session_was_open: evidence.project.session_was_open,
+            pending_close_was_active: evidence.project.pending_close_was_active,
+            authoring_session_released: evidence.project.authoring_session_released,
+            pending_close_released: evidence.project.pending_close_released,
+            runtime_lease_released: evidence.project.runtime_lease_released,
+            retired_library_generations_remaining: evidence
+                .project
+                .retired_library_generations_remaining,
+            lifecycle_failure: evidence.project.lifecycle_failure.clone(),
+            all_resources_released: evidence.project.all_resources_released(),
+        };
+        let audio_output = evidence.audio.output;
+        let audio = PerfAudioClosureReport {
+            schema_version: evidence.audio.schema_version,
+            render_workers_started: evidence.audio.render_workers_started,
+            render_workers_terminated: evidence.audio.render_workers_terminated,
+            render_worker_panics: evidence.audio.render_worker_panics,
+            render_worker_owner_abandonments: evidence.audio.render_worker_owner_abandonments,
+            render_worker_terminal_evidence_missing: evidence
+                .audio
+                .render_worker_terminal_evidence_missing,
+            render_current_thread_detachments: evidence.audio.render_current_thread_detachments,
+            render_retirement_workers_started: evidence.audio.render_retirement_workers_started,
+            render_retirement_workers_terminated: evidence
+                .audio
+                .render_retirement_workers_terminated,
+            render_retirement_worker_panics: evidence.audio.render_retirement_worker_panics,
+            render_retirement_worker_owner_abandonments: evidence
+                .audio
+                .render_retirement_worker_owner_abandonments,
+            render_retirement_worker_terminal_evidence_missing: evidence
+                .audio
+                .render_retirement_worker_terminal_evidence_missing,
+            render_retirement_current_thread_detachments: evidence
+                .audio
+                .render_retirement_current_thread_detachments,
+            output: PerfAudioOutputClosureReport {
+                schema_version: audio_output.schema_version,
+                workers_started: audio_output.workers_started,
+                workers_terminated: audio_output.workers_terminated,
+                worker_start_failures: audio_output.worker_start_failures,
+                worker_spawner_panics: audio_output.worker_spawner_panics,
+                worker_panics: audio_output.worker_panics,
+                current_thread_detachments: audio_output.current_thread_detachments,
+                worker_owner_abandonments: audio_output.worker_owner_abandonments,
+                worker_terminal_evidence_missing: audio_output.worker_terminal_evidence_missing,
+                all_workers_terminated: audio_output.all_workers_terminated(),
+            },
+            foreign_owner_panics: evidence.audio.foreign_owner_panics,
+            foreign_owner_abandonments: evidence.audio.foreign_owner_abandonments,
+            shutdown_coordinators_started: evidence.audio.shutdown_coordinators_started,
+            shutdown_coordinators_terminated: evidence.audio.shutdown_coordinators_terminated,
+            shutdown_coordinator_start_failures: evidence.audio.shutdown_coordinator_start_failures,
+            shutdown_coordinator_panics: evidence.audio.shutdown_coordinator_panics,
+            shutdown_coordinator_timeouts: evidence.audio.shutdown_coordinator_timeouts,
+            shutdown_coordinator_detachments: evidence.audio.shutdown_coordinator_detachments,
+            shutdown_coordinator_spawner_panics: evidence.audio.shutdown_coordinator_spawner_panics,
+            shutdown_coordinator_owner_abandonments: evidence
+                .audio
+                .shutdown_coordinator_owner_abandonments,
+            shutdown_resource_facts_complete_at_deadline: evidence
+                .audio
+                .shutdown_resource_facts_complete_at_deadline,
+            shutdown_owner_lifetime_unresolved_at_deadline: evidence
+                .audio
+                .shutdown_owner_lifetime_unresolved_at_deadline,
+            all_workers_terminated: evidence.audio.all_workers_terminated(),
+        };
+        let audio_source_cache = PerfAudioSourceClosureReport {
+            strong_references_before_consumption: evidence
+                .audio_source_cache
+                .strong_references_before_consumption,
+            strong_references_remaining: evidence.audio_source_cache.strong_references_remaining,
+            cache: evidence.audio_source_cache.cache,
+            all_resources_released: evidence.audio_source_cache.all_resources_released(),
+        };
+        Self {
+            app_owner_consumed: evidence.app_owner_consumed,
+            project,
+            reference_output: evidence.reference_output.clone(),
+            reference_output_resources_released: evidence.reference_output.all_resources_released(),
+            export: evidence.export,
+            export_terminal_snapshot: evidence.export_terminal_snapshot,
+            export_resources_released: evidence.export.all_resources_released(),
+            audio,
+            audio_source_cache,
+            workers,
+            all_resources_released: evidence.all_resources_released(),
+        }
+    }
+}
+
+fn preview_owned_worker_outcome_label(outcome: PreviewOwnedWorkerShutdown) -> &'static str {
+    match outcome {
+        PreviewOwnedWorkerShutdown::NotStarted => "not_started",
+        PreviewOwnedWorkerShutdown::Terminated => "terminated",
+        PreviewOwnedWorkerShutdown::Panicked => "panicked",
+        PreviewOwnedWorkerShutdown::CurrentThreadSkipped => "current_thread_skipped",
+        PreviewOwnedWorkerShutdown::TimedOutDetached => "timed_out_detached",
+    }
+}
+
+impl PerfPreviewClosureReport {
+    fn from_evidence(owner_slot: usize, evidence: PreviewRuntimeShutdownEvidence) -> Self {
+        let render_cache = evidence.timeline_render_cache;
+        Self {
+            owner_slot,
+            schema_version: evidence.schema_version,
+            workers_started: evidence.workers_started,
+            workers_terminated: evidence.workers_terminated,
+            worker_panics: evidence.worker_panics,
+            current_thread_detachments: evidence.current_thread_detachments,
+            unverified_async_reaps: evidence.unverified_async_reaps,
+            worker_timeouts: evidence.worker_timeouts,
+            worker_deadline_detachments: evidence.worker_deadline_detachments,
+            render_cache_schema_version: render_cache.schema_version,
+            render_cache_required: render_cache.required,
+            render_cache_start_failed: render_cache.start_failed,
+            render_cache_worker: render_cache.worker.map(|worker| {
+                PerfRenderCacheWorkerClosureReport {
+                    worker_started: worker.worker_started,
+                    worker_terminated: worker.worker_terminated,
+                    worker_panicked: worker.worker_panicked,
+                    current_thread_skipped: worker.current_thread_skipped,
+                    timed_out: worker.timed_out,
+                    detached: worker.detached,
+                    all_workers_terminated: worker.all_workers_terminated(),
+                }
+            }),
+            render_cache_aggregate_outcome: preview_owned_worker_outcome_label(
+                render_cache.aggregate_outcome,
+            ),
+            all_resources_released: evidence.all_workers_terminated(),
+        }
+    }
+}
+
+impl PerfGpuClosureReport {
+    fn from_evidence(
+        evidence: super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
+    ) -> Self {
+        let generation_terminal_kind = evidence.generation_terminal_kind.map(|kind| match kind {
+            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceLost => {
+                "device_lost"
+            }
+            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => {
+                "device_destroyed"
+            }
+            super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::ProgressFailure => {
+                "progress_failure"
+            }
+        });
+        let all_resources_released = evidence.worker_started
+            && evidence.worker_terminated
+            && !evidence.worker_panicked
+            && !evidence.timed_out
+            && evidence.retirement_requested
+            && evidence.retirement_handoff_accepted
+            && evidence.retirement_completed
+            && generation_terminal_kind.is_none();
+        Self {
+            worker_started: evidence.worker_started,
+            worker_terminated: evidence.worker_terminated,
+            worker_panicked: evidence.worker_panicked,
+            timed_out: evidence.timed_out,
+            retirement_requested: evidence.retirement_requested,
+            retirement_handoff_accepted: evidence.retirement_handoff_accepted,
+            retirement_completed: evidence.retirement_completed,
+            generation_terminal_kind,
+            all_resources_released,
+        }
+    }
+}
+
+impl PerfOwnerClosureReport {
+    fn from_evidence(
+        shared_deadline_budget_ms: u64,
+        gpu_owner_required: bool,
+        preview_evidence: Vec<PreviewRuntimeShutdownEvidence>,
+        gpu_evidence: Option<
+            super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
+        >,
+        app_evidence: super::endurance_shutdown::AppEnduranceShutdownEvidence,
+    ) -> Self {
+        let preview_owner_count = preview_evidence.len();
+        let previews = preview_evidence
+            .into_iter()
+            .enumerate()
+            .map(|(slot, evidence)| PerfPreviewClosureReport::from_evidence(slot, evidence))
+            .collect::<Vec<_>>();
+        let gpu = gpu_evidence.map(PerfGpuClosureReport::from_evidence);
+        let app = PerfAppClosureReport::from_evidence(&app_evidence);
+        let all_resources_released = previews.iter().all(|preview| preview.all_resources_released)
+            && if gpu_owner_required {
+                gpu.as_ref().is_some_and(|gpu| gpu.all_resources_released)
+            } else {
+                gpu.is_none()
+            }
+            && app.all_resources_released;
+        Self {
+            schema_version: 1,
+            shared_deadline_budget_ms,
+            preview_owner_count,
+            gpu_owner_required,
+            previews,
+            gpu,
+            app,
+            all_resources_released,
+        }
+    }
+
+    fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.schema_version == 1,
+            "unknown performance owner-closure schema"
+        );
+        anyhow::ensure!(
+            self.preview_owner_count == self.previews.len(),
+            "performance owner-closure Preview inventory changed"
+        );
+        anyhow::ensure!(
+            self.previews
+                .iter()
+                .enumerate()
+                .all(|(slot, preview)| preview.owner_slot == slot),
+            "performance owner-closure Preview slots changed"
+        );
+        anyhow::ensure!(
+            self.gpu_owner_required == self.gpu.is_some(),
+            "performance owner-closure GPU inventory changed"
+        );
+        anyhow::ensure!(
+            self.all_resources_released
+                && self.previews.iter().all(|preview| {
+                    preview.all_resources_released
+                        && preview.render_cache_required
+                        && !preview.render_cache_start_failed
+                        && preview
+                            .render_cache_worker
+                            .is_some_and(|worker| worker.all_workers_terminated)
+                })
+                && self.gpu.as_ref().is_none_or(|gpu| gpu.all_resources_released)
+                && self.app.all_resources_released,
+            "performance owner-closure did not release every Preview/GPU/App resource: {self:?}"
+        );
+        Ok(())
+    }
+}
+
+fn install_perf_timeline_render_cache<O: Clone>(
+    preview: &PreviewProductionRuntime<O>,
+    root: &Path,
+) -> anyhow::Result<()> {
+    const DISK_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+    const ARTIFACT_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
+    const QUEUE_CAPACITY: usize = 4;
+    let config = mondrian_render_cache::TimelineRenderCacheConfig::new(
+        root.to_path_buf(),
+        DISK_BUDGET_BYTES,
+        ARTIFACT_BUDGET_BYTES,
+        QUEUE_CAPACITY,
+    )?;
+    preview.install_timeline_render_cache_for_test(config).with_context(|| {
+        format!(
+            "start isolated performance Timeline render cache {}",
+            root.display()
+        )
+    })
+}
+
+fn persistent_cache_request_verified(
+    before: TimelineRenderCacheDiagnostics,
+    after: TimelineRenderCacheDiagnostics,
+) -> bool {
+    after.lookup_submissions > before.lookup_submissions && after.hits > before.hits
+}
+
+fn shutdown_perf_owners<O: Clone>(
+    mut previews: Vec<PreviewProductionRuntime<O>>,
+    gpu: Option<HeadlessViewerGpuAdapter>,
+    mut app: AppState,
+    shared_deadline_budget_ms: u64,
+    gpu_owner_required: bool,
+) -> PerfOwnerClosureReport {
+    let deadline = Instant::now() + Duration::from_millis(shared_deadline_budget_ms);
+    for preview in &mut previews {
+        preview.begin_endurance_shutdown();
+    }
+    app.begin_endurance_shutdown();
+    let preview_evidence =
+        previews.into_iter().map(|preview| preview.shutdown_until(deadline)).collect();
+    // Preview workers and their decoder-native residency are producers of GPU
+    // work. Reclaim them before retiring the device generation so no producer
+    // can race the final native Device::poll/queue-completion proof.
+    let gpu_evidence = gpu.map(|gpu| gpu.shutdown_until(deadline));
+    let app_evidence = app.shutdown_for_endurance(deadline);
+    PerfOwnerClosureReport::from_evidence(
+        shared_deadline_budget_ms,
+        gpu_owner_required,
+        preview_evidence,
+        gpu_evidence,
+        app_evidence,
+    )
+}
+
+fn finish_perf_owner_run<T>(
+    operation: anyhow::Result<T>,
+    owner_closure: PerfOwnerClosureReport,
+) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
+    let closure_validation = owner_closure.validate();
+    let closure_json = serde_json::to_string(&owner_closure)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+    match (operation, closure_validation) {
+        (Ok(value), Ok(())) => Ok((value, owner_closure)),
+        (Err(operation_error), Ok(())) => Err(anyhow::anyhow!(
+            "performance operation failed: {operation_error:#}; owner_closure={closure_json}"
+        )),
+        (Ok(_), Err(closure_error)) => Err(closure_error),
+        (Err(operation_error), Err(closure_error)) => Err(anyhow::anyhow!(
+            "performance operation failed: {operation_error:#}; owner closure also failed: {closure_error:#}; owner_closure={closure_json}"
+        )),
+    }
+}
+
+fn perf_panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(detail) = payload.downcast_ref::<&str>() {
+        (*detail).to_owned()
+    } else if let Some(detail) = payload.downcast_ref::<String>() {
+        detail.clone()
+    } else {
+        "opaque panic payload".to_owned()
+    }
+}
+
+fn run_with_perf_owners<O: Clone, T>(
+    mut app: AppState,
+    mut previews: Vec<PreviewProductionRuntime<O>>,
+    mut gpu: Option<HeadlessViewerGpuAdapter>,
+    operation: impl FnOnce(
+        &mut AppState,
+        &mut [PreviewProductionRuntime<O>],
+        Option<&mut HeadlessViewerGpuAdapter>,
+    ) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
+    let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        operation(&mut app, &mut previews, gpu.as_mut())
+    }))
+    .unwrap_or_else(|payload| {
+        Err(anyhow::anyhow!(
+            "performance operation panicked: {}",
+            perf_panic_detail(payload)
+        ))
+    });
+    let budget_ms = perf_shutdown_budget_ms();
+    let gpu_owner_required = gpu.is_some();
+    let owner_closure = shutdown_perf_owners(previews, gpu, app, budget_ms, gpu_owner_required);
+    finish_perf_owner_run(operation_result, owner_closure)
+}
+
+fn run_with_perf_gpu_factory<O: Clone, T>(
+    app: AppState,
+    previews: Vec<PreviewProductionRuntime<O>>,
+    create_gpu: impl FnOnce() -> anyhow::Result<HeadlessViewerGpuAdapter>,
+    operation: impl FnOnce(
+        &mut AppState,
+        &mut [PreviewProductionRuntime<O>],
+        Option<&mut HeadlessViewerGpuAdapter>,
+    ) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
+    let gpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_gpu))
+        .unwrap_or_else(|payload| {
+            Err(anyhow::anyhow!(
+                "performance GPU initialization panicked: {}",
+                perf_panic_detail(payload)
+            ))
+        });
+    match gpu_result {
+        Ok(gpu) => run_with_perf_owners(app, previews, Some(gpu), operation),
+        Err(error) => {
+            let budget_ms = perf_shutdown_budget_ms();
+            let owner_closure = shutdown_perf_owners(previews, None, app, budget_ms, true);
+            finish_perf_owner_run(Err(error), owner_closure)
+        }
+    }
+}
+
+fn run_with_realtime_perf_owners<T>(
+    mut app: AppState,
+    mut realtime: HeadlessRealtimePlaybackSession,
+    operation: impl FnOnce(&mut AppState, &mut HeadlessRealtimePlaybackSession) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
+    let operation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        operation(&mut app, &mut realtime)
+    }))
+    .unwrap_or_else(|payload| {
+        Err(anyhow::anyhow!(
+            "performance operation panicked: {}",
+            perf_panic_detail(payload)
+        ))
+    });
+    let (preview, gpu) = realtime.into_shutdown_owners();
+    let budget_ms = perf_shutdown_budget_ms();
+    let owner_closure = shutdown_perf_owners(vec![preview], Some(gpu), app, budget_ms, true);
+    finish_perf_owner_run(operation_result, owner_closure)
+}
+
+fn run_with_realtime_perf_gpu_factory<T>(
+    app: AppState,
+    create_gpu: impl FnOnce() -> anyhow::Result<HeadlessViewerGpuAdapter>,
+    operation: impl FnOnce(&mut AppState, &mut HeadlessRealtimePlaybackSession) -> anyhow::Result<T>,
+) -> anyhow::Result<(T, PerfOwnerClosureReport)> {
+    let preview = HeadlessPreviewRuntime::new();
+    let gpu_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create_gpu))
+        .unwrap_or_else(|payload| {
+            Err(anyhow::anyhow!(
+                "performance GPU initialization panicked: {}",
+                perf_panic_detail(payload)
+            ))
+        });
+    let gpu = match gpu_result {
+        Ok(gpu) => gpu,
+        Err(error) => {
+            let budget_ms = perf_shutdown_budget_ms();
+            let owner_closure = shutdown_perf_owners(vec![preview], None, app, budget_ms, true);
+            return finish_perf_owner_run(Err(error), owner_closure);
+        }
+    };
+    match HeadlessRealtimePlaybackSession::with_shutdown_owners(preview, gpu) {
+        Ok(realtime) => run_with_realtime_perf_owners(app, realtime, operation),
+        Err(failure) => {
+            let (error, preview, gpu) = *failure;
+            let budget_ms = perf_shutdown_budget_ms();
+            let owner_closure =
+                shutdown_perf_owners(vec![preview], Some(gpu), app, budget_ms, true);
+            finish_perf_owner_run(Err(error), owner_closure)
+        }
+    }
+}
+
 fn perf_output_path() -> Option<PathBuf> {
     std::env::var_os("MONDRIAN_PERF_OUTPUT").map(PathBuf::from)
 }
@@ -2430,16 +3085,13 @@ impl FreshJsonlEvidenceWriter {
     }
 }
 
-fn write_report_if_needed(report_json: &str) {
+fn write_report_if_needed(report_json: &str) -> anyhow::Result<()> {
     if let Some(path) = perf_output_path() {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-            let _ = writeln!(file, "{report_json}");
-        }
+        let mut writer = FreshJsonlEvidenceWriter::create(path)?;
+        writer.write_json_line(report_json)?;
+        writer.finish()?;
     }
+    Ok(())
 }
 
 #[test]
@@ -2481,6 +3133,128 @@ fn fresh_jsonl_evidence_writer_propagates_invalid_output_errors() -> anyhow::Res
     assert!(error.to_string().contains("open fresh performance evidence output"));
     fs::remove_dir_all(root)?;
     Ok(())
+}
+
+#[test]
+fn performance_owner_closure_rejects_preview_without_real_render_cache() {
+    let preview = HeadlessPreviewRuntime::new_without_workers_for_test();
+    let closure = shutdown_perf_owners(
+        vec![preview],
+        None,
+        AppState::new(),
+        perf_shutdown_budget_ms(),
+        false,
+    );
+
+    assert!(!closure.previews[0].render_cache_required);
+    assert!(closure.validate().is_err());
+}
+
+#[test]
+fn performance_owner_closure_accepts_real_render_cache_worker() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let preview = HeadlessPreviewRuntime::new_without_workers_for_test();
+    install_perf_timeline_render_cache(&preview, temp.path())?;
+
+    let closure = shutdown_perf_owners(
+        vec![preview],
+        None,
+        AppState::new(),
+        perf_shutdown_budget_ms(),
+        false,
+    );
+
+    closure.validate()?;
+    let render_cache = closure.previews[0]
+        .render_cache_worker
+        .context("real performance render-cache receipt missing")?;
+    assert!(render_cache.worker_started);
+    assert!(render_cache.worker_terminated);
+    assert!(render_cache.all_workers_terminated);
+    Ok(())
+}
+
+#[test]
+fn performance_operation_error_retains_structured_owner_closure() {
+    let closure = shutdown_perf_owners(
+        Vec::<PreviewProductionRuntime<HeadlessViewerGpuOutput>>::new(),
+        None,
+        AppState::new(),
+        perf_shutdown_budget_ms(),
+        false,
+    );
+    let error = finish_perf_owner_run::<()>(Err(anyhow::anyhow!("intentional failure")), closure)
+        .expect_err("operation failure must be retained");
+    let detail = error.to_string();
+
+    assert!(detail.contains("intentional failure"));
+    assert!(detail.contains("owner_closure={"));
+    assert!(detail.contains("\"all_resources_released\":true"));
+}
+
+#[test]
+fn performance_owner_closure_rejects_duplicate_preview_slots() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let previews = vec![
+        HeadlessPreviewRuntime::new_without_workers_for_test(),
+        HeadlessPreviewRuntime::new_without_workers_for_test(),
+    ];
+    for (slot, preview) in previews.iter().enumerate() {
+        install_perf_timeline_render_cache(preview, &temp.path().join(slot.to_string()))?;
+    }
+    let mut closure = shutdown_perf_owners(
+        previews,
+        None,
+        AppState::new(),
+        perf_shutdown_budget_ms(),
+        false,
+    );
+    closure.validate()?;
+    assert_eq!(closure.previews[0].owner_slot, 0);
+    assert_eq!(closure.previews[1].owner_slot, 1);
+    closure.previews[1] = closure.previews[0].clone();
+    assert!(closure.validate().is_err());
+    Ok(())
+}
+
+#[test]
+fn performance_gpu_initialization_error_closes_existing_owners_fail_closed() {
+    let error = run_with_perf_gpu_factory(
+        AppState::new(),
+        vec![HeadlessPreviewRuntime::new_without_workers_for_test()],
+        || Err(anyhow::anyhow!("intentional GPU initialization failure")),
+        |_, _, _| Ok(()),
+    )
+    .expect_err("GPU initialization failure must retain exact existing-owner evidence");
+    let detail = error.to_string();
+
+    assert!(detail.contains("intentional GPU initialization failure"));
+    assert!(detail.contains("owner_closure={"));
+    assert!(detail.contains("\"gpu_owner_required\":true"));
+    assert!(detail.contains("\"gpu\":null"));
+    assert!(detail.contains("\"all_resources_released\":false"));
+}
+
+#[test]
+fn persistent_cache_verification_requires_this_requests_lookup_and_hit() {
+    let before = TimelineRenderCacheDiagnostics {
+        lookup_submissions: 7,
+        hits: 3,
+        ..TimelineRenderCacheDiagnostics::default()
+    };
+    assert!(!persistent_cache_request_verified(before, before));
+    assert!(!persistent_cache_request_verified(
+        before,
+        TimelineRenderCacheDiagnostics { lookup_submissions: 8, ..before }
+    ));
+    assert!(!persistent_cache_request_verified(
+        before,
+        TimelineRenderCacheDiagnostics { hits: 4, ..before }
+    ));
+    assert!(persistent_cache_request_verified(
+        before,
+        TimelineRenderCacheDiagnostics { lookup_submissions: 8, hits: 4, ..before }
+    ));
 }
 
 fn preview_decode_hard_failures(report: &PreviewDecodePerformanceReport) -> Vec<&'static str> {
@@ -2827,7 +3601,8 @@ fn viewer_gpu_output_budget_smoke() -> anyhow::Result<()> {
     )?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_HEALTH_REPORT_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
+
     if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
         anyhow::bail!("viewer GPU output budget smoke failed: {report_json}");
     }
@@ -2858,7 +3633,7 @@ fn viewer_gpu_output_display_baseline_smoke() -> anyhow::Result<()> {
     )?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_VIEWER_GPU_OUTPUT_DISPLAY_BASELINE_HEALTH_REPORT_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
     if report.report.verdict == ViewerGpuOutputHealthVerdict::Fail {
         anyhow::bail!("viewer GPU output display baseline smoke failed: {report_json}");
     }
@@ -2881,43 +3656,57 @@ fn perf_project_lifecycle_smoke() -> anyhow::Result<()> {
     let root = std::env::temp_dir().join(format!("mondrian_perf_smoke_{uniq}"));
     fs::create_dir_all(&root)?;
 
-    let result = (|| -> anyhow::Result<Vec<PerfCaseReport>> {
-        let project_path = root.join("perf-smoke.mdp");
-        let mut state = AppState::new();
+    let state = AppState::new();
+    let (report, owner_closure) = run_with_perf_owners(
+        state,
+        Vec::<PreviewProductionRuntime<HeadlessViewerGpuOutput>>::new(),
+        None,
+        |state, _, _| -> anyhow::Result<Vec<PerfCaseReport>> {
+            let project_path = root.join("perf-smoke.mdp");
 
-        let create_case = run_case("project.create_new_project", 1, create_threshold_ms, || {
-            state.create_new_project_at(
-                project_path.clone(),
-                "perf-smoke",
-                1920,
-                1080,
-                Rational::FPS_25,
-            )
-        })?;
+            let create_case =
+                run_case("project.create_new_project", 1, create_threshold_ms, || {
+                    state.create_new_project_at(
+                        project_path.clone(),
+                        "perf-smoke",
+                        1920,
+                        1080,
+                        Rational::FPS_25,
+                    )
+                })?;
 
-        let open_case = run_case(
-            "project.open_existing",
-            open_iters,
-            open_threshold_ms,
-            || state.open_project_file(project_path.clone()),
-        )?;
+            let open_case = run_case(
+                "project.open_existing",
+                open_iters,
+                open_threshold_ms,
+                || state.open_project_file(project_path.clone()),
+            )?;
 
-        let save_case = run_case(
-            "project.save_existing",
-            save_iters,
-            save_threshold_ms,
-            || state.save_project_file(),
-        )?;
+            let save_case = run_case(
+                "project.save_existing",
+                save_iters,
+                save_threshold_ms,
+                || state.save_project_file(),
+            )?;
 
-        Ok(vec![create_case, open_case, save_case])
-    })();
+            Ok(vec![create_case, open_case, save_case])
+        },
+    )?;
 
-    let _ = fs::remove_dir_all(&root);
+    fs::remove_dir_all(&root).with_context(|| {
+        format!(
+            "remove closed Project performance fixture {}",
+            root.display()
+        )
+    })?;
 
-    let report = result?;
-    let report_json = serde_json::to_string(&report)?;
+    let evidence = report
+        .iter()
+        .map(|case| ProjectPerfCaseEvidence { case, owner_closure: &owner_closure })
+        .collect::<Vec<_>>();
+    let report_json = serde_json::to_string(&evidence)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
 
     let failed_cases: Vec<_> = report.iter().filter(|c| !c.passed).map(|c| c.case).collect();
     if !failed_cases.is_empty() {
@@ -2955,150 +3744,192 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
     let root_dir = std::env::temp_dir().join(format!("mondrian_ui_perf_smoke_{uniq}"));
     fs::create_dir_all(&root_dir)?;
 
-    let result = (|| -> anyhow::Result<AppUiScaleReport> {
-        let mut state = build_app_ui_perf_state(&root_dir, asset_count, clip_count, effect_count)?;
-        let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
-        let theme = ThemePreset::Dark.build();
+    let state = build_app_ui_perf_state(&root_dir, asset_count, clip_count, effect_count)?;
+    let preview_service = WindowPreviewAdapter::new();
+    let preview_playback_service = WindowPreviewAdapter::new();
+    // This headless UI probe has no Window GPU registration authority. Drive
+    // the production bounded CPU fallback explicitly so it qualifies a real
+    // Program Output/color boundary instead of stopping at GpuComposite.
+    preview_service.request_viewer_cpu_fallback("headless App UI performance probe");
+    preview_playback_service.request_viewer_cpu_fallback("headless App UI performance probe");
+    let (mut report, owner_closure) = run_with_perf_owners(
+        state,
+        vec![preview_service, preview_playback_service],
+        None,
+        |state, previews, _| -> anyhow::Result<AppUiScaleReport> {
+            let preview_service =
+                previews.first().context("app UI scale omitted its Preview diagnostics owner")?;
+            let preview_playback_service =
+                previews.get(1).context("app UI scale omitted its playback Preview owner")?;
+            install_perf_timeline_render_cache(preview_service, &root_dir.join("preview-cache"))?;
+            install_perf_timeline_render_cache(
+                preview_playback_service,
+                &root_dir.join("playback-preview-cache"),
+            )?;
+            let bounds = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+            let theme = ThemePreset::Dark.build();
 
-        let build_case = run_case(
-            "app_ui.root_build_large_project",
-            1,
-            build_threshold_ms,
-            || {
-                let mut root = AppUiAppRoot::from_app_state(&state);
-                TreeWalker::layout(&mut root, bounds);
-                Ok(())
-            },
-        )?;
+            let build_case = run_case(
+                "app_ui.root_build_large_project",
+                1,
+                build_threshold_ms,
+                || {
+                    let mut root = AppUiAppRoot::from_app_state(state);
+                    TreeWalker::layout(&mut root, bounds);
+                    Ok(())
+                },
+            )?;
 
-        let mut root = AppUiAppRoot::from_app_state(&state);
-        TreeWalker::layout(&mut root, bounds);
-
-        let refresh_case = run_case(
-            "app_ui.refresh_large_project",
-            refresh_iterations,
-            refresh_threshold_ms,
-            || {
-                root.refresh_from_app_state(&state);
-                TreeWalker::layout(&mut root, bounds);
-                Ok(())
-            },
-        )?;
-
-        let resize_case = run_case("app_ui.resize_loop", 1, resize_threshold_ms, || {
-            for index in 0..resize_iterations {
-                let width = 1280.0 + (index % 9) as f32 * 83.0;
-                let height = 720.0 + (index % 7) as f32 * 47.0;
-                TreeWalker::layout(&mut root, Rect::new(0.0, 0.0, width, height));
-            }
+            let mut root = AppUiAppRoot::from_app_state(state);
             TreeWalker::layout(&mut root, bounds);
-            Ok(())
-        })?;
 
-        let mut initial_paint_commands = 0usize;
-        let paint_case = run_case("app_ui.paint_large_project", 1, paint_threshold_ms, || {
-            initial_paint_commands = paint_command_count(&root, &theme, bounds);
-            anyhow::ensure!(
-                initial_paint_commands > 0,
-                "app UI root emitted no paint commands"
-            );
-            Ok(())
-        })?;
-
-        state.play()?;
-        let mut playback_paint_commands_max = 0usize;
-        let playback_case = run_case(
-            "app_ui.sustained_playback_refresh",
-            1,
-            playback_threshold_ms,
-            || {
-                for frame in 0..playback_frames {
-                    state.set_playback_frame_running(frame as i64);
-                    root.refresh_playback_frame_from_app_state(&state, None);
+            let refresh_case = run_case(
+                "app_ui.refresh_large_project",
+                refresh_iterations,
+                refresh_threshold_ms,
+                || {
+                    root.refresh_from_app_state(state);
                     TreeWalker::layout(&mut root, bounds);
-                    if frame % 12 == 0 {
-                        playback_paint_commands_max = playback_paint_commands_max
-                            .max(paint_command_count(&root, &theme, bounds));
+                    Ok(())
+                },
+            )?;
+
+            let resize_case = run_case("app_ui.resize_loop", 1, resize_threshold_ms, || {
+                for index in 0..resize_iterations {
+                    let width = 1280.0 + (index % 9) as f32 * 83.0;
+                    let height = 720.0 + (index % 7) as f32 * 47.0;
+                    TreeWalker::layout(&mut root, Rect::new(0.0, 0.0, width, height));
+                }
+                TreeWalker::layout(&mut root, bounds);
+                Ok(())
+            })?;
+
+            let mut initial_paint_commands = 0usize;
+            let paint_case = run_case("app_ui.paint_large_project", 1, paint_threshold_ms, || {
+                initial_paint_commands = paint_command_count(&root, &theme, bounds);
+                anyhow::ensure!(
+                    initial_paint_commands > 0,
+                    "app UI root emitted no paint commands"
+                );
+                Ok(())
+            })?;
+
+            state.play()?;
+            let mut playback_paint_commands_max = 0usize;
+            let playback_case = run_case(
+                "app_ui.sustained_playback_refresh",
+                1,
+                playback_threshold_ms,
+                || {
+                    for frame in 0..playback_frames {
+                        state.set_playback_frame_running(frame as i64);
+                        root.refresh_playback_frame_from_app_state(state, None);
+                        TreeWalker::layout(&mut root, bounds);
+                        if frame % 12 == 0 {
+                            playback_paint_commands_max = playback_paint_commands_max
+                                .max(paint_command_count(&root, &theme, bounds));
+                        }
                     }
-                }
-                Ok(())
-            },
-        )?;
-        state.pause()?;
+                    Ok(())
+                },
+            )?;
+            state.pause()?;
 
-        let preview_service = WindowPreviewAdapter::new();
-        let mut preview_diagnostics = preview_service.diagnostics();
-        let preview_probe_case = run_case(
-            "app_ui.preview_diagnostics_probe",
-            1,
-            preview_probe_threshold_ms,
-            || {
-                let _ = preview_service.viewer_preview_for_state(&state);
-                let _ = preview_service
-                    .gpu_preview_frame(state.preview_frame_execution_request(Instant::now()));
-                preview_diagnostics = preview_service.diagnostics();
-                Ok(())
-            },
-        )?;
+            let mut preview_diagnostics = preview_service.diagnostics();
+            let preview_probe_case = run_case(
+                "app_ui.preview_diagnostics_probe",
+                1,
+                preview_probe_threshold_ms,
+                || {
+                    wait_for_window_preview_color_evidence(
+                        preview_service,
+                        state,
+                        Duration::from_millis(
+                            preview_probe_threshold_ms.min(u128::from(u64::MAX)) as u64
+                        ),
+                    )?;
+                    preview_diagnostics = preview_service.diagnostics();
+                    Ok(())
+                },
+            )?;
 
-        let preview_playback_service = WindowPreviewAdapter::new();
-        let mut preview_playback_diagnostics = preview_playback_service.diagnostics();
-        let preview_playback_case = run_case(
-            "app_ui.preview_playback_refresh",
-            1,
-            preview_playback_threshold_ms,
-            || {
-                for frame in 0..playback_frames {
-                    state.set_playback_frame_running(frame as i64);
-                    root.refresh_playback_frame_from_app_state(
-                        &state,
-                        Some(&preview_playback_service),
-                    );
-                    TreeWalker::layout(&mut root, bounds);
-                }
-                preview_playback_diagnostics = preview_playback_service.diagnostics();
-                Ok(())
-            },
-        )?;
-        state.pause()?;
+            let mut preview_playback_diagnostics = preview_playback_service.diagnostics();
+            let preview_playback_case = run_case(
+                "app_ui.preview_playback_refresh",
+                1,
+                preview_playback_threshold_ms,
+                || {
+                    for frame in 0..playback_frames {
+                        state.set_playback_frame_running(frame as i64);
+                        root.refresh_playback_frame_from_app_state(
+                            state,
+                            Some(preview_playback_service),
+                        );
+                        TreeWalker::layout(&mut root, bounds);
+                    }
+                    wait_for_window_preview_color_evidence(
+                        preview_playback_service,
+                        state,
+                        Duration::from_millis(
+                            preview_playback_threshold_ms.min(u128::from(u64::MAX)) as u64,
+                        ),
+                    )?;
+                    preview_playback_diagnostics = preview_playback_service.diagnostics();
+                    Ok(())
+                },
+            )?;
+            state.pause()?;
 
-        Ok(AppUiScaleReport {
-            scenario: "app_ui_scale",
-            assets: asset_count,
-            clips: clip_count,
-            effects: effect_count,
-            resize_iterations,
-            playback_frames,
-            initial_paint_commands,
-            playback_paint_commands_max,
-            preview_diagnostics,
-            preview_color_report: build_preview_color_health_report(
-                preview_diagnostics.color_health_summary(),
-                "app_ui_scale_preview",
-            ),
-            preview_playback_diagnostics,
-            preview_playback_color_report: build_preview_color_health_report(
-                preview_playback_diagnostics.color_health_summary(),
-                "app_ui_scale_preview_playback",
-            ),
-            cases: vec![
-                build_case,
-                refresh_case,
-                resize_case,
-                paint_case,
-                playback_case,
-                preview_probe_case,
-                preview_playback_case,
-            ],
-        })
-    })();
+            Ok(AppUiScaleReport {
+                scenario: "app_ui_scale",
+                assets: asset_count,
+                clips: clip_count,
+                effects: effect_count,
+                resize_iterations,
+                playback_frames,
+                initial_paint_commands,
+                playback_paint_commands_max,
+                preview_diagnostics,
+                preview_color_report: build_preview_color_health_report(
+                    preview_diagnostics.color_health_summary(),
+                    "app_ui_scale_preview",
+                ),
+                preview_playback_diagnostics,
+                preview_playback_color_report: build_preview_color_health_report(
+                    preview_playback_diagnostics.color_health_summary(),
+                    "app_ui_scale_preview_playback",
+                ),
+                owner_closure: None,
+                cases: vec![
+                    build_case,
+                    refresh_case,
+                    resize_case,
+                    paint_case,
+                    playback_case,
+                    preview_probe_case,
+                    preview_playback_case,
+                ],
+            })
+        },
+    )?;
+    report.owner_closure = Some(owner_closure);
 
-    let _ = fs::remove_dir_all(&root_dir);
+    fs::remove_dir_all(&root_dir).with_context(|| {
+        format!(
+            "remove closed app UI performance fixture {}",
+            root_dir.display()
+        )
+    })?;
 
-    let report = result?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
+
+    report
+        .owner_closure
+        .as_ref()
+        .context("app UI scale report omitted exact owner-closure evidence")?
+        .validate()?;
 
     let failed_color_gates = app_ui_scale_color_gate_failures(
         &report.preview_color_report,
@@ -3140,6 +3971,33 @@ fn app_ui_scale_smoke() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn wait_for_window_preview_color_evidence(
+    preview: &WindowPreviewAdapter,
+    state: &AppState,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        // CPU fallback is deliberately scheduled through the same candidate
+        // seam used by the Window GPU path. Presentation itself is a pure
+        // projection and cannot start or drain asynchronous execution.
+        let _ = preview.gpu_preview_frame(state.preview_frame_execution_request(Instant::now()));
+        let _ = preview.poll_playback_work(
+            state.pending_playback_frame_demand_identity(),
+            state.preview_transport_intent(),
+        );
+        let _ = preview.viewer_preview_for_state(state);
+        if preview.diagnostics().color_health_summary().is_some() {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "headless Window Preview did not produce bounded CPU-fallback color evidence"
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 #[ignore = "development preview media decode/cache smoke test; run manually"]
 fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
@@ -3161,11 +4019,21 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
     let video_path = root_dir.join("preview-media-smoke.mp4");
 
     if !generate_preview_media_fixture(&video_path)? {
-        eprintln!(
-            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_decode_cache\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
-        );
-        let _ = fs::remove_dir_all(&root_dir);
-        return Ok(());
+        let report_json = serde_json::json!({
+            "scenario": "preview_media_decode_cache",
+            "skipped": "ffmpeg CLI unavailable or fixture generation failed",
+            "eligible": false,
+        })
+        .to_string();
+        eprintln!("MONDRIAN_PERF_JSON={report_json}");
+        write_report_if_needed(&report_json)?;
+        fs::remove_dir_all(&root_dir).with_context(|| {
+            format!(
+                "remove ineligible Preview performance fixture {}",
+                root_dir.display()
+            )
+        })?;
+        anyhow::bail!("Preview performance fixture generation is required: {report_json}");
     }
 
     let result = run_preview_media_access_mode_probe(
@@ -3183,12 +4051,17 @@ fn preview_media_decode_cache_smoke() -> anyhow::Result<()> {
         None,
     );
 
-    let _ = fs::remove_dir_all(&root_dir);
+    fs::remove_dir_all(&root_dir).with_context(|| {
+        format!(
+            "remove closed Preview performance fixture {}",
+            root_dir.display()
+        )
+    })?;
 
     let report = result?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
 
     validate_preview_media_access_mode_report(&report, &report_json)?;
 
@@ -3250,7 +4123,7 @@ fn run_preview_media_access_mode_probe_with_media_info(
     // Otherwise the Frame Store can satisfy the second phase and falsely claim
     // access-mode coverage without exercising its media Session.
     let sequence_frame_count = frame_count.saturating_mul(2).max(2);
-    let mut state = match media_info {
+    let state = match media_info {
         Some(media_info) => build_preview_media_perf_state_with_media_info(
             root_dir,
             video_path,
@@ -3260,185 +4133,305 @@ fn run_preview_media_access_mode_probe_with_media_info(
         None => build_preview_media_perf_state(root_dir, video_path, sequence_frame_count)?,
     };
     let preview_service = HeadlessPreviewRuntime::new();
-    let mut gpu_adapter =
-        HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter")?;
-    configure_headless_gpu_decode_admission(&preview_service, &mut gpu_adapter)?;
-    let mut headless_gpu = HeadlessViewerGpuExecutionSummary {
-        adapter: Some(gpu_adapter.adapter_info().clone()),
-        ..HeadlessViewerGpuExecutionSummary::default()
-    };
-    ensure_preview_media_access_mode_deadline(overall_deadline, scenario, Some(&preview_service))?;
-
-    let first_frame_case = run_case(
-        "preview_media.first_frame_ready",
-        1,
-        first_frame_threshold_ms,
-        || {
-            state.seek(0)?;
-            wait_for_headless_gpu_ready(
-                &preview_service,
-                &mut state,
-                &mut gpu_adapter,
-                &mut headless_gpu,
-                ready_timeout,
-            )
-        },
-    )?;
-
-    let cached_frame_case = run_case(
-        "preview_media.cached_frame_refresh",
-        1,
-        cache_threshold_ms,
-        || {
-            for _ in 0..cache_iterations {
-                // A cache lookup may concurrently schedule fresher media work.
-                // The retained frame is deliberately reported as Stale while
-                // that replacement is pending, so keep it visible and wait for
-                // the exact requested frame instead of treating Stale as a
-                // render failure.
-                ensure_preview_media_access_mode_deadline(
-                    overall_deadline,
-                    scenario,
-                    Some(&preview_service),
-                )?;
-                wait_for_headless_gpu_ready(
-                    &preview_service,
-                    &mut state,
-                    &mut gpu_adapter,
-                    &mut headless_gpu,
-                    ready_timeout,
-                )?;
-            }
-            Ok(())
-        },
-    )?;
-
-    let scrub_case = run_case(
-        "preview_media.active_scrub_ready_window",
-        1,
-        scrub_threshold_ms,
-        || {
-            for sample in 0..frame_count {
-                let frame = session_warm_then_backward_seek_frame(sample, frame_count);
-                state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag)?;
-                ensure_preview_media_access_mode_deadline(
-                    overall_deadline,
-                    scenario,
-                    Some(&preview_service),
-                )?;
-                wait_for_headless_gpu_ready(
-                    &preview_service,
-                    &mut state,
-                    &mut gpu_adapter,
-                    &mut headless_gpu,
-                    ready_timeout,
-                )?;
-            }
-            state.seek(frame_count.saturating_sub(1) as i64)?;
-            Ok(())
-        },
-    )?;
-
-    let still_case = run_case(
-        "preview_media.random_access_still_ready_window",
-        1,
-        sequential_threshold_ms,
-        || {
-            for sample in 0..frame_count {
-                let frame = frame_count
-                    .saturating_add(session_warm_then_backward_seek_frame(sample, frame_count));
-                state.seek(frame as i64)?;
-                ensure_preview_media_access_mode_deadline(
-                    overall_deadline,
-                    scenario,
-                    Some(&preview_service),
-                )?;
-                wait_for_headless_gpu_ready(
-                    &preview_service,
-                    &mut state,
-                    &mut gpu_adapter,
-                    &mut headless_gpu,
-                    ready_timeout,
-                )?;
-            }
-            Ok(())
-        },
-    )?;
-
-    let gpu_candidate_case = run_case(
-        "preview_media.gpu_candidate_ready",
-        1,
-        gpu_candidate_threshold_ms,
-        || {
-            wait_for_headless_gpu_ready(
-                &preview_service,
-                &mut state,
-                &mut gpu_adapter,
-                &mut headless_gpu,
-                ready_timeout,
-            )
-        },
-    )?;
-    settle_headless_preview_and_release_transport_media(
-        &preview_service,
-        &mut state,
-        &mut gpu_adapter,
-        &mut headless_gpu,
-        ready_timeout,
-    )?;
-    let gpu_timings = gpu_adapter
-        .finish_gpu_timings()
-        .context("finish deferred headless Viewer GPU timestamp maps")?;
-    headless_gpu.record_gpu_timings(&gpu_timings);
-    headless_gpu.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
-
-    let preview_diagnostics = preview_service.diagnostics();
-    let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-    let preview_color_report =
-        build_preview_color_health_report(preview_diagnostics.color_health_summary(), scenario);
-    let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
-        preview_diagnostics.decode_performance_summary(PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
-        scenario,
-        PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
-        &[
-            PreviewDecodeAccessMode::ScrubCursor,
-            PreviewDecodeAccessMode::RandomAccessStillFrame,
-        ],
-    );
-    let preview_render_report = preview_diagnostics
-        .render_performance_summary(PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US)
-        .map(|summary| {
-            build_preview_render_performance_report(
-                Some(summary),
+    let (mut report, owner_closure) = run_with_perf_gpu_factory(
+        state,
+        vec![preview_service],
+        || HeadlessViewerGpuAdapter::new().context("create real headless Viewer GPU Adapter"),
+        |state, previews, gpu_adapter| -> anyhow::Result<PreviewMediaPerfReport> {
+            let preview_service = previews
+                .first()
+                .context("preview access-mode probe omitted its Preview owner")?;
+            let gpu_adapter =
+                gpu_adapter.context("preview access-mode probe omitted its GPU owner")?;
+            install_perf_timeline_render_cache(
+                preview_service,
+                &root_dir.join("timeline-render-cache"),
+            )?;
+            configure_headless_gpu_decode_admission(preview_service, gpu_adapter)?;
+            let mut headless_gpu = HeadlessViewerGpuExecutionSummary {
+                adapter: Some(gpu_adapter.adapter_info().clone()),
+                ..HeadlessViewerGpuExecutionSummary::default()
+            };
+            ensure_preview_media_access_mode_deadline(
+                overall_deadline,
                 scenario,
-                PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
-            )
-        });
-    let decode_failure_codes = preview_decode_hard_failures(&preview_decode_report);
-    let render_failure_codes = preview_render_report
-        .as_ref()
-        .map(preview_render_hard_failures)
-        .unwrap_or_default();
-    Ok(PreviewMediaPerfReport {
-        scenario,
-        frames: frame_count,
-        cache_iterations,
-        headless_gpu,
-        media_color_issues,
-        preview_diagnostics,
-        preview_color_report,
-        decode_failure_codes,
-        render_failure_codes,
-        preview_decode_report,
-        preview_render_report,
-        cases: vec![
-            first_frame_case,
-            cached_frame_case,
-            scrub_case,
-            still_case,
-            gpu_candidate_case,
-        ],
-    })
+                Some(preview_service),
+            )?;
+
+            let first_frame_case = run_case(
+                "preview_media.first_frame_ready",
+                1,
+                first_frame_threshold_ms,
+                || {
+                    state.seek(0)?;
+                    wait_for_headless_gpu_ready(
+                        preview_service,
+                        state,
+                        gpu_adapter,
+                        &mut headless_gpu,
+                        ready_timeout,
+                    )
+                },
+            )?;
+
+            let cached_frame_case = run_case(
+                "preview_media.cached_frame_refresh",
+                1,
+                cache_threshold_ms,
+                || {
+                    for _ in 0..cache_iterations {
+                        // A cache lookup may concurrently schedule fresher media work.
+                        // The retained frame is deliberately reported as Stale while
+                        // that replacement is pending, so keep it visible and wait for
+                        // the exact requested frame instead of treating Stale as a
+                        // render failure.
+                        ensure_preview_media_access_mode_deadline(
+                            overall_deadline,
+                            scenario,
+                            Some(preview_service),
+                        )?;
+                        wait_for_headless_gpu_ready(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut headless_gpu,
+                            ready_timeout,
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+
+            let persistent_cache_case = run_case(
+                "preview_media.persistent_cache_verified_hit",
+                1,
+                cache_threshold_ms.saturating_mul(4),
+                || {
+                    // Persistent working-frame artifacts are produced by the
+                    // bounded CPU Viewer fallback. A GPU-only presentation
+                    // has no CPU working frame to publish and must not be
+                    // mistaken for cache evidence.
+                    preview_service.request_viewer_cpu_fallback(
+                        "performance Timeline render-cache publication probe",
+                    );
+                    state.seek(0)?;
+                    let publication_deadline = Instant::now() + ready_timeout;
+                    let publications_before =
+                        preview_service.diagnostics().timeline_render_cache.publications;
+                    while preview_service.diagnostics().timeline_render_cache.publications
+                        <= publications_before
+                    {
+                        let _ = preview_service.gpu_preview_frame(
+                            state.preview_frame_execution_request(Instant::now()),
+                        );
+                        let _ = pump_playback_preview(state, preview_service);
+                        anyhow::ensure!(
+                            Instant::now() < publication_deadline,
+                            "Timeline render cache did not durably publish the first Preview frame"
+                        );
+                        thread::yield_now();
+                    }
+                    anyhow::ensure!(
+                        preview_service.diagnostics().timeline_render_cache.publications
+                            > publications_before,
+                        "Timeline render cache publication was not owned by this probe"
+                    );
+                    preview_service.clear_viewer_cpu_fallback();
+                    state.seek(1)?;
+                    wait_for_headless_gpu_ready(
+                        preview_service,
+                        state,
+                        gpu_adapter,
+                        &mut headless_gpu,
+                        ready_timeout,
+                    )?;
+                    let cache_settle_deadline = Instant::now() + ready_timeout;
+                    loop {
+                        let cache = preview_service.diagnostics().timeline_render_cache;
+                        let completed_lookups = cache
+                            .hits
+                            .saturating_add(cache.misses)
+                            .saturating_add(cache.corruptions);
+                        if cache.lookup_submissions == completed_lookups
+                            && cache.publication_submissions == cache.publications
+                        {
+                            break;
+                        }
+                        anyhow::ensure!(
+                            cache.failures == 0 && cache.dropped_results == 0,
+                            "Timeline render cache failed while settling pre-baseline work: {cache:?}"
+                        );
+                        let _ = pump_playback_preview(state, preview_service);
+                        anyhow::ensure!(
+                            Instant::now() < cache_settle_deadline,
+                            "Timeline render cache did not settle pre-baseline work: {cache:?}"
+                        );
+                        thread::yield_now();
+                    }
+                    preview_service.clear_memory_residency_for_persistent_cache_test();
+                    let cache_before = preview_service.diagnostics().timeline_render_cache;
+                    state.seek(0)?;
+                    preview_service.request_viewer_cpu_fallback(
+                        "performance Timeline render-cache verified-hit probe",
+                    );
+                    let hit_deadline = Instant::now() + ready_timeout;
+                    while !persistent_cache_request_verified(
+                        cache_before,
+                        preview_service.diagnostics().timeline_render_cache,
+                    ) {
+                        let _ = preview_service.gpu_preview_frame(
+                            state.preview_frame_execution_request(Instant::now()),
+                        );
+                        let _ = pump_playback_preview(state, preview_service);
+                        anyhow::ensure!(
+                            Instant::now() < hit_deadline,
+                            "Timeline render cache did not return a verified hit after memory reset; before={cache_before:?}, current={:?}",
+                            preview_service.diagnostics().timeline_render_cache,
+                        );
+                        thread::yield_now();
+                    }
+                    preview_service.clear_viewer_cpu_fallback();
+                    Ok(())
+                },
+            )?;
+
+            let scrub_case = run_case(
+                "preview_media.active_scrub_ready_window",
+                1,
+                scrub_threshold_ms,
+                || {
+                    for sample in 0..frame_count {
+                        let frame = session_warm_then_backward_seek_frame(sample, frame_count);
+                        state.seek_with_source(frame as i64, TimelineSeekSource::PointerDrag)?;
+                        ensure_preview_media_access_mode_deadline(
+                            overall_deadline,
+                            scenario,
+                            Some(preview_service),
+                        )?;
+                        wait_for_headless_gpu_ready(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut headless_gpu,
+                            ready_timeout,
+                        )?;
+                    }
+                    state.seek(frame_count.saturating_sub(1) as i64)?;
+                    Ok(())
+                },
+            )?;
+
+            let still_case = run_case(
+                "preview_media.random_access_still_ready_window",
+                1,
+                sequential_threshold_ms,
+                || {
+                    for sample in 0..frame_count {
+                        let frame = frame_count.saturating_add(
+                            session_warm_then_backward_seek_frame(sample, frame_count),
+                        );
+                        state.seek(frame as i64)?;
+                        ensure_preview_media_access_mode_deadline(
+                            overall_deadline,
+                            scenario,
+                            Some(preview_service),
+                        )?;
+                        wait_for_headless_gpu_ready(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut headless_gpu,
+                            ready_timeout,
+                        )?;
+                    }
+                    Ok(())
+                },
+            )?;
+
+            let gpu_candidate_case = run_case(
+                "preview_media.gpu_candidate_ready",
+                1,
+                gpu_candidate_threshold_ms,
+                || {
+                    wait_for_headless_gpu_ready(
+                        preview_service,
+                        state,
+                        gpu_adapter,
+                        &mut headless_gpu,
+                        ready_timeout,
+                    )
+                },
+            )?;
+            settle_headless_preview_and_release_transport_media(
+                preview_service,
+                state,
+                gpu_adapter,
+                &mut headless_gpu,
+                ready_timeout,
+            )?;
+            let gpu_timings = gpu_adapter
+                .finish_gpu_timings()
+                .context("finish deferred headless Viewer GPU timestamp maps")?;
+            headless_gpu.record_gpu_timings(&gpu_timings);
+            headless_gpu.discarded_gpu_timestamp_frames = gpu_adapter.discarded_gpu_timings();
+
+            let preview_diagnostics = preview_service.diagnostics();
+            let media_color_issues = summarize_active_sequence_media_color_issues(state)?;
+            let preview_color_report = build_preview_color_health_report(
+                preview_diagnostics.color_health_summary(),
+                scenario,
+            );
+            let preview_decode_report =
+                build_preview_decode_performance_report_with_required_access_modes(
+                    preview_diagnostics
+                        .decode_performance_summary(PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US),
+                    scenario,
+                    PREVIEW_DECODE_DEFAULT_SLOW_FRAME_BUDGET_US,
+                    &[
+                        PreviewDecodeAccessMode::ScrubCursor,
+                        PreviewDecodeAccessMode::RandomAccessStillFrame,
+                    ],
+                );
+            let preview_render_report = preview_diagnostics
+                .render_performance_summary(PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US)
+                .map(|summary| {
+                    build_preview_render_performance_report(
+                        Some(summary),
+                        scenario,
+                        PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+                    )
+                });
+            let decode_failure_codes = preview_decode_hard_failures(&preview_decode_report);
+            let render_failure_codes = preview_render_report
+                .as_ref()
+                .map(preview_render_hard_failures)
+                .unwrap_or_default();
+            Ok(PreviewMediaPerfReport {
+                scenario,
+                frames: frame_count,
+                cache_iterations,
+                headless_gpu,
+                media_color_issues,
+                preview_diagnostics,
+                preview_color_report,
+                decode_failure_codes,
+                render_failure_codes,
+                preview_decode_report,
+                preview_render_report,
+                owner_closure: None,
+                cases: vec![
+                    first_frame_case,
+                    cached_frame_case,
+                    persistent_cache_case,
+                    scrub_case,
+                    still_case,
+                    gpu_candidate_case,
+                ],
+            })
+        },
+    )?;
+    report.owner_closure = Some(owner_closure);
+    Ok(report)
 }
 
 fn session_warm_then_backward_seek_frame(sample: usize, frame_count: usize) -> usize {
@@ -3483,6 +4476,24 @@ fn validate_preview_media_access_mode_report(
     report: &PreviewMediaPerfReport,
     report_json: &str,
 ) -> anyhow::Result<()> {
+    report
+        .owner_closure
+        .as_ref()
+        .context("preview media report omitted exact owner-closure evidence")?
+        .validate()?;
+    let cache = report.preview_diagnostics.timeline_render_cache;
+    anyhow::ensure!(
+        cache.lookup_submissions > 0
+            && cache.publication_submissions > 0
+            && cache.hits > 0
+            && cache.misses > 0
+            && cache.publications > 0,
+        "preview media persistent Timeline render cache did not prove miss -> publication -> verified hit: {cache:?}; report: {report_json}"
+    );
+    anyhow::ensure!(
+        cache.failures == 0 && cache.corruptions == 0 && cache.dropped_results == 0,
+        "preview media persistent Timeline render cache reported a failed, corrupt, or dropped operation: {cache:?}; report: {report_json}"
+    );
     let failed_cases: Vec<_> =
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
     if !failed_cases.is_empty() {
@@ -3613,12 +4624,17 @@ fn preview_media_external_access_mode_smoke() -> anyhow::Result<()> {
         ready_timeout,
         Some(overall_deadline),
     );
-    let _ = fs::remove_dir_all(&root_dir);
+    fs::remove_dir_all(&root_dir).with_context(|| {
+        format!(
+            "remove closed external Preview fixture {}",
+            root_dir.display()
+        )
+    })?;
 
     let report = result?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
     validate_preview_media_access_mode_report(&report, &report_json)?;
 
     Ok(())
@@ -3644,13 +4660,32 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
     let root_dir = std::env::temp_dir().join(format!("mondrian_preview_playback_perf_{uniq}"));
     fs::create_dir_all(&root_dir)?;
     let video_path = root_dir.join("preview-playback-smoke.mp4");
+    let fixture_duration_secs = frame_count.saturating_add(2).saturating_add(29) / 30;
 
-    if !generate_preview_media_fixture(&video_path)? {
-        eprintln!(
-            "MONDRIAN_PERF_JSON={{\"scenario\":\"preview_media_continuous_playback\",\"skipped\":\"ffmpeg CLI unavailable or fixture generation failed\"}}"
-        );
-        let _ = fs::remove_dir_all(&root_dir);
-        return Ok(());
+    // The cadence probe needs one authored successor after its final measured
+    // interval. Generate matching source-media headroom as well; extending
+    // only the Clip would turn legitimate lookahead into an EOF decode fault.
+    if !generate_preview_media_fixture_with_size(
+        &video_path,
+        320,
+        180,
+        fixture_duration_secs as u32,
+    )? {
+        let report_json = serde_json::json!({
+            "scenario": "preview_media_continuous_playback",
+            "skipped": "ffmpeg CLI unavailable or fixture generation failed",
+            "eligible": false,
+        })
+        .to_string();
+        eprintln!("MONDRIAN_PERF_JSON={report_json}");
+        write_report_if_needed(&report_json)?;
+        fs::remove_dir_all(&root_dir).with_context(|| {
+            format!(
+                "remove ineligible continuous Preview fixture {}",
+                root_dir.display()
+            )
+        })?;
+        anyhow::bail!("continuous Preview fixture generation is required: {report_json}");
     }
 
     let result = run_preview_media_continuous_playback_probe(
@@ -3660,7 +4695,10 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         PreviewMediaPlaybackProbeConfig {
             scenario: "preview_media_continuous_playback",
             frame_count,
-            sequence_frame_count: frame_count,
+            // The initial presentation precedes the measured cadence loop and
+            // the final interval must still have one exact successor. Keep the
+            // performance window away from the authored content boundary.
+            sequence_frame_count: frame_count.saturating_add(2),
             frame_interval_ns,
             playback_threshold_ms,
             gpu_candidate_threshold_ms,
@@ -3678,12 +4716,23 @@ fn preview_media_continuous_playback_smoke() -> anyhow::Result<()> {
         },
     );
 
-    let _ = fs::remove_dir_all(&root_dir);
+    fs::remove_dir_all(&root_dir).with_context(|| {
+        format!(
+            "remove closed continuous Preview fixture {}",
+            root_dir.display()
+        )
+    })?;
 
     let report = result?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
+
+    report
+        .owner_closure
+        .as_ref()
+        .context("continuous Preview report omitted exact owner-closure evidence")?
+        .validate()?;
 
     let failed_cases: Vec<_> =
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
@@ -3795,7 +4844,7 @@ fn preview_media_resolution_scale_decode_stability_smoke() -> anyhow::Result<()>
     let report = result?;
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
 
     anyhow::ensure!(
         report.passed,
@@ -4452,7 +5501,7 @@ fn run_professional_cpal_av_probe(
     });
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
     anyhow::ensure!(
         report.passed,
         "professional production CPAL A/V gate failed: {:?}; report: {report_json}",
@@ -4809,7 +5858,7 @@ fn run_external_isolated_demux_qualification_gate(video_path: PathBuf) -> anyhow
     report.qualification_media_gates = Some(qualification);
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
     anyhow::ensure!(
         qualification_passed,
         "short Main10 production qualification failed; report: {report_json}"
@@ -5240,7 +6289,7 @@ fn run_external_continuous_playback_gate(
     }
     let report_json = serde_json::to_string(&report)?;
     eprintln!("MONDRIAN_PERF_JSON={report_json}");
-    write_report_if_needed(&report_json);
+    write_report_if_needed(&report_json)?;
 
     let failed_cases: Vec<_> =
         report.cases.iter().filter(|case| !case.passed).map(|case| case.case).collect();
@@ -5670,372 +6719,387 @@ fn run_preview_media_continuous_playback_probe(
             height: authored_full_resolution.height,
         },
     };
-    let gpu_adapter =
-        HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(
+    let (mut report, owner_closure) = run_with_realtime_perf_gpu_factory(
+        state,
+        || {
+            HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(
             config.native_video_gpu_timing.renderer_policy(),
             config.native_video_gpu_timing.observation_capacity(),
         )
-        .context("create real headless Viewer GPU Adapter")?;
-    let mut realtime = HeadlessRealtimePlaybackSession::with_gpu_adapter(gpu_adapter)?;
-    let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
-        realtime.preview()?.decode_execution_watch(),
-        config.scenario,
-    )?;
-    let mut readiness = PreviewReadinessCounts::default();
-    let mut headless_gpu_preroll = HeadlessViewerGpuExecutionSummary::default();
-    let mut headless_gpu = HeadlessViewerGpuExecutionSummary::default();
-    headless_gpu_preroll.adapter = Some(realtime.gpu()?.adapter_info().clone());
-    headless_gpu.adapter = Some(realtime.gpu()?.adapter_info().clone());
-    let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
-    let process_memory_probe = SystemPlatformService;
-    let mut process_memory_sampler = None;
+        .context("create real headless Viewer GPU Adapter")
+        },
+        |state, realtime| -> anyhow::Result<PreviewMediaPlaybackPerfReport> {
+            install_perf_timeline_render_cache(
+                realtime.preview()?,
+                &root_dir.join("playback-timeline-render-cache"),
+            )?;
+            let decode_execution_journal = PreviewDecodeExecutionJournal::start_from_env(
+                realtime.preview()?.decode_execution_watch(),
+                config.scenario,
+            )?;
+            let mut readiness = PreviewReadinessCounts::default();
+            let mut headless_gpu_preroll = HeadlessViewerGpuExecutionSummary::default();
+            let mut headless_gpu = HeadlessViewerGpuExecutionSummary::default();
+            headless_gpu_preroll.adapter = Some(realtime.gpu()?.adapter_info().clone());
+            headless_gpu.adapter = Some(realtime.gpu()?.adapter_info().clone());
+            let mut process_memory_evidence = PreviewProcessMemoryEvidenceCollector::default();
+            let process_memory_probe = SystemPlatformService;
+            let mut process_memory_sampler = None;
 
-    state.seek(0)?;
-    {
-        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-        wait_for_headless_gpu_ready(
-            preview_service,
-            &mut state,
-            gpu_adapter,
-            &mut headless_gpu_preroll,
-            config.ready_timeout,
-        )?;
-    }
-    let observation_plan = continuous_playback_observation_plan(config.frame_count)?;
-    let mut continuous_playback_window = None;
-    let playback_case = run_case(
-        "preview_media.continuous_playback_readiness",
-        1,
-        config.playback_threshold_ms,
-        || {
-            state.play()?;
-            // Startup priming is a bounded hold, not a promise that frame zero
-            // remains current indefinitely. If cold decoder/GPU setup misses
-            // that hold, the authoritative Synthetic Clock must advance and
-            // the adapter establishes the first presentable *current* frame.
-            // Freezing the clock here leaves a terminal Late demand with no
-            // authority for replacement work.
-            let initial_ready_observation = {
-                let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-                wait_for_headless_gpu_ready_observation(
-                    preview_service,
-                    &mut state,
-                    gpu_adapter,
-                    &mut headless_gpu,
-                    config.ready_timeout,
-                )?
-            };
-            anyhow::ensure!(
-                initial_ready_observation.current_gpu_ready,
-                "continuous playback failed to establish its exact starting presentation"
-            );
+            state.seek(0)?;
             {
                 let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-                wait_for_headless_playback_preroll(
+                wait_for_headless_gpu_ready(
                     preview_service,
-                    &mut state,
+                    state,
+                    gpu_adapter,
+                    &mut headless_gpu_preroll,
+                    config.ready_timeout,
+                )?;
+            }
+            let observation_plan = continuous_playback_observation_plan(config.frame_count)?;
+            let mut continuous_playback_window = None;
+            let playback_case = run_case(
+                "preview_media.continuous_playback_readiness",
+                1,
+                config.playback_threshold_ms,
+                || {
+                    state.play()?;
+                    // Startup priming is a bounded hold, not a promise that frame zero
+                    // remains current indefinitely. If cold decoder/GPU setup misses
+                    // that hold, the authoritative Synthetic Clock must advance and
+                    // the adapter establishes the first presentable *current* frame.
+                    // Freezing the clock here leaves a terminal Late demand with no
+                    // authority for replacement work.
+                    let initial_ready_observation = {
+                        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                        wait_for_headless_gpu_ready_observation(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut headless_gpu,
+                            config.ready_timeout,
+                        )?
+                    };
+                    anyhow::ensure!(
+                        initial_ready_observation.current_gpu_ready,
+                        "continuous playback failed to establish its exact starting presentation"
+                    );
+                    {
+                        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                        wait_for_headless_playback_preroll(
+                            preview_service,
+                            state,
+                            gpu_adapter,
+                            &mut headless_gpu,
+                            config.ready_timeout,
+                        )?;
+                    }
+                    // The declared continuous window begins only after cold-start
+                    // priming has established a presentable current frame. Startup
+                    // skips remain observable in Preview diagnostics but must not be
+                    // charged to the later fixed-size clock-displacement ledger.
+                    state.begin_playback_evidence_run(
+                        mondrian_playback::PlaybackEvidenceConfig::default(),
+                    )?;
+                    let playback_started = Instant::now();
+                    process_memory_sampler =
+                        Some(ProfessionalProcessMemorySampler::start(playback_started)?);
+                    let start_frame = state.current_frame();
+                    let mut opportunity_ledger = ContinuousPlaybackOpportunityLedger::new(
+                        state.playback_epoch(),
+                        start_frame,
+                        config.frame_count,
+                    )?;
+                    let planned_terminal_frame = state
+                        .last_content_frame()
+                        .context("resolve continuous playback terminal frame")?;
+                    realtime.begin_realtime(state, config.absolute_deadline)?;
+                    for _ in 0..observation_plan.advancing_intervals {
+                        if opportunity_ledger.classified_opportunities()
+                            >= config
+                                .frame_count
+                                .saturating_sub(observation_plan.terminal_observations)
+                        {
+                            break;
+                        }
+                        let outcome = realtime.run_video_interval(
+                            state,
+                            &mut headless_gpu,
+                            config.ready_timeout,
+                        )?;
+                        let HeadlessRealtimeIntervalOutcome::Advanced { epoch, frame, sample } =
+                            outcome
+                        else {
+                            break;
+                        };
+                        opportunity_ledger.record(epoch, frame, sample, &mut readiness)?;
+                    }
+                    let _ = realtime.pump_preview_completion(state)?;
+                    let terminal_epoch = state.playback_epoch();
+                    let terminal_frame = state.current_frame();
+                    if !opportunity_ledger.is_complete() {
+                        let terminal_sample = realtime.complete_current_video_opportunity(
+                            state,
+                            &mut headless_gpu,
+                            config.ready_timeout,
+                        )?;
+                        opportunity_ledger.record(
+                            terminal_epoch,
+                            terminal_frame,
+                            terminal_sample,
+                            &mut readiness,
+                        )?;
+                    }
+                    let wall_duration_us =
+                        playback_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    process_memory_evidence.observe_playback_duration(wall_duration_us);
+                    let terminal = state.playback_engine.snapshot();
+                    continuous_playback_window = Some(ContinuousPlaybackWindowEvidence {
+                        target_observations: config.frame_count,
+                        observed_observations: opportunity_ledger.observed_opportunities(),
+                        required_duration_us: minimum_continuous_window_duration_us(
+                            observation_plan.advancing_intervals,
+                            config.frame_interval_ns,
+                        ),
+                        start_frame,
+                        terminal_frame: terminal.position.frame,
+                        planned_terminal_frame,
+                        reached_natural_end: terminal.state
+                            == mondrian_playback::TransportState::Ended,
+                        wall_duration_us,
+                        playback: state.playback_evidence_report(),
+                    });
+                    anyhow::ensure!(
+                        opportunity_ledger.missed_opportunities() == readiness.missed_deadline,
+                        "continuous playback opportunity ledger diverged from readiness evidence"
+                    );
+                    let _ = realtime.finish_realtime()?;
+                    Ok(())
+                },
+            )?;
+            let continuous_playback_window = continuous_playback_window
+                .context("continuous playback case omitted its bounded window evidence")?;
+            let process_memory_sampler = process_memory_sampler
+                .take()
+                .context("continuous playback omitted its process-memory sampler")?;
+            for sample in process_memory_sampler.finish()? {
+                process_memory_evidence.observe_playback(sample.observed_at_us, sample.sample);
+            }
+            {
+                let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                drain_headless_gpu_submission(
+                    preview_service,
+                    state,
                     gpu_adapter,
                     &mut headless_gpu,
                     config.ready_timeout,
                 )?;
             }
-            // The declared continuous window begins only after cold-start
-            // priming has established a presentable current frame. Startup
-            // skips remain observable in Preview diagnostics but must not be
-            // charged to the later fixed-size clock-displacement ledger.
-            state
-                .begin_playback_evidence_run(mondrian_playback::PlaybackEvidenceConfig::default())?;
-            let playback_started = Instant::now();
-            process_memory_sampler =
-                Some(ProfessionalProcessMemorySampler::start(playback_started)?);
-            let start_frame = state.current_frame();
-            let mut opportunity_ledger = ContinuousPlaybackOpportunityLedger::new(
-                state.playback_epoch(),
-                start_frame,
-                config.frame_count,
-            )?;
-            let planned_terminal_frame = state
-                .last_content_frame()
-                .context("resolve continuous playback terminal frame")?;
-            realtime.begin_realtime(&state, config.absolute_deadline)?;
-            for _ in 0..observation_plan.advancing_intervals {
-                if opportunity_ledger.classified_opportunities()
-                    >= config.frame_count.saturating_sub(observation_plan.terminal_observations)
-                {
-                    break;
-                }
-                let outcome = realtime.run_video_interval(
-                    &mut state,
-                    &mut headless_gpu,
-                    config.ready_timeout,
-                )?;
-                let HeadlessRealtimeIntervalOutcome::Advanced { epoch, frame, sample } = outcome
-                else {
-                    break;
-                };
-                opportunity_ledger.record(epoch, frame, sample, &mut readiness)?;
-            }
-            let _ = realtime.pump_preview_completion(&mut state)?;
-            let terminal_epoch = state.playback_epoch();
-            let terminal_frame = state.current_frame();
-            if !opportunity_ledger.is_complete() {
-                let terminal_sample = realtime.complete_current_video_opportunity(
-                    &mut state,
-                    &mut headless_gpu,
-                    config.ready_timeout,
-                )?;
-                opportunity_ledger.record(
-                    terminal_epoch,
-                    terminal_frame,
-                    terminal_sample,
-                    &mut readiness,
-                )?;
-            }
-            let wall_duration_us =
-                playback_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            process_memory_evidence.observe_playback_duration(wall_duration_us);
-            let terminal = state.playback_engine.snapshot();
-            continuous_playback_window = Some(ContinuousPlaybackWindowEvidence {
-                target_observations: config.frame_count,
-                observed_observations: opportunity_ledger.observed_opportunities(),
-                required_duration_us: minimum_continuous_window_duration_us(
-                    observation_plan.advancing_intervals,
-                    config.frame_interval_ns,
-                ),
-                start_frame,
-                terminal_frame: terminal.position.frame,
-                planned_terminal_frame,
-                reached_natural_end: terminal.state == mondrian_playback::TransportState::Ended,
-                wall_duration_us,
-                playback: state.playback_evidence_report(),
-            });
-            anyhow::ensure!(
-                opportunity_ledger.missed_opportunities() == readiness.missed_deadline,
-                "continuous playback opportunity ledger diverged from readiness evidence"
-            );
-            let _ = realtime.finish_realtime()?;
-            Ok(())
-        },
-    )?;
-    let continuous_playback_window = continuous_playback_window
-        .context("continuous playback case omitted its bounded window evidence")?;
-    let process_memory_sampler = process_memory_sampler
-        .take()
-        .context("continuous playback omitted its process-memory sampler")?;
-    for sample in process_memory_sampler.finish()? {
-        process_memory_evidence.observe_playback(sample.observed_at_us, sample.sample);
-    }
-    {
-        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-        drain_headless_gpu_submission(
-            preview_service,
-            &mut state,
-            gpu_adapter,
-            &mut headless_gpu,
-            config.ready_timeout,
-        )?;
-    }
-    let continuous_preview_diagnostics = realtime.preview()?.diagnostics();
-    let preview_decode_report = build_preview_decode_performance_report_with_required_access_modes(
-        continuous_preview_diagnostics
-            .decode_performance_summary(config.decode_slow_frame_budget_us),
-        config.scenario,
-        config.decode_slow_frame_budget_us,
-        &[PreviewDecodeAccessMode::PlaybackCursor],
-    );
-    let preview_render_report = continuous_preview_diagnostics
-        .render_performance_summary(PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US)
-        .map(|summary| {
-            build_preview_render_performance_report(
-                Some(summary),
-                config.scenario,
-                PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
-            )
-        });
-    let mut headless_gpu_post_window = HeadlessViewerGpuExecutionSummary {
-        adapter: Some(realtime.gpu()?.adapter_info().clone()),
-        ..HeadlessViewerGpuExecutionSummary::default()
-    };
-    let mut headless_gpu_resize = HeadlessViewerGpuExecutionSummary {
-        adapter: Some(realtime.gpu()?.adapter_info().clone()),
-        ..HeadlessViewerGpuExecutionSummary::default()
-    };
-    // The measured realtime window is complete. Move to the settled transport
-    // family explicitly instead of relying on the cadence loop to land on the
-    // Sequence's Ended boundary. The final candidate probe must establish a
-    // durable output under that exact family before decoder residency is
-    // released.
-    state.pause()?;
-    let seek_case = (config.seek_probe_count > 0)
-        .then(|| {
-            run_case(
-                "preview_media.cross_region_seek_readiness",
+            let continuous_preview_diagnostics = realtime.preview()?.diagnostics();
+            let preview_decode_report =
+                build_preview_decode_performance_report_with_required_access_modes(
+                    continuous_preview_diagnostics
+                        .decode_performance_summary(config.decode_slow_frame_budget_us),
+                    config.scenario,
+                    config.decode_slow_frame_budget_us,
+                    &[PreviewDecodeAccessMode::PlaybackCursor],
+                );
+            let preview_render_report = continuous_preview_diagnostics
+                .render_performance_summary(PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US)
+                .map(|summary| {
+                    build_preview_render_performance_report(
+                        Some(summary),
+                        config.scenario,
+                        PREVIEW_RENDER_DEFAULT_SLOW_FRAME_BUDGET_US,
+                    )
+                });
+            let mut headless_gpu_post_window = HeadlessViewerGpuExecutionSummary {
+                adapter: Some(realtime.gpu()?.adapter_info().clone()),
+                ..HeadlessViewerGpuExecutionSummary::default()
+            };
+            let mut headless_gpu_resize = HeadlessViewerGpuExecutionSummary {
+                adapter: Some(realtime.gpu()?.adapter_info().clone()),
+                ..HeadlessViewerGpuExecutionSummary::default()
+            };
+            // The measured realtime window is complete. Move to the settled transport
+            // family explicitly instead of relying on the cadence loop to land on the
+            // Sequence's Ended boundary. The final candidate probe must establish a
+            // durable output under that exact family before decoder residency is
+            // released.
+            state.pause()?;
+            let seek_case = (config.seek_probe_count > 0)
+                .then(|| {
+                    run_case(
+                        "preview_media.cross_region_seek_readiness",
+                        1,
+                        u128::from(config.seek_probe_count.saturating_add(1) as u64)
+                            .saturating_mul(config.seek_threshold_per_settled_ms),
+                        || {
+                            let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                            run_headless_cross_region_seeks(
+                                preview_service,
+                                state,
+                                gpu_adapter,
+                                &mut headless_gpu_post_window,
+                                config.sequence_frame_count,
+                                config.seek_probe_count,
+                                config.ready_timeout,
+                            )
+                        },
+                    )
+                })
+                .transpose()?;
+
+            let mut pause_seek_resume_probe = None;
+            let pause_seek_resume_case = (config.resume_probe_frames > 0)
+                .then(|| {
+                    run_case(
+                        "preview_media.pause_seek_resume_readiness",
+                        1,
+                        u128::from(config.resume_probe_frames as u64).saturating_mul(1_000),
+                        || {
+                            pause_seek_resume_probe = Some(run_headless_pause_seek_resume_probe(
+                                realtime,
+                                state,
+                                &mut headless_gpu_post_window,
+                                config.resume_probe_frames,
+                                config.ready_timeout,
+                            )?);
+                            Ok(())
+                        },
+                    )
+                })
+                .transpose()?;
+
+            let mut playback_resize_probe = None;
+            let mut playback_resize_context = (config.resize_probe_frames > 0)
+                .then(|| {
+                    prepare_headless_playback_resize_probe(
+                        realtime,
+                        state,
+                        &mut headless_gpu_resize,
+                        config.ready_timeout,
+                    )
+                })
+                .transpose()?;
+            let playback_resize_case = (config.resize_probe_frames > 0)
+                .then(|| {
+                    run_case(
+                        "preview_media.playback_viewer_resize_readiness",
+                        1,
+                        u128::from(config.resize_probe_frames as u64).saturating_mul(1_000),
+                        || {
+                            playback_resize_probe = Some(run_headless_playback_resize_probe(
+                                realtime,
+                                state,
+                                &mut headless_gpu_resize,
+                                playback_resize_context.as_mut().context(
+                                    "playback-resize setup omitted its prepared context",
+                                )?,
+                                config.resize_probe_frames,
+                                authored_resolution,
+                                authored_resolution_scale,
+                                config.ready_timeout,
+                            )?);
+                            Ok(())
+                        },
+                    )
+                })
+                .transpose()?;
+
+            let mut cancellation_recovery_probe = None;
+            let cancellation_recovery_case = config
+                .probe_cancellation_recovery
+                .then(|| {
+                    run_case(
+                        "preview_media.cancellation_recovery",
+                        1,
+                        config.ready_timeout.as_millis().saturating_mul(2),
+                        || {
+                            let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                            cancellation_recovery_probe =
+                                Some(run_headless_cancellation_recovery_probe(
+                                    preview_service,
+                                    state,
+                                    gpu_adapter,
+                                    &mut headless_gpu_post_window,
+                                    config.sequence_frame_count,
+                                    config.ready_timeout,
+                                )?);
+                            Ok(())
+                        },
+                    )
+                })
+                .transpose()?;
+
+            let gpu_candidate_case = run_case(
+                "preview_media.playback_gpu_candidate_ready",
                 1,
-                u128::from(config.seek_probe_count.saturating_add(1) as u64)
-                    .saturating_mul(config.seek_threshold_per_settled_ms),
+                config.gpu_candidate_threshold_ms,
                 || {
                     let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-                    run_headless_cross_region_seeks(
+                    wait_for_headless_gpu_ready(
                         preview_service,
-                        &mut state,
+                        state,
                         gpu_adapter,
                         &mut headless_gpu_post_window,
-                        config.sequence_frame_count,
-                        config.seek_probe_count,
                         config.ready_timeout,
                     )
                 },
-            )
-        })
-        .transpose()?;
-
-    let mut pause_seek_resume_probe = None;
-    let pause_seek_resume_case = (config.resume_probe_frames > 0)
-        .then(|| {
-            run_case(
-                "preview_media.pause_seek_resume_readiness",
+            )?;
+            {
+                let (preview_service, gpu_adapter) = realtime.bound_resources()?;
+                settle_headless_preview_and_release_transport_media(
+                    preview_service,
+                    state,
+                    gpu_adapter,
+                    &mut headless_gpu_post_window,
+                    config.ready_timeout,
+                )?;
+            }
+            let gpu_timings = realtime
+                .gpu_mut()?
+                .finish_gpu_timings()
+                .context("finish deferred headless Viewer GPU timestamp maps")?;
+            distribute_gpu_timestamp_samples(
+                &gpu_timings,
+                &mut [
+                    &mut headless_gpu_preroll,
+                    &mut headless_gpu,
+                    &mut headless_gpu_post_window,
+                    &mut headless_gpu_resize,
+                ],
                 1,
-                u128::from(config.resume_probe_frames as u64).saturating_mul(1_000),
-                || {
-                    pause_seek_resume_probe = Some(run_headless_pause_seek_resume_probe(
-                        &mut realtime,
-                        &mut state,
-                        &mut headless_gpu_post_window,
-                        config.resume_probe_frames,
-                        config.ready_timeout,
-                    )?);
-                    Ok(())
-                },
-            )
-        })
-        .transpose()?;
+            );
+            headless_gpu_post_window.discarded_gpu_timestamp_frames =
+                realtime.gpu()?.discarded_gpu_timings();
+            let native_video_gpu_timing = build_native_video_gpu_timing_report(
+                realtime
+                    .gpu_mut()?
+                    .finish_native_import_gpu_timings()
+                    .context("finish native-import Viewer GPU timing evidence")?,
+                &[
+                    &headless_gpu_preroll,
+                    &headless_gpu,
+                    &headless_gpu_post_window,
+                    &headless_gpu_resize,
+                ],
+            );
+            process_memory_evidence
+                .observe_post_stress(process_memory_probe.product_process_tree_memory());
 
-    let mut playback_resize_probe = None;
-    let mut playback_resize_context = (config.resize_probe_frames > 0)
-        .then(|| {
-            prepare_headless_playback_resize_probe(
-                &mut realtime,
-                &mut state,
-                &mut headless_gpu_resize,
-                config.ready_timeout,
-            )
-        })
-        .transpose()?;
-    let playback_resize_case = (config.resize_probe_frames > 0)
-        .then(|| {
-            run_case(
-                "preview_media.playback_viewer_resize_readiness",
-                1,
-                u128::from(config.resize_probe_frames as u64).saturating_mul(1_000),
-                || {
-                    playback_resize_probe = Some(run_headless_playback_resize_probe(
-                        &mut realtime,
-                        &mut state,
-                        &mut headless_gpu_resize,
-                        playback_resize_context
-                            .as_mut()
-                            .context("playback-resize setup omitted its prepared context")?,
-                        config.resize_probe_frames,
-                        authored_resolution,
-                        authored_resolution_scale,
-                        config.ready_timeout,
-                    )?);
-                    Ok(())
-                },
-            )
-        })
-        .transpose()?;
-
-    let mut cancellation_recovery_probe = None;
-    let cancellation_recovery_case = config
-        .probe_cancellation_recovery
-        .then(|| {
-            run_case(
-                "preview_media.cancellation_recovery",
-                1,
-                config.ready_timeout.as_millis().saturating_mul(2),
-                || {
-                    let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-                    cancellation_recovery_probe = Some(run_headless_cancellation_recovery_probe(
-                        preview_service,
-                        &mut state,
-                        gpu_adapter,
-                        &mut headless_gpu_post_window,
-                        config.sequence_frame_count,
-                        config.ready_timeout,
-                    )?);
-                    Ok(())
-                },
-            )
-        })
-        .transpose()?;
-
-    let gpu_candidate_case = run_case(
-        "preview_media.playback_gpu_candidate_ready",
-        1,
-        config.gpu_candidate_threshold_ms,
-        || {
-            let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-            wait_for_headless_gpu_ready(
-                preview_service,
-                &mut state,
-                gpu_adapter,
-                &mut headless_gpu_post_window,
-                config.ready_timeout,
-            )
-        },
-    )?;
-    {
-        let (preview_service, gpu_adapter) = realtime.bound_resources()?;
-        settle_headless_preview_and_release_transport_media(
-            preview_service,
-            &mut state,
-            gpu_adapter,
-            &mut headless_gpu_post_window,
-            config.ready_timeout,
-        )?;
-    }
-    let gpu_timings = realtime
-        .gpu_mut()?
-        .finish_gpu_timings()
-        .context("finish deferred headless Viewer GPU timestamp maps")?;
-    distribute_gpu_timestamp_samples(
-        &gpu_timings,
-        &mut [
-            &mut headless_gpu_preroll,
-            &mut headless_gpu,
-            &mut headless_gpu_post_window,
-            &mut headless_gpu_resize,
-        ],
-        1,
-    );
-    headless_gpu_post_window.discarded_gpu_timestamp_frames =
-        realtime.gpu()?.discarded_gpu_timings();
-    let native_video_gpu_timing = build_native_video_gpu_timing_report(
-        realtime
-            .gpu_mut()?
-            .finish_native_import_gpu_timings()
-            .context("finish native-import Viewer GPU timing evidence")?,
-        &[
-            &headless_gpu_preroll,
-            &headless_gpu,
-            &headless_gpu_post_window,
-            &headless_gpu_resize,
-        ],
-    );
-    process_memory_evidence.observe_post_stress(process_memory_probe.product_process_tree_memory());
-
-    anyhow::ensure!(
-        readiness.unavailable == 0,
-        "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
-        readiness,
-        realtime.preview()?.diagnostics()
-    );
-    anyhow::ensure!(
-        headless_gpu.rendered_frames > 0,
-        "continuous playback produced no real headless GPU executions"
-    );
-    anyhow::ensure!(
+            anyhow::ensure!(
+                readiness.unavailable == 0,
+                "continuous playback returned unavailable frames: {:?}; diagnostics: {:?}",
+                readiness,
+                realtime.preview()?.diagnostics()
+            );
+            anyhow::ensure!(
+                headless_gpu.rendered_frames > 0,
+                "continuous playback produced no real headless GPU executions"
+            );
+            anyhow::ensure!(
         headless_gpu_preroll.native_import_retained_sources_peak == 0
             && headless_gpu.native_import_retained_sources_peak == 0
             && headless_gpu_post_window.native_import_retained_sources_peak == 0
@@ -6046,101 +7110,106 @@ fn run_preview_media_continuous_playback_probe(
         headless_gpu_post_window.native_import_retained_sources_peak,
         headless_gpu_resize.native_import_retained_sources_peak
     );
-    anyhow::ensure!(
-        headless_gpu.stage_diagnostics.readback_stages == 0,
-        "headless Viewer GPU execution introduced readback stages: {:?}",
-        headless_gpu.stage_diagnostics
-    );
-    anyhow::ensure!(
-        headless_gpu.stage_diagnostics.gpu_blockers == 0,
-        "headless Viewer GPU execution reported blockers: {:?}",
-        headless_gpu.stage_diagnostics
-    );
+            anyhow::ensure!(
+                headless_gpu.stage_diagnostics.readback_stages == 0,
+                "headless Viewer GPU execution introduced readback stages: {:?}",
+                headless_gpu.stage_diagnostics
+            );
+            anyhow::ensure!(
+                headless_gpu.stage_diagnostics.gpu_blockers == 0,
+                "headless Viewer GPU execution reported blockers: {:?}",
+                headless_gpu.stage_diagnostics
+            );
 
-    let preview_diagnostics = realtime.preview()?.diagnostics();
-    let media_color_issues = summarize_active_sequence_media_color_issues(&state)?;
-    let preview_color_report = build_preview_color_health_report(
-        preview_diagnostics.color_health_summary(),
-        config.scenario,
-    );
-    let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
-    let render_failure_codes = preview_render_report
-        .as_ref()
-        .map(preview_render_hard_failures)
-        .unwrap_or_default();
-    // Professional seek/cancellation qualification runs after the continuous
-    // window. The collector report is cumulative, so its final snapshot keeps
-    // the complete clock/delivery evidence and also includes those completed
-    // warm, accurate, and superseded seek samples. The continuous-window
-    // snapshot remains independently embedded in `continuous_playback_window`.
-    let playback_evidence = state.playback_evidence_report();
-    let multilayer_playback = (config.video_layer_count > 1).then(|| {
-        evaluate_multilayer_playback(
-            config.video_layer_count,
-            headless_gpu.rendered_frames,
-            u64::from(headless_gpu.rendered_decode_execution.media_layers),
-            headless_gpu.compositing_diagnostics.gpu_passthrough_frames,
-            headless_gpu.compositing_diagnostics.gpu_native_composites,
-            &headless_gpu.output_extents,
-            &authored_output.full_extent,
-        )
-    });
-    if let Some(multilayer) = multilayer_playback.as_ref() {
-        anyhow::ensure!(
-            multilayer.passed,
-            "multilayer playback gate failed: {multilayer:?}"
-        );
-    }
-    let report = PreviewMediaPlaybackPerfReport {
-        scenario: config.scenario,
-        frames: config.frame_count,
-        frame_interval_ns: config.frame_interval_ns,
-        media_probe,
-        authored_output,
-        pause_seek_resume_probe,
-        playback_resize_probe,
-        multilayer_playback,
-        readiness,
-        headless_gpu_preroll,
-        headless_gpu,
-        headless_gpu_post_window,
-        headless_gpu_resize,
-        cancellation_recovery_probe,
-        real_media_gates: None,
-        qualification_media_gates: None,
-        professional_media_gates: None,
-        media_color_issues,
-        continuous_preview_diagnostics,
-        preview_diagnostics,
-        preview_color_report,
-        decode_failure_codes,
-        render_failure_codes,
-        preview_decode_report,
-        preview_render_report,
-        continuous_playback_window,
-        playback_evidence,
-        process_memory_evidence: process_memory_evidence.report(),
-        native_video_gpu_timing,
-        cases: std::iter::once(playback_case)
-            .chain(seek_case)
-            .chain(pause_seek_resume_case)
-            .chain(playback_resize_case)
-            .chain(cancellation_recovery_case)
-            .chain(std::iter::once(gpu_candidate_case))
-            .collect(),
-    };
-    if config.authored_output == PreviewMediaAuthoredOutput::SourceFull {
-        anyhow::ensure!(
+            let preview_diagnostics = realtime.preview()?.diagnostics();
+            let media_color_issues = summarize_active_sequence_media_color_issues(state)?;
+            let preview_color_report = build_preview_color_health_report(
+                preview_diagnostics.color_health_summary(),
+                config.scenario,
+            );
+            let decode_failure_codes = preview_playback_decode_failures(&preview_decode_report);
+            let render_failure_codes = preview_render_report
+                .as_ref()
+                .map(preview_render_hard_failures)
+                .unwrap_or_default();
+            // Professional seek/cancellation qualification runs after the continuous
+            // window. The collector report is cumulative, so its final snapshot keeps
+            // the complete clock/delivery evidence and also includes those completed
+            // warm, accurate, and superseded seek samples. The continuous-window
+            // snapshot remains independently embedded in `continuous_playback_window`.
+            let playback_evidence = state.playback_evidence_report();
+            let multilayer_playback = (config.video_layer_count > 1).then(|| {
+                evaluate_multilayer_playback(
+                    config.video_layer_count,
+                    headless_gpu.rendered_frames,
+                    u64::from(headless_gpu.rendered_decode_execution.media_layers),
+                    headless_gpu.compositing_diagnostics.gpu_passthrough_frames,
+                    headless_gpu.compositing_diagnostics.gpu_native_composites,
+                    &headless_gpu.output_extents,
+                    &authored_output.full_extent,
+                )
+            });
+            if let Some(multilayer) = multilayer_playback.as_ref() {
+                anyhow::ensure!(
+                    multilayer.passed,
+                    "multilayer playback gate failed: {multilayer:?}"
+                );
+            }
+            let report = PreviewMediaPlaybackPerfReport {
+                scenario: config.scenario,
+                frames: config.frame_count,
+                frame_interval_ns: config.frame_interval_ns,
+                media_probe,
+                authored_output,
+                pause_seek_resume_probe,
+                playback_resize_probe,
+                multilayer_playback,
+                readiness,
+                headless_gpu_preroll,
+                headless_gpu,
+                headless_gpu_post_window,
+                headless_gpu_resize,
+                cancellation_recovery_probe,
+                real_media_gates: None,
+                qualification_media_gates: None,
+                professional_media_gates: None,
+                media_color_issues,
+                continuous_preview_diagnostics,
+                preview_diagnostics,
+                preview_color_report,
+                decode_failure_codes,
+                render_failure_codes,
+                preview_decode_report,
+                preview_render_report,
+                continuous_playback_window,
+                playback_evidence,
+                process_memory_evidence: process_memory_evidence.report(),
+                native_video_gpu_timing,
+                owner_closure: None,
+                cases: std::iter::once(playback_case)
+                    .chain(seek_case)
+                    .chain(pause_seek_resume_case)
+                    .chain(playback_resize_case)
+                    .chain(cancellation_recovery_case)
+                    .chain(std::iter::once(gpu_candidate_case))
+                    .collect(),
+            };
+            if config.authored_output == PreviewMediaAuthoredOutput::SourceFull {
+                anyhow::ensure!(
             report.headless_gpu.output_extents.contains(&report.authored_output.full_extent),
             "source-Full playback window never executed its authored Full GPU extent {:?}: {:?}",
             report.authored_output.full_extent,
             report.headless_gpu.output_extents
         );
-    }
-    validate_executed_adaptive_scaling(&report)?;
-    if let Some(journal) = decode_execution_journal {
-        journal.finish()?;
-    }
+            }
+            validate_executed_adaptive_scaling(&report)?;
+            if let Some(journal) = decode_execution_journal {
+                journal.finish()?;
+            }
+            Ok(report)
+        },
+    )?;
+    report.owner_closure = Some(owner_closure);
     Ok(report)
 }
 
@@ -7582,17 +8651,6 @@ fn build_app_ui_perf_state(
         sequence.video_tracks[track_index].add_clip(clip)?;
     }
 
-    for index in 0..(clip_count / 3).max(audio_track_count) {
-        let track_index = index % audio_track_count;
-        let lane_index = index / audio_track_count;
-        let position = tt((lane_index as i64) * 120, tb);
-        let duration = tt(96, tb);
-        let mut clip =
-            Clip::new(asset_ids[index % asset_ids.len()], position, duration).expect("valid clip");
-        clip.label = Some(format!("Audio {index:04}"));
-        sequence.audio_tracks[track_index].add_clip(clip)?;
-    }
-
     sequence.playhead = tt(0, tb);
     sequence.mark_out(sequence.total_duration().expect("valid duration"));
     let sequence_id = sequence.id;
@@ -8681,6 +9739,7 @@ fn preview_perf_report_serializes_color_report() {
         render_failure_codes,
         preview_decode_report,
         preview_render_report: Some(preview_render_report),
+        owner_closure: None,
         cases: Vec::new(),
     };
 

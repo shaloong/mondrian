@@ -875,6 +875,12 @@ pub(crate) struct HeadlessRealtimePlaybackSession {
     driver: Option<HeadlessRealtimePlaybackDriver>,
 }
 
+type HeadlessRealtimeBindFailure = Box<(
+    anyhow::Error,
+    HeadlessPreviewRuntime,
+    HeadlessViewerGpuAdapter,
+)>;
+
 impl HeadlessRealtimePlaybackSession {
     /// Create and bind the default real Headless GPU Adapter.
     pub(crate) fn new() -> anyhow::Result<Self> {
@@ -883,9 +889,23 @@ impl HeadlessRealtimePlaybackSession {
     }
 
     /// Bind an explicitly configured Adapter without entering realtime residency.
-    pub(crate) fn with_gpu_adapter(mut gpu: HeadlessViewerGpuAdapter) -> anyhow::Result<Self> {
+    pub(crate) fn with_gpu_adapter(gpu: HeadlessViewerGpuAdapter) -> anyhow::Result<Self> {
         let preview = HeadlessPreviewRuntime::new();
-        configure_headless_gpu_decode_admission(&preview, &mut gpu)?;
+        Self::with_shutdown_owners(preview, gpu).map_err(|failure| {
+            let (error, _, _) = *failure;
+            error
+        })
+    }
+
+    /// Bind already-owned Preview/GPU resources while preserving both owners
+    /// for an exact consuming shutdown if admission setup fails.
+    pub(crate) fn with_shutdown_owners(
+        preview: HeadlessPreviewRuntime,
+        mut gpu: HeadlessViewerGpuAdapter,
+    ) -> Result<Self, HeadlessRealtimeBindFailure> {
+        if let Err(error) = configure_headless_gpu_decode_admission(&preview, &mut gpu) {
+            return Err(Box::new((error, preview, gpu)));
+        }
         Ok(Self { preview, gpu, driver: None })
     }
 

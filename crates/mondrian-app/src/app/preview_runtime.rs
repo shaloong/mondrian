@@ -641,6 +641,30 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     #[cfg(test)]
+    pub(crate) fn install_timeline_render_cache_for_test(
+        &self,
+        config: mondrian_render_cache::TimelineRenderCacheConfig,
+    ) -> Result<(), std::io::Error> {
+        let work_notifier = self.work_notifier.clone();
+        let notifier = Arc::new(move || {
+            work_notifier.result_became_pollable();
+        });
+        let service = mondrian_render_cache::TimelineRenderCacheService::start_with_notifier(
+            config, notifier,
+        )?;
+        *self.timeline_render_cache.borrow_mut() =
+            crate::app::preview_render_cache::PreviewTimelineRenderCache::with_service(service);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_memory_residency_for_persistent_cache_test(&self) {
+        self.clear_all_preview_residency();
+        self.execution.borrow_mut().clear_output();
+        self.timeline_render_cache.borrow_mut().clear_memory_state_for_test();
+    }
+
+    #[cfg(test)]
     /// Create a workerless Runtime with a deterministic media-scheduler clock.
     pub(crate) fn new_without_workers_with_scheduler_clock_for_test<C>(clock: C) -> Self
     where
@@ -929,7 +953,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         );
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "validation"))]
     pub(crate) fn retain_shutdown_worker_for_test(&self, worker: JoinHandle<()>) {
         self.workers.borrow_mut().push(worker);
     }

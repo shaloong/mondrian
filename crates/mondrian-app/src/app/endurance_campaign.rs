@@ -476,8 +476,11 @@ impl EnduranceExecutionOwners {
         preview_owner.begin_endurance_shutdown();
         self.waveform.begin_shutdown();
         app.begin_endurance_shutdown();
-        let gpu = gpu_owner.shutdown_until(deadline);
         let preview = preview_owner.shutdown_until(deadline);
+        // Decoder/Preview workers can still own native surfaces and enqueue
+        // completion-visible work after shutdown admission closes. Reclaim
+        // those producers before retiring the GPU device generation.
+        let gpu = gpu_owner.shutdown_until(deadline);
         let waveform = self.waveform.shutdown_until(deadline);
         let app = app.shutdown_for_endurance(deadline);
         let device_loss_count = u64::from(

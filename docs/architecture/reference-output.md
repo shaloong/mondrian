@@ -231,6 +231,7 @@ Module with reusable pinned buffers or device-resident transfers rather than
 creating a second signal interpretation.
 
 Software tests prove exact mode admission, carrier packing, cadence, ordering,
+coordinator spawn/join identity (including optional coordinators),
 reference-loss behavior, runtime-unavailable behavior, clean-feed color
 identity, persistent exact-source visual/Audio continuity, App author binding,
 author-drift fault latching, ordinary stop completion, and preference

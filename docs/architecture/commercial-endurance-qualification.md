@@ -374,6 +374,45 @@ proof. The explicit consuming Audio Source Cache coordinator remains the sole
 deadline-qualified authority, and only consuming qualification paths plus typed
 receipts can close a phase.
 
+The default App performance suite reuses this ownership rule instead of
+granting test teardown a weaker meaning. Each smoke runs its measured work
+inside a panic boundary, closes all admission, synchronously reclaims Preview
+workers/decoder-native residency, retires the GPU generation, and consumes the
+App against one caller-owned absolute deadline. Preview must precede GPU
+retirement after the shared stop signal: an admitted decoder worker can still
+own the renderer-qualified device root or a native surface until its join is
+proved. Its
+schema-1 JSON projection preserves all typed terminal leaves, including the
+Preview Runtime's nested Timeline render-cache receipt and the App's Project,
+Reference, Export terminal snapshot, Audio, Audio Source, and auxiliary-worker
+facts. Project timing compatibility remains three case rows carrying one
+identical receipt. The suite and comparator import one strict leaf validator
+with a fixed App worker-domain inventory; they reject missing, inconsistent,
+default, timed-out, detached, residual, boolean-only, or unequal three-row
+evidence. Preview receipts carry closure-local ordered owner slots, so duplicating
+one receipt cannot prove two owners. Numeric and boolean leaves require their
+actual JSON types; requested/start/termination counts, coordinator spawn/join,
+and Export final counters are independently reconciled. Measured case sets are
+exact and timing aggregates are recomputed from samples. The serial suite builds
+the release product executable and lib-test runner before measurements, using the same Cargo target setup;
+a worker-path override is rejected to avoid qualifying a stale binary.
+This proves bounded local smoke
+teardown only; it does not replace a campaign phase closure or 72-hour result.
+
+Because Rust tests normally disable the production cache root, performance
+Preview owners explicitly install a real service on a unique temporary root.
+The access-mode smoke additionally proves a persistent miss, durable
+publication through the bounded CPU Viewer fallback, in-memory residency reset,
+and verified hit before consuming the cache worker. GPU-only presentation has
+no CPU working frame to publish and cannot supply that evidence. Earlier
+lookup/publication work must reach terminal before the reset and baseline;
+both lookup and hit counters must then increase for the new request, so a
+delayed earlier hit cannot satisfy the gate. The headless App UI probe drives
+candidate scheduling and the production result pump explicitly; presentation
+remains a read/projection seam, not async execution authority.
+Cache-pressure recovery remains a separate Frame Store memory
+trim contract and cannot borrow this disk-cache evidence.
+
 This checkpoint supplies the serial supervisor, sealed snapshot constructors,
 owner-consuming cleanup, typed workload preparation/NotRun admission, the
 phase-scoped frozen repeated-Export owner, the persistent production Timeline
@@ -764,3 +803,8 @@ HDR/P3 display, DeckLink/AJA SDI loopback, Genlock/reference monitor, ancillary
 data, external Blender/DaVinci Resolve/Premiere reference-frame, and final
 72-hour rig gates. A Windows success, simulator receipt, or `NotRun` result is
 not transferable evidence for any of those cells.
+
+The [living commercialization handoff](../dev/color-commercialization-handoff.md)
+separates remaining local implementation and failed performance gates from
+native-platform implementation and physical qualification work. Clean smoke
+owner receipts cannot erase a timing failure or close those transfer items.
