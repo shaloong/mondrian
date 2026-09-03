@@ -71,8 +71,11 @@ The implementation is split at existing authority boundaries:
   Project/Session/Library both before and after source capture, retains the
   receipt, and exposes a mandatory revalidation seam for phase-owner admission.
   Windows fingerprints and hashes each
-  canonical direct source from one read-only-sharing object and retains it with
-  the inventory and Export-preset handles. macOS/Linux fail closed until their
+  canonical direct source from one read-only-sharing object. Export presets and
+  optional Broadcast QC profiles are likewise parsed, semantically validated,
+  and retained from their machine-plan-bound same-read objects; the factory
+  never reopens or independently interprets those paths. All handles remain
+  with the inventory. macOS/Linux fail closed until their
   descriptor-based immutable-source Adapters are qualified.
 - `mondrian-app::app::endurance_product_runtime` is the validation-only concrete
   composition over fresh `AppState` owners. A machine factory must prove the

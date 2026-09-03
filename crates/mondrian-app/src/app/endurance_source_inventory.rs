@@ -30,6 +30,7 @@ const SOURCE_INVENTORY_SCHEMA_VERSION: u32 = 1;
 const SOURCE_INVENTORY_ID: &str = "mondrian-col047/external-source-inventory/v1";
 const MAXIMUM_SOURCE_INVENTORY_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_EXPORT_PRESET_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_BROADCAST_QC_PROFILE_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_PHASE_COUNT: usize = 16;
 const MAXIMUM_SEQUENCE_COUNT_PER_PHASE: usize = 1024;
 const MAXIMUM_SOURCE_COUNT: usize = 4096;
@@ -147,6 +148,7 @@ pub struct PreparedEnduranceSourceInventory {
     root_sequence_revision: SequenceRevision,
     phase_closures: Vec<PreparedEndurancePhaseSourceClosure>,
     export_presets: BTreeMap<String, PreparedEnduranceExportPreset>,
+    broadcast_qc_profiles: BTreeMap<String, PreparedEnduranceBroadcastQcProfile>,
     sources: BTreeMap<AssetId, PreparedEnduranceSource>,
     project_fixture: PreparedEnduranceProjectFixture,
     _inventory_lease: File,
@@ -159,6 +161,32 @@ pub struct PreparedEnduranceExportPreset {
     sha256: String,
     preset: ExportPreset,
     _lease: File,
+}
+
+/// Exact parsed Broadcast QC profile retained from its machine-plan-bound object.
+#[derive(Debug)]
+pub struct PreparedEnduranceBroadcastQcProfile {
+    phase_id: String,
+    sha256: String,
+    profile: mondrian_broadcast::BroadcastQcProfile,
+    _lease: File,
+}
+
+impl PreparedEnduranceBroadcastQcProfile {
+    /// Profile phase whose Export uses this QC contract.
+    pub fn phase_id(&self) -> &str {
+        &self.phase_id
+    }
+
+    /// SHA-256 of the exact retained profile bytes.
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Typed QC profile parsed and validated from the retained bytes.
+    pub const fn profile(&self) -> &mondrian_broadcast::BroadcastQcProfile {
+        &self.profile
+    }
 }
 
 impl PreparedEnduranceExportPreset {
@@ -263,6 +291,14 @@ impl PreparedEnduranceSourceInventory {
         self.export_presets.get(phase_id)
     }
 
+    /// Exact retained Broadcast QC profile for one Export-owning phase, when planned.
+    pub fn broadcast_qc_profile(
+        &self,
+        phase_id: &str,
+    ) -> Option<&PreparedEnduranceBroadcastQcProfile> {
+        self.broadcast_qc_profiles.get(phase_id)
+    }
+
     /// Number of retained source-file objects.
     pub fn source_count(&self) -> usize {
         self.sources.len()
@@ -339,8 +375,11 @@ fn prepare_windows(
     let inventory: ExternalSourceInventory = serde_json::from_slice(&bytes)?;
     validate_inventory_header(&inventory, machine_plan, project_fixture)?;
     let requirements = machine_plan.phase_requirements();
-    let (expected_closures, export_presets) =
-        derive_phase_closures(app, machine_plan, requirements)?;
+    let DerivedEndurancePhaseArtifacts {
+        closures: expected_closures,
+        export_presets,
+        broadcast_qc_profiles,
+    } = derive_phase_closures(app, machine_plan, requirements)?;
     validate_phase_closures(&inventory.phase_closures, &expected_closures, requirements)?;
     let expected_assets = expected_closures
         .iter()
@@ -417,6 +456,7 @@ fn prepare_windows(
         root_sequence_revision: inventory.root_sequence_revision,
         phase_closures: expected_closures,
         export_presets,
+        broadcast_qc_profiles,
         sources,
         project_fixture: project_fixture.clone(),
         _inventory_lease: inventory_lease,
@@ -503,17 +543,18 @@ fn validate_inventory_header(
 }
 
 #[cfg(windows)]
+struct DerivedEndurancePhaseArtifacts {
+    closures: Vec<PreparedEndurancePhaseSourceClosure>,
+    export_presets: BTreeMap<String, PreparedEnduranceExportPreset>,
+    broadcast_qc_profiles: BTreeMap<String, PreparedEnduranceBroadcastQcProfile>,
+}
+
+#[cfg(windows)]
 fn derive_phase_closures(
     app: &AppState,
     machine_plan: &PreparedCommercialEnduranceMachinePlan,
     requirements: &[EndurancePhaseRequirement],
-) -> Result<
-    (
-        Vec<PreparedEndurancePhaseSourceClosure>,
-        BTreeMap<String, PreparedEnduranceExportPreset>,
-    ),
-    EnduranceSourceInventoryError,
-> {
+) -> Result<DerivedEndurancePhaseArtifacts, EnduranceSourceInventoryError> {
     if requirements.is_empty() || requirements.len() > MAXIMUM_PHASE_COUNT {
         return Err(EnduranceSourceInventoryError::PhaseClosure(
             "profile phase count is zero or exceeds policy".to_owned(),
@@ -528,6 +569,7 @@ fn derive_phase_closures(
     let mut seen_phase_ids = BTreeSet::new();
     let mut closures = Vec::with_capacity(requirements.len());
     let mut export_presets = BTreeMap::new();
+    let mut broadcast_qc_profiles = BTreeMap::new();
     for requirement in requirements {
         if !seen_phase_ids.insert(requirement.phase_id.as_str()) {
             return Err(EnduranceSourceInventoryError::PhaseClosure(format!(
@@ -554,6 +596,11 @@ fn derive_phase_closures(
                     &requirement.phase_id,
                 )?;
                 export_presets.insert(requirement.phase_id.clone(), preset);
+                if let Some(profile) =
+                    load_broadcast_qc_profile(&requirement.phase_id, export.broadcast_qc.as_ref())?
+                {
+                    broadcast_qc_profiles.insert(requirement.phase_id.clone(), profile);
+                }
                 closure
             }
             EndurancePhaseKind::ConcurrentRecovery => {
@@ -574,6 +621,12 @@ fn derive_phase_closures(
                     &requirement.phase_id,
                 )?;
                 export_presets.insert(requirement.phase_id.clone(), preset);
+                if let Some(profile) = load_broadcast_qc_profile(
+                    &requirement.phase_id,
+                    export_plan(machine_plan, requirement)?.broadcast_qc.as_ref(),
+                )? {
+                    broadcast_qc_profiles.insert(requirement.phase_id.clone(), profile);
+                }
                 playback.0.extend(export.0);
                 playback.1.extend(export.1);
                 playback
@@ -592,7 +645,7 @@ fn derive_phase_closures(
             media_asset_ids: std::mem::take(&mut closure.1),
         });
     }
-    Ok((closures, export_presets))
+    Ok(DerivedEndurancePhaseArtifacts { closures, export_presets, broadcast_qc_profiles })
 }
 
 #[cfg(windows)]
@@ -656,6 +709,37 @@ fn load_export_preset(
         preset,
         _lease: lease,
     })
+}
+
+#[cfg(windows)]
+fn load_broadcast_qc_profile(
+    phase_id: &str,
+    binding: Option<&EnduranceMachineFileBinding>,
+) -> Result<Option<PreparedEnduranceBroadcastQcProfile>, EnduranceSourceInventoryError> {
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    let (mut lease, bytes, sha256) = read_bound_file(
+        binding,
+        MAXIMUM_BROADCAST_QC_PROFILE_BYTES,
+        "Broadcast QC profile",
+    )?;
+    let profile: mondrian_broadcast::BroadcastQcProfile = serde_json::from_slice(&bytes)?;
+    profile
+        .validate()
+        .map_err(|error| EnduranceSourceInventoryError::InvalidBinding {
+            field: "Broadcast QC profile",
+            detail: error.to_string(),
+        })?;
+    lease
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| invalid_binding("Broadcast QC profile", error))?;
+    Ok(Some(PreparedEnduranceBroadcastQcProfile {
+        phase_id: phase_id.to_owned(),
+        sha256,
+        profile,
+        _lease: lease,
+    }))
 }
 
 #[cfg(windows)]
@@ -979,6 +1063,11 @@ fn source_error(asset_id: AssetId, detail: impl Into<String>) -> EnduranceSource
 mod tests {
     use super::*;
     use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate};
+    use mondrian_broadcast::{
+        BroadcastQcObservationTap, BroadcastQcProfile, BroadcastQcRule, BroadcastQcSeverity,
+        QcActivePicture,
+    };
+    use mondrian_core::ColorSpace;
     use mondrian_project::{save_project_archive, ProjectDocument};
     use mondrian_timeline::{Clip, Sequence, SequenceCollection, SequenceSettings};
     use std::fs::OpenOptions;
@@ -990,6 +1079,7 @@ mod tests {
         app: AppState,
         receipt: PreparedEnduranceProjectFixture,
         source_path: PathBuf,
+        broadcast_qc_path: PathBuf,
         source_id: AssetId,
     }
 
@@ -1066,6 +1156,25 @@ mod tests {
         let profile = profile();
         let preset = ExportPreset::h264_aac_sdr_1080p();
         let preset_bytes = serde_json::to_vec_pretty(&preset).expect("serialize Export preset");
+        let broadcast_qc = BroadcastQcProfile {
+            id: "fixture-qc".to_owned(),
+            edition: "1".to_owned(),
+            source_sha256: [7; 32],
+            signal_color_space: ColorSpace::Rec709,
+            observation_tap: BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: QcActivePicture::full(1_920, 1_080),
+            rules: vec![BroadcastQcRule::SignalExcursion {
+                rule_id: "legal-range".to_owned(),
+                tolerance_per_mille: 0,
+                maximum_coverage_ppm: 0,
+                severity: BroadcastQcSeverity::Fail,
+            }],
+            maximum_retained_findings: 32,
+            require_regulatory_flash_analysis: false,
+            require_encoded_artifact_revalidation: true,
+        };
+        let broadcast_qc_bytes =
+            serde_json::to_vec_pretty(&broadcast_qc).expect("serialize Broadcast QC profile");
         for requirement in profile.phases.iter().filter(|requirement| {
             matches!(
                 requirement.kind,
@@ -1077,6 +1186,11 @@ mod tests {
                 &preset_bytes,
             )
             .expect("write exact Export preset");
+            fs::write(
+                root.path().join(format!("{}-qc.json", requirement.phase_id)),
+                &broadcast_qc_bytes,
+            )
+            .expect("write exact Broadcast QC profile");
             fs::create_dir(root.path().join(format!("{}-output", requirement.phase_id)))
                 .expect("create Export output root");
         }
@@ -1144,7 +1258,7 @@ mod tests {
             serde_json::json!(inventory_sha256);
         for export in value["exports"].as_array_mut().expect("Export plans") {
             export["sequence_id"] = serde_json::json!(sequence_id);
-            let phase_id = export["phase_id"].as_str().expect("phase id");
+            let phase_id = export["phase_id"].as_str().expect("phase id").to_owned();
             let preset_path = mondrian_assets::canonical_native_path(
                 &root.path().join(format!("{phase_id}-preset.json")),
             )
@@ -1154,6 +1268,19 @@ mod tests {
                 "{:x}",
                 Sha256::digest(fs::read(&preset_path).expect("read preset bytes"))
             ));
+            let broadcast_qc_path = mondrian_assets::canonical_native_path(
+                &root.path().join(format!("{phase_id}-qc.json")),
+            )
+            .expect("canonical Broadcast QC path");
+            export["broadcast_qc"] = serde_json::json!({
+                "path": broadcast_qc_path,
+                "sha256": format!(
+                    "{:x}",
+                    Sha256::digest(
+                        fs::read(&broadcast_qc_path).expect("read Broadcast QC bytes")
+                    )
+                )
+            });
         }
         fs::write(
             &plan_path,
@@ -1165,6 +1292,10 @@ mod tests {
         let mut app = AppState::new();
         let receipt =
             app.open_endurance_project_fixture(&plan).expect("open exact Project fixture");
+        let broadcast_qc_path = mondrian_assets::canonical_native_path(
+            &root.path().join("02-continuous-export-24h-qc.json"),
+        )
+        .expect("canonical retained Broadcast QC path");
 
         ExactFixture {
             _root: root,
@@ -1172,6 +1303,7 @@ mod tests {
             app,
             receipt,
             source_path,
+            broadcast_qc_path,
             source_id,
         }
     }
@@ -1198,9 +1330,33 @@ mod tests {
                 .audio_program_selection(),
             ExportAudioProgramSelection::Primary
         );
+        assert_eq!(
+            prepared
+                .broadcast_qc_profile("02-continuous-export-24h")
+                .expect("prepared Continuous Export QC profile")
+                .profile(),
+            &BroadcastQcProfile {
+                id: "fixture-qc".to_owned(),
+                edition: "1".to_owned(),
+                source_sha256: [7; 32],
+                signal_color_space: ColorSpace::Rec709,
+                observation_tap: BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+                active_picture: QcActivePicture::full(1_920, 1_080),
+                rules: vec![BroadcastQcRule::SignalExcursion {
+                    rule_id: "legal-range".to_owned(),
+                    tolerance_per_mille: 0,
+                    maximum_coverage_ppm: 0,
+                    severity: BroadcastQcSeverity::Fail,
+                }],
+                maximum_retained_findings: 32,
+                require_regulatory_flash_analysis: false,
+                require_encoded_artifact_revalidation: true,
+            }
+        );
 
         assert!(OpenOptions::new().write(true).open(&fixture.source_path).is_err());
         assert!(fs::remove_file(&fixture.source_path).is_err());
+        assert!(OpenOptions::new().write(true).open(&fixture.broadcast_qc_path).is_err());
 
         fixture
             .app
