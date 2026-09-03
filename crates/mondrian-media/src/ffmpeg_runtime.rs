@@ -85,12 +85,23 @@ pub(crate) fn ensure_ffmpeg_initialized(path: &Path) -> Result<()> {
 /// production proxy, audio-source, export, and post-encode validation paths.
 pub fn verify_ffmpeg_runtime() -> Result<()> {
     let runtime_path = Path::new("<packaged-runtime>");
+    #[cfg(feature = "validation")]
+    match crate::qualified_ffmpeg::verify_installed_process_toolchain() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            return Err(runtime_error(
+                runtime_path,
+                format!("installed exact FFmpeg toolchain failed revalidation: {error}"),
+            ));
+        }
+    }
     ensure_ffmpeg_initialized(runtime_path)?;
     verify_required_decoders(runtime_path)?;
     verify_packaged_command_tools(runtime_path)
 }
 
-fn verify_required_decoders(path: &Path) -> Result<()> {
+pub(crate) fn verify_required_decoders(path: &Path) -> Result<()> {
     let missing = REQUIRED_LINKED_DECODERS
         .iter()
         .copied()
@@ -109,6 +120,53 @@ fn verify_required_decoders(path: &Path) -> Result<()> {
             missing.join(", ")
         ),
     ))
+}
+
+#[cfg(feature = "validation")]
+pub(crate) fn verify_qualified_command_capabilities(
+    path: &Path,
+    encoders: &str,
+    filters: &str,
+    muxers: &str,
+    mut encoder_help: impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    verify_listing(path, "encoders", encoders, REQUIRED_COMMAND_ENCODERS)?;
+    verify_listing(path, "filters", filters, REQUIRED_COMMAND_FILTERS)?;
+    verify_listing(path, "muxers", muxers, REQUIRED_COMMAND_MUXERS)?;
+    for (encoder, required) in [
+        (
+            "dnxhd",
+            &[
+                "dnxhr_lb",
+                "dnxhr_sq",
+                "dnxhr_hq",
+                "dnxhr_hqx",
+                "dnxhr_444",
+                "yuv422p10le",
+                "gbrp10le",
+            ][..],
+        ),
+        ("libx264", &["avcintra-class", "yuv422p10le"][..]),
+        ("v210", &["yuv422p10le"][..]),
+        ("r210", &["gbrp10le"][..]),
+    ] {
+        let help = encoder_help(encoder)?;
+        let missing = required
+            .iter()
+            .copied()
+            .filter(|token| !help.contains(token))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(runtime_error(
+                path,
+                format!(
+                    "qualified FFmpeg encoder {encoder} is missing professional contract tokens: {}",
+                    missing.join(", ")
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn verify_packaged_command_tools(path: &Path) -> Result<()> {

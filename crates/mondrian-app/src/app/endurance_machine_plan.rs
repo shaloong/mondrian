@@ -17,11 +17,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const MACHINE_PLAN_SCHEMA_VERSION: u32 = 1;
+const MACHINE_PLAN_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_MACHINE_PLAN_BYTES: u64 = 256 * 1024;
 const MAXIMUM_PATH_BYTES: usize = 4 * 1024;
 const MAXIMUM_IDENTITY_BYTES: usize = 128;
 const MAXIMUM_SEEK_TARGETS: usize = 128;
+const MAXIMUM_FFMPEG_RUNTIME_FILES: usize = 512;
 const MAXIMUM_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAXIMUM_ARTIFACT_BYTES: u64 = 1 << 40;
 
@@ -197,6 +198,9 @@ pub struct EnduranceMachineVerifierTools {
     pub ffmpeg: EnduranceMachineToolPlan,
     /// Pinned FFprobe executable and capability identity.
     pub ffprobe: EnduranceMachineToolPlan,
+    /// Complete ordered packaged Windows DLL closure shared by both tools and
+    /// the in-process FFmpeg runtime.
+    pub runtime_files: Vec<EnduranceMachineFileBinding>,
 }
 
 /// Non-renewing execution bounds frozen into the approved machine plan.
@@ -217,7 +221,7 @@ pub struct EnduranceMachineTimeoutPlan {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommercialEnduranceMachinePlan {
-    /// Machine-plan schema. Version 1 is required.
+    /// Machine-plan schema. Version 2 is required.
     pub schema_version: u32,
     /// Stable operator-assigned plan identity.
     pub plan_id: String,
@@ -348,6 +352,7 @@ fn validate_plan(
     }
     validate_tool(&plan.verifier_tools.ffmpeg, "ffmpeg")?;
     validate_tool(&plan.verifier_tools.ffprobe, "ffprobe")?;
+    validate_verifier_runtime_files(&plan.verifier_tools)?;
     validate_timeouts(plan.timeouts)?;
 
     let export_phase_ids = profile
@@ -408,6 +413,41 @@ fn validate_plan(
             expected: recovery_cycle_count,
             actual: plan.recovery_seek_targets.len(),
         });
+    }
+    Ok(())
+}
+
+fn validate_verifier_runtime_files(
+    tools: &EnduranceMachineVerifierTools,
+) -> Result<(), CommercialEnduranceMachinePlanError> {
+    if tools.runtime_files.is_empty()
+        || tools.runtime_files.len() > MAXIMUM_FFMPEG_RUNTIME_FILES
+        || tools.ffmpeg.executable.path.parent() != tools.ffprobe.executable.path.parent()
+    {
+        return Err(CommercialEnduranceMachinePlanError::InvalidVerifierRuntimeClosure);
+    }
+    let executable_directory = tools
+        .ffmpeg
+        .executable
+        .path
+        .parent()
+        .ok_or(CommercialEnduranceMachinePlanError::InvalidVerifierRuntimeClosure)?;
+    let mut previous: Option<&Path> = None;
+    let mut names = BTreeSet::new();
+    for binding in &tools.runtime_files {
+        validate_file_binding(binding, "verifier_tools.runtime_files")?;
+        if binding.path.parent() != Some(executable_directory)
+            || binding
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_none_or(|extension| !extension.eq_ignore_ascii_case("dll"))
+            || previous.is_some_and(|path| path >= binding.path.as_path())
+            || !names.insert(binding.path.file_name())
+        {
+            return Err(CommercialEnduranceMachinePlanError::InvalidVerifierRuntimeClosure);
+        }
+        previous = Some(binding.path.as_path());
     }
     Ok(())
 }
@@ -513,7 +553,7 @@ pub enum CommercialEnduranceMachinePlanError {
     #[error("invalid commercial endurance machine-plan JSON: {0}")]
     Json(serde_json::Error),
     /// Machine-plan schema is unsupported.
-    #[error("unsupported commercial endurance machine-plan schema {actual}; expected 1")]
+    #[error("unsupported commercial endurance machine-plan schema {actual}; expected 2")]
     UnsupportedSchema { actual: u32 },
     /// Identity token was empty, placeholder, oversized, or unsafe.
     #[error("invalid commercial endurance machine-plan identity '{field}'")]
@@ -521,6 +561,10 @@ pub enum CommercialEnduranceMachinePlanError {
     /// An approved file digest was malformed.
     #[error("commercial endurance machine-plan field '{field}' must be lowercase SHA-256")]
     InvalidSha256 { field: &'static str },
+    /// Pinned FFmpeg runtime files were missing, unordered, duplicated, or did
+    /// not share the executable directory.
+    #[error("invalid FFmpeg verifier runtime-file closure")]
+    InvalidVerifierRuntimeClosure,
     /// A plan path was not a bounded absolute normalized path.
     #[error("commercial endurance machine-plan path '{field}' is invalid")]
     InvalidPath { field: &'static str },
@@ -587,7 +631,7 @@ pub(crate) fn write_test_machine_plan(
         })
         .collect();
     let plan = CommercialEnduranceMachinePlan {
-        schema_version: 1,
+        schema_version: 2,
         plan_id: "test-machine-plan".to_owned(),
         project: EnduranceMachineProjectPlan {
             project: binding("project.mdp"),
@@ -637,6 +681,7 @@ pub(crate) fn write_test_machine_plan(
                 version_output_sha256: "d".repeat(64),
                 capability_report_sha256: "e".repeat(64),
             },
+            runtime_files: vec![binding("avcodec.dll")],
         },
         timeouts: EnduranceMachineTimeoutPlan {
             interval_ms: 1_000,
@@ -701,6 +746,20 @@ mod tests {
         assert!(matches!(
             PreparedCommercialEnduranceMachinePlan::load(&path, &profile(), 24),
             Err(CommercialEnduranceMachinePlanError::Json(_))
+        ));
+
+        write_test_machine_plan(&path, temporary.path(), &profile(), 24);
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("read plan")).expect("parse plan");
+        value["verifier_tools"]["runtime_files"] = serde_json::json!([]);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&value).expect("serialize empty runtime closure"),
+        )
+        .expect("write empty runtime closure");
+        assert!(matches!(
+            PreparedCommercialEnduranceMachinePlan::load(&path, &profile(), 24),
+            Err(CommercialEnduranceMachinePlanError::InvalidVerifierRuntimeClosure)
         ));
 
         write_test_machine_plan(&path, temporary.path(), &profile(), 24);

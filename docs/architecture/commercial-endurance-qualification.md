@@ -35,11 +35,12 @@ The implementation is split at existing authority boundaries:
   the concrete runtime remains the authority for pumping real product work,
   coordinator-bounded owner snapshots, typed semantic events, and synchronous
   closure.
-- `mondrian-app::app::endurance_machine_plan` owns the bounded schema-1 JSON
+- `mondrian-app::app::endurance_machine_plan` owns the bounded schema-2 JSON
   that binds the exact canonical Project and external-source inventory,
   Sequence, physical Audio and Reference Output contracts, phase-specific
   Export preset/range/output/QC/verifier limits, ordered recovery seek targets,
-  pinned FFmpeg/FFprobe identities, and non-renewing timeouts. Its SHA-256 is
+  pinned FFmpeg/FFprobe identities, the complete ordered same-directory Windows
+  runtime-DLL closure, and non-renewing timeouts. Its SHA-256 is
   computed from the original regular-file bytes, not caller-supplied fields.
 - `mondrian-app::app::endurance_run_request` is the only public campaign-input
   admission seam. Its strict bounded schema-1 JSON binds the original profile,
@@ -101,6 +102,22 @@ The implementation is split at existing authority boundaries:
   Windows denies write and delete sharing for the retained install lifetime;
   macOS and Linux currently fail closed until an equivalent native
   immutable-object Adapter and transfer qualification cell exist.
+- `mondrian-app::app::endurance_ffmpeg_toolchain` lowers only the already
+  prepared machine plan into the Media-owned exact runtime capsule. It binds
+  the plan digest, both executable receipts, every DLL receipt, and one
+  canonical receipt digest; validates the canonical-path closure of currently
+  loaded FFmpeg modules; and installs the capsule process-wide exactly once. This must occur
+  before a fresh `AppState`, Export Queue, media worker, or independent verifier
+  exists. Every later machine-factory use revalidates the same plan binding.
+  The CLI snapshot and helper-process source DLLs therefore share approved
+  retained bytes instead of independently reopening mutable paths. Previously
+  mapped in-process modules currently have canonical-path evidence rather than
+  independent mapped-image/file-object evidence, so the machine factory and
+  final qualification report must retain that limitation until the stronger
+  Windows evidence seam is implemented. The capsule entry check is fail-closed
+  for accidental change but is not an atomic hostile-same-user check across
+  command construction and spawn. macOS/Linux fail closed pending their
+  descriptor/immutable-image Adapter qualification.
 - `mondrian-app::app::endurance_workload` owns the bounded regular-file read,
   SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
   duration/counter validation, plus the exact pre-start capability inventory.

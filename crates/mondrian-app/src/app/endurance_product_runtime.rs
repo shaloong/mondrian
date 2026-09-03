@@ -1278,7 +1278,7 @@ mod tests {
             _requirement: &EndurancePhaseRequirement,
             _workload: &PreparedEnduranceWorkload,
         ) -> Result<EndurancePreStartCapabilityInventory, EnduranceCampaignError> {
-            assert_eq!(machine_plan.plan().schema_version, 1);
+            assert_eq!(machine_plan.plan().schema_version, 2);
             Ok(self.inventory.clone())
         }
 
@@ -1290,7 +1290,7 @@ mod tests {
             prepared_start: PreparedEndurancePhaseStart,
         ) -> FreshEndurancePhaseBuild {
             self.build_calls.set(self.build_calls.get() + 1);
-            assert_eq!(machine_plan.plan().schema_version, 1);
+            assert_eq!(machine_plan.plan().schema_version, 2);
             assert_eq!(prepared_start.phase_id(), requirement.phase_id);
             assert_eq!(prepared_start.workload_id(), workload.workload_id());
             assert_eq!(prepared_start.kind(), requirement.kind);

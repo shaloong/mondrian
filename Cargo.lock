@@ -2533,6 +2533,7 @@ dependencies = [
  "tracing",
  "walkdir",
  "windows 0.62.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

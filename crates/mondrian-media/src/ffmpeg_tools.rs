@@ -41,11 +41,19 @@ pub(crate) struct ResolvedFfmpegTool {
 
 /// Construct an FFmpeg command using the packaged tool when present.
 pub fn ffmpeg_command() -> Command {
+    #[cfg(feature = "validation")]
+    if let Some(command) = crate::qualified_ffmpeg::process_ffmpeg_command() {
+        return command;
+    }
     Command::new(resolve_ffmpeg_tool(FfmpegTool::Ffmpeg).path)
 }
 
 /// Construct an ffprobe command using the packaged tool when present.
 pub fn ffprobe_command() -> Command {
+    #[cfg(feature = "validation")]
+    if let Some(command) = crate::qualified_ffmpeg::process_ffprobe_command() {
+        return command;
+    }
     Command::new(resolve_ffmpeg_tool(FfmpegTool::Ffprobe).path)
 }
 

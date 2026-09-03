@@ -24,6 +24,8 @@ mod packet_identity;
 pub mod preview;
 mod process_supervisor;
 pub mod proxy;
+#[cfg(feature = "validation")]
+mod qualified_ffmpeg;
 mod resident_encode;
 pub mod waveform;
 
@@ -131,6 +133,13 @@ pub use proxy::{
     ProxyGenerationOutcome, ProxyGenerator, ProxyPublicationEvidence, ProxyPublicationFailure,
     ProxyPublicationFailureKind, ProxyPublicationPhase, ProxyResolution, ProxySourceFingerprint,
     ProxyStatus,
+};
+#[cfg(feature = "validation")]
+pub use qualified_ffmpeg::{
+    install_process_ffmpeg_toolchain, PreparedFfmpegToolchain,
+    QualifiedFfmpegRuntimeFileExpectation, QualifiedFfmpegRuntimeFileReceipt,
+    QualifiedFfmpegToolExpectation, QualifiedFfmpegToolKind, QualifiedFfmpegToolReceipt,
+    QualifiedFfmpegToolchainError,
 };
 pub use resident_encode::{
     D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, D3D12ResidentHevcEncoderSession,

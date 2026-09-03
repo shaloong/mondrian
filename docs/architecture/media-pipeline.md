@@ -866,6 +866,41 @@ gate rejects PATH-only tools, missing linked baseline decoders, missing
 production CLI encoders/filters/muxers, and an unredistributable `--enable-nonfree`
 build; product startup must not depend on Cargo's test-only search path,
 Homebrew, or a developer-specific `PATH`.
+
+Commercial endurance adds a stricter validation-only ownership seam. One
+`PreparedFfmpegToolchain` is constructed before any App, Queue, media worker,
+or CLI owner. On Windows it requires two canonical executable bindings plus an
+ordered machine-plan binding for every DLL actually present beside them. It
+opens every source with read-only sharing, hashes and copies the same open
+objects into one unique private capsule, reopens those copies with write/delete
+sharing denied, and retains a direct capsule-directory handle that prevents the
+directory itself from being renamed or deleted. Because that handle does not
+prevent insertion of a new child, every exact command construction revalidates
+the complete capsule entry set and permanently poisons a changed capsule before
+returning an executable command. Fixed bounded version/capability probes and the normal
+required-decoder/encoder/filter/muxer/encoder-option baseline execute from that
+capsule with its directory as CWD and the only non-system PATH entry. The gate
+also requires process-loaded `avcodec`, `avformat`, `avutil`, `avfilter`,
+`swscale`, and `swresample`, and requires their canonical module paths to equal
+the corresponding retained approved source paths. Every already-loaded declared
+runtime basename must pass the same path check; every other loaded DLL must be
+an exact declared path or reside under the resolved Windows System, SysWOW64,
+or WinSxS directories. Module enumeration retries bounded buffer growth so a
+concurrent load cannot authorize a truncated observation.
+Only then may the pair be installed in the process-wide once cell; all
+production `ffmpeg_command`/`ffprobe_command` call sites subsequently use the
+exact private byte copies. Reinstalling the same receipt is idempotent and a
+different identity fails closed. The receipt proves approved executable and
+packaged runtime bytes, not that a private copy is the same filesystem object
+as its source. macOS/Linux preparation intentionally returns Unsupported until
+descriptor/immutable-image execution and loaded-library identity receive their
+transfer qualification.
+The current Windows linked-runtime evidence proves a canonical-path closure; it
+does not independently bind a previously mapped image to the later retained
+file object. The capsule namespace check also is not atomic with a later
+`Command::spawn`. Qualification therefore assumes an access-controlled machine
+without a hostile same-user process; mapped-image/object evidence and stronger
+capsule ACL or handle-relative execution remain explicit qualification work.
 On Windows the sanitized gate retains only the staged directory and Windows
 system directories in `PATH`; the vcpkg build tree cannot heal an omitted DLL.
 Linux additionally resolves the recursive staged ELF graph after RPATH rewrite

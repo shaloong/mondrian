@@ -15,10 +15,13 @@ Adapter is never eligible evidence.
 - sufficient create-only evidence storage for 72 hours plus exports;
 - an externally approved `mondrian-endurance-replay` binary hash and exact
   checked-in profile-file hash;
-- an exact bounded schema-1 machine plan whose original file SHA-256 binds the
+- an exact bounded schema-2 machine plan whose original file SHA-256 binds the
   canonical `.mdp`, external-source inventory, active Sequence, physical Audio
   and Reference routes, Export plans, recovery targets, verifier tools, and
-  timeouts. Its Reference request must explicitly include the ANC policy;
+  timeouts. On Windows `verifier_tools.runtime_files` must be the strictly
+  ordered exact set of every `.dll` beside both FFmpeg executables, with a
+  lowercase SHA-256 for each; omission or an extra declaration fails closed.
+  Its Reference request must explicitly include the ANC policy;
 - an external `external-commercial-endurance-authority-v2` manifest with one
   single-use challenge, exact release bindings, and exact phase workload and
   producer bindings. Its bytes must be approved and pinned before capture.
@@ -71,6 +74,27 @@ hashes and parses the capture authority from the same bounded byte read, so a
 replacement between separate hash and parse opens cannot be accepted. Only the
 prepared request can enter the public product runtime; do not construct a raw
 campaign request in a validation binary.
+
+Before creating the fresh `AppState` or any Queue/worker, call
+`PreparedEnduranceFfmpegToolchain::prepare_and_install` with that same prepared
+machine plan and retain the result in the machine factory. Preparation copies
+the exact executable and DLL objects into one private capsule, denies
+write/delete sharing on every declared file, retains the capsule directory
+against rename/delete, and revalidates the exact entry set before every command.
+It uses a capsule-only PATH/CWD for bounded fixed probes, applies the product
+semantic runtime gate, and verifies process-loaded runtime identities. Record its
+`toolchain_receipt_sha256` alongside the machine-plan digest. A second identity
+in one process is invalid. Current macOS/Linux builds return Unsupported and
+must remain incomplete until their recorded transfer qualification is done.
+This is staged admission infrastructure: the machine-specific factory still
+must make successful preparation and retention a construction prerequisite for
+the App and every phase owner.
+On Windows the in-process check currently proves an exact canonical-path
+closure, not independent identity of a module image mapped before its retained
+source handle was acquired. The entry-set recheck is also not atomic with
+`spawn`. Run only on an access-controlled qualification account, record these
+limitations, and do not claim mapped-image/object or hostile-same-user
+qualification until the dedicated evidence seam is complete.
 
 For every admitted phase, the machine-specific factory must create a fresh
 `AppState` and call `open_endurance_project_fixture` with the exact
