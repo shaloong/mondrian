@@ -4484,6 +4484,7 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_session(
         frame,
         program_boundary,
         adaptation,
+        false,
         session,
     )?;
     Ok(float.into_rgba8())
@@ -4502,6 +4503,7 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_wit
         frame,
         program_boundary,
         adaptation,
+        matches!(tap, mondrian_core::ProgramScopesTap::ProgramOutput),
         session,
     )?;
     let signal_color_space = match tap {
@@ -4512,8 +4514,16 @@ pub fn execute_cpu_program_monitor_presentation_rgba8_with_signal_monitoring_wit
     let width = float.monitor_frame.descriptor().width;
     match tap {
         mondrian_core::ProgramScopesTap::ProgramOutput => {
+            let program_frame = float.program_frame.as_ref().ok_or_else(|| {
+                RenderColorTransformError::execution_failed(
+                    crate::RenderColorTransformDirection::Intermediate,
+                    float.program_output_descriptor,
+                    float.monitor_frame.descriptor(),
+                    "Program Output signal tap was not retained",
+                )
+            })?;
             mondrian_core::apply_signal_monitoring_rgba_f32(
-                &float.program_frame.rgba_f32().data,
+                &program_frame.rgba_f32().data,
                 &mut float.monitor_frame.rgba_f32_mut().data,
                 width,
                 contract,
@@ -4539,7 +4549,7 @@ struct RenderProgramMonitorPresentationFloat {
     program_output_descriptor: ColorFrameDescriptor,
     monitor_color_diagnostics: Option<crate::RenderColorTransformDiagnostics>,
     stage_diagnostics: RenderColorStageDiagnostics,
-    program_frame: crate::CpuEncodedFloatColorFrame,
+    program_frame: Option<crate::CpuEncodedFloatColorFrame>,
     monitor_frame: crate::CpuEncodedFloatColorFrame,
 }
 
@@ -4565,6 +4575,7 @@ fn execute_cpu_program_monitor_presentation_float_with_session(
     frame: &CpuColorFrame,
     program_boundary: &RenderOutputColorBoundary,
     adaptation: &crate::RenderMonitorAdaptation,
+    retain_program_for_monitoring: bool,
     session: &mut crate::RenderCpuColorExecutionSession,
 ) -> Result<RenderProgramMonitorPresentationFloat, RenderColorTransformError> {
     validate_program_monitor_boundary(frame, program_boundary, adaptation)?;
@@ -4575,7 +4586,10 @@ fn execute_cpu_program_monitor_presentation_float_with_session(
         mut stage_diagnostics,
         output_descriptor: program_output_descriptor,
     } = execute_cpu_output_boundary_float_with_session(frame, program_boundary, session)?;
-    let program_frame_for_monitoring = program_frame.clone();
+    // Only a Program Output classification tap needs the pre-monitor raster.
+    // Retaining it for ordinary presentation defeats the consuming monitor
+    // path's Arc::try_unwrap and forces an otherwise unused full-frame copy.
+    let program_frame_for_monitoring = retain_program_for_monitoring.then(|| program_frame.clone());
     let (monitor_frame, monitor_color_diagnostics) = if adaptation.requires_pass() {
         let result = crate::CpuColorTransformExecutor::monitor_adaptation_float_owned_with_session(
             program_frame,
@@ -4643,14 +4657,7 @@ fn validate_program_monitor_boundary(
 }
 
 fn quantize_encoded_float_frame_rgba8(frame: &crate::CpuEncodedFloatColorFrame) -> Vec<u8> {
-    let pixels = &frame.rgba_f32().data;
-    let mut rgba = Vec::with_capacity(pixels.len().saturating_mul(4));
-    for pixel in pixels {
-        for channel in pixel {
-            rgba.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
-        }
-    }
-    rgba
+    crate::cpu_quantization::quantize_rgba8(&frame.rgba_f32().data)
 }
 
 impl<'a> RenderColorStagePlanner<'a> {

@@ -863,15 +863,7 @@ impl CpuColorTransformExecutor {
         };
 
         let encoded_float = Self::transform_float_with_session(frame, transform, session)?;
-        let rgba = encoded_float
-            .frame
-            .rgba_f32()
-            .data
-            .iter()
-            .flat_map(|pixel| {
-                pixel.iter().map(|channel| (channel.clamp(0.0, 1.0) * 255.0).round() as u8)
-            })
-            .collect();
+        let rgba = crate::cpu_quantization::quantize_rgba8(&encoded_float.frame.rgba_f32().data);
 
         let frame = CpuEncodedColorFrame::rgba8(
             descriptor.width,

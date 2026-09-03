@@ -5,6 +5,12 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
+New lifecycle audit caveat: the existing clean receipts cover their declared
+owner inventory, not every renderer thread. `CpuYuvUploadRuntime::new` currently
+discards its upload worker's JoinHandle, so GPU progress retirement alone does
+not prove that upload worker has exited. Closing this missing owner/evidence
+boundary is required before complete COL-047 lifetime qualification.
+
 ## Local Windows work still in progress
 
 COL-047 default performance owner-closure receipts now cover Project, App UI,
@@ -20,15 +26,35 @@ suite:
   cold-start cost, not a proven latency fix. A deterministic NumberInput/Label
   regression confirmed two independent widget font-measurement initializations.
   These now share one thread-local owner, with exact-size/shaping parity and
-  all 1,003 Widgets tests passing. The modified App release smoke still needs
-  a new measurement; do not close its cold-start gate from the unchanged-binary
-  repeat or the initialization-count test alone.
+  all 1,003 Widgets tests passing. The modified App release smoke measured
+  2,750 ms and passed all seven UI cases. This is the new original-scenario
+  observation; the unchanged-binary repeat was not used as fix evidence.
 - Decode/cache proved real persistent publication and a new request-local
   lookup/hit. Its render maximum was 64,201 us against 50,000 us: preparation
   2,157 us, composite 4,723 us, CPU output boundary 57,321 us. The boundary
   includes processor preparation, Program Output, monitor adaptation, and
   quantization, not cache disk publication. Keep the required CPU publication,
   output extent, color semantics, and existing budget intact when optimizing.
+  Isolated 960x540 boundary diagnostics reproduced 60.3/70.2 ms cold and
+  43.9–56.8 ms warm execution. Bounded OCIO scratch and removal of an unused
+  retained Program frame now measure 42.2 ms cold and 34.5–39.0 ms warm, with
+  identical input/output hashes. Core release regression passed 348 tests;
+  the public Viewer allocation regression passed after first proving the
+  redundant full-frame allocation. The complete App rerun still **failed**:
+  52,872 us against 50,000 us, including preparation 2,124 us, composite
+  5,148 us, and CPU output boundary 45,600 us. Persistent publication and the
+  new request-local hit passed, as did all six ordinary media cases; owner
+  closure remained clean. Next isolate exact RGBA8 quantization rather than
+  rerunning unchanged code until a favorable timing sample appears.
+  The subsequent shared exact quantization kernel passed four kernel
+  regressions and public Viewer presentation parity. Its isolated median was
+  0.918 ms versus the original loop's 5.065 ms; complete cold boundary execution
+  measured 37.063 ms with the same final RGBA SHA-256 as before. These remain
+  diagnostics, not substitutes for the original App gate. The subsequent
+  `col047-quantized-final` App gate passed at **44,567 us / 50,000 us**:
+  preparation 2,140 us, composite 4,363 us, CPU output boundary 38,064 us.
+  All six media cases passed, including real persistent publication and the
+  new request-local hit. The CPU optimization block is validated.
 - Export/Audio initially stopped at an OCIO dependency-checkout write denial,
   before measurement. After authorized dependency rebuilding, the 1080p29.97
   Export repeat passed: 96 frames, zero budget misses, maximum 22 ms, with
@@ -36,35 +62,67 @@ suite:
   load-matrix cells with zero deadline misses. Both reports passed the exact
   suite eligibility validator; the initial build denial was neither a
   performance failure nor a passing skip.
+  The subsequent `col047-cpu-final` suite again passed Export (96 frames,
+  maximum 20 ms, zero misses) and all 12 Audio cells. Its only failure was the
+  decode/cache render budget above. All six reports were copied with matching
+  SHA-256 into `.scratch/color-pipeline-commercialization/evidence/20260904-cpu-first-suite/`.
+
+The final quantized suite passed Project, media, continuous playback (60/60
+Ready), Export (96 frames, maximum 19 ms, zero misses, pixel/color pass), and
+Audio (12 cells, zero misses). Its UI case failed **before measurement** because
+the PID/counter-based fixture allocator adopted an existing runtime directory
+without a durable ownership marker. The same release test executable, using a
+fresh exclusive process-local temporary parent, passed all seven UI cases
+(root construction 5,068 ms / 10,000 ms) and the original eligibility validator.
+Do not call this a single all-green suite run. A controlled injection into a
+fresh temporary parent reproduced the exact marker failure (child PID 9152,
+first legacy fixture slot, exit 101); the slot did not preexist the injection.
+The fixture allocator needs a separate fix; the production ownership guard
+must remain fail-closed. Reports and both failure/repeat logs were preserved
+with SHA-256 checks in
+`.scratch/color-pipeline-commercialization/evidence/20260904-quantized-suite/`.
 
 These are developer-run observations on an uncommitted tree, not a sealed
 COL-031 or COL-047 reference-machine result. Raw local reports are under
-`target/perf/col047-final/` and may be removed during a clean rebuild.
+`target/perf/col047-final/` and `target/perf/col047-cpu-final/` and may be
+removed during a clean rebuild. Preserve reports outside `target` with hash
+verification before deleting build output.
 
 Remaining local COL-047 implementation/validation blocks:
 
-1. Rerun the modified App release UI gate and diagnose the CPU output-boundary
-   cost with explicit cold/warm owner observations before selecting its fix.
-   Retain failed samples alongside subsequent measurements; diagnostic warm
-   frames must never replace the formal smoke's first-frame budget.
-2. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
+1. Fix test-fixture allocation so a reused PID cannot adopt an old directory.
+   Atomically claim a fresh root; preserve ownership markers and existing
+   fixture lifetime semantics. Cover the deterministic stale-slot regression
+   and rerun the original UI case. CPU output optimization has passed its
+   original 50 ms gate; retain earlier failed samples alongside that result.
+2. Retain and explicitly retire the renderer CPU YUV upload worker, with bounded
+   non-blocking retirement, exact terminal evidence, and full/partial Viewer
+   runtime construction coverage. Current progress-worker receipts cannot
+   stand in for this worker's completion.
+3. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
    consume them through the shared shutdown deadline, rather than returning
-   only an error and later reporting App-only closure.
-3. Extract cohesive performance owner-closure support from the large test
+   only an error and later reporting App-only closure. Preserve typed startup
+   failure evidence past the product entrypoint, even when cleanup succeeds.
+4. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
    warning suppression.
-4. Make qualified FFmpeg command rejection a typed error; a command pointing
+5. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
-5. Close the capsule lifecycle: sealed namespace, spawn-time admission,
+6. Close the capsule lifecycle: sealed namespace, spawn-time admission,
    retained child leases, explicit Windows access-control evidence, and
    fallible process-owner cleanup. Static owners do not run TempDir cleanup
    at process exit. Never recover orphans by deleting a filename-prefix glob.
-6. Add pre-loader authority and post-load image/object attestation. Current
+7. Add pre-loader authority and post-load image/object attestation. Current
    loaded-module canonical paths do not prove the identity of an image mapped
    before the retained source handle was acquired. Do not substitute a partial
    PE hash for complete image identity.
-7. Run the locally executable real Windows campaign smoke after those
+8. Run the locally executable real Windows campaign smoke after those
    boundaries close. A short smoke cannot certify the physical 72-hour run.
+9. Qualify the CPU-output bottleneck recommendation: the current generic
+   `move_preview_output_boundary_to_gpu` action is not universally applicable.
+   Diagnostics must preserve mandatory CPU cache publication, respect route
+   requirements, and distinguish processor/memory optimization from legal GPU
+   output admission (including a hybrid path if actually supported).
 
 A same-user filesystem race and an attacker able to inject into the process
 are distinct threat models. Any solution requiring a new privileged broker or
@@ -84,10 +142,19 @@ Then run the native build/test matrix, real decoder/encoder and audio-device
 paths, GPU/driver/display cells, process-tree memory capture, and endurance
 capture. Preserve exact source/package/runtime hashes and the same sealed
 workload contracts. A Windows pass is not evidence for another platform.
+The CPU terminal RGBA8 kernel uses baseline SSE2 on x86_64 and canonical scalar
+code elsewhere; ARM performance must be measured on the target, not inferred
+from the local x86_64 optimization.
 
 ## Physical and external-application work
 
 - P0 COL-010: real HDR/P3/ICC Viewer display qualification.
+- P1 COL-031: execute the complete sealed realtime performance matrix for the
+  current release candidate: 4K60/8K30 HDR/effects/scopes, real dual-layer
+  Main10 Preview, 30-minute video/audio, and 5/30/120-minute authoring gates.
+  The software matrix exists, but the issue records no executed sealed
+  reference-machine baseline. Run locally eligible cells after owner closure
+  is complete; retain unmet reference-machine requirements for transfer.
 - P2 COL-042: DeckLink/AJA vendor bridge and physical output qualification.
 - P2 COL-043: Genlock and reference-monitor qualification.
 - P2 COL-044: physical ANC/VANC, captions/timecode, and broadcast QC chain.

@@ -774,6 +774,36 @@ contaminating the stage distributions.
 
 Performance output should be committed only when it is an intentional benchmark artifact; ordinary runs should leave `target/` ignored.
 
+### CPU output-boundary diagnosis
+
+Two explicitly ignored diagnostics separate execution cost from qualification:
+
+```powershell
+$env:MONDRIAN_CPU_OUTPUT_PROBE_REPORT = 'target/perf/cpu-output-boundary.json'
+cargo test -p mondrian-renderer --release -j 1 --test cpu_output_boundary_probe -- --ignored --nocapture --test-threads=1
+cargo test -p mondrian-core --release -j 1 --lib cpu_rgb_chunk_sizes_probe -- --ignored --nocapture --test-threads=1
+cargo test -p mondrian-renderer --release -j 1 --test cpu_quantization -- --ignored --nocapture --test-threads=1
+```
+
+Create the output directory first; the optional boundary report refuses to
+overwrite a previous measurement. It retains the process's first CPU boundary,
+same-owner warm observations, and a new owner using process-shared parent
+processors, with per-observation cache deltas and exact RGBA/input parity.
+Separate warm observations time Program Output, retained/consuming monitor
+adaptation, and reference scalar quantization (not the production SIMD kernel).
+Schema 2 names that scalar reference explicitly; complete boundary observations
+always execute the production presentation path. The independent quantization
+probe alternates the original loop with the exact current private kernel.
+New-owner reuse does not isolate CPU
+finalization: OCIO itself may cache CPU handles inside the shared parent.
+
+The Core probe compares warmed layouts with the exact same OCIO processors,
+rotates measurement order, and checks bitwise parity against whole-raster RGB
+execution. None of these diagnostics has authority to qualify a machine or replace
+the App smoke's original cold-frame budget with warmed samples. Run them
+serially, without another build or performance workload, and retain failed
+formal-smoke samples alongside subsequent measurements.
+
 ## Commercial realtime performance matrix
 
 `tests/validation/realtime-performance-matrix.json` is the sealed COL-031

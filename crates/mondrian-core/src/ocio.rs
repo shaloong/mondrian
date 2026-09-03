@@ -3888,10 +3888,27 @@ fn apply_cpu_processor_float(cpu: &CPUProcessor, data: &mut [f32]) {
     if num_pixels == 0 {
         return;
     }
-    // Program color transforms own RGB only. Processing the interleaved buffer
-    // through OCIO's RGB entry point preserves straight/premultiplied alpha
-    // byte-for-byte and avoids a per-frame alpha side buffer.
-    cpu.apply_rgb_pixels(data, num_pixels, 4);
+    // ocio-rs presents RGB pixels as one scanline. For a full raster OCIO's
+    // non-RGBA layout allocates three full-width float scratch buffers and
+    // streams each operation across all of them. Bound the working set with
+    // one 16 KiB packed tile, which OCIO can process in place without that
+    // scanline allocation. This is layout scheduling, not different color math.
+    let mut scratch = [0.0_f32; 1024 * 4];
+    let complete_len = data.len() / 4 * 4;
+    for chunk in data[..complete_len].chunks_mut(scratch.len()) {
+        let scratch = &mut scratch[..chunk.len()];
+        for (source, target) in chunk.chunks_exact(4).zip(scratch.chunks_exact_mut(4)) {
+            target[..3].copy_from_slice(&source[..3]);
+            // OCIO's RGB ImageDesc supplies synthetic zero alpha. Never expose
+            // image coverage: Custom OCIO can couple alpha into RGB. Reset the
+            // synthetic lane every tile even if the processor modifies it.
+            target[3] = 0.0;
+        }
+        cpu.apply_rgba_pixels(scratch, (scratch.len() / 4) as i64, 4);
+        for (source, target) in scratch.chunks_exact(4).zip(chunk.chunks_exact_mut(4)) {
+            target[..3].copy_from_slice(&source[..3]);
+        }
+    }
 }
 
 // ── Utility: list available displays / views ───────────────────────────────────
@@ -4103,6 +4120,10 @@ pub fn mondrian_standard_output_target_contract_for_package(
         black_level_millinits: 0,
     })
 }
+
+#[cfg(test)]
+#[path = "ocio/cpu_apply_tests.rs"]
+mod cpu_apply_tests;
 
 #[cfg(test)]
 mod tests {

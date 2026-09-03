@@ -16,6 +16,7 @@ pub mod color_report_vocab;
 mod color_stage;
 pub mod color_transform;
 pub mod context;
+mod cpu_quantization;
 mod cpu_visual_execution;
 mod cpu_yuv;
 mod creative_lut_gpu;

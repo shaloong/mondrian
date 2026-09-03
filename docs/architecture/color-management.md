@@ -31,6 +31,43 @@ and monitor remain separate semantic stages; the CPU presentation path moves
 one Float32 raster through both and quantizes once, while GPU recording keeps
 the Program Output handle available for scopes and diagnostics.
 
+CPU presentation retains a separate pre-monitor Float32 frame only when the
+caller requests the Program Output signal-classification tap. Ordinary Viewer
+presentation consumes that raster through monitor adaptation; retaining an
+unused shared handle would force the consuming path to clone the whole frame.
+Monitor Output warnings retain their classification samples, not an unrelated
+Program Output frame. The public-Interface regression in
+`mondrian-renderer/tests/cpu_presentation.rs` counts full-raster allocations and
+compares pixels, alpha, stage evidence, and immutable input with the retained
+reference path, both with and without an actual monitor conversion.
+
+The Core CPU apply seam schedules the same OCIO processor over fixed 1,024-pixel
+packed tiles. One 16 KiB stack buffer replaces the whole-raster RGB scanline
+that the pinned OCIO bridge otherwise expands into three frame-sized temporary
+buffers. Each tile copies RGB into packed lanes, resets synthetic alpha to zero
+(the existing OCIO RGB ImageDesc convention), executes stock OCIO, and writes
+back RGB only. Real coverage is never passed to OCIO or rewritten, including
+its exact non-finite bit patterns. Passing real RGBA and merely restoring alpha
+afterward is not equivalent: Custom OCIO matrices may couple alpha into RGB.
+Dynamic properties are still applied once per owner invocation before tiling;
+processor identity, thread ownership, RGB math, and stage boundaries do not
+change. Whole-raster RGB oracles cover tile tails, SDR/P3/HDR views, colorimetric
+routes, dynamic exposure, and a cross-channel custom matrix. This bounded CPU
+layout is independent of GPU pass tiling and introduces no worker pool.
+
+Renderer's private `cpu_quantization` Module owns the shared terminal RGBA8
+conversion for ordinary Program Output and Viewer presentation. It preserves
+the exact `(clamp(channel, 0, 1) * 255).round() as u8` result, including NaN,
+infinities, coverage, and half-code boundaries. On x86_64, baseline SSE2 rounds
+the already-scaled value by comparing it with `trunc(value) + 0.5`; that
+threshold is exact, unlike prematurely adding 0.5 to the scaled value itself.
+Complete 16-channel chunks use unaligned SIMD loads/stores and all tails use
+the canonical scalar expression. Other architectures retain scalar execution.
+The Module allocates only the final byte raster, owns no color interpretation,
+and introduces no worker or full-float scratch. Kernel attribution, final pixel
+parity, and the original complete App first-frame budget are separate tests;
+a Windows kernel measurement is not ARM/macOS/Linux performance qualification.
+
 ## Camera RAW input boundary
 
 Camera RAW development is a source-materialization step before OCIO, not a
@@ -196,7 +233,7 @@ texture; native YUV, proxies, and ordinary color-input transforms cannot
 masquerade as this route. Preview and Export lower the same
 `PreparedSourceFrame` evidence into this typed upload path.
 The CPU timeline backend executes legal transitions directly through the
-selected engine's OCIO CPU processors without copying between pixel containers.
+selected engine's OCIO CPU processors without another full-frame pixel container.
 Those processors are retained only by the explicit
 `RenderCpuColorExecutionSession` owned by the Preview runtime, one Export job,
 or a dedicated derived-media worker. Timeline compositor scratch carries that
