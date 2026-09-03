@@ -100,6 +100,8 @@ mod audio_authoring;
 mod audio_idle_warmup;
 mod audio_monitoring;
 mod clip_authoring;
+#[cfg(test)]
+mod test_fixture;
 pub use audio_monitoring::ActiveAudioMonitoringPathEvidence;
 #[cfg(test)]
 mod audio_playback_acceptance;
@@ -764,13 +766,12 @@ impl AppState {
     fn test_fixture_root() -> PathBuf {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
-        let root = std::env::temp_dir().join(format!(
+        let name = format!(
             "mondrian-app-test-{}-{}",
             std::process::id(),
             NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&root).expect("create test fixture root");
-        root
+        );
+        test_fixture::create_root(&std::env::temp_dir(), &name).expect("create test fixture root")
     }
 
     #[cfg(test)]

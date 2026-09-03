@@ -77,8 +77,16 @@ fresh exclusive process-local temporary parent, passed all seven UI cases
 Do not call this a single all-green suite run. A controlled injection into a
 fresh temporary parent reproduced the exact marker failure (child PID 9152,
 first legacy fixture slot, exit 101); the slot did not preexist the injection.
-The fixture allocator needs a separate fix; the production ownership guard
-must remain fail-closed. Reports and both failure/repeat logs were preserved
+The fixture allocator was corrected separately with an atomically claimed
+randomized root and unchanged fixture lifetime. Three regressions first failed
+on the old allocator, then passed on both the isolated source harness and the
+rebuilt release App test binary. The real App UI test with an injected old PID
+slot then passed all seven cases (root construction 2,874 ms / 10,000 ms), left
+the old runtime directory unchanged, and passed the original eligibility
+validator. The production ownership guard remains fail-closed. The fixed report
+and log were SHA-256 verified in
+`.scratch/color-pipeline-commercialization/evidence/20260904-fixture-fix/`.
+Earlier reports and both failure/repeat logs were preserved
 with SHA-256 checks in
 `.scratch/color-pipeline-commercialization/evidence/20260904-quantized-suite/`.
 
@@ -90,35 +98,30 @@ verification before deleting build output.
 
 Remaining local COL-047 implementation/validation blocks:
 
-1. Fix test-fixture allocation so a reused PID cannot adopt an old directory.
-   Atomically claim a fresh root; preserve ownership markers and existing
-   fixture lifetime semantics. Cover the deterministic stale-slot regression
-   and rerun the original UI case. CPU output optimization has passed its
-   original 50 ms gate; retain earlier failed samples alongside that result.
-2. Retain and explicitly retire the renderer CPU YUV upload worker, with bounded
+1. Retain and explicitly retire the renderer CPU YUV upload worker, with bounded
    non-blocking retirement, exact terminal evidence, and full/partial Viewer
    runtime construction coverage. Current progress-worker receipts cannot
    stand in for this worker's completion.
-3. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
+2. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
    consume them through the shared shutdown deadline, rather than returning
    only an error and later reporting App-only closure. Preserve typed startup
    failure evidence past the product entrypoint, even when cleanup succeeds.
-4. Extract cohesive performance owner-closure support from the large test
+3. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
    warning suppression.
-5. Make qualified FFmpeg command rejection a typed error; a command pointing
+4. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
-6. Close the capsule lifecycle: sealed namespace, spawn-time admission,
+5. Close the capsule lifecycle: sealed namespace, spawn-time admission,
    retained child leases, explicit Windows access-control evidence, and
    fallible process-owner cleanup. Static owners do not run TempDir cleanup
    at process exit. Never recover orphans by deleting a filename-prefix glob.
-7. Add pre-loader authority and post-load image/object attestation. Current
+6. Add pre-loader authority and post-load image/object attestation. Current
    loaded-module canonical paths do not prove the identity of an image mapped
    before the retained source handle was acquired. Do not substitute a partial
    PE hash for complete image identity.
-8. Run the locally executable real Windows campaign smoke after those
+7. Run the locally executable real Windows campaign smoke after those
    boundaries close. A short smoke cannot certify the physical 72-hour run.
-9. Qualify the CPU-output bottleneck recommendation: the current generic
+8. Qualify the CPU-output bottleneck recommendation: the current generic
    `move_preview_output_boundary_to_gpu` action is not universally applicable.
    Diagnostics must preserve mandatory CPU cache publication, respect route
    requirements, and distinguish processor/memory optimization from legal GPU
@@ -155,6 +158,14 @@ from the local x86_64 optimization.
   The software matrix exists, but the issue records no executed sealed
   reference-machine baseline. Run locally eligible cells after owner closure
   is complete; retain unmet reference-machine requirements for transfer.
+  Local read-only inventory on 2026-09-04 reports 15.86 GiB physical memory,
+  12 logical processors, Windows build 26200, and an NVIDIA RTX 3050 Laptop GPU
+  (WMI-reported adapter RAM approximately 4 GiB; driver 32.0.15.9159). No
+  hardware serials were collected. This machine does not meet the matrix's
+  32 GiB `professional-large-project` minimum; transfer the sealed full-matrix
+  baseline to a qualifying machine. Locally runnable smaller diagnostics are
+  still useful but cannot be relabeled as that baseline. GPU timestamp/HDR
+  admission remains execution evidence, not inferred from this inventory.
 - P2 COL-042: DeckLink/AJA vendor bridge and physical output qualification.
 - P2 COL-043: Genlock and reference-monitor qualification.
 - P2 COL-044: physical ANC/VANC, captions/timecode, and broadcast QC chain.

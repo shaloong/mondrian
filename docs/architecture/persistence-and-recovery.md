@@ -731,6 +731,20 @@ Recovery selection uses the manifest's actual runtime root and requires both
 authorities to agree on `ProjectId`. SQLite migrations operate on the extracted
 runtime copy only; saving is the sole path back into `.mdp`.
 
+### App test fixture namespace
+
+App's test-only fixture allocator uses the PID/counter label only for diagnostics.
+It atomically claims a randomized directory under the selected temporary parent;
+it never adopts an existing directory through `create_dir_all`. Reused process
+IDs must not cause a new test to attach to an old unmarked runtime parent.
+The existing durable runtime-parent marker checks remain unchanged.
+
+Allocation returns a persistent path because asynchronous App/domain owners may
+outlive the allocating call. It does not drop a temporary-directory guard while
+those owners are live, delete prior fixture directories, or establish a new
+automatic cleanup policy. Regression tests exercise the same allocator source
+for stale PID slots, concurrent same-label claims, and missing-parent rejection.
+
 ## Document Schema Contract
 
 Document schema v26 is the current Alpha author contract. It persists the
