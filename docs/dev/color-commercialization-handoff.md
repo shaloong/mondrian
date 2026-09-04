@@ -184,15 +184,24 @@ Remaining local COL-047 implementation/validation blocks:
    No broad warning suppression was added. Keep bounded protocol-test execution distinct from
    unnecessarily repeated release linking of every product/tool executable;
    preserve the real public-interface compile checks and test coverage.
-   The initial `preview_visual_protocol` target compiles the three actual Preview
-   source Modules independently of the giant App lib-test unit. Test cases are
-   still inline in those sources, so moving them to independent files and
-   extracting performance evidence/owner support remain unfinished. Do not claim
-   that this target alone eliminates ordinary App library/binary build costs.
-   Both `cargo test --test` and `cargo rustc --test` still scheduled package
-   executables locally. The bounded execution above used direct `rustc` with
-   recorded exact Cargo library artifacts/native paths and the existing runtime
-   DLL directory; a general reproducible bounded runner remains follow-on work.
+   `preview_visual_protocol` now has a validation-only Cargo example/libtest
+   entry, not a top-level integration target. The original 26 private tests across
+   the real worker-lifecycle, notifier, visual-task and dependency-observer
+   Modules live in independent `tests/protocol/` files, excluded from ordinary
+   library source inputs. One additional test covers already-terminal string
+   and opaque panics at an expired join deadline. Run `cargo test --release -p
+   mondrian-app --features validation --example preview_visual_protocol -j 1 -- --test-threads=1` with
+   `CARGO_INCREMENTAL=0`. Cargo owns library/native/profile/loader selection;
+   no one-off manually linked runner is required. Neither a product binary nor
+   an alternative Runtime was introduced. Local release evidence: initial
+   migration26/26 passed (build6m34s); adding only the new case27/27 passed
+   (build1m08s). Both Cargo graphs contained no companion binaries or App lib-test;
+   the second kept the ordinary App library fresh. The non-test example returned
+   the expected usage failure. These are iteration observations, not a controlled
+   performance baseline. Cold or changed ordinary App library builds remain
+   expensive. Performance evidence/owner support extraction and
+   bounded production-linked owner tests are still unfinished; source protocol
+   tests do not replace App Runtime/GPU/physical closure qualification.
 3. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
 4. Close the capsule lifecycle: sealed namespace, spawn-time admission,

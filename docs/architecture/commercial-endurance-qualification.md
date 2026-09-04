@@ -890,14 +890,32 @@ Interface before asserting zero physical leases. Separate controlled-worker
 tests cover nonblocking Drop and eventual lease release, and result-backpressure
 shutdown covers the explicit join and immediate post-join zero inventory.
 
-The `preview_visual_protocol` validation test target directly compiles the actual
-worker-lifecycle, work-notification and visual-task source Modules, retaining
-their private protocol tests without copying their Implementation. Its narrow
-test-only unused-method allowances do not affect the production library. This
-target does not build the giant App lib-test unit; it remains distinct from
-linked App Runtime and real Headless GPU closure tests. Cargo may still rebuild
-the ordinary package library/binaries, and the inline tests have not yet been
-moved out of production source inputs.
+The validation-only `preview_visual_protocol` Cargo example uses the standard
+libtest harness and directly compiles the actual worker-lifecycle,
+work-notification, visual-task and dependency-observer source Modules. Their
+private tests live in `crates/mondrian-app/tests/protocol/`, loaded only under
+`cfg(test)` by both App lib tests and the example. No Implementation is copied,
+no private hook becomes a product Interface, and the test files are not ordinary
+App library inputs. Narrow harness-only unused-method allowances do not affect
+the production library. The Runtime keeps its public lifecycle-type re-export;
+the task Modules import that type directly from its owning Module.
+
+Run the bounded source-protocol tests through Cargo from the repository root:
+
+```powershell
+$env:CARGO_INCREMENTAL='0'
+cargo test --release -p mondrian-app --features validation --example preview_visual_protocol -j 1 -- --test-threads=1
+```
+
+The explicit example selector avoids the companion product/tool executables
+scheduled by integration-test selectors and does not build the giant App
+lib-test unit. Cargo still owns the ordinary library/dependency builds, profile,
+features, native linking and test loader environment; a cold or changed library
+can still be expensive. There is no manually assembled rlib/native-path runner
+or profile override. The non-test example executable prints this command and
+returns failure, never a passing qualification receipt. It is outside product
+binary routing and requires `validation`. Source-protocol tests remain distinct
+from linked App Runtime tests, real Headless GPU closure and physical campaigns.
 
 Preview diagnostics read the dependency observer's live health stamp directly,
 without requiring an evaluation or result poll to latch its exit. Headless owner
