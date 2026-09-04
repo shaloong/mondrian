@@ -2595,11 +2595,19 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let preview_work_event_pending = Arc::new(AtomicBool::new(false));
     let worker_event_pending = Arc::clone(&preview_work_event_pending);
     let worker_event_proxy = preview_work_event_proxy.clone();
-    preview_work_watch.install_waker(move || {
-        queue_preview_work_event(&worker_event_pending, || {
-            worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
-        });
-    });
+    preview_work_watch
+        .install_waker(move || {
+            queue_preview_work_event(&worker_event_pending, || {
+                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+            });
+        })
+        .map_err(|failure| {
+            let (reason, callback) = failure.into_parts();
+            // The native Adapter retains ownership on rejection. These captures
+            // were never accepted by the Preview retirement owner.
+            drop(callback);
+            anyhow::Error::new(reason)
+        })?;
     let mut session = AppUiWindowSession::from_window_and_surface(
         AppUiWindowRole::Startup,
         startup_window,
@@ -7466,12 +7474,14 @@ mod tests {
         let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let callback_pending = Arc::clone(&pending);
         let callback_queued = Arc::clone(&queued);
-        watch.install_waker(move || {
-            queue_preview_work_event(&callback_pending, || {
-                callback_queued.fetch_add(1, Ordering::AcqRel);
-                true
-            });
-        });
+        watch
+            .install_waker(move || {
+                queue_preview_work_event(&callback_pending, || {
+                    callback_queued.fetch_add(1, Ordering::AcqRel);
+                    true
+                });
+            })
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
 
         for _ in 0..128 {
             notifier.result_became_pollable();
@@ -7488,12 +7498,14 @@ mod tests {
         let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let callback_pending = Arc::clone(&pending);
         let callback_queued = Arc::clone(&queued);
-        watch.install_waker(move || {
-            queue_preview_work_event(&callback_pending, || {
-                callback_queued.fetch_add(1, Ordering::AcqRel);
-                true
-            });
-        });
+        watch
+            .install_waker(move || {
+                queue_preview_work_event(&callback_pending, || {
+                    callback_queued.fetch_add(1, Ordering::AcqRel);
+                    true
+                });
+            })
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
         let drain_target_revision = watch.revision();
 
         // The publisher observes an already queued event and intentionally

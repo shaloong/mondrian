@@ -2,6 +2,12 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
+fn install(watch: &PreviewWorkWatch, callback: impl Fn() + Send + Sync + 'static) {
+    watch
+        .install_waker(callback)
+        .unwrap_or_else(|failure| panic!("{}", failure.reason));
+}
+
 #[test]
 fn publication_before_wait_is_observed_without_sleeping() {
     let (notifier, watch) = preview_work_notification_channel();
@@ -31,7 +37,7 @@ fn waker_is_payload_free_and_does_not_advance_revision() {
     let (notifier, watch) = preview_work_notification_channel();
     let wakes = Arc::new(AtomicUsize::new(0));
     let callback_wakes = Arc::clone(&wakes);
-    watch.install_waker(move || {
+    install(&watch, move || {
         callback_wakes.fetch_add(1, Ordering::AcqRel);
     });
 
@@ -58,7 +64,7 @@ fn panicking_waker_isolated_and_detached_from_worker_publication() {
     let (notifier, watch) = preview_work_notification_channel();
     let calls = Arc::new(AtomicUsize::new(0));
     let callback_calls = Arc::clone(&calls);
-    watch.install_waker(move || {
+    install(&watch, move || {
         callback_calls.fetch_add(1, Ordering::AcqRel);
         panic!("test wake Adapter panic");
     });

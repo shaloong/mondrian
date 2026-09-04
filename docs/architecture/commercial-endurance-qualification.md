@@ -873,24 +873,55 @@ failure against its caller's absolute deadline before converting it to anyhow.
 Live and terminal GPU counters share the same terminal-kind classification,
 including `DeviceDestroyed` as a fatal qualification fault.
 
-Preview shutdown evidence schema 3 adds the actual visual-dependency observer
+Preview shutdown evidence schema 4 retains the actual visual-dependency observer
 join outcome to both its named receipt and aggregate worker inventory. Normal
 qualification requires `Terminated`, rejecting absent, never-started, panicked,
 same-thread and timed-out outcomes. The observer receives shutdown admission
 before any join and uses the same caller deadline. Its ordinary Drop retains the
 existing short grace only when no explicit consuming shutdown took its handle.
 Schema-2 historical Preview evidence is not upgraded to cover this additional
-owner; the strict performance validator requires schema 3.
+owner; the strict performance validator now requires schema 4 and the raw callback-owner receipt.
 
 The ordinary Preview worker-lifecycle Module owns both consuming join policies
 for media and auxiliary workers. Only exact string panic payloads are destroyed
 on the joining thread; opaque payloads are deliberately retained and reported
 as `PanickedPayloadAbandoned`. The aggregate receipt records the actual join,
 panic, and payload abandonment separately; either fault rejects clean closure.
-This is an additive taxonomy within the same schema-3 worker inventory: old
-healthy receipts already require zero panics, while a present abandonment field
-must independently be a typed zero. It is not general foreign-code crash
+Schema 4 requires an explicit typed-zero payload abandonment field as well as
+the independent callback inventory. It is not general foreign-code crash
 containment or proof that every callback/constructor unwind path is closed.
+
+The Work Watch owns callback lifecycle in a separate bounded Module. Producers
+invoke the selected registration synchronously outside its gate; a retained
+registration owner prevents replacement or producer exit from running its final
+Drop. One lazy retirement worker owns destruction after all invocations leave.
+Capacity eight includes installed, in-flight, queued and actively destroyed
+registrations. Rejection returns unaccepted ownership to the installing Adapter.
+Only exact String/static-str panic payloads are destroyed; opaque payloads and
+failed callback owners are deliberately retained. Invocation, destructor and
+retirement-worker faults have separate sticky counters, so a clean join cannot
+erase them. Failure publication advances revisions without recursively calling
+the native Adapter. A late old failure detaches only the identical registration.
+
+Runtime closes callback admission before producer teardown and then consumes
+the retirement owner under the same original deadline. The first accepted
+consuming call seals an immutable receipt; later worker completion cannot upgrade
+a timeout. Reentrant invocation/destruction and concurrent consumers receive
+explicit nonterminal rejection without taking the join handle. Ordinary Drop
+never claims qualified closure. The raw schema-1 callback DTO requires every
+field, including explicit nullable outcomes/rejections. Clean closure proves
+exact accepted/released counts, zero faults/residual work, the correct lazy-worker
+outcome, and deadline completion. Aggregate Preview worker counts must include
+every named observer/cache/callback worker. Headless live projections read this
+ledger without pumping payloads; Perf serializes it unchanged and both Rust and
+PowerShell validators reject absent, malformed and contradictory receipts.
+
+The dependency observer's outer guard stores unhealthy before publishing its
+terminal hint, after worker-local resources leave; failed spawn uses the same
+ordering. These are software ownership/protocol guarantees, not native event
+delivery health, GPU callback containment, physical failure injection or soak
+qualification. Window retains its coalesced EventLoopProxy wake; Headless installs
+no consumer callback and therefore starts no retirement thread.
 
 Ordinary visual-task Drop closes admission without waiting for active execution;
 its return is not zero-residency evidence. Qualification uses the consuming join

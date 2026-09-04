@@ -148,12 +148,25 @@ Remaining local COL-047 implementation/validation blocks:
    dependencies and native search paths came from the freshly built Cargo graph.
    Final strict PowerShell, format/diff, ordinary App library Clippy and full
    workspace/all-target/all-feature Clippy gates passed with warnings denied.
-   These changes do not close
-   internal construction or every callback/other-owner panic path. In particular,
-   Preview work-watch `invoke_waker` still drops the caught payload via `is_ok()`;
-   its worker-exit notification can therefore re-unwind inside a Drop. Retaining
-   callback owners, recording their failures and publishing observer terminal
-   wakes safely belongs to the next lifecycle block, alongside GPU progress joins.
+   These changes do not close internal construction or every other-owner/GPU
+   callback panic path. The subsequent Work Watch block now owns bounded
+   registrations and off-producer retirement, opaque payload/capture abandonment,
+   original-deadline immutable receipts, and rejected reentrant/concurrent
+   consuming calls. Observer termination stores unhealthy before publishing its
+   terminal hint. Preview schema 4 requires the complete raw callback receipt;
+   Runtime, Headless and Perf preserve its independent failures and inventory.
+   Strict Rust/PowerShell validation rejects missing nullable fields, scalar-enum
+   shape errors and contradictory named/aggregate worker counts. GPU progress
+   callback/join closure and native event delivery health remain separate work.
+   Final local Work Watch validation on 2026-09-04: 46 actual-source protocol
+   tests and 59 production-linked App targeted tests passed, including the
+   explicitly selected real-GPU Headless startup/binding failure and panic case.
+   Full workspace/all-target/all-feature Clippy with warnings denied, format,
+   diff, and strict PowerShell owner/case/suite checks passed. A new test's
+   incorrect worker-total assumption was corrected against the real factory's
+   baseline; the production closure predicate was not weakened. The final App
+   lib-test rebuild took 26m01s: this is developer iteration cost, not realtime
+   performance qualification. No capacity failure or target cleanup occurred.
    Finish Window initial/reopen candidate
    owning failures and their separate old/candidate/UI receipts, preserving the
    original error and unique returned App owner.
@@ -161,8 +174,9 @@ Remaining local COL-047 implementation/validation blocks:
    Endurance installs failed startup before error propagation and returns a
    dedicated Startup receipt. Perf factory and direct GPU/CPAL paths consume
    failures; Golden uses the same binder. Live DeviceDestroyed counting now
-   shares terminal classification. Preview schema 3 requires the actual
-   dependency-observer join; historical schema 2 does not cover that owner.
+   shares terminal classification. Preview schema 4 requires the actual
+   dependency-observer join and callback inventory; historical schemas 2/3
+   cannot prove the new inventory.
    The current raw-terminal block preserves complete Realtime/App-only receipts
    separately from the optional snapshot and attaches them to public campaign
    failures, including failures after clean shutdown. Next-phase preparation

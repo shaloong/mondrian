@@ -505,7 +505,7 @@ impl EnduranceExecutionOwners {
                     ),
                 };
             let preview = PreviewRuntimeShutdownEvidence {
-                schema_version: 3,
+                schema_version: 4,
                 unverified_async_reaps: 1,
                 ..PreviewRuntimeShutdownEvidence::default()
             };

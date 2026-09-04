@@ -39,6 +39,8 @@ enum ObservationCommand {
     Observe(Arc<PreparedVisualProgram>),
     Forget(SequenceId),
     Shutdown,
+    #[cfg(test)]
+    PanicForTest,
 }
 
 struct ObservationEntry {
@@ -128,27 +130,50 @@ impl PreviewVisualDependencyObserver {
         result_capacity: usize,
         work_notifier: PreviewWorkNotifier,
     ) -> Self {
+        Self::with_configuration_and_spawn(
+            timing,
+            command_capacity,
+            result_capacity,
+            work_notifier,
+            |task| {
+                std::thread::Builder::new()
+                    .name("mondrian-preview-visual-dependencies".to_owned())
+                    .spawn(task)
+            },
+        )
+    }
+
+    fn with_configuration_and_spawn(
+        timing: ObservationTiming,
+        command_capacity: usize,
+        result_capacity: usize,
+        work_notifier: PreviewWorkNotifier,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> Self {
         let (command_tx, command_rx) = mpsc::sync_channel::<ObservationCommand>(command_capacity);
         let (result_tx, result_rx) = mpsc::sync_channel::<DependencyRefreshResult>(result_capacity);
         let shutdown = Arc::new(AtomicBool::new(false));
         let worker_shutdown = Arc::clone(&shutdown);
         let healthy = Arc::new(AtomicBool::new(true));
         let worker_health = Arc::clone(&healthy);
-        let worker = std::thread::Builder::new()
-            .name("mondrian-preview-visual-dependencies".to_owned())
-            .spawn(move || {
-                let _health_guard = WorkerHealthGuard(worker_health);
-                dependency_observer_worker(
-                    command_rx,
-                    result_tx,
-                    work_notifier,
-                    worker_shutdown,
-                    timing,
-                );
-            })
-            .ok();
+        let failed_start_notifier = work_notifier.clone();
+        let worker = spawn(Box::new(move || {
+            let _health_guard = WorkerHealthGuard {
+                healthy: worker_health,
+                notifier: work_notifier.clone(),
+            };
+            dependency_observer_worker(
+                command_rx,
+                result_tx,
+                work_notifier,
+                worker_shutdown,
+                timing,
+            );
+        }))
+        .ok();
         if worker.is_none() {
             healthy.store(false, Ordering::Release);
+            failed_start_notifier.retry_became_actionable();
             tracing::warn!(
                 "failed to start Preview visual dependency observer; dependent Preview execution will fail closed"
             );
@@ -302,11 +327,15 @@ impl PreviewVisualDependencyObserver {
     }
 }
 
-struct WorkerHealthGuard(Arc<AtomicBool>);
+struct WorkerHealthGuard {
+    healthy: Arc<AtomicBool>,
+    notifier: PreviewWorkNotifier,
+}
 
 impl Drop for WorkerHealthGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.healthy.store(false, Ordering::Release);
+        self.notifier.retry_became_actionable();
     }
 }
 
@@ -338,6 +367,8 @@ fn dependency_observer_worker(
     while !shutdown.load(Ordering::Acquire) {
         let timeout = next_worker_timeout(&entries, timing.shutdown_poll);
         match command_rx.recv_timeout(timeout) {
+            #[cfg(test)]
+            Ok(ObservationCommand::PanicForTest) => panic!("injected observer body panic"),
             Ok(ObservationCommand::Observe(program)) => {
                 let sequence_id = program.sequence_id();
                 let changed = entries

@@ -187,7 +187,15 @@ Assert-Rejected { Assert-MondrianPerfCases @($rows[0], $rows[0], $rows[2]) "proj
 
 # Separate actual owners may have identical terminal facts, but never the same slot.
 $preview = [pscustomobject]@{
-    owner_slot = 0; schema_version = 3; workers_started = 2; workers_terminated = 2
+    owner_slot = 0; schema_version = 4; workers_started = 2; workers_terminated = 2
+    work_callbacks = [pscustomobject]@{
+        schema_version = 1; admission_closed = $true
+        registrations_accepted = 0; registrations_released = 0; registrations_abandoned = 0
+        registrations_retained = 0; invocations_in_flight = 0; retirements_active = 0
+        invocation_panics = 0; destructor_panics = 0; opaque_payloads_abandoned = 0
+        worker_start_failures = 0; worker_started = $false; worker_panics = 0
+        worker = 'not_started'; deadline_met = $true; shutdown_rejection = $null
+    }
     visual_dependency_worker = 'terminated'
     worker_panic_payloads_abandoned = 0
     worker_panics = 0; current_thread_detachments = 0; unverified_async_reaps = 0
@@ -213,7 +221,69 @@ foreach ($abandoned in @(1, "0", $null)) {
 }
 $historical = Copy-JsonValue $good
 $historical.owner_closure.previews[0].PSObject.Properties.Remove("worker_panic_payloads_abandoned")
-Assert-MondrianCleanOwnerClosure $historical "healthy schema-3 inventory before additive panic taxonomy" 2 $false
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $historical "missing exact panic inventory" 2 $false } "missing exact panic inventory"
+foreach ($leaf in @($preview.work_callbacks.PSObject.Properties.Name)) {
+    $bad = Copy-JsonValue $good
+    $bad.owner_closure.previews[0].work_callbacks.PSObject.Properties.Remove($leaf)
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "missing callback inventory" 2 $false } "missing callback leaf $leaf"
+}
+foreach ($leaf in @(
+    'registrations_accepted', 'registrations_released', 'registrations_abandoned', 'registrations_retained',
+    'invocations_in_flight', 'retirements_active', 'invocation_panics', 'destructor_panics',
+    'opaque_payloads_abandoned', 'worker_start_failures', 'worker_panics'
+)) {
+    foreach ($invalid in @(-1, 0.5, '0', $null)) {
+        $bad = Copy-JsonValue $good
+        $bad.owner_closure.previews[0].work_callbacks.$leaf = $invalid
+        Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "invalid callback counter" 2 $false } "callback counter $leaf=$invalid"
+    }
+}
+foreach ($leaf in @('admission_closed', 'deadline_met', 'worker_started')) {
+    $bad = Copy-JsonValue $good
+    $bad.owner_closure.previews[0].work_callbacks.$leaf = 'false'
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "invalid callback boolean" 2 $false } "callback boolean $leaf"
+}
+foreach ($mutation in @(
+    @{ registrations_abandoned = 1 }, @{ invocation_panics = 1 }, @{ destructor_panics = 1 },
+    @{ opaque_payloads_abandoned = 1 }, @{ invocations_in_flight = 1 }, @{ retirements_active = 1 },
+    @{ registrations_retained = 1 }, @{ worker_panics = 1 }, @{ worker_start_failures = 1 },
+    @{ admission_closed = $false }, @{ deadline_met = $false }, @{ shutdown_rejection = 'current_invocation' },
+    @{ registrations_accepted = 1; registrations_released = 1 }, @{ worker_started = $true },
+    @{ worker = 'terminated' }, @{ registrations_accepted = 1 },
+    @{ worker_started = $true; worker = 'terminated' },
+    @{ worker = @('not_started') }, @{ worker = @() }, @{ worker = @{} }, @{ worker = $null }
+)) {
+    $bad = Copy-JsonValue $good
+    foreach ($leaf in $mutation.Keys) { $bad.owner_closure.previews[0].work_callbacks.$leaf = $mutation[$leaf] }
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "dirty callback inventory" 2 $false } "dirty callback inventory"
+}
+$bad = Copy-JsonValue $good
+$bad.owner_closure.previews[0].schema_version = 3
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "pre-callback schema" 2 $false } "schema-3 callback omission"
+$registered = Copy-JsonValue $good
+$bad = Copy-JsonValue $good
+$bad.owner_closure.previews[0].work_callbacks | Add-Member -NotePropertyName extra -NotePropertyValue 0
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "unknown callback field" 2 $false } "unknown callback field"
+$bad = Copy-JsonValue $good
+$bad.owner_closure.previews[0].work_callbacks.PSObject.Properties.Remove('worker')
+$bad.owner_closure.previews[0].work_callbacks | Add-Member -NotePropertyName WORKER -NotePropertyValue 'not_started'
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "noncanonical callback field" 2 $false } "noncanonical callback field"
+$registered.owner_closure.previews[0].work_callbacks.registrations_accepted = 1
+$registered.owner_closure.previews[0].work_callbacks.registrations_released = 1
+$registered.owner_closure.previews[0].work_callbacks.worker_started = $true
+$registered.owner_closure.previews[0].work_callbacks.worker = 'terminated'
+$registered.owner_closure.previews[0].workers_started = 3
+$registered.owner_closure.previews[0].workers_terminated = 3
+Assert-MondrianCleanOwnerClosure $registered "joined callback registration" 2 $false
+foreach ($count in @(0, 2)) {
+    $bad = Copy-JsonValue $registered
+    $bad.owner_closure.previews[0].workers_started = $count
+    $bad.owner_closure.previews[0].workers_terminated = $count
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "omitted declared owner" 2 $false } "omitted declared owner $count"
+}
+$bad = Copy-JsonValue $registered
+$bad.owner_closure.previews[0].work_callbacks.worker = @('terminated')
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "callback enum array" 2 $false } "callback enum array"
 foreach ($outcome in @($null, 'not-started', 'panicked', 'timed-out-detached', 'current-thread-skipped')) {
     $bad = Copy-JsonValue $good
     $bad.owner_closure.previews[0].visual_dependency_worker = $outcome

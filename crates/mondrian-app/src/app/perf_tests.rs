@@ -250,6 +250,7 @@ struct PerfRenderCacheWorkerClosureReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct PerfPreviewClosureReport {
+    work_callbacks: Option<super::preview_runtime::PreviewWorkCallbackEvidence>,
     visual_dependency_worker: Option<&'static str>,
     owner_slot: usize,
     schema_version: u32,
@@ -2686,6 +2687,7 @@ impl PerfPreviewClosureReport {
     fn from_evidence(owner_slot: usize, evidence: PreviewRuntimeShutdownEvidence) -> Self {
         let render_cache = evidence.timeline_render_cache;
         Self {
+            work_callbacks: evidence.work_callbacks,
             visual_dependency_worker: evidence
                 .visual_dependency_worker
                 .map(preview_owned_worker_outcome_label),
@@ -2813,6 +2815,13 @@ impl PerfOwnerClosureReport {
             self.all_resources_released
                 && self.previews.iter().all(|preview| {
                     preview.all_resources_released
+                        && preview.schema_version == 4
+                        && preview.work_callbacks.is_some_and(|callbacks| {
+                            callbacks.all_resources_released()
+                                && preview.workers_started
+                                    >= 2 + u32::from(callbacks.worker_started)
+                        })
+                        && preview.workers_started == preview.workers_terminated
                         && preview.visual_dependency_worker == Some("terminated")
                         && preview.render_cache_required
                         && !preview.render_cache_start_failed

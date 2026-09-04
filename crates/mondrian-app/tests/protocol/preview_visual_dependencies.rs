@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn observer_terminal_notification_sees_unhealthy_before_normal_or_panic_wake() {
+    for panicking in [false, true] {
+        let (notifier, watch) =
+            super::super::preview_work_notification::preview_work_notification_channel();
+        let mut observer =
+            PreviewVisualDependencyObserver::with_timing_and_notifier(test_timing(), notifier);
+        let healthy = observer.healthy.clone();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let (sent, received) = mpsc::channel();
+        watch
+            .install_waker(move || {
+                if calls.fetch_add(1, Ordering::Relaxed) > 0 {
+                    sent.send(healthy.load(Ordering::Acquire)).expect("record terminal health");
+                }
+            })
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
+        if panicking {
+            observer
+                .command_tx
+                .send(ObservationCommand::PanicForTest)
+                .expect("inject body panic");
+        } else {
+            observer.begin_shutdown();
+        }
+        assert!(!received.recv_timeout(Duration::from_secs(5)).expect("terminal wake"));
+        let outcome = observer.shutdown_until(Instant::now() + Duration::from_secs(5));
+        assert_eq!(
+            outcome,
+            if panicking {
+                PreviewOwnedWorkerShutdown::Panicked
+            } else {
+                PreviewOwnedWorkerShutdown::Terminated
+            }
+        );
+        assert!(watch.shutdown_and_wait().all_resources_released());
+    }
+}
+
+#[test]
+fn observer_failed_spawn_publishes_progress_without_synthetic_results() {
+    let (notifier, watch) =
+        super::super::preview_work_notification::preview_work_notification_channel();
+    let before = watch.revision();
+    let mut observer = PreviewVisualDependencyObserver::with_configuration_and_spawn(
+        test_timing(),
+        1,
+        1,
+        notifier,
+        |_| Err(std::io::Error::other("injected observer spawn failure")),
+    );
+    assert!(!observer.is_healthy());
+    assert_ne!(watch.revision(), before);
+    assert!(observer.poll_refreshes().is_empty());
+    assert_eq!(
+        observer.shutdown_and_wait(),
+        PreviewOwnedWorkerShutdown::NotStarted
+    );
+    assert!(watch.shutdown_and_wait().all_resources_released());
+}
+
+#[test]
 fn dependency_observer_shutdown_consumes_worker_exactly_once() {
     let mut observer = PreviewVisualDependencyObserver::with_timing(test_timing());
     assert_eq!(

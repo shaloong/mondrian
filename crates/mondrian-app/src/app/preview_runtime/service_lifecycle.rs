@@ -219,6 +219,11 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let render_cache = self.timeline_render_cache.borrow_mut().shutdown_and_wait();
         evidence.record(render_cache.aggregate_outcome);
         evidence.timeline_render_cache = render_cache;
+        let callbacks = self.work_watch.shutdown_and_wait();
+        if let Some(worker) = callbacks.worker {
+            evidence.record(worker);
+        }
+        evidence.work_callbacks = Some(callbacks);
         evidence
     }
 
@@ -276,10 +281,16 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let render_cache = self.timeline_render_cache.borrow_mut().shutdown_until(deadline);
         evidence.record(render_cache.aggregate_outcome);
         evidence.timeline_render_cache = render_cache;
+        let callbacks = self.work_watch.shutdown_until(deadline);
+        if let Some(worker) = callbacks.worker {
+            evidence.record(worker);
+        }
+        evidence.work_callbacks = Some(callbacks);
         evidence
     }
 
     fn begin_shutdown(&self) -> bool {
+        self.work_watch.begin_shutdown();
         self.jobs.close();
         self.visual_dependencies.begin_shutdown();
         let already_shutdown = self.shutdown.request();

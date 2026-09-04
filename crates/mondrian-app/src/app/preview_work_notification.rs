@@ -7,13 +7,18 @@
 //! Window and Headless Adapters can wake without inventing a second queue.
 
 use std::fmt;
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(any(test, feature = "validation"))]
 use std::time::Duration;
+#[cfg(any(test, feature = "validation"))]
+use std::time::Instant;
 
-type PreviewWorkWaker = Arc<dyn Fn() + Send + Sync + 'static>;
+#[path = "preview_work_notification/callbacks.rs"]
+mod callbacks;
+use callbacks::CallbackOwner;
+pub(crate) use callbacks::RegistrationRejected;
+pub use callbacks::{PreviewCallbackShutdownRejection, PreviewWorkCallbackEvidence};
 
 /// Monotonic process-local revision of actionable Preview worker progress.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -52,7 +57,18 @@ struct PreviewWorkNotificationState {
     revision: AtomicU64,
     wait_gate: Mutex<()>,
     changed: Condvar,
-    waker: Mutex<Option<PreviewWorkWaker>>,
+    callbacks: CallbackOwner,
+}
+
+impl PreviewWorkNotificationState {
+    fn publish_revision_only(&self) -> PreviewWorkRevision {
+        let gate = lock_unpoisoned(&self.wait_gate);
+        let next = self.revision.load(Ordering::Relaxed).saturating_add(1);
+        self.revision.store(next, Ordering::Release);
+        self.changed.notify_all();
+        drop(gate);
+        PreviewWorkRevision(next)
+    }
 }
 
 impl fmt::Debug for PreviewWorkNotifier {
@@ -85,7 +101,7 @@ pub(crate) fn preview_work_notification_channel() -> (PreviewWorkNotifier, Previ
         revision: AtomicU64::new(0),
         wait_gate: Mutex::new(()),
         changed: Condvar::new(),
-        waker: Mutex::new(None),
+        callbacks: CallbackOwner::default(),
     });
     (
         PreviewWorkNotifier { shared: Arc::clone(&shared) },
@@ -115,20 +131,9 @@ impl PreviewWorkNotifier {
     }
 
     fn publish_progress(&self) -> PreviewWorkRevision {
-        let gate = lock_unpoisoned(&self.shared.wait_gate);
-        let current = self.shared.revision.load(Ordering::Relaxed);
-        let next = current.saturating_add(1);
-        self.shared.revision.store(next, Ordering::Release);
-        self.shared.changed.notify_all();
-        drop(gate);
-
-        // Never invoke an Adapter while holding the notification-state locks.
-        // Sending a native-loop event is allowed to re-enter arbitrary OS code.
-        let waker = lock_unpoisoned(&self.shared.waker).clone();
-        if let Some(waker) = waker {
-            invoke_waker(&self.shared, waker);
-        }
-        PreviewWorkRevision(next)
+        let revision = self.shared.publish_revision_only();
+        self.shared.callbacks.invoke(&self.shared);
+        revision
     }
 
     #[cfg(test)]
@@ -187,24 +192,35 @@ impl PreviewWorkWatch {
     /// Installation performs one initial wake so results published before
     /// registration cannot strand a consumer in its native wait state. Later
     /// calls replace the Adapter; Headless revision waits remain independent.
-    pub(crate) fn install_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
-        let waker: PreviewWorkWaker = Arc::new(waker);
-        *lock_unpoisoned(&self.shared.waker) = Some(Arc::clone(&waker));
-        invoke_waker(&self.shared, waker);
+    /// Rejection transfers the unaccepted callback back to the caller; no
+    /// callback is destroyed on an internal rejection or replacement path.
+    pub(crate) fn install_waker<F>(&self, waker: F) -> Result<(), RegistrationRejected<F>>
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.shared.callbacks.install(&self.shared, waker)
     }
-}
 
-fn invoke_waker(shared: &PreviewWorkNotificationState, waker: PreviewWorkWaker) {
-    if catch_unwind(AssertUnwindSafe(|| waker())).is_ok() {
-        return;
+    /// Close callback registration and invocation before any Runtime join.
+    pub(crate) fn begin_shutdown(&self) {
+        self.shared.callbacks.begin_shutdown();
     }
-    let mut installed = lock_unpoisoned(&shared.waker);
-    if installed.as_ref().is_some_and(|current| Arc::ptr_eq(current, &waker)) {
-        *installed = None;
+
+    /// Read sticky callback facts without pumping a Preview result transport.
+    pub(crate) fn callback_evidence(&self) -> PreviewWorkCallbackEvidence {
+        self.shared.callbacks.diagnostics()
     }
-    tracing::warn!(
-        "Preview work-watch Adapter panicked and was detached; revision and bounded waits remain active"
-    );
+
+    /// Consume callback ownership under the Runtime's original deadline.
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn shutdown_until(&self, deadline: Instant) -> PreviewWorkCallbackEvidence {
+        self.shared.callbacks.shutdown(Some(deadline))
+    }
+
+    /// Explicit unbounded counterpart used by synchronous Runtime shutdown.
+    pub(crate) fn shutdown_and_wait(&self) -> PreviewWorkCallbackEvidence {
+        self.shared.callbacks.shutdown(None)
+    }
 }
 
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

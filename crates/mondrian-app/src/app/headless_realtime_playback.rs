@@ -1193,6 +1193,8 @@ fn project_headless_endurance_owner_snapshot(
         usize::from(audio.output.as_ref().is_some_and(|output| output.buffered_frames > 0));
     let pinned_viewer_owner = usize::from(preview.frame_store.pinned_viewer_bytes > 0);
     let owned_resource_units = [
+        preview.work_callbacks.registrations_retained,
+        preview.work_callbacks.retirements_active,
         preview.frame_store.media_aggregate_entries,
         preview.frame_store.media_aggregate_resource_units,
         preview.frame_store.viewer_entries,
@@ -1208,6 +1210,7 @@ fn project_headless_endurance_owner_snapshot(
     .try_fold(0_usize, |total, value| total.checked_add(value))
     .ok_or_else(|| anyhow::anyhow!("Headless owned-resource inventory overflowed usize"))?;
     let preview_fatal_errors = [
+        u64::from(preview.work_callbacks.has_failure()),
         u64::from(preview.visual_execution_health_failed),
         u64::from(preview.visual_dependency_health_failed),
         u64::from(preview.media_worker_health_failed),
@@ -1242,9 +1245,14 @@ fn project_headless_endurance_owner_snapshot(
     .ok_or_else(|| anyhow::anyhow!("Headless queue inventory overflowed usize"))?;
     let background = app_background.totals().map_err(anyhow::Error::msg)?;
     let other_queue_depth = usize_to_u64(other_queue_depth)?
+        .checked_add(preview.work_callbacks.invocations_in_flight)
+        .and_then(|value| value.checked_add(preview.work_callbacks.retirements_active as u64))
+        .ok_or_else(|| anyhow::anyhow!("Preview callback work inventory overflowed u64"))?
         .checked_add(background.queue_depth)
         .ok_or_else(|| anyhow::anyhow!("Headless total queue inventory overflowed u64"))?;
     let owned_resource_units = usize_to_u64(owned_resource_units)?
+        .checked_add(preview.work_callbacks.registrations_abandoned)
+        .ok_or_else(|| anyhow::anyhow!("Preview callback resource inventory overflowed u64"))?
         .checked_add(background.owned_resource_units)
         .ok_or_else(|| anyhow::anyhow!("Headless total resource inventory overflowed u64"))?;
     let other_fatal_errors = preview_fatal_errors
@@ -2017,6 +2025,38 @@ mod tests {
         assert_eq!(
             project(failed).fatal_errors(),
             project(healthy).fatal_errors() + 1
+        );
+    }
+
+    #[test]
+    fn owner_projection_counts_callback_work_resources_and_unpolled_failure() {
+        let project = |preview| {
+            project_headless_endurance_owner_snapshot(
+                preview,
+                HeadlessViewerGpuEnduranceSnapshot::test_fixture(0, 0, 0, 0, 0),
+                mondrian_media::AudioPlaybackSnapshot::execution_unavailable(),
+                false,
+                AppBackgroundEnduranceSnapshot::default(),
+            )
+            .expect("valid callback projection")
+        };
+        let healthy = crate::app::preview_runtime::PreviewDiagnostics::default();
+        let mut failed = healthy;
+        failed.work_callbacks.registrations_retained = 2;
+        failed.work_callbacks.retirements_active = 1;
+        failed.work_callbacks.registrations_abandoned = 1;
+        failed.work_callbacks.invocations_in_flight = 3;
+        failed.work_callbacks.invocation_panics = 1;
+        let baseline = project(healthy);
+        let failure = project(failed);
+        assert_eq!(failure.fatal_errors(), baseline.fatal_errors() + 1);
+        assert_eq!(
+            failure.owned_resource_units(),
+            baseline.owned_resource_units() + 4
+        );
+        assert_eq!(
+            failure.other_queue_depth(),
+            baseline.other_queue_depth() + 4
         );
     }
 }

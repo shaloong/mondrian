@@ -1,5 +1,15 @@
 # UI System
 
+Preview's native wake Adapter installs its coalesced EventLoopProxy callback
+through the Work Watch registration owner. Failed admission returns the original
+reason and unaccepted callback to Window; it is not silently treated as a working
+wake path. Callback invocation remains synchronous, while final destruction is
+owned by one bounded retirement worker, never by a producer holding ownership
+locks. Explicit Preview shutdown includes its raw callback receipt under the
+original operation deadline. See [endurance ownership](commercial-endurance-qualification.md)
+for panic, rejection, timeout and evidence semantics. This does not qualify native
+event delivery or replace pending Window startup/reopen inventory work.
+
 The Export panel edits the same typed `ExportPreset` consumed by queue
 admission. Artifact-family-specific controls are projected from
 `ExportArtifactEncoding`: media-file presets expose container/video/audio and

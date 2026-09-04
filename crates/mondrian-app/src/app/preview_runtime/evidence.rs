@@ -23,6 +23,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let mut decode_access_mode_profiles = self.metrics.decode_access_mode_profiles.get();
         decode_access_mode_profiles.apply_cancellation(decode_cancellation);
         PreviewDiagnostics {
+            work_callbacks: self.work_watch.callback_evidence(),
             resource_decision_applications: self.metrics.resource_decision_applications.get(),
             visual_program_cache: self.visual_programs.borrow().diagnostics(),
             future_media_window: self.future_media_window.borrow().diagnostics(),

@@ -4,6 +4,9 @@ $ErrorActionPreference = "Stop"
 # Explicit schema leaves, not PowerShell's coercive numeric conversions. Keep
 # this inventory shared by all required-field checks, including zero counters.
 $script:IntegerLeaves = @(
+    "registrations_accepted", "registrations_released", "registrations_abandoned",
+    "registrations_retained", "invocations_in_flight", "retirements_active",
+    "invocation_panics", "destructor_panics", "opaque_payloads_abandoned",
     "schema_version", "shared_deadline_budget_ms", "preview_owner_count", "owner_slot",
     "requested_workers", "started_workers", "terminated_workers", "panicked_workers",
     "timed_out_workers", "detached_workers", "unexpected_worker_exits",
@@ -128,16 +131,53 @@ function Assert-CleanWorker {
     Assert-Bool $Worker.lifecycle_closed $true "$Context.lifecycle_closed"
 }
 
+function Assert-CleanPreviewCallbacks {
+    param($Callbacks, [string]$Context)
+    $fields = @(
+        "schema_version", "admission_closed", "registrations_accepted", "registrations_released",
+        "registrations_abandoned", "registrations_retained", "invocations_in_flight", "retirements_active",
+        "invocation_panics", "destructor_panics", "opaque_payloads_abandoned", "worker_start_failures",
+        "worker_started", "worker_panics", "worker", "deadline_met", "shutdown_rejection"
+    )
+    Assert-Fields $Callbacks $fields $Context
+    $actual = @($Callbacks.PSObject.Properties.Name)
+    if ($actual.Count -ne $fields.Count) { throw "$Context has unexpected callback fields" }
+    foreach ($field in $fields) {
+        if ($actual -cnotcontains $field) { throw "$Context requires exact field '$field'" }
+    }
+    if ($Callbacks.schema_version -ne 1 -or
+        [uint64]$Callbacks.registrations_accepted -ne [uint64]$Callbacks.registrations_released) {
+        throw "$Context has unknown schema or unreleased registrations"
+    }
+    foreach ($leaf in @(
+        "registrations_abandoned", "registrations_retained", "invocations_in_flight", "retirements_active",
+        "invocation_panics", "destructor_panics", "opaque_payloads_abandoned", "worker_start_failures", "worker_panics"
+    )) { Assert-Zero $Callbacks.$leaf "$Context.$leaf" }
+    Assert-Bool $Callbacks.admission_closed $true "$Context.admission_closed"
+    Assert-Bool $Callbacks.deadline_met $true "$Context.deadline_met"
+    Assert-BoolType $Callbacks.worker_started "$Context.worker_started"
+    Assert-Null $Callbacks.shutdown_rejection "$Context.shutdown_rejection"
+    if ($Callbacks.worker -isnot [string]) { throw "$Context.worker must be a scalar string" }
+    if ($Callbacks.worker_started) {
+        if ($Callbacks.worker -cne 'terminated' -or $Callbacks.registrations_accepted -eq 0) {
+            throw "$Context worker was not joined or owns no accepted registration"
+        }
+    } elseif ($Callbacks.worker -cne 'not_started' -or $Callbacks.registrations_accepted -ne 0) {
+        throw "$Context has unproved unstarted callback ownership"
+    }
+}
+
 function Assert-CleanPreview {
     param($Preview, [string]$Context)
     Assert-Fields $Preview @(
         "owner_slot", "schema_version", "workers_started", "workers_terminated", "worker_panics",
+        "worker_panic_payloads_abandoned", "work_callbacks",
         "current_thread_detachments", "unverified_async_reaps", "worker_timeouts",
         "worker_deadline_detachments", "render_cache_schema_version",
         "render_cache_required", "render_cache_start_failed", "render_cache_worker", "visual_dependency_worker",
         "render_cache_aggregate_outcome", "all_resources_released"
     ) $Context
-    if ([uint64]$Preview.schema_version -ne 3 -or
+    if ([uint64]$Preview.schema_version -ne 4 -or
         [uint64]$Preview.render_cache_schema_version -ne 1 -or
         [uint64]$Preview.workers_started -ne [uint64]$Preview.workers_terminated) {
         throw "$Context has an unknown schema or incomplete worker inventory"
@@ -148,12 +188,10 @@ function Assert-CleanPreview {
     )) {
         Assert-Zero $Preview.$leaf "$Context.$leaf"
     }
-    # Additive panic taxonomy within the unchanged schema-3 owner inventory.
-    # Older clean receipts already require worker_panics=0; if the more precise
-    # abandonment fact is present it must independently be a typed zero.
-    if ($null -ne $Preview.PSObject.Properties["worker_panic_payloads_abandoned"]) {
-        Assert-Fields $Preview @("worker_panic_payloads_abandoned") $Context
-        Assert-Zero $Preview.worker_panic_payloads_abandoned "$Context.worker_panic_payloads_abandoned"
+    Assert-Zero $Preview.worker_panic_payloads_abandoned "$Context.worker_panic_payloads_abandoned"
+    Assert-CleanPreviewCallbacks $Preview.work_callbacks "$Context.work_callbacks"
+    if ([uint64]$Preview.workers_started -lt (2 + [int]$Preview.work_callbacks.worker_started)) {
+        throw "$Context worker inventory omits a declared observer, render-cache or callback owner"
     }
     Assert-Bool $Preview.render_cache_required $true "$Context.render_cache_required"
     Assert-Bool $Preview.render_cache_start_failed $false "$Context.render_cache_start_failed"

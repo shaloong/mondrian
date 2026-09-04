@@ -213,6 +213,8 @@ pub struct PreviewDiagnostics {
     pub visual_execution_health_failed: bool,
     /// Whether the dependency observer is unavailable, including unpolled worker exit.
     pub visual_dependency_health_failed: bool,
+    /// Live callback owner facts, observable without result polling.
+    pub work_callbacks: super::PreviewWorkCallbackEvidence,
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
     /// Requests that produced a current ready frame.

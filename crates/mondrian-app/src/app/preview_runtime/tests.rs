@@ -13253,7 +13253,7 @@ fn synchronous_preview_shutdown_reclaims_complete_worker_inventory() {
 
     let evidence = runtime.shutdown_and_wait();
 
-    assert_eq!(evidence.schema_version, 3);
+    assert_eq!(evidence.schema_version, 4);
     assert_eq!(evidence.workers_started, 5);
     assert_eq!(evidence.workers_terminated, 5);
     assert_eq!(
@@ -13287,6 +13287,86 @@ fn preview_shutdown_requires_explicit_healthy_dependency_observer_receipt() {
         !evidence.all_workers_terminated(),
         "old schema cannot acquire new inventory proof"
     );
+}
+
+#[test]
+fn preview_shutdown_requires_explicit_callback_ownership_receipt() {
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let mut evidence = runtime.shutdown_and_wait();
+    assert!(evidence.all_workers_terminated());
+    let callbacks = evidence.work_callbacks.take().expect("explicit empty callback owner");
+    assert!(callbacks.all_resources_released());
+    assert!(!evidence.all_workers_terminated());
+    evidence.work_callbacks = Some(PreviewWorkCallbackEvidence::default());
+    assert!(!evidence.all_workers_terminated());
+    evidence.work_callbacks = Some(callbacks);
+    let started = evidence.workers_started;
+    evidence.workers_started = 0;
+    evidence.workers_terminated = 0;
+    assert!(
+        !evidence.all_workers_terminated(),
+        "declared owners must be counted"
+    );
+    evidence.workers_started = started;
+    evidence.workers_terminated = started;
+    evidence.schema_version = 3;
+    assert!(
+        !evidence.all_workers_terminated(),
+        "schema 3 cannot prove callback ownership"
+    );
+}
+
+#[test]
+fn preview_shutdown_counts_the_callback_retirement_worker() {
+    let baseline =
+        PreviewProductionRuntime::<()>::new_without_workers_for_test().shutdown_and_wait();
+    assert!(baseline.all_workers_terminated());
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    runtime
+        .work_watch()
+        .install_waker(|| {})
+        .unwrap_or_else(|failure| panic!("{}", failure.reason));
+    let mut evidence = runtime.shutdown_and_wait();
+    assert!(evidence.all_workers_terminated());
+    assert_eq!(
+        evidence.workers_started,
+        baseline.workers_started + 1,
+        "callback retirement adds exactly one worker to the real factory inventory"
+    );
+    evidence.workers_started = 1;
+    evidence.workers_terminated = 1;
+    assert!(!evidence.all_workers_terminated());
+}
+
+#[test]
+fn preview_shutdown_retains_callback_failure_without_pumping_results() {
+    for bounded in [false, true] {
+        let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+        runtime
+            .work_watch()
+            .install_waker(|| panic!("injected callback failure"))
+            .unwrap_or_else(|failure| panic!("{}", failure.reason));
+        let live = runtime.diagnostics();
+        assert!(live.work_callbacks.has_failure());
+        assert_eq!(live.work_callbacks.invocation_panics, 1);
+        let evidence = if bounded {
+            runtime.shutdown_until(Instant::now() + Duration::from_secs(5))
+        } else {
+            runtime.shutdown_and_wait()
+        };
+        let callbacks = evidence.work_callbacks.expect("exact callback receipt");
+        assert_eq!(callbacks.invocation_panics, 1);
+        assert_eq!(callbacks.registrations_abandoned, 1);
+        assert_eq!(
+            callbacks.worker,
+            Some(PreviewOwnedWorkerShutdown::Terminated)
+        );
+        assert_eq!(evidence.worker_panics, 0);
+        assert!(
+            !evidence.all_workers_terminated(),
+            "clean workers cannot erase callback failure"
+        );
+    }
 }
 
 #[test]
@@ -13388,7 +13468,7 @@ fn bounded_preview_shutdown_detaches_a_worker_at_the_absolute_deadline() {
 
     let evidence = join_preview_workers_until(vec![worker], Instant::now());
 
-    assert_eq!(evidence.schema_version, 3);
+    assert_eq!(evidence.schema_version, 4);
     assert_eq!(evidence.workers_started, 1);
     assert_eq!(evidence.workers_terminated, 0);
     assert_eq!(evidence.worker_timeouts, 1);
