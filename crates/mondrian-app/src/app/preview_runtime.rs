@@ -2604,6 +2604,7 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownE
     evidence
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn join_preview_workers_until(
     handles: Vec<JoinHandle<()>>,
     deadline: Instant,

@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
+#[cfg(any(test, feature = "validation"))]
 use std::time::Instant;
 
 use mondrian_core::mask_data::{
@@ -32,6 +33,7 @@ use mondrian_media::{
 use mondrian_timeline::sequence::{InputColorResolutionSource, ResolvedInputColor};
 use sha2::{Digest, Sha256};
 
+#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::AppState;
 
@@ -592,6 +594,7 @@ impl VisualTrackingService {
         self.jobs.take();
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,
@@ -1247,6 +1250,7 @@ fn tracking_cache_key(
     Ok(hasher.finalize().into())
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn saturating_u64_to_usize(value: u64) -> usize {
     match usize::try_from(value) {
         Ok(value) => value,
@@ -1254,6 +1258,7 @@ fn saturating_u64_to_usize(value: u64) -> usize {
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }

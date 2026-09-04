@@ -226,6 +226,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     ///
     /// Qualification calls this before waiting on any execution owner so every
     /// cooperative cancellation observes the same absolute shutdown window.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn begin_endurance_shutdown(&mut self) {
         self.begin_shutdown();
         if let Some(task) = self.visual_execution.as_mut() {
@@ -246,6 +247,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// the owner thread, then each movable worker handle is polled and joined
     /// only when it has completed. Any worker still running at `deadline` is
     /// detached and recorded fail-closed.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewRuntimeShutdownEvidence {
         self.begin_endurance_shutdown();
         let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();

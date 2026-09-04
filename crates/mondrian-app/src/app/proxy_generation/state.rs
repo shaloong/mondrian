@@ -495,6 +495,7 @@ pub(super) fn cancel_for_shutdown(state: &mut ProxyGenerationState) {
     }
 }
 
+#[cfg(any(test, feature = "validation"))]
 pub(super) fn clear_after_workers_terminated(state: &mut ProxyGenerationState) {
     state.pending.clear();
     state.active_by_key.clear();

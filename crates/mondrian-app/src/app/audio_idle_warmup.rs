@@ -26,6 +26,7 @@ use mondrian_timeline::Sequence;
 use parking_lot::{Condvar, Mutex};
 
 use super::audio_rendering::TimelineAudioPcmRenderer;
+#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 
 const TERMINAL_RETENTION: usize = 32;
@@ -554,6 +555,7 @@ impl AudioIdleWarmupService {
         }
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,

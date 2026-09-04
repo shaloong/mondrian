@@ -825,6 +825,19 @@ regression gate, not qualification evidence from a physical campaign.
 
 ## Qualification boundary
 
+### Validation-only lifecycle interfaces
+
+Qualification receipts, owner snapshots, and deadline-consuming App adapters are
+compiled under `cfg(any(test, feature = "validation"))`. Their paired imports and
+read-only retained diagnostic fields use the same boundary; the standalone
+product library is checked separately from the all-feature workspace.
+
+Ordinary shutdown, bounded Drop primitives, admission, atomic owner inventory,
+and worker-side cumulative failure writes remain in every product build.
+Preview's public synchronous shutdown and its shared worker-join primitive also
+remain available without validation. Do not suppress unused-code warnings or
+remove live accounting to make a qualification-only wrapper compile cleanly.
+
 ### Headless failed-start ownership
 
 The validation-only `headless_execution_startup` Module separates live owning

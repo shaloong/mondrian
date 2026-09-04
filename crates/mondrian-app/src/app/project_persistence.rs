@@ -24,6 +24,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(any(test, feature = "validation"))]
 use super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 
 pub(super) const PERSISTENCE_QUEUE_CAPACITY: usize = 4;
@@ -518,6 +519,7 @@ enum ProjectPersistenceWorkerMessage {
 
 /// Monotonic owner-derived persistence facts sampled while the App is live.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[cfg(any(test, feature = "validation"))]
 pub(super) struct ProjectPersistenceEnduranceRuntimeFacts {
     pub(super) queue_depth: u64,
     pub(super) running_work: u64,
@@ -534,6 +536,7 @@ pub struct ProjectPersistenceService {
     completion_rx: Receiver<ProjectPersistenceCompletion>,
     queued: Arc<AtomicUsize>,
     pending: Arc<AtomicUsize>,
+    #[cfg(any(test, feature = "validation"))]
     cumulative_worker_failures: Arc<AtomicU64>,
     worker_unexpected_exit_recorded: AtomicBool,
     session_admission: HashMap<AuthoringSessionId, SessionAdmission>,
@@ -593,6 +596,7 @@ impl ProjectPersistenceService {
             completion_rx,
             queued,
             pending,
+            #[cfg(any(test, feature = "validation"))]
             cumulative_worker_failures,
             worker_unexpected_exit_recorded: AtomicBool::new(false),
             session_admission: HashMap::new(),
@@ -935,6 +939,7 @@ impl ProjectPersistenceService {
 
     /// Snapshot mutually exclusive queued/running ownership and monotonic
     /// failure/worker-health facts without consuming the persistence owner.
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn endurance_runtime_facts(&self) -> ProjectPersistenceEnduranceRuntimeFacts {
         self.observe_unexpected_worker_exit();
         let queued = self.queued.load(Ordering::Acquire);
@@ -967,6 +972,7 @@ impl ProjectPersistenceService {
         let _ = self.worker_tx.send(ProjectPersistenceWorkerMessage::Shutdown);
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,
@@ -1300,6 +1306,7 @@ fn saturating_atomic_add(counter: &AtomicU64, amount: u64) {
     });
 }
 
+#[cfg(any(test, feature = "validation"))]
 fn saturating_usize_to_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }

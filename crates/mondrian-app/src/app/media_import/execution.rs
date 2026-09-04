@@ -20,6 +20,7 @@ use mondrian_core::{
 };
 use parking_lot::{Condvar, Mutex};
 
+#[cfg(any(test, feature = "validation"))]
 use super::super::endurance_shutdown::{join_workers_until, EnduranceWorkerShutdownEvidence};
 use super::asset_adapter::{AssetLibraryMediaImportBackend, MediaImportPreparedCandidate};
 use super::{
@@ -645,6 +646,7 @@ impl MediaImportExecution {
         self.inner.available.notify_all();
     }
 
+    #[cfg(any(test, feature = "validation"))]
     pub(in super::super) fn finish_endurance_shutdown(
         &mut self,
         deadline: Instant,

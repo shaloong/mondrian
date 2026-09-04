@@ -26,6 +26,7 @@ struct TimelineAudioRenderState {
 
 impl TimelineAudioPcmRenderer {
     /// Prepare the canonical public Program without audition or channel remapping.
+    #[cfg(any(test, feature = "validation"))]
     pub(super) fn new_public_program(
         sequence: Sequence,
         sequences: Vec<Sequence>,

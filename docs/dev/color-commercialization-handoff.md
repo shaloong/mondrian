@@ -164,11 +164,12 @@ Remaining local COL-047 implementation/validation blocks:
    returned-owner bind failures. Preview-first outer constructor unwinds now
    consume the existing App and retain unverified internal-inventory facts.
 2. Extract cohesive performance owner-closure support from the large test
-   module and tighten validation-only module/cfg boundaries without broad
-   warning suppression. The standalone non-validation App lib Clippy exposes
-   existing dead-code groups across shutdown adapters and diagnostic facts;
-   the required all-feature workspace gate is a different configuration and
-   does not prove this one clean. Keep bounded protocol-test execution distinct from
+   module. The validation-only lifecycle/cfg boundary is now closed: ordinary
+   App library and binaries, validation App library, and the required
+   workspace/all-target/all-feature Clippy each passed with warnings denied.
+   Only qualification wrappers/imports/read-only diagnostic retention were
+   gated; ordinary Drop, worker accounting and shutdown primitives remain.
+   No broad warning suppression was added. Keep bounded protocol-test execution distinct from
    unnecessarily repeated release linking of every product/tool executable;
    preserve the real public-interface compile checks and test coverage.
 3. Make qualified FFmpeg command rejection a typed error; a command pointing

@@ -132,6 +132,7 @@ pub mod endurance_recovery;
 pub mod endurance_reference_output;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_run_request;
+#[cfg(any(test, feature = "validation"))]
 mod endurance_shutdown;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_source_inventory;
