@@ -284,6 +284,18 @@ An `Ok` shutdown receipt is still rejected immediately when any software
 worker, supervised child, Export worker, pending job, or active job remains;
 the coordinator must not take the final sample or admit the next phase.
 
+If a consumed phase later returns an error, inspect
+`EnduranceCampaignError::WithTerminalEvidence`: it keeps the original error and
+the complete owner-free Realtime or App-only shutdown receipt, including clean
+cleanup followed by publication failure. A receipt is not a successful terminal
+sample. Next-phase preparation clears only its error attachment before loading
+the next workload, and cannot make a missing terminal sample admissible.
+The shared GPU receipt retains both retirement-requested and exact terminal
+kind; explicit device destruction fails normal qualification just like loss or
+progress failure. Safe resource release is a separate claim. Partial GPU/Preview
+constructor/bind failure propagation and public raw success reports are not yet
+closed by this change.
+
 At every profile cadence:
 
 1. record scheduled monotonic offset;

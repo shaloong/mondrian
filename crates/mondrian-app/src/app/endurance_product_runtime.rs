@@ -18,8 +18,8 @@ use mondrian_reference_output::{ReferenceOutputDeviceDescriptor, ReferenceOutput
 
 use super::endurance_campaign::{
     run_endurance_campaign, EnduranceCampaignClock, EnduranceCampaignError, EnduranceCampaignEvent,
-    EnduranceCampaignRuntime, EnduranceExecutionOwners, EnduranceRuntimeClosure,
-    EnduranceRuntimeSnapshot,
+    EnduranceCampaignRuntime, EnduranceExecutionOwners, EndurancePhaseTerminalEvidence,
+    EnduranceRuntimeClosure, EnduranceRuntimeSnapshot, EnduranceTerminalOwners,
 };
 use super::endurance_export::{FrozenRepeatedExportPhase, FrozenRepeatedExportRequest};
 use super::endurance_ffmpeg_toolchain::PreparedEnduranceFfmpegToolchain;
@@ -545,7 +545,10 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
 enum RuntimeState {
     Empty,
     Owned(Box<PhaseOwners>),
-    Terminal(Option<Box<EnduranceRuntimeSnapshot>>),
+    Terminal {
+        snapshot: Option<Box<EnduranceRuntimeSnapshot>>,
+        evidence: Option<Box<EndurancePhaseTerminalEvidence>>,
+    },
 }
 
 struct PhaseOwners {
@@ -1062,7 +1065,31 @@ where
     factory.validate_machine_plan(prepared_request.machine_plan())?;
     let request = prepared_request.into_campaign_request();
     let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
-    run_endurance_campaign(request, &mut runtime, process_memory, clock.as_ref())
+    runtime.run_with_terminal_evidence(|runtime| {
+        run_endurance_campaign(request, runtime, process_memory, clock.as_ref())
+    })
+}
+
+impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
+    /// Attach the current receipt once, including failures after successful cleanup.
+    fn run_with_terminal_evidence<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, EnduranceCampaignError>,
+    ) -> Result<T, EnduranceCampaignError> {
+        let result = operation(self);
+        result.map_err(|primary| {
+            let RuntimeState::Terminal { evidence, .. } = &mut self.state else {
+                return primary;
+            };
+            match evidence.take() {
+                Some(terminal) => EnduranceCampaignError::WithTerminalEvidence {
+                    primary: Box::new(primary),
+                    terminal,
+                },
+                None => primary,
+            }
+        })
+    }
 }
 
 impl<F, S, C> EnduranceCampaignRuntime for ProductEnduranceCampaignRuntime<F, S, C>
@@ -1071,6 +1098,12 @@ where
     S: EnduranceSurfaceReopenDriver,
     C: EnduranceCampaignClock,
 {
+    fn begin_phase_preparation(&mut self) {
+        if let RuntimeState::Terminal { evidence, .. } = &mut self.state {
+            *evidence = None;
+        }
+    }
+
     fn bind_machine_plan(
         &mut self,
         machine_plan: PreparedCommercialEnduranceMachinePlan,
@@ -1104,12 +1137,12 @@ where
                     "cannot begin an endurance phase while another phase owns resources",
                 ));
             }
-            RuntimeState::Terminal(None) => {
+            RuntimeState::Terminal { snapshot: None, .. } => {
                 return Err(runtime_error(
                     "cannot begin after terminal snapshot construction failed",
                 ));
             }
-            RuntimeState::Empty | RuntimeState::Terminal(Some(_)) => {}
+            RuntimeState::Empty | RuntimeState::Terminal { snapshot: Some(_), .. } => {}
         }
         self.state = RuntimeState::Empty;
         let timeouts = self.timeouts.ok_or_else(|| {
@@ -1240,8 +1273,8 @@ where
     fn snapshot(&mut self) -> Result<EnduranceRuntimeSnapshot, EnduranceCampaignError> {
         match &self.state {
             RuntimeState::Owned(owners) => owners.live_snapshot().map_err(runtime_error),
-            RuntimeState::Terminal(Some(snapshot)) => Ok((**snapshot).clone()),
-            RuntimeState::Empty | RuntimeState::Terminal(None) => {
+            RuntimeState::Terminal { snapshot: Some(snapshot), .. } => Ok((**snapshot).clone()),
+            RuntimeState::Empty | RuntimeState::Terminal { snapshot: None, .. } => {
                 Err(runtime_error("endurance runtime has no snapshot authority"))
             }
         }
@@ -1254,7 +1287,10 @@ where
         let timeouts = self.timeouts.ok_or_else(|| {
             runtime_error("commercial endurance machine-plan timeouts are missing")
         })?;
-        let state = std::mem::replace(&mut self.state, RuntimeState::Terminal(None));
+        let state = std::mem::replace(
+            &mut self.state,
+            RuntimeState::Terminal { snapshot: None, evidence: None },
+        );
         let RuntimeState::Owned(mut owners) = state else {
             self.state = state;
             return Err(runtime_error(
@@ -1373,14 +1409,18 @@ where
             .take()
             .ok_or_else(|| runtime_error("shutdown lost the phase App owner"))?;
 
-        let (app_shutdown, capture_facts, playback_workers_terminated) =
+        let (terminal_owners, capture_facts, playback_workers_terminated) =
             if let Some(execution) = owners.execution.take() {
                 let closure = execution.shutdown_until(app, deadline)?;
                 failures.extend(closure.owner_snapshot_failure.clone());
                 failures.extend(closure.terminal_projection_failure.clone());
                 let capture_facts = closure.capture_facts();
                 let workers = closure.all_workers_terminated();
-                (closure.app, capture_facts, workers)
+                (
+                    EnduranceTerminalOwners::Realtime(Box::new(closure)),
+                    capture_facts,
+                    workers,
+                )
             } else {
                 let app_shutdown = app.shutdown_for_endurance(deadline);
                 let workers = app_shutdown.all_resources_released();
@@ -1401,11 +1441,16 @@ where
                     }
                     (None, Ok(_)) => EnduranceCaptureFacts::failed_continuous_export(),
                 };
-                (app_shutdown, capture_facts, workers)
+                (
+                    EnduranceTerminalOwners::AppOnly(Box::new(app_shutdown)),
+                    capture_facts,
+                    workers,
+                )
             };
+        let app_shutdown = terminal_owners.app();
         let export_shutdown = app_shutdown.export;
         let supervised_child_processes_remaining =
-            supervised_child_processes_remaining(&app_shutdown);
+            supervised_child_processes_remaining(app_shutdown);
         let all_app_resources_released = app_shutdown.all_resources_released();
         if !all_app_resources_released {
             failures.push("App endurance shutdown retained resources".to_owned());
@@ -1428,7 +1473,15 @@ where
             supervised_child_processes_remaining,
             export: export_shutdown,
         };
-        self.state = RuntimeState::Terminal(terminal_snapshot.map(Box::new));
+        self.state = RuntimeState::Terminal {
+            snapshot: terminal_snapshot.map(Box::new),
+            evidence: Some(Box::new(EndurancePhaseTerminalEvidence {
+                phase_kind: owners.kind,
+                closure,
+                owners: terminal_owners,
+                failures,
+            })),
+        };
         Ok((closure, events))
     }
 }
@@ -1677,6 +1730,193 @@ mod tests {
         assert!(events.is_empty());
         assert!(runtime.snapshot().is_ok());
         assert!(runtime.shutdown_phase().is_err());
+    }
+
+    fn failed_setup_runtime() -> (
+        ProductEnduranceCampaignRuntime<TestFactory, ForbiddenSurface, TestClock>,
+        tempfile::TempDir,
+    ) {
+        let factory = TestFactory {
+            inventory: EndurancePreStartCapabilityInventory::new([
+                EndurancePreStartCapability::FrozenExportFixtureDeclared,
+                EndurancePreStartCapability::IndependentExportVerifierPrepared,
+            ]),
+            build_calls: Rc::new(Cell::new(0)),
+            fail_build: true,
+        };
+        let mut runtime = ProductEnduranceCampaignRuntime::new(
+            factory,
+            ForbiddenSurface,
+            Arc::new(TestClock::default()),
+        );
+        let temporary = bind_test_machine_plan(&mut runtime);
+        (runtime, temporary)
+    }
+
+    #[test]
+    fn public_failure_retains_real_clean_shutdown_without_inventing_cleanup_error() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        let error = runtime
+            .run_with_terminal_evidence::<()>(|runtime| {
+                let primary = runtime.begin_phase(&requirement, &workload, 0).unwrap_err();
+                Err(super::super::endurance_campaign::cleanup_started_phase(
+                    runtime, primary,
+                ))
+            })
+            .unwrap_err();
+        let EnduranceCampaignError::WithTerminalEvidence { primary, terminal } = error else {
+            panic!("public failure lost consuming evidence");
+        };
+        assert!(
+            matches!(*primary, EnduranceCampaignError::Runtime(ref detail)
+            if detail == "injected phase setup failure")
+        );
+        assert_eq!(terminal.phase_kind, requirement.kind);
+        assert_eq!(
+            terminal.closure.status,
+            EndurancePhaseTerminalStatus::Failed
+        );
+        assert!(terminal.owners.app().all_resources_released());
+        assert!(matches!(
+            terminal.owners,
+            EnduranceTerminalOwners::AppOnly(_)
+        ));
+        assert_eq!(runtime.factory.build_calls.get(), 1);
+        assert!(runtime.snapshot().is_ok());
+        assert!(runtime.shutdown_phase().is_err());
+        let second = runtime
+            .run_with_terminal_evidence::<()>(|_| Err(runtime_error("second failure")))
+            .unwrap_err();
+        assert!(matches!(second, EnduranceCampaignError::Runtime(_)));
+    }
+
+    #[test]
+    fn public_failure_retains_primary_cleanup_error_and_real_unconsumed_cache_receipt() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        let mut retained_cache = None;
+        let error = runtime
+            .run_with_terminal_evidence::<()>(|runtime| {
+                let primary = runtime.begin_phase(&requirement, &workload, 0).unwrap_err();
+                let RuntimeState::Owned(owners) = &runtime.state else {
+                    panic!("failed setup must own its App");
+                };
+                // Real external ownership prevents consuming the cache at shutdown.
+                retained_cache = Some(Arc::clone(
+                    &owners.app.as_ref().expect("real App").audio_source_cache,
+                ));
+                Err(super::super::endurance_campaign::cleanup_started_phase(
+                    runtime, primary,
+                ))
+            })
+            .unwrap_err();
+        let EnduranceCampaignError::WithTerminalEvidence { primary, terminal } = error else {
+            panic!("public failure lost consuming evidence");
+        };
+        let EnduranceCampaignError::StartedPhaseCleanup { primary, cleanup } = *primary else {
+            panic!("incomplete real cleanup must retain both errors");
+        };
+        assert!(
+            matches!(*primary, EnduranceCampaignError::Runtime(ref detail)
+            if detail == "injected phase setup failure")
+        );
+        assert!(matches!(
+            *cleanup,
+            EnduranceCampaignError::IncompletePhaseCleanup { .. }
+        ));
+        let cache = &terminal.owners.app().audio_source_cache;
+        assert!(cache.strong_references_remaining > 0);
+        assert!(cache.cache.is_none());
+        assert!(!terminal.owners.app().all_resources_released());
+        assert!(terminal.failures.iter().any(|failure| failure.contains("retained resources")));
+        let cache = Arc::try_unwrap(retained_cache.take().expect("test-owned cache"))
+            .unwrap_or_else(|_| panic!("App must have released its own cache reference"));
+        let receipt = cache.shutdown_until(Instant::now() + Duration::from_secs(10));
+        assert_eq!(receipt.decoder_resource_handles_remaining, 0);
+    }
+
+    #[test]
+    fn post_shutdown_publication_failure_retains_the_successful_owner_receipt() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        let error = runtime
+            .run_with_terminal_evidence::<()>(|runtime| {
+                assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+                let RuntimeState::Owned(owners) = &mut runtime.state else {
+                    panic!("real App missing");
+                };
+                owners.fault = None;
+                let (closure, _) = runtime.shutdown_phase()?;
+                assert_eq!(closure.status, EndurancePhaseTerminalStatus::Completed);
+                Err(runtime_error("injected final publication failure"))
+            })
+            .unwrap_err();
+        let EnduranceCampaignError::WithTerminalEvidence { primary, terminal } = error else {
+            panic!("post-shutdown error lost the actual clean receipt");
+        };
+        assert!(
+            matches!(*primary, EnduranceCampaignError::Runtime(ref detail)
+            if detail == "injected final publication failure")
+        );
+        assert!(terminal.owners.app().all_resources_released());
+        assert_eq!(
+            terminal.closure.status,
+            EndurancePhaseTerminalStatus::Completed
+        );
+        assert!(terminal.failures.is_empty());
+    }
+
+    #[test]
+    fn missing_terminal_snapshot_keeps_evidence_but_never_grants_next_phase_admission() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        runtime.state = RuntimeState::Owned(Box::new(PhaseOwners::failed_before_start(
+            EndurancePhaseKind::PlaybackReference,
+            AppState::new(),
+            None,
+            0,
+            1,
+            0,
+            "injected pre-playback failure".to_owned(),
+        )));
+        runtime.shutdown_phase().expect("consume real App without a playback snapshot");
+        assert!(matches!(
+            runtime.state,
+            RuntimeState::Terminal { snapshot: None, evidence: Some(_) }
+        ));
+        assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+        runtime.begin_phase_preparation();
+        assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+        assert_eq!(runtime.factory.build_calls.get(), 0);
+        assert!(runtime.snapshot().is_err());
+    }
+
+    #[test]
+    fn next_phase_preparation_error_cannot_receive_the_previous_receipt() {
+        let (requirement, workload) = continuous_export_contract();
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        let error = runtime
+            .run_with_terminal_evidence::<()>(|runtime| {
+                assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
+                runtime.shutdown_phase()?;
+                assert!(matches!(
+                    runtime.state,
+                    RuntimeState::Terminal { evidence: Some(_), .. }
+                ));
+                runtime.begin_phase_preparation();
+                // The coordinator loads the next workload before begin_phase.
+                Err(runtime_error("next workload could not be loaded"))
+            })
+            .unwrap_err();
+        assert!(matches!(error, EnduranceCampaignError::Runtime(ref detail)
+            if detail == "next workload could not be loaded"));
+        runtime.factory.inventory = EndurancePreStartCapabilityInventory::new([]);
+        assert!(matches!(
+            runtime.begin_phase(&requirement, &workload, 0),
+            Ok(EndurancePhaseAdmission::NotRun(_))
+        ));
+        assert_eq!(runtime.factory.build_calls.get(), 1);
     }
 
     #[test]

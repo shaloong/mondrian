@@ -43,45 +43,12 @@ use super::headless_realtime_playback::{
     HeadlessGpuExecutionObserver, HeadlessPreviewSample, HeadlessRealtimePlaybackSession,
 };
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
-use super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
+pub use super::viewer_gpu_device_progress::{
+    ViewerGpuDeviceGenerationTerminalKind,
+    ViewerGpuDeviceProgressShutdownEvidence as EnduranceGpuShutdownEvidence,
+};
 use super::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
 use super::AppState;
-
-/// Public projection of bounded Headless GPU retirement evidence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EnduranceGpuShutdownEvidence {
-    /// Whether the progress worker started.
-    pub worker_started: bool,
-    /// Whether it returned within the shutdown bound.
-    pub worker_terminated: bool,
-    /// Whether the worker panicked.
-    pub worker_panicked: bool,
-    /// Whether bounded shutdown expired.
-    pub timed_out: bool,
-    /// Whether the complete device-generation envelope reached the worker.
-    pub retirement_handoff_accepted: bool,
-    /// Whether every accepted GPU/native resource became safe to release.
-    pub retirement_completed: bool,
-    /// Actual created Renderer runtime retirement, including the joined upload worker.
-    pub renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
-    /// Unexpected device losses observed through final retirement.
-    pub device_loss_count: u64,
-    /// Progress-domain failures observed through final retirement.
-    pub fatal_error_count: u64,
-}
-
-impl EnduranceGpuShutdownEvidence {
-    /// Whether GPU progress and generation retirement closed exactly.
-    pub const fn all_resources_retired(self) -> bool {
-        self.worker_started
-            && self.worker_terminated
-            && !self.worker_panicked
-            && !self.timed_out
-            && self.retirement_handoff_accepted
-            && self.retirement_completed
-            && matches!(self.renderer_retirement, Some(receipt) if receipt.is_healthy())
-    }
-}
 
 /// Synchronous closure across Headless and every AppState execution owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,7 +74,7 @@ impl EnduranceExecutionOwnerClosure {
         self.preview.all_workers_terminated()
             && self.app.all_resources_released()
             && self.waveform.all_resources_released()
-            && self.gpu.all_resources_retired()
+            && self.gpu.qualifies_normal_runtime()
     }
 
     /// Seal terminal gauges while retaining cumulative pre-shutdown failures.
@@ -437,11 +404,11 @@ impl EnduranceExecutionOwners {
                 worker_terminated: false,
                 worker_panicked: false,
                 timed_out: false,
+                retirement_requested: false,
                 retirement_handoff_accepted: false,
                 retirement_completed: false,
                 renderer_retirement: None,
-                device_loss_count: 0,
-                fatal_error_count: 1,
+                generation_terminal_kind: None,
             };
             let terminal_owner_snapshot = HeadlessEnduranceOwnerSnapshot::failed_capture()
                 .fail_closed_after_shutdown(HeadlessEnduranceShutdownProjection {
@@ -487,24 +454,6 @@ impl EnduranceExecutionOwners {
         let gpu = gpu_owner.shutdown_until(deadline);
         let waveform = self.waveform.shutdown_until(deadline);
         let app = app.shutdown_for_endurance(deadline);
-        let device_loss_count = u64::from(
-            gpu.generation_terminal_kind == Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost),
-        );
-        let fatal_error_count = u64::from(
-            gpu.generation_terminal_kind
-                == Some(ViewerGpuDeviceGenerationTerminalKind::ProgressFailure),
-        );
-        let gpu = EnduranceGpuShutdownEvidence {
-            worker_started: gpu.worker_started,
-            worker_terminated: gpu.worker_terminated,
-            worker_panicked: gpu.worker_panicked,
-            timed_out: gpu.timed_out,
-            retirement_handoff_accepted: gpu.retirement_handoff_accepted,
-            retirement_completed: gpu.retirement_completed,
-            renderer_retirement: gpu.renderer_retirement,
-            device_loss_count,
-            fatal_error_count,
-        };
         let (app_background, background_projection_failure) =
             match app.background_terminal_snapshot() {
                 Ok(snapshot) => (Some(snapshot), None),
@@ -523,9 +472,9 @@ impl EnduranceExecutionOwners {
                     app_residual_owners_closed: app.all_residual_owner_resources_released()
                         && waveform.all_resources_released(),
                     app_background,
-                    gpu_closed: gpu.all_resources_retired(),
-                    gpu_device_losses: gpu.device_loss_count,
-                    gpu_fatal_errors: gpu.fatal_error_count,
+                    gpu_closed: gpu.qualifies_normal_runtime(),
+                    gpu_device_losses: gpu.device_loss_count(),
+                    gpu_fatal_errors: gpu.fatal_error_count(),
                     transport_shutdown_failed,
                 },
                 background_projection_failure,
@@ -802,8 +751,47 @@ impl EnduranceRuntimeClosure {
     }
 }
 
+/// Raw receipts for the exact owner inventory consumed by a product phase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnduranceTerminalOwners {
+    /// Actual complete Headless, Waveform and App consuming shutdown receipts.
+    Realtime(Box<EnduranceExecutionOwnerClosure>),
+    /// Actual App shutdown where no execution group was installed.
+    AppOnly(Box<AppEnduranceShutdownEvidence>),
+}
+
+impl EnduranceTerminalOwners {
+    /// Borrow the one App receipt without copying or reinterpreting its inventory.
+    pub fn app(&self) -> &AppEnduranceShutdownEvidence {
+        match self {
+            Self::Realtime(owners) => &owners.app,
+            Self::AppOnly(app) => app,
+        }
+    }
+}
+
+/// Owner-free evidence from one consumed phase, independent of snapshot authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndurancePhaseTerminalEvidence {
+    /// Phase whose owners actually produced these receipts.
+    pub phase_kind: EndurancePhaseKind,
+    /// Coordinator's lightweight terminal projection, not a replacement for owners.
+    pub closure: EnduranceRuntimeClosure,
+    /// Complete raw receipts retained without live workers or device handles.
+    pub owners: EnduranceTerminalOwners,
+    /// Every latched shutdown/projection failure, not only the aggregate status.
+    pub failures: Vec<String>,
+}
+
 /// Product-owned execution surface consumed by the serial supervisor.
 pub trait EnduranceCampaignRuntime {
+    /// Start the next phase's preparation before loading its workload or capture.
+    ///
+    /// Forget prior-phase error attachments without granting owner admission or
+    /// repairing a missing terminal snapshot. Current-phase publication failures
+    /// retain their receipt until this boundary is reached.
+    fn begin_phase_preparation(&mut self) {}
+
     /// Bind the exact validated plan before any phase owner can be created.
     fn bind_machine_plan(
         &mut self,
@@ -892,6 +880,7 @@ where
     )?;
 
     for requirement in &profile.phases {
+        runtime.begin_phase_preparation();
         let workload_path = request
             .workload_contracts
             .get(&requirement.phase_id)
@@ -1014,7 +1003,7 @@ where
         .map_err(Into::into)
 }
 
-fn cleanup_started_phase<R: EnduranceCampaignRuntime>(
+pub(super) fn cleanup_started_phase<R: EnduranceCampaignRuntime>(
     runtime: &mut R,
     primary: EnduranceCampaignError,
 ) -> EnduranceCampaignError {
@@ -1148,6 +1137,16 @@ fn validate_workload_map(
 /// Stable campaign coordination failure.
 #[derive(Debug, Error)]
 pub enum EnduranceCampaignError {
+    /// The public product return retains actual consuming evidence independently
+    /// of whether the primary failure occurred before, during, or after cleanup.
+    #[error("{primary}; terminal owner evidence retained")]
+    WithTerminalEvidence {
+        /// Original failure, including any distinct secondary cleanup failure.
+        #[source]
+        primary: Box<EnduranceCampaignError>,
+        /// The current phase's complete owner-free terminal evidence.
+        terminal: Box<EndurancePhaseTerminalEvidence>,
+    },
     /// Evidence capture/publication failed closed.
     #[error(transparent)]
     Capture(#[from] EnduranceCaptureError),
@@ -1323,7 +1322,7 @@ mod tests {
         assert!(closure.waveform.all_resources_released());
         assert!(closure.app.audio.all_workers_terminated());
         assert!(closure.app.all_resources_released());
-        assert!(closure.gpu.all_resources_retired());
+        assert!(closure.gpu.qualifies_normal_runtime());
         assert!(closure.all_workers_terminated());
     }
 
@@ -1355,6 +1354,9 @@ mod tests {
 
     struct FakeRuntime<'a> {
         clock: &'a FakeClock,
+        preparation_calls: u32,
+        begin_calls: u32,
+        shutdown_calls: u32,
         machine_plan_sha256: Option<String>,
         kind: Option<mondrian_platform::EndurancePhaseKind>,
         phase_started_at_us: u64,
@@ -1366,6 +1368,9 @@ mod tests {
         fn new(clock: &'a FakeClock) -> Self {
             Self {
                 clock,
+                preparation_calls: 0,
+                begin_calls: 0,
+                shutdown_calls: 0,
                 machine_plan_sha256: None,
                 kind: None,
                 phase_started_at_us: 0,
@@ -1380,6 +1385,10 @@ mod tests {
     }
 
     impl EnduranceCampaignRuntime for FakeRuntime<'_> {
+        fn begin_phase_preparation(&mut self) {
+            self.preparation_calls += 1;
+        }
+
         fn bind_machine_plan(
             &mut self,
             machine_plan: PreparedCommercialEnduranceMachinePlan,
@@ -1395,6 +1404,7 @@ mod tests {
             phase_started_at_run_us: u64,
         ) -> Result<EndurancePhaseAdmission, EnduranceCampaignError> {
             assert!(self.machine_plan_sha256.is_some());
+            self.begin_calls += 1;
             self.kind = Some(requirement.kind);
             self.phase_started_at_us = phase_started_at_run_us;
             self.verified_exports = 0;
@@ -1482,6 +1492,7 @@ mod tests {
             &mut self,
         ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>
         {
+            self.shutdown_calls += 1;
             self.shutdown = true;
             Ok((
                 EnduranceRuntimeClosure {
@@ -1760,6 +1771,30 @@ mod tests {
             workload_contracts: workloads,
         };
         (temporary, request, profile, evidence)
+    }
+
+    #[test]
+    fn coordinator_begins_next_preparation_before_a_workload_load_failure() {
+        let (temporary, mut request, profile, _) = campaign_fixture();
+        let third = profile
+            .phases
+            .iter()
+            .find(|phase| phase.kind == EndurancePhaseKind::ConcurrentRecovery)
+            .expect("third phase");
+        request.workload_contracts.insert(
+            third.phase_id.clone(),
+            temporary.path().join("missing-next-workload.json"),
+        );
+        let clock = FakeClock::default();
+        let mut runtime = FakeRuntime::new(&clock);
+        let error = run_endurance_campaign(request, &mut runtime, &FakeMemory(&clock), &clock)
+            .expect_err("third workload must fail before owner admission");
+        assert!(matches!(error, EnduranceCampaignError::Workload(_)));
+        // First phase is NotRun; the second completes its consuming shutdown.
+        // The third reaches preparation, but never begin or additional cleanup.
+        assert_eq!(runtime.preparation_calls, 3);
+        assert_eq!(runtime.begin_calls, 2);
+        assert_eq!(runtime.shutdown_calls, 1);
     }
 
     #[derive(Clone, Copy)]

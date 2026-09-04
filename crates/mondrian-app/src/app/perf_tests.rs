@@ -2730,15 +2730,7 @@ impl PerfGpuClosureReport {
                 "progress_failure"
             }
         });
-        let all_resources_released = evidence.worker_started
-            && evidence.worker_terminated
-            && !evidence.worker_panicked
-            && !evidence.timed_out
-            && evidence.retirement_requested
-            && evidence.retirement_handoff_accepted
-            && evidence.retirement_completed
-            && evidence.renderer_retirement.is_some_and(|receipt| receipt.is_healthy())
-            && generation_terminal_kind.is_none();
+        let all_resources_released = evidence.qualifies_normal_runtime();
         Self {
             worker_started: evidence.worker_started,
             worker_terminated: evidence.worker_terminated,

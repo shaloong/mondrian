@@ -268,7 +268,17 @@ It synchronously retires the same PCM/device workers pumped by Playback before
 transferring the complete GPU device-generation retirement envelope to the
 existing progress worker. GPU closure is bounded by the same terminal budget
 and records worker start/return, panic, timeout, retirement-handoff acceptance,
-and exact resource retirement.
+and exact resource retirement. Endurance retains the shared, owner-free
+`ViewerGpuDeviceProgressShutdownEvidence` directly, including retirement request
+and the exact generation terminal kind. Endurance, Perf and Window use its one
+normal-runtime qualification predicate. DeviceDestroyed, DeviceLost and
+ProgressFailure all reject normal qualification, even after safe physical release;
+the stronger qualification predicate never controls resource-release safety.
+Validation API migration: `EnduranceGpuShutdownEvidence` is now the exact shared
+receipt re-export. Use `device_loss_count()` / `fatal_error_count()` instead of
+the removed projected fields and `qualifies_normal_runtime()` instead of
+`all_resources_retired()`. Neither the project container nor the Window schema-2
+shutdown JSON format changes.
 The GPU receipt also retains the Renderer-owned joined CPU-YUV upload outcome
 and native device-removal evidence. Complete normal-runtime qualification
 requires an actual healthy Renderer receipt; `retirement_completed=false` with
@@ -292,6 +302,23 @@ join is merged into the terminal counters rather than being frozen only before
 teardown. A timeout detaches the still-authoritative progress worker so that it can
 finish safe retirement, but it is terminal campaign failure evidence: it never
 claims that a GPU/native owner returned or that its admission slot was freed.
+
+The concrete Product runtime retains the complete Realtime or App-only raw
+closure as `EndurancePhaseTerminalEvidence`, independently of its optional
+terminal sample. It no longer discards Preview/GPU/Renderer/Waveform receipts
+while projecting App counters. The public failure boundary attaches this
+owner-free value once with `WithTerminalEvidence`, preserving the primary error
+and any incomplete-cleanup error. A failure after successful shutdown (including
+sample or publication failure) retains the clean receipt without falsely calling
+cleanup a failure. The coordinator marks the next phase's preparation before
+loading workload/capture data, so a failure there cannot acquire the previous
+phase's receipt. Clearing that attachment does not repair a missing terminal
+sample or grant next-phase admission.
+
+This boundary covers failures after actual phase shutdown, not yet owning
+Headless/Window constructor failures. Successful campaign returns still expose
+the sealed manifest, not a public collection of raw phase receipts; durable raw
+success reporting and exact partial-start inventories remain follow-on work.
 
 Validation Window sessions use the operation's original absolute deadline for
 both Window Preview and Waveform teardown. The host returns their typed

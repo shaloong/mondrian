@@ -529,16 +529,7 @@ fn exact_presented_surface_picture(
 fn seal_clean_viewer_gpu_shutdown(
     evidence: ViewerGpuDeviceProgressShutdownEvidence,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    if !evidence.worker_started
-        || !evidence.worker_terminated
-        || evidence.worker_panicked
-        || evidence.timed_out
-        || !evidence.retirement_requested
-        || !evidence.retirement_handoff_accepted
-        || !evidence.retirement_completed
-        || !evidence.renderer_retirement.is_some_and(|receipt| receipt.is_healthy())
-        || evidence.generation_terminal_kind.is_some()
-    {
+    if !evidence.qualifies_normal_runtime() {
         return Err("Viewer GPU device generation did not retire cleanly".into());
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {

@@ -163,7 +163,7 @@ pub(crate) enum ViewerGpuDeviceProgressObservation {
 
 /// Why one complete Viewer device generation became terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ViewerGpuDeviceGenerationTerminalKind {
+pub enum ViewerGpuDeviceGenerationTerminalKind {
     /// wgpu reported an unexpected concrete device loss.
     DeviceLost,
     /// The application explicitly destroyed the concrete device generation.
@@ -305,18 +305,64 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
 /// Bounded synchronous closure evidence for one Viewer GPU progress domain.
 #[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ViewerGpuDeviceProgressShutdownEvidence {
-    pub(crate) worker_started: bool,
-    pub(crate) worker_terminated: bool,
-    pub(crate) worker_panicked: bool,
-    pub(crate) timed_out: bool,
-    pub(crate) retirement_requested: bool,
-    pub(crate) retirement_handoff_accepted: bool,
-    pub(crate) retirement_completed: bool,
+pub struct ViewerGpuDeviceProgressShutdownEvidence {
+    /// Whether this exact progress worker started.
+    pub worker_started: bool,
+    /// Whether its actual thread was joined within the deadline.
+    pub worker_terminated: bool,
+    /// Whether progress execution or its thread panicked.
+    pub worker_panicked: bool,
+    /// Whether the consuming shutdown deadline elapsed.
+    pub timed_out: bool,
+    /// Whether the caller requested generation retirement, not just command drain.
+    pub retirement_requested: bool,
+    /// Whether the complete retirement envelope reached the progress domain.
+    pub retirement_handoff_accepted: bool,
+    /// Whether the envelope proved safe release through all independent barriers.
+    pub retirement_completed: bool,
     /// Present only after a completed retirement of a created Renderer runtime.
-    pub(crate) renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
+    pub renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     /// Terminal observed through the final bounded progress-worker join.
-    pub(crate) generation_terminal_kind: Option<ViewerGpuDeviceGenerationTerminalKind>,
+    pub generation_terminal_kind: Option<ViewerGpuDeviceGenerationTerminalKind>,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl ViewerGpuDeviceProgressShutdownEvidence {
+    /// Qualify a complete normal-runtime shutdown, never authorize resource release.
+    ///
+    /// A destroyed/lost device or joined upload panic can permit physical release
+    /// while failing this stronger predicate. Partial startup has its own inventory
+    /// and must not fabricate a Renderer receipt to satisfy normal qualification.
+    pub const fn qualifies_normal_runtime(self) -> bool {
+        self.worker_started
+            && self.worker_terminated
+            && !self.worker_panicked
+            && !self.timed_out
+            && self.retirement_requested
+            && self.retirement_handoff_accepted
+            && self.retirement_completed
+            && matches!(self.renderer_retirement, Some(receipt) if receipt.is_healthy())
+            && self.generation_terminal_kind.is_none()
+    }
+
+    /// Unexpected device losses observed through final shutdown.
+    pub const fn device_loss_count(self) -> u64 {
+        matches!(
+            self.generation_terminal_kind,
+            Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost)
+        ) as u64
+    }
+
+    /// Non-loss terminal faults, including explicit destruction during qualification.
+    pub const fn fatal_error_count(self) -> u64 {
+        matches!(
+            self.generation_terminal_kind,
+            Some(
+                ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed
+                    | ViewerGpuDeviceGenerationTerminalKind::ProgressFailure
+            )
+        ) as u64
+    }
 }
 
 /// Clone captured by the exact queue callback.

@@ -116,6 +116,13 @@ COL-031 or COL-047 reference-machine result. Raw local reports are under
 removed during a clean rebuild. Preserve reports outside `target` with hash
 verification before deleting build output.
 
+The raw-terminal evidence block passed 91 focused tests on 2026-09-04,
+including real App clean/incomplete shutdown and one real Headless GPU/native
+scheduling shutdown. GPU terminal fault combinations are protocol tests, not
+physical fault injection. Full workspace/all-target/all-feature Clippy, format
+and diff checks passed. These are developer validation results, not a sealed
+realtime or 72-hour qualification baseline.
+
 Remaining local COL-047 implementation/validation blocks:
 
 1. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
@@ -126,14 +133,23 @@ Remaining local COL-047 implementation/validation blocks:
    terminal receipts as well as the optional campaign snapshot. The now-verified
    Renderer retirement/progress protocol is the shared prerequisite, not proof
    that these constructor/public-result paths already close.
-   Also retain the exact GPU terminal kind and retirement-requested flag:
-   Endurance currently loses `DeviceDestroyed` in its count-only projection,
-   unlike Perf/Window qualification. Safe physical release and a healthy normal
-   qualification must stay separate predicates; this is a protocol finding,
-   not an observed local device failure.
+   The current raw-terminal block preserves complete Realtime/App-only receipts
+   separately from the optional snapshot and attaches them to public campaign
+   failures, including failures after clean shutdown. Next-phase preparation
+   clears stale error attachments before workload loading. It also replaces
+   Endurance's lossy GPU projection with the exact shared receipt and one
+   Endurance/Perf/Window normal qualification predicate, rejecting
+   `DeviceDestroyed`. This is a protocol finding, not an observed hardware fault.
+   Public successful campaign returns still expose the manifest only; raw
+   success reporting and owning partial-start inventories remain incomplete.
+   Include Golden acceptance constructor callers in that migration. Live
+   Headless GPU snapshot counters also still omit `DeviceDestroyed`; the
+   current fix preserves and rejects it in the consuming terminal receipt.
 2. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
-   warning suppression.
+   warning suppression. Keep bounded protocol-test execution distinct from
+   unnecessarily repeated release linking of every product/tool executable;
+   preserve the real public-interface compile checks and test coverage.
 3. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
 4. Close the capsule lifecycle: sealed namespace, spawn-time admission,
