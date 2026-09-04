@@ -233,7 +233,7 @@ render-substitution, generation-recovery, underrun-recovery, backend-loss, and
 deactivation-failure counts. Headless endurance capture projects retired plus
 current counts, preventing counter regression at the replacement boundary.
 
-The closure consumes schema-3 Playback, schema-2 physical-output, and schema-5
+The closure consumes schema-3 Playback, schema-2 physical-output, and schema-6
 Audio Source receipts. Playback additionally inventories its prebuilt renderer
 retirement owner; completion channels retain only PCM or safe value errors, so
 an opaque renderer error/destructor cannot migrate onto the coordinator or
@@ -245,7 +245,7 @@ a fresh decoder worker.
 
 The App-owned product Waveform service now has its own schema-1 consuming-style
 receipt over the analysis worker, request/publication backlog, external cache
-references, and nested schema-5 Audio Source closure; its Timeline adapter is
+references, and nested schema-6 Audio Source closure; its Timeline adapter is
 weak and cannot prolong those owners. Normal `AppUiHost` quit consumes that
 receipt under a fixed deadline. Realtime endurance phases now instantiate the
 same product Waveform owner, bind it to the exact phase Asset Library, signal it

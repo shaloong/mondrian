@@ -52,8 +52,9 @@ pub use audio_playback::{
     AudioPlaybackState, AudioRenderRecoveryDisposition,
 };
 pub use audio_source::{
-    AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheDiagnostics,
-    AudioSourceCacheShutdownEvidence, AudioSourceReader, AudioSourceSelection,
+    AudioDecoderStartupShutdownEvidence, AudioSourceCache, AudioSourceCacheConfig,
+    AudioSourceCacheDiagnostics, AudioSourceCacheShutdownEvidence, AudioSourceReader,
+    AudioSourceSelection,
 };
 pub use camera_raw::probe_camera_raw_metadata;
 pub use decoder::{

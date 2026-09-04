@@ -415,6 +415,43 @@ function Assert-CleanAudio {
     Assert-Bool $output.all_workers_terminated $true "$Context.output.all_workers_terminated"
 }
 
+function Assert-CleanAudioStartup {
+    param($Startup, [string]$Context)
+    $counters = @(
+        'workers_started', 'workers_joined', 'start_failures', 'panics',
+        'publication_missing', 'owner_abandonments', 'unverified_native_owners',
+        'requests_admitted', 'requests_claimed', 'requests_retired', 'canceled_before_spawn',
+        'queued_remaining', 'in_flight_remaining', 'unclaimed_results_remaining', 'producers_remaining'
+    )
+    $fields = @('required', 'attempted') + $counters
+    if ($null -eq $Startup -or $Startup -isnot [pscustomobject]) {
+        throw "$Context must be one startup inventory object"
+    }
+    $actual = @($Startup.PSObject.Properties.Name)
+    if ($actual.Count -ne $fields.Count) { throw "$Context has a noncanonical shape" }
+    foreach ($field in $fields) {
+        if ($field -cnotin $actual) { throw "$Context is missing canonical field '$field'" }
+    }
+    Assert-Bool $Startup.required $true "$Context.required"
+    Assert-Bool $Startup.attempted $true "$Context.attempted"
+    foreach ($field in $counters) {
+        Assert-UnsignedInteger $Startup.$field "$Context.$field"
+        if ([bigint]$Startup.$field -gt [bigint][uint64]::MaxValue) {
+            throw "$Context.$field exceeds its producer range"
+        }
+    }
+    if ($Startup.workers_started -ne 1 -or $Startup.workers_joined -ne 1 -or
+        [bigint]$Startup.requests_admitted -ne ([bigint]$Startup.requests_claimed + [bigint]$Startup.requests_retired) -or
+        [bigint]$Startup.canceled_before_spawn -gt [bigint]$Startup.requests_admitted) {
+        throw "$Context has incomplete worker or request ownership"
+    }
+    foreach ($field in @(
+        'start_failures', 'panics', 'publication_missing', 'owner_abandonments',
+        'unverified_native_owners', 'queued_remaining', 'in_flight_remaining',
+        'unclaimed_results_remaining', 'producers_remaining'
+    )) { Assert-Zero $Startup.$field "$Context.$field" }
+}
+
 function Assert-CleanAudioSource {
     param($Source, [string]$Context)
     Assert-Fields $Source @(
@@ -428,7 +465,7 @@ function Assert-CleanAudioSource {
     Assert-Bool $Source.all_resources_released $true "$Context.all_resources_released"
     $cache = $Source.cache
     Assert-Fields $cache @(
-        "schema_version", "in_flight_decodes_before", "pcm_entries_before", "pcm_bytes_before",
+        "schema_version", "decoder_startup", "in_flight_decodes_before", "pcm_entries_before", "pcm_bytes_before",
         "failure_entries_before", "external_pcm_buffer_references", "pcm_entries_remaining",
         "pcm_bytes_remaining", "failure_entries_remaining", "decoder_sessions_before",
         "decoder_sessions_remaining", "child_processes_observed", "child_processes_terminated",
@@ -448,7 +485,9 @@ function Assert-CleanAudioSource {
         "shutdown_resource_facts_complete_at_deadline",
         "shutdown_owner_lifetime_unresolved_at_deadline"
     ) "$Context.cache"
-    if ([uint64]$cache.schema_version -ne 5 -or
+    Assert-CleanAudioStartup $cache.decoder_startup "$Context.cache.decoder_startup"
+    if ([uint64]$cache.schema_version -ne 6 -or
+        [uint64]$cache.decoder_shutdown_workers_started -ne 1 -or
         [uint64]$cache.child_processes_observed -ne [uint64]$cache.child_processes_terminated -or
         [uint64]$cache.stdout_pump_threads_observed -ne [uint64]$cache.stdout_pump_threads_joined -or
         [uint64]$cache.stderr_pump_threads_observed -ne [uint64]$cache.stderr_pump_threads_joined -or

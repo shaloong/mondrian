@@ -929,7 +929,17 @@ coarse preroll followed by output-side exact trim. Stdout look-ahead and
 stderr retention are byte-bounded, and generation cancellation kills, waits,
 and joins the process and pump threads. Linked in-process decoding remains a
 replaceable Adapter choice rather than a different source contract. Decode
-runs only on audio render workers, never on the callback or UI thread.
+runs only on audio render workers, never on the callback or UI thread. Native
+child/pump construction uses a separate prebuilt Media startup lane so an
+uninterruptible OS spawn cannot hold the canceled read waiter. Cancellation
+before or during construction preserves partial ownership for the independent
+teardown lane; the physical permit is released only after actual closure.
+Startup completion envelopes retain producer leases through install/retire,
+including channel disconnection. This changes lifetime scheduling, not PCM,
+seek, channel mapping, or the Runtime's generation/publication authority.
+SourceCache schema 6 reports that startup inventory independently from its
+unchanged one-worker teardown contract. Logical responsiveness is not proof
+of the separate 50 ms physical-retirement qualification target.
 
 Playback and export both use this Runtime. Their only differences are Render
 Contract mode, scheduling, error handling, and downstream sink:

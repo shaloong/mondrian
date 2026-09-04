@@ -17,6 +17,13 @@ from the independent artifact re-open/content verification required by
 commercial endurance qualification; see
 [Commercial Endurance Qualification](commercial-endurance-qualification.md).
 
+The job-scoped Audio Source Cache now returns schema-6 raw closure, including
+its independent native-startup worker and producer leases. Queue consumers do
+not reinterpret audio construction or introduce a separate startup scheduler.
+The existing Export terminal owner counters still summarize that raw receipt;
+durable preservation of complete successful receipts is a separate outstanding
+COL-047 requirement, not implied by the schema update.
+
 The validation-only repeated-Export owner sits above this Queue rather than
 inside it. It freezes one ordinary `ExportConfig`, changes only a unique
 monotonic create-only output path, admits exactly one Job at a time, requires

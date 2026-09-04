@@ -2,8 +2,10 @@
 
 mod mapping;
 mod session;
+mod startup_evidence;
 
 pub use mapping::AudioSourceSelection;
+pub use startup_evidence::AudioDecoderStartupShutdownEvidence;
 
 use crate::audio::AudioBuffer;
 use crate::owner_lifetime::{abandon_io_error, dispose_canonical_or_abandon_opaque_panic_payload};
@@ -82,6 +84,7 @@ pub struct AudioSourceCache {
 pub(super) struct AudioWindowDecoderShutdownSignal {
     requested: AtomicBool,
     worker: OnceLock<thread::Thread>,
+    startup_worker: OnceLock<thread::Thread>,
 }
 
 impl AudioWindowDecoderShutdownSignal {
@@ -89,12 +92,14 @@ impl AudioWindowDecoderShutdownSignal {
         Self {
             requested: AtomicBool::new(false),
             worker: OnceLock::new(),
+            startup_worker: OnceLock::new(),
         }
     }
 
     pub(super) fn request(&self) {
         self.requested.store(true, Ordering::Release);
         self.notify_worker();
+        self.notify_startup_worker();
     }
 
     pub(super) fn is_requested(&self) -> bool {
@@ -107,6 +112,16 @@ impl AudioWindowDecoderShutdownSignal {
 
     pub(super) fn notify_worker(&self) {
         if let Some(worker) = self.worker.get() {
+            worker.unpark();
+        }
+    }
+
+    pub(super) fn register_startup_worker(&self) {
+        let _already_registered = self.startup_worker.set(thread::current());
+    }
+
+    pub(super) fn notify_startup_worker(&self) {
+        if let Some(worker) = self.startup_worker.get() {
             worker.unpark();
         }
     }
@@ -264,6 +279,7 @@ pub(super) struct AudioWindowDecoderDiagnostics {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct AudioWindowDecoderShutdownEvidence {
+    pub(super) startup: AudioDecoderStartupShutdownEvidence,
     pub(super) sessions_before: usize,
     pub(super) sessions_remaining: usize,
     pub(super) child_processes_observed: usize,
@@ -289,7 +305,10 @@ pub(super) struct AudioWindowDecoderShutdownEvidence {
 
 impl AudioWindowDecoderShutdownEvidence {
     pub(super) const fn all_resources_released(self) -> bool {
-        self.sessions_remaining == 0
+        self.startup.all_resources_released()
+            && (!self.startup.required
+                || (self.shutdown_workers_started == 1 && self.shutdown_workers_terminated == 1))
+            && self.sessions_remaining == 0
             && self.child_processes_observed == self.child_processes_terminated
             && self.child_process_termination_failures == 0
             && self.stdout_pump_threads_observed == self.stdout_pump_threads_joined
@@ -506,6 +525,8 @@ pub struct AudioSourceCacheDiagnostics {
 pub struct AudioSourceCacheShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,
+    /// Independent native startup worker and move-only request closure.
+    pub decoder_startup: AudioDecoderStartupShutdownEvidence,
     /// Decode leaders present before consuming cleanup began.
     pub in_flight_decodes_before: usize,
     /// Resident PCM windows before cleanup.
@@ -603,7 +624,7 @@ pub struct AudioSourceCacheShutdownEvidence {
 impl AudioSourceCacheShutdownEvidence {
     /// Whether every cache, child-process, pump-thread, and ownership fact closed exactly.
     pub const fn all_resources_released(self) -> bool {
-        self.schema_version == 5
+        self.schema_version == 6
             && self.in_flight_decodes_before == 0
             && self.external_pcm_buffer_references == 0
             && self.pcm_entries_remaining == 0
@@ -620,6 +641,7 @@ impl AudioSourceCacheShutdownEvidence {
             && self.shutdown_resource_facts_complete_at_deadline
             && !self.shutdown_owner_lifetime_unresolved_at_deadline
             && AudioWindowDecoderShutdownEvidence {
+                startup: self.decoder_startup,
                 sessions_before: self.decoder_sessions_before,
                 sessions_remaining: self.decoder_sessions_remaining,
                 child_processes_observed: self.child_processes_observed,
@@ -949,7 +971,8 @@ impl AudioSourceCache {
         };
         let decoder = self.decoder.shutdown_sessions();
         AudioSourceCacheShutdownEvidence {
-            schema_version: 5,
+            schema_version: 6,
+            decoder_startup: decoder.startup,
             in_flight_decodes_before,
             pcm_entries_before,
             pcm_bytes_before,
@@ -1199,7 +1222,7 @@ impl AudioSourceCache {
         owner_abandonments: u32,
     ) -> AudioSourceCacheShutdownEvidence {
         AudioSourceCacheShutdownEvidence {
-            schema_version: 5,
+            schema_version: 6,
             // The coordinator owns an unobservable cache/decoder lifetime.
             // Retain a conservative resource floor instead of claiming zero.
             decoder_resource_handles_remaining: 1,
@@ -1835,11 +1858,18 @@ mod tests {
         assert!(!AudioSourceCacheShutdownEvidence::default().all_resources_released());
         let evidence = AudioSourceCache::new(48_000).shutdown_and_wait();
 
-        assert_eq!(evidence.schema_version, 5);
+        assert_eq!(evidence.schema_version, 6);
         assert_eq!(
             evidence,
             AudioSourceCacheShutdownEvidence {
-                schema_version: 5,
+                schema_version: 6,
+                decoder_startup: AudioDecoderStartupShutdownEvidence {
+                    required: true,
+                    attempted: true,
+                    workers_started: 1,
+                    workers_joined: 1,
+                    ..Default::default()
+                },
                 decoder_shutdown_workers_started: 1,
                 decoder_shutdown_workers_terminated: 1,
                 shutdown_resource_facts_complete_at_deadline: true,
@@ -1849,7 +1879,7 @@ mod tests {
         );
         assert!(evidence.all_resources_released());
 
-        let stale = AudioSourceCacheShutdownEvidence { schema_version: 4, ..evidence };
+        let stale = AudioSourceCacheShutdownEvidence { schema_version: 5, ..evidence };
         assert!(!stale.all_resources_released());
     }
 
@@ -1857,7 +1887,7 @@ mod tests {
     fn shutdown_placeholder_owns_no_decoder_worker() {
         let evidence = AudioSourceCache::shutdown_placeholder(48_000).shutdown_and_wait();
 
-        assert_eq!(evidence.schema_version, 5);
+        assert_eq!(evidence.schema_version, 6);
         assert_eq!(evidence.decoder_shutdown_workers_started, 0);
         assert_eq!(evidence.decoder_shutdown_workers_terminated, 0);
         assert!(evidence.all_resources_released());
@@ -1919,7 +1949,7 @@ mod tests {
         let evidence =
             AudioSourceCache::new(48_000).shutdown_until(Instant::now() + Duration::from_secs(2));
 
-        assert_eq!(evidence.schema_version, 5);
+        assert_eq!(evidence.schema_version, 6);
         assert_eq!(evidence.shutdown_coordinators_started, 1);
         assert_eq!(evidence.shutdown_coordinators_terminated, 1);
         assert_eq!(evidence.shutdown_coordinator_start_failures, 0);
@@ -2698,6 +2728,13 @@ mod tests {
         assert_eq!(diagnostics.decoder_random_seek_restarts, 1);
         assert_eq!(diagnostics.decoder_sessions, 1);
         assert!(diagnostics.decoder_peak_sessions <= diagnostics.decoder_session_capacity);
+        drop(reader);
+        let receipt = Arc::try_unwrap(cache)
+            .ok()
+            .expect("only test owns cache")
+            .shutdown_until(Instant::now() + Duration::from_secs(2));
+        eprintln!("real-media parity closure: {receipt:?}");
+        assert!(receipt.all_resources_released(), "{receipt:?}");
     }
 
     #[test]
@@ -2708,7 +2745,22 @@ mod tests {
             eprintln!("skipped: MONDRIAN_AUDIO_EXTERNAL_MEDIA_PATH not set");
             return;
         };
-        let cache = Arc::new(AudioSourceCache::new(48_000));
+        let (native_entered_tx, native_entered_rx) = std::sync::mpsc::sync_channel(1);
+        let decoder = PersistentFfmpegAudioWindowDecoder::with_native_spawn_for_test(
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
+            Arc::new(move |command| {
+                let _ = native_entered_tx.send(());
+                command.spawn()
+            }),
+        );
+        let cache = Arc::new(AudioSourceCache::with_decoder(
+            48_000,
+            AUDIO_SOURCE_WINDOW_SECONDS,
+            AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
+            AUDIO_SOURCE_CACHE_BYTE_BUDGET,
+            AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
+            Arc::new(decoder),
+        ));
         let stream = crate::probe_media_info(&path)
             .expect("probe external source")
             .primary_audio()
@@ -2726,11 +2778,9 @@ mod tests {
             let mut destination = vec![0.0; 2_048 * 2];
             reader.read_interleaved_cancellable(0, 2_048, &mut destination, &worker_cancellation)
         });
-        let admission_deadline = Instant::now() + Duration::from_secs(2);
-        while Instant::now() < admission_deadline && cache.diagnostics().decoder_sessions == 0 {
-            std::thread::yield_now();
-        }
-        assert_eq!(cache.diagnostics().decoder_sessions, 1);
+        // Observe the actual OS call, not the earlier physical reservation: a
+        // queued cancellation could correctly avoid creating any child at all.
+        let native_entered = native_entered_rx.recv_timeout(Duration::from_secs(2)).is_ok();
         let canceled_at = Instant::now();
         cancellation.cancel();
         let error = worker.join().expect("decode worker returns").expect_err("decode cancels");
@@ -2749,9 +2799,19 @@ mod tests {
             .shutdown_until(Instant::now() + Duration::from_secs(2));
         eprintln!("real-child cancellation: read={read_return_elapsed:?}, physical_observation={physical_release_elapsed:?}, remaining={}, receipt={receipt:?}", diagnostics.decoder_sessions);
         assert!(receipt.all_resources_released(), "{receipt:?}");
+        assert!(
+            native_entered,
+            "real native spawn must have begun before cancellation"
+        );
         assert_eq!(receipt.child_processes_observed, 1);
-        assert_eq!(receipt.stdout_pump_threads_joined, 1);
-        assert_eq!(receipt.stderr_pump_threads_joined, 1);
+        assert_eq!(
+            receipt.stdout_pump_threads_observed,
+            receipt.stdout_pump_threads_joined
+        );
+        assert_eq!(
+            receipt.stderr_pump_threads_observed,
+            receipt.stderr_pump_threads_joined
+        );
         assert!(
             read_return_elapsed <= Duration::from_millis(50),
             "persistent decode cancellation exceeded 50 ms: {:?}",

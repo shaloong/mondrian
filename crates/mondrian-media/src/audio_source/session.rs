@@ -33,6 +33,13 @@ const DECODER_TEARDOWN_WORKER_RUNNING: u8 = 1;
 const DECODER_TEARDOWN_WORKER_COMPLETED: u8 = 2;
 const DECODER_TEARDOWN_WORKER_PANICKED: u8 = 3;
 
+#[path = "session/startup.rs"]
+mod startup;
+use startup::StartupLane;
+
+#[cfg(test)]
+type NativeChildSpawner = Arc<dyn Fn(&mut Command) -> std::io::Result<Child> + Send + Sync>;
+
 type DecoderTeardownWork = Box<dyn FnOnce() + Send + 'static>;
 type DecoderTeardownSpawner =
     Arc<dyn Fn(DecoderTeardownWork) -> std::io::Result<JoinHandle<()>> + Send + Sync>;
@@ -53,10 +60,14 @@ pub(super) struct PersistentFfmpegAudioWindowDecoder {
     teardown_queue: Arc<DecoderTeardownQueue>,
     teardown_faulted: Arc<AtomicBool>,
     shutdown: Mutex<DecoderShutdownControl>,
+    startup: Arc<StartupLane>,
+    #[cfg(test)]
+    native_spawn_for_test: Option<NativeChildSpawner>,
 }
 
 struct DecoderShutdownControl {
     worker: Option<JoinHandle<()>>,
+    startup_worker: Option<JoinHandle<()>>,
     publication: Arc<Mutex<Option<AudioWindowDecoderShutdownEvidence>>>,
     terminal: Arc<AtomicU8>,
 }
@@ -119,10 +130,15 @@ impl DecoderTeardownQueue {
     fn wait_for_work(
         &self,
         shutdown_signal: &AudioWindowDecoderShutdownSignal,
+        startup: &StartupLane,
+        initial_sweep_pending: bool,
     ) -> VecDeque<DecoderTeardownOwner> {
         loop {
             let owners = std::mem::take(&mut self.state.lock().owners);
-            if !owners.is_empty() || shutdown_signal.is_requested() {
+            if !owners.is_empty()
+                || (shutdown_signal.is_requested()
+                    && (initial_sweep_pending || startup.producers_closed()))
+            {
                 return owners;
             }
             // `unpark` retains a one-shot token when it races this call, so a
@@ -358,9 +374,25 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
                 self.remove_slot(&slot);
                 return Err(canceled_audio_decode(&source.path));
             }
-            match DecodeSession::spawn(&key, start_frame, permit) {
+            let mut completion = match self.startup.wait(
+                &key,
+                start_frame,
+                permit,
+                cancellation,
+                #[cfg(test)]
+                self.native_spawn_for_test.clone(),
+            ) {
+                Ok(completion) => completion,
+                Err(error) => {
+                    drop(session);
+                    self.remove_slot(&slot);
+                    self.record_window(kind, false, started.elapsed(), cancellation.is_canceled());
+                    return Err(error);
+                }
+            };
+            match completion.take() {
                 Ok(created) => {
-                    if self.shutdown_signal.is_requested() {
+                    if cancellation.is_canceled() || self.shutdown_signal.is_requested() {
                         let _accepted =
                             self.enqueue_teardown(VecDeque::from([DecoderTeardownOwner::Session(
                                 created,
@@ -531,6 +563,7 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
             None => (false, false, 0),
         };
         let mut evidence = (*publication.lock()).unwrap_or_default();
+        evidence.startup = self.startup.join(shutdown.startup_worker.take());
         if joined_now && !current_thread_detachment {
             evidence.shutdown_workers_terminated =
                 evidence.shutdown_workers_terminated.saturating_add(1);
@@ -601,7 +634,22 @@ impl PersistentFfmpegAudioWindowDecoder {
         )
     }
 
+    #[cfg(test)]
+    pub(super) fn with_native_spawn_for_test(capacity: usize, spawn: NativeChildSpawner) -> Self {
+        let mut decoder = Self::with_capacity(capacity);
+        decoder.native_spawn_for_test = Some(spawn);
+        decoder
+    }
+
     fn with_state_and_spawner(state: DecoderState, spawner: DecoderTeardownSpawner) -> Self {
+        Self::with_state_and_spawners(state, spawner, startup::product_startup_spawner())
+    }
+
+    fn with_state_and_spawners(
+        state: DecoderState,
+        spawner: DecoderTeardownSpawner,
+        startup_spawner: DecoderTeardownSpawner,
+    ) -> Self {
         let session_permits = Arc::new(DecoderSessionPermitPool::new(state.session_capacity));
         let state = Arc::new(Mutex::new(state));
         let shutdown_signal = Arc::new(AudioWindowDecoderShutdownSignal::new());
@@ -610,6 +658,12 @@ impl PersistentFfmpegAudioWindowDecoder {
             Arc::clone(&shutdown_signal),
         ));
         let teardown_faulted = Arc::new(AtomicBool::new(false));
+        let startup = StartupLane::new(
+            Arc::clone(&shutdown_signal),
+            Arc::clone(&teardown_queue),
+            Arc::clone(&state),
+            Arc::clone(&teardown_faulted),
+        );
         let publication = Arc::new(Mutex::new(None));
         let terminal = Arc::new(AtomicU8::new(0));
 
@@ -619,6 +673,7 @@ impl PersistentFfmpegAudioWindowDecoder {
         let worker_faulted = Arc::clone(&teardown_faulted);
         let worker_publication = Arc::clone(&publication);
         let worker_terminal = Arc::clone(&terminal);
+        let worker_startup = Arc::clone(&startup);
         let work: DecoderTeardownWork = Box::new(move || {
             worker_terminal.store(DECODER_TEARDOWN_WORKER_RUNNING, Ordering::Release);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -627,6 +682,7 @@ impl PersistentFfmpegAudioWindowDecoder {
                     &worker_queue,
                     &worker_signal,
                     &worker_faulted,
+                    &worker_startup,
                 )
             }));
             let (mut evidence, terminal_state) = match result {
@@ -683,13 +739,25 @@ impl PersistentFfmpegAudioWindowDecoder {
             }
         };
 
+        if teardown_faulted.load(Ordering::Acquire) {
+            shutdown_signal.request();
+        }
+        let startup_worker = startup.start(startup_spawner);
         Self {
             state,
             session_permits,
             shutdown_signal,
             teardown_queue,
             teardown_faulted,
-            shutdown: Mutex::new(DecoderShutdownControl { worker, publication, terminal }),
+            shutdown: Mutex::new(DecoderShutdownControl {
+                worker,
+                startup_worker,
+                publication,
+                terminal,
+            }),
+            startup,
+            #[cfg(test)]
+            native_spawn_for_test: None,
         }
     }
 
@@ -949,16 +1017,51 @@ fn run_decoder_teardown_worker(
     queue: &DecoderTeardownQueue,
     shutdown_signal: &AudioWindowDecoderShutdownSignal,
     teardown_faulted: &AtomicBool,
+    startup: &StartupLane,
 ) -> AudioWindowDecoderShutdownEvidence {
     shutdown_signal.register_worker();
     let mut evidence = AudioWindowDecoderShutdownEvidence::default();
+    let mut initial_sweep_pending = true;
     loop {
-        let retired = terminate_teardown_owners(queue.wait_for_work(shutdown_signal));
+        let retired = terminate_teardown_owners(queue.wait_for_work(
+            shutdown_signal,
+            startup,
+            initial_sweep_pending,
+        ));
         if teardown_retirement_failed(retired) {
             teardown_faulted.store(true, Ordering::Release);
         }
         evidence.merge(retired);
         if !shutdown_signal.is_requested() {
+            continue;
+        }
+
+        if initial_sweep_pending {
+            initial_sweep_pending = false;
+            // Do not let an unrelated native spawn retain idle Sessions. Busy
+            // slots keep their cooperative handoff and the final sweep; the
+            // teardown queue remains open to every startup producer.
+            let idle = {
+                let mut state = state.lock();
+                let entries = std::mem::take(&mut state.entries);
+                let mut idle = VecDeque::new();
+                for entry in entries {
+                    if Arc::strong_count(&entry.slot) == 1 {
+                        idle.push_back(DecoderTeardownOwner::Entry(entry));
+                    } else {
+                        state.entries.push_back(entry);
+                    }
+                }
+                idle
+            };
+            evidence.sessions_before = evidence.sessions_before.saturating_add(idle.len());
+            let retired = terminate_teardown_owners(idle);
+            if teardown_retirement_failed(retired) {
+                teardown_faulted.store(true, Ordering::Release);
+            }
+            evidence.merge(retired);
+        }
+        if !startup.producers_closed() {
             continue;
         }
 
@@ -1279,19 +1382,23 @@ impl Drop for PartialDecodeSession {
 }
 
 impl DecodeSession {
-    fn spawn(
-        key: &SessionKey,
-        start_frame: i64,
-        permit: DecoderSessionPermit,
-    ) -> std::result::Result<Self, Box<DecodeSessionSpawnFailure>> {
-        Self::spawn_with_command(key, start_frame, permit, crate::ffmpeg_command)
-    }
-
+    #[cfg(all(test, feature = "validation"))]
     fn spawn_with_command(
         key: &SessionKey,
         start_frame: i64,
         permit: DecoderSessionPermit,
         command: impl FnOnce() -> std::result::Result<Command, crate::FfmpegCommandError>,
+    ) -> std::result::Result<Self, Box<DecodeSessionSpawnFailure>> {
+        Self::spawn_with_factories(key, start_frame, permit, command, Command::spawn, || false)
+    }
+
+    fn spawn_with_factories(
+        key: &SessionKey,
+        start_frame: i64,
+        permit: DecoderSessionPermit,
+        command: impl FnOnce() -> std::result::Result<Command, crate::FfmpegCommandError>,
+        native_spawn: impl FnOnce(&mut Command) -> std::io::Result<Child>,
+        canceled: impl Fn() -> bool,
     ) -> std::result::Result<Self, Box<DecodeSessionSpawnFailure>> {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
@@ -1332,7 +1439,13 @@ impl DecodeSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         hide_child_window(&mut command);
-        let child = command.spawn().map_err(|error| {
+        if canceled() {
+            return Err(Box::new(DecodeSessionSpawnFailure {
+                error: Box::new(canceled_audio_decode(&key.source.path)),
+                owner: None,
+            }));
+        }
+        let child = native_spawn(&mut command).map_err(|error| {
             Box::new(DecodeSessionSpawnFailure {
                 error: Box::new(MondrianError::DecodeFailed {
                     asset_id: key.source.path.display().to_string(),
@@ -1342,6 +1455,12 @@ impl DecodeSession {
             })
         })?;
         let mut partial = PartialDecodeSession::new(child, permit);
+        if canceled() {
+            return Err(Box::new(DecodeSessionSpawnFailure {
+                error: Box::new(canceled_audio_decode(&key.source.path)),
+                owner: Some(partial),
+            }));
+        }
         let stdout = match partial.stdout.take() {
             Some(stdout) => stdout,
             None => {
@@ -1388,6 +1507,13 @@ impl DecodeSession {
                 }));
             }
         };
+        if canceled() {
+            partial.stderr = Some(stderr);
+            return Err(Box::new(DecodeSessionSpawnFailure {
+                error: Box::new(canceled_audio_decode(&key.source.path)),
+                owner: Some(partial),
+            }));
+        }
         match std::thread::Builder::new()
             .name("mondrian-audio-stderr".to_owned())
             .spawn(move || pump_stderr(stderr, stderr_tx))
@@ -1806,6 +1932,10 @@ fn hide_child_window(command: &mut Command) {
 fn hide_child_window(_command: &mut Command) {}
 
 #[cfg(test)]
+#[path = "session/startup_tests.rs"]
+mod startup_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1862,7 +1992,7 @@ mod tests {
         }
     }
 
-    fn test_session_key(index: u32) -> SessionKey {
+    pub(super) fn test_session_key(index: u32) -> SessionKey {
         SessionKey {
             source: AudioSourceIdentity {
                 path: PathBuf::from(format!("session-{index}.wav")),

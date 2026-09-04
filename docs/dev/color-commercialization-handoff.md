@@ -53,6 +53,31 @@ caught; these tests do not certify complete startup/public-result qualification.
 
 ## Local Windows work still in progress
 
+The current COL-031/COL-047 slice isolates native FFmpeg audio startup behind
+one bounded Media-owned lane. Its actual-call-site regression first proved a
+canceled read was blocked by OS process creation. Owning completions now keep
+producer leases through install/retire, including buffered/disconnected results;
+teardown first reclaims independent idle Sessions and continues draining while
+a native startup is blocked. SourceCache schema 6 includes independent startup
+worker, request, join, failure, and unresolved-owner inventory. Startup failure
+never falls back to synchronous read-side construction. Focused Media gates
+passed62 SourceCache regressions; both real WAV/AAC parity cases passed.
+Six actual-native-call samples returned canceled reads in0.98–18.86ms with
+complete eventual closure, but one AAC physical observation still held its
+permit at50.83ms and failed the unchanged50ms gate. The other five physical
+observations were33.25–42.38ms. App validation passed35 executed cases:21
+Waveform,2 App shutdown,9 Endurance coordinator,2 explicitly selected real-GPU
+cases and1 Project smoke. The smoke's create/open/save maxima were289/78/58ms.
+The actual schema6 Project receipt passed the strict PowerShell owner/case/suite
+corpus, including missing, mistyped, stale and contradictory startup inventory.
+Full workspace/all-target/all-feature Clippy with warnings denied, format and
+diff checks passed. App release rebuild took25m13s; that is iteration cost,
+not realtime qualification. An initially wrong Waveform GPU filter ran zero
+tests and was not counted; the corrected exact test executed and passed.
+Physical 50 ms retirement, multiple-source startup pressure and sealed matrix
+qualification remain COL-031 work. Do not convert this logical-response fix
+or eventual resource closure into physical timing qualification.
+
 COL-047 default performance owner-closure receipts now cover Project, App UI,
 Preview decode/cache, and continuous playback. The 2026-09-04 release run
 returned clean Preview/cache/GPU/App closure for all four scenarios, without

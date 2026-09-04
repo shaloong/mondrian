@@ -246,7 +246,7 @@ Non-product decoder implementations inherit a fail-closed shutdown default:
 only diagnostics that already report zero Sessions can produce clean closure
 without implementing the explicit Session shutdown Seam.
 
-`AudioSourceCacheShutdownEvidence` schema 5 also records the persistent decoder
+`AudioSourceCacheShutdownEvidence` schema 6 also records the persistent decoder
 teardown worker and coordinator lifecycle. Its shutdown signal is captured at
 construction: the first request is an atomic state transition plus `unpark`,
 with no mutex acquisition, thread creation, or idle polling at the begin seam.
@@ -255,6 +255,31 @@ published, so concurrent followers reuse the same final receipt instead of
 racing a second cleanup interpretation. The App's post-consumption replacement
 is a resource-free, already-closed placeholder and does not create a hidden
 decoder worker while terminal evidence is being collected.
+
+Native process and pipe-pump construction run on one separate prebuilt startup
+lane. Typed FFmpeg command admission still precedes the cancelable handoff;
+an admission rejection keeps its original cause. Read cancellation never waits
+for an in-progress OS process creation. The physical Session permit stays with
+the request, partial child, completed Session, or retiring owner until actual
+child and pump closure. A fixed maximum additionally bounds failed completion
+envelopes whose physical permit has already been released; it is not a second
+Playback scheduler or a change to resource-policy entitlement.
+
+Each owning completion holds a producer lease through install or explicit
+retirement. Buffered-result and disconnected-channel Drop enqueue native owners
+on teardown rather than invoking `DecodeSession::Drop` on the reader. The
+teardown lane continues draining unrelated owners while startup is blocked and
+cannot close its queue until startup has exited and every completion producer
+has handed off ownership. Separate prebuilt startup/teardown wake targets avoid
+lost shutdown notifications. Startup creation failure has no synchronous fallback.
+
+The nested `decoder_startup` receipt distinguishes a required product lane from
+an absent synthetic decoder, records actual worker joins and exact queued,
+in-flight, unclaimed, and producer inventory, and retains failed or unverified
+native ownership after panic. Logical cancellation latency and physical retirement
+latency are separate observations against the original qualification threshold;
+isolating native startup is not a claim that OS process creation or cleanup
+always completes within 50 ms.
 
 Persistent decoding owns one prebuilt named teardown worker. Session eviction,
 random-seek replacement, partial child construction, normal EOF, cancellation,
@@ -419,7 +444,7 @@ pending/deferred demand, closes the bounded job sender, and signals the private
 `AudioSourceCache`; it performs no join or process teardown. The terminal phase
 joins the retained worker only before one absolute deadline, drains result
 publication acknowledgements, then uniquely consumes the source cache through
-its schema-5 close. `AudioWaveformShutdownEvidence` schema 1 records configured,
+its schema-6 close. `AudioWaveformShutdownEvidence` schema 1 records configured,
 started, start-failed, returned, result-transport-failed, panicked, timed-out,
 detached, and abandoned workers; logical/physical/publication residuals;
 external cache references; and
@@ -434,7 +459,7 @@ service outside its unwind region and returns an owning failure with the exact
 Prepared/SourceCache/AnalysisWorker inventory and safe original diagnostic.
 Consuming failure shutdown calls the existing service protocol with the caller's
 unchanged deadline. Its distinct startup receipt permits only the exact created
-inventory, requires real schema-5 evidence whenever a source cache exists, and
+inventory, requires real schema-6 evidence whenever a source cache exists, and
 never changes the normal one-worker qualification predicate. Unknown panic
 payloads are explicitly abandoned and fail clean closure. Ordinary `new` retains
 its existing panic propagation and OS-spawn-failure degraded-service policy;

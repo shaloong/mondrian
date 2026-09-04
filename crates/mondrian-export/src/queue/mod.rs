@@ -16904,7 +16904,7 @@ mod audio_source_owner_tests {
                 .expect("used owner closure")
         };
 
-        assert_eq!(closure.cache.schema_version, 5);
+        assert_eq!(closure.cache.schema_version, 6);
         assert!(closure.all_resources_released(), "{closure:?}");
         assert_eq!(
             events,

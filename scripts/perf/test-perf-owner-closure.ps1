@@ -55,6 +55,48 @@ foreach ($row in $rows) {
 }
 Assert-MondrianIdenticalOwnerClosures -Containers $rows -Context "valid Project fixture"
 
+# Native startup inventory is mandatory even for an idle product cache.
+foreach ($field in @($rows[0].owner_closure.app.audio_source_cache.cache.decoder_startup.PSObject.Properties.Name)) {
+    $bad = Copy-JsonValue $rows[0]
+    $bad.owner_closure.app.audio_source_cache.cache.decoder_startup.PSObject.Properties.Remove($field)
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "missing startup field" 0 $false } "missing startup $field"
+    foreach ($invalid in @($null, '0', @(), @{}, -1, 0.5)) {
+        $bad = Copy-JsonValue $rows[0]
+        $bad.owner_closure.app.audio_source_cache.cache.decoder_startup.$field = $invalid
+        Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "invalid startup field" 0 $false } "invalid startup $field"
+    }
+}
+foreach ($mutation in @(
+    @{ required = $false }, @{ attempted = $false },
+    @{ workers_started = 0; workers_joined = 0 }, @{ workers_joined = 0 },
+    @{ start_failures = 1 }, @{ panics = 1 }, @{ publication_missing = 1 },
+    @{ owner_abandonments = 1 }, @{ unverified_native_owners = 1 },
+    @{ requests_admitted = 1 }, @{ requests_claimed = 1 }, @{ requests_retired = 1 },
+    @{ canceled_before_spawn = 1 }, @{ queued_remaining = 1 }, @{ in_flight_remaining = 1 },
+    @{ unclaimed_results_remaining = 1 }, @{ producers_remaining = 1 }
+)) {
+    $bad = Copy-JsonValue $rows[0]
+    foreach ($field in $mutation.Keys) {
+        $bad.owner_closure.app.audio_source_cache.cache.decoder_startup.$field = $mutation[$field]
+    }
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "dirty startup inventory" 0 $false } "dirty startup inventory"
+}
+foreach ($shape in @('missing', 'null', 'case', 'extra', 'old_schema')) {
+    $bad = Copy-JsonValue $rows[0]
+    $cache = $bad.owner_closure.app.audio_source_cache.cache
+    switch ($shape) {
+        'missing' { $cache.PSObject.Properties.Remove('decoder_startup') }
+        'null' { $cache.decoder_startup = $null }
+        'case' {
+            $cache.decoder_startup.PSObject.Properties.Remove('required')
+            $cache.decoder_startup | Add-Member -NotePropertyName REQUIRED -NotePropertyValue $true
+        }
+        'extra' { $cache.decoder_startup | Add-Member -NotePropertyName extra -NotePropertyValue 0 }
+        'old_schema' { $cache.schema_version = 5 }
+    }
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "startup shape" 0 $false } "startup shape $shape"
+}
+
 # Synthetic schema probes, not physical GPU qualification evidence.
 $gpuFixture = Copy-JsonValue $rows[0]
 $gpuFixture.owner_closure.gpu_owner_required = $true
