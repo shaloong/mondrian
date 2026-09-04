@@ -3291,9 +3291,12 @@ impl RenderGpuInputStageResourcePlan {
                 reason: "native GPU input transform requires an encoded-float source frame",
             });
         }
-        if input.texture_format() != GpuColorFrameTextureFormat::Rgba16Float {
+        if !matches!(
+            input.texture_format(),
+            GpuColorFrameTextureFormat::Rgba16Float | GpuColorFrameTextureFormat::Rgba32Float
+        ) {
             return Err(RenderGpuInputStageResourcePlanError::UnsupportedStagePlan {
-                reason: "native encoded-float source must use Rgba16Float",
+                reason: "native encoded-float source must use Rgba16Float or Rgba32Float",
             });
         }
         if planned.gpu_output != output.descriptor() {
@@ -7619,6 +7622,20 @@ mod tests {
         assert_eq!(resources.output, output);
         assert_eq!(resources.stage_diagnostics(), stage_plan.diagnostics());
         assert_eq!(resources.stage_diagnostics().upload_stages, 0);
+        let full_precision_input = gpu_handle_with_format(
+            712,
+            input_descriptor,
+            GpuColorFrameTextureFormat::Rgba32Float,
+            "native-yuv-full-precision-source",
+        );
+        let full_precision = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            &full_precision_input,
+            &output,
+            &stage_plan,
+        )
+        .expect("full precision native input must not be quantized to half");
+        assert_eq!(full_precision.input, full_precision_input);
+        assert!(full_precision.input_upload.is_none());
         assert_eq!(
             resources.output.descriptor().domain,
             ColorFrameDomain::Working

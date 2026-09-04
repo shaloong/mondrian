@@ -9,6 +9,11 @@ mode must surface as errors instead of falling back to different color science.
 
 ## Color execution Module boundaries
 
+The GPU-resident encoded-source input boundary accepts both RGBA16F and
+RGBA32F. Native and compact-YUV materialization use the product RGBA32F
+intermediate without a half-precision conversion before OCIO; accepting an
+already half-precision input does not change the product working-output policy.
+
 Renderer color execution has four public semantic Modules: `color::source`,
 `color::working`, `color::program_output`, and `color::monitor`. Source consumes
 the Timeline-owned `MediaInputColorContext`; Program Output consumes the closed
