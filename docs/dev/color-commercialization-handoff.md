@@ -252,11 +252,23 @@ Window transaction across old/candidate GPU generation, native event-loop state,
 Host success/failure handback, and one final unique App receipt. Durable successful
 raw-receipt history remains separate work.
 
+The following Window candidate-publication slice now prepares the complete
+Window/Surface/frame-renderer/Viewer-runtime candidate before changing Host or
+old-Window state. Initial Window startup consumes owning Host failures and
+bounded partial-GPU cleanup under its existing deadline. Device reopen validates
+candidate identities before retiring the old generation, bounds every candidate
+cleanup path, and publishes Host display/native-import state only after clean old
+retirement. Same-Device role replacement also prepares its shell before hiding
+the old one. Remaining Window work is the outer event-loop panic/return-slot
+transaction and durable typed old/candidate/UI receipts; this slice must not be
+reported as whole Window qualification until those are complete.
+
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.
-2. Window initial/reopen: Host/Thumbnail/catalog startup ownership is complete;
-   old/candidate GPU, native event-loop/UI ownership, original failure merging,
+2. Window initial/reopen: Host handback, candidate-before-revoke ordering, and
+   bounded partial candidate cleanup are complete; outer event-loop/UI panic
+   ownership, durable typed old/candidate receipts, original failure merging,
    and the final unique returned App receipt remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.

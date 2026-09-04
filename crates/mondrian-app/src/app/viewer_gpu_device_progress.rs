@@ -317,7 +317,6 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
 }
 
 /// Bounded synchronous closure evidence for one Viewer GPU progress domain.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ViewerGpuDeviceProgressShutdownEvidence {
     /// Whether this exact progress worker started.
@@ -340,13 +339,13 @@ pub struct ViewerGpuDeviceProgressShutdownEvidence {
     pub generation_terminal_kind: Option<ViewerGpuDeviceGenerationTerminalKind>,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl ViewerGpuDeviceProgressShutdownEvidence {
     /// Qualify a complete normal-runtime shutdown, never authorize resource release.
     ///
     /// A destroyed/lost device or joined upload panic can permit physical release
     /// while failing this stronger predicate. Partial startup has its own inventory
     /// and must not fabricate a Renderer receipt to satisfy normal qualification.
+    #[cfg(any(test, feature = "validation"))]
     pub const fn qualifies_normal_runtime(self) -> bool {
         self.qualifies_created_inventory(true)
     }
@@ -369,6 +368,7 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
     }
 
     /// Unexpected device losses observed through final shutdown.
+    #[cfg(any(test, feature = "validation"))]
     pub const fn device_loss_count(self) -> u64 {
         match self.generation_terminal_kind {
             Some(kind) => kind.device_loss_count(),
@@ -377,6 +377,7 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
     }
 
     /// Non-loss terminal faults, including explicit destruction during qualification.
+    #[cfg(any(test, feature = "validation"))]
     pub const fn fatal_error_count(self) -> u64 {
         match self.generation_terminal_kind {
             Some(kind) => kind.fatal_error_count(),
@@ -715,7 +716,6 @@ struct ViewerGpuDeviceProgressWorker<I> {
     command_sender: Option<mpsc::Sender<ViewerGpuDeviceProgressCommand<I>>>,
     observation_receiver: mpsc::Receiver<ViewerGpuDeviceProgressObservation>,
     join_handle: Option<thread::JoinHandle<()>>,
-    #[cfg(any(test, feature = "validation"))]
     exit_receiver: mpsc::Receiver<ViewerGpuDeviceProgressExit>,
     wake: ViewerGpuDeviceProgressWake,
     health: ViewerGpuDeviceGenerationHealth,
@@ -882,7 +882,6 @@ impl ViewerGpuDeviceProgressOwner {
     }
 
     /// Transfer the retirement envelope and wait against one caller-owned deadline.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retire_device_generation_until(
         mut self,
         retirement: impl ViewerGpuDeviceGenerationRetirement,
@@ -918,7 +917,6 @@ where
     {
         let (command_sender, command_receiver) = mpsc::channel();
         let (observation_sender, observation_receiver) = mpsc::channel();
-        #[cfg(any(test, feature = "validation"))]
         let (exit_sender, exit_receiver) = mpsc::channel();
         let progress_state = Arc::new(ViewerGpuDeviceProgressState::new());
         let worker_wake = health.wake.clone();
@@ -962,7 +960,6 @@ where
                 {
                     std::mem::forget(admission);
                 }
-                #[cfg(any(test, feature = "validation"))]
                 let _ = exit_sender.send(exit);
             })
             .map_err(ViewerGpuDeviceProgressStartError::ThreadSpawn)?;
@@ -970,7 +967,6 @@ where
             command_sender: Some(command_sender),
             observation_receiver,
             join_handle: Some(join_handle),
-            #[cfg(any(test, feature = "validation"))]
             exit_receiver,
             wake: health.wake.clone(),
             health,
@@ -1023,7 +1019,6 @@ where
         self.shutdown_until(retirement_requested, retirement_handoff_accepted, deadline)
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn shutdown_until(
         &mut self,
         retirement_requested: bool,

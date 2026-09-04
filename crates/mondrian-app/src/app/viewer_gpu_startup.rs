@@ -6,6 +6,8 @@
 
 use mondrian_renderer::{ViewerGpuExecutionRetirement, ViewerGpuExecutionRuntime};
 
+#[cfg(feature = "validation")]
+use super::viewer_gpu_device_progress::ViewerGpuDeviceGenerationId;
 use super::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationRetirement, ViewerGpuDeviceGenerationRetirementReceipt,
     ViewerGpuDeviceGenerationTerminal, ViewerGpuDeviceProgressOwner,
@@ -13,7 +15,6 @@ use super::viewer_gpu_device_progress::{
 };
 
 /// Exact created inventory and bounded retirement of a partial GPU generation.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ViewerGpuStartupShutdownEvidence {
     /// Observed before retirement, not inferred from an absent terminal receipt.
@@ -22,7 +23,6 @@ pub struct ViewerGpuStartupShutdownEvidence {
     pub progress: super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl ViewerGpuStartupShutdownEvidence {
     /// Whether every actually created owner closed without a qualification fault.
     pub const fn all_created_resources_released(self) -> bool {
@@ -70,6 +70,15 @@ impl ViewerGpuStartupOwner {
         self.runtime.as_ref()
     }
 
+    /// Identity reserved by the partial generation before it is published.
+    #[cfg(feature = "validation")]
+    pub(crate) fn generation_id(&self) -> ViewerGpuDeviceGenerationId {
+        self.progress
+            .as_ref()
+            .expect("unactivated Viewer GPU startup retains progress ownership")
+            .generation_id()
+    }
+
     /// Move a complete generation into its Adapter after all other setup succeeds.
     pub(crate) fn activate(
         &mut self,
@@ -87,7 +96,6 @@ impl ViewerGpuStartupOwner {
 
     /// Consume the actual partial inventory using one unchanged caller deadline.
     /// An already activated guard has no remaining owner and returns no receipt.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(
         mut self,
         deadline: std::time::Instant,

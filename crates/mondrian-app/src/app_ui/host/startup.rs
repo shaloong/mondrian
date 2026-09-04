@@ -349,6 +349,7 @@ pub struct AppUiHostStartupQualificationError {
 }
 
 #[cfg(any(test, feature = "validation"))]
+#[cfg_attr(all(test, not(feature = "validation")), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AppUiHostStartupFault {
     /// Unwind after a complete Host stage is installed.
@@ -832,6 +833,7 @@ impl AppUiHost {
     }
 
     #[cfg(any(test, feature = "validation"))]
+    #[cfg_attr(all(test, not(feature = "validation")), allow(dead_code))]
     pub(crate) fn try_new_with_startup_fault(
         app_state: AppState,
         preferences: AppUiPreferences,
@@ -1021,14 +1023,14 @@ pub fn qualify_app_ui_host_startup_ownership(
     })
 }
 
-#[cfg(feature = "validation")]
+#[cfg(any(test, feature = "validation"))]
 static HOST_OPAQUE_QUALIFICATION_DROPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(feature = "validation")]
+#[cfg(any(test, feature = "validation"))]
 struct HostOpaqueQualificationPayload;
 
-#[cfg(feature = "validation")]
+#[cfg(any(test, feature = "validation"))]
 impl Drop for HostOpaqueQualificationPayload {
     fn drop(&mut self) {
         HOST_OPAQUE_QUALIFICATION_DROPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

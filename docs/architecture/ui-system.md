@@ -1757,17 +1757,34 @@ the old Window submission without publishing into the new Window generation.
 Validation-triggered Surface/Device recovery is a different consuming
 operation. The Window session assigns checked nonzero process-local identities
 to every concrete Surface and progress/Device generation. After an actual
-external-texture Viewer frame is presented, the event-loop owner revokes old
-publication, transfers the complete old runtime/lifecycle/native-owner envelope
-to its existing progress worker, and waits within one explicit bound. A clean
+external-texture Viewer frame is presented, the event-loop owner first prepares
+a complete candidate Window, Surface, Device/Queue, frame renderer, progress
+worker, and Viewer execution runtime without changing Host-visible display,
+native-import, or CPU-fallback state. It validates distinct Surface and Device
+generation identities before revoking old publication. Only then does it
+transfer the complete old runtime/lifecycle/native-owner envelope to its
+existing progress worker and wait within the original explicit bound. A clean
 return requires both Adapter-specific retirement and a successful whole-queue
 wgpu wait; concrete device loss/destroy may replace the queue fence for release
-but is not accepted as a clean qualification receipt. Only then does the owner
-install a separately requested Device/Queue/progress worker and a fresh native
-Window/Surface. The operation seals success only after that new Surface presents
+but is not accepted as a clean qualification receipt. Candidate preparation or
+publication failure consumes its real partial GPU owner under that same
+deadline and reports the raw receipt alongside the primary error; it never
+relies on ordinary asynchronous Drop as qualification. Only after clean old
+retirement does the owner publish the candidate's display snapshot and native
+decode authority and hide the old Window. The operation seals success only
+after that new Surface presents
 the same active Sequence/frame/color/display contract. A Headless surface, a
 successful `configure`, a reused Device generation, or a CPU-only raster is not
 Surface reopen evidence.
+
+Initial Window startup likewise calls the owning `AppUiHost::try_new` seam. A
+Host failure is consumed against the Window's existing absolute deadline and
+returns the same App in validation; its original diagnostic remains primary.
+Once a partial Viewer GPU generation exists, waker rejection, renderer/runtime
+preparation failure, or activation failure performs bounded product cleanup and
+retains its concrete progress/renderer receipt. Native role replacement prepares
+the new Window/Surface/UI shell before hiding the old shell, then transfers the
+unchanged four-part Device-generation authority exactly once.
 
 The validation event loop retains a consuming host-return guard around
 `AppUiHost`. Every exit path first closes the Window-owned production Preview

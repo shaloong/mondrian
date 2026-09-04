@@ -530,7 +530,9 @@ fn seal_clean_viewer_gpu_shutdown(
     evidence: ViewerGpuDeviceProgressShutdownEvidence,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
     if !evidence.qualifies_normal_runtime() {
-        return Err("Viewer GPU device generation did not retire cleanly".into());
+        return Err(
+            format!("Viewer GPU device generation did not retire cleanly: {evidence:?}").into(),
+        );
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
         schema_version: 2,
@@ -1906,6 +1908,19 @@ fn request_app_ui_device(
     pollster::block_on(adapter.request_device(&descriptor))
 }
 
+fn close_failed_viewer_gpu_startup(
+    startup: crate::app::viewer_gpu_startup::ViewerGpuStartupOwner,
+    deadline: Instant,
+    primary: impl std::fmt::Display,
+) -> Box<dyn std::error::Error> {
+    let cleanup = startup.shutdown_until(deadline);
+    let cleanup_released = cleanup.is_some_and(|receipt| receipt.all_created_resources_released());
+    format!(
+        "{primary}; Viewer GPU startup cleanup_all_created_resources_released={cleanup_released}; cleanup={cleanup:?}"
+    )
+    .into()
+}
+
 #[cfg(feature = "validation")]
 #[allow(clippy::too_many_arguments)]
 fn reopen_window_surface_and_device(
@@ -1941,14 +1956,7 @@ fn reopen_window_surface_and_device(
         }),
     )?;
 
-    clear_viewer_spatial_presentation(session, host);
-    session.window.set_visible(false);
-    let (retiring_progress, retirement) = session.take_viewer_gpu_generation_retirement()?;
-    let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
-    let (shutdown_receipt_json, shutdown_receipt_sha256) =
-        seal_clean_viewer_gpu_shutdown(shutdown)?;
-
-    let next_session = AppUiWindowSession::from_window_and_surface(
+    let prepared = match AppUiPreparedWindowSession::prepare(
         session.role,
         next_window,
         next_surface,
@@ -1957,18 +1965,68 @@ fn reopen_window_surface_and_device(
         &next_queue,
         host,
         Some(&mut next_startup),
-    )?;
-    let surface_generation_after = next_session.surface_generation_id.get();
-    let device_generation_after = next_session
-        .viewer_gpu_device_progress
-        .generation_id()
-        .ok_or("reopened Window Viewer GPU device generation is missing")?
-        .get();
+    ) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            return Err(close_failed_viewer_gpu_startup(
+                next_startup,
+                deadline,
+                primary,
+            ));
+        }
+    };
+    let surface_generation_after = prepared.surface_generation_id().get();
+    let device_generation_after = next_startup.generation_id().get();
     if surface_generation_after == surface_generation_before
         || device_generation_after == device_generation_before
     {
-        return Err("Surface/device recovery reused a consumed generation identity".into());
+        return Err(close_failed_viewer_gpu_startup(
+            next_startup,
+            deadline,
+            "Surface/device recovery reused a consumed generation identity",
+        ));
     }
+
+    // Only a complete, identity-checked candidate may revoke the active
+    // generation. Until this point the original Window stays visible and its
+    // Viewer publication authority is unchanged.
+    clear_viewer_spatial_presentation(session, host);
+    let (retiring_progress, retirement) = match session.take_viewer_gpu_generation_retirement() {
+        Ok(retirement) => retirement,
+        Err(primary) => {
+            return Err(close_failed_viewer_gpu_startup(
+                next_startup,
+                deadline,
+                primary,
+            ));
+        }
+    };
+    let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
+    let (shutdown_receipt_json, shutdown_receipt_sha256) =
+        match seal_clean_viewer_gpu_shutdown(shutdown) {
+            Ok(sealed) => sealed,
+            Err(primary) => {
+                return Err(close_failed_viewer_gpu_startup(
+                    next_startup,
+                    deadline,
+                    primary,
+                ));
+            }
+        };
+    session.window.set_visible(false);
+
+    let next_session = match prepared.publish(host, Some(&mut next_startup)) {
+        Ok(session) => session,
+        Err(primary) => {
+            return Err(close_failed_viewer_gpu_startup(
+                next_startup,
+                deadline,
+                format!(
+                    "{primary}; retired old Viewer GPU receipt sha256={shutdown_receipt_sha256}"
+                ),
+            ));
+        }
+    };
 
     next_session.window.set_visible(true);
     next_session.window.request_redraw();
@@ -2530,6 +2588,8 @@ fn run_app_ui_with_initial_state_on_event_loop(
     #[cfg(feature = "validation")]
     let validation_shutdown_deadline =
         surface_reopen_validation.as_ref().map(|validation| validation.deadline);
+    #[cfg(not(feature = "validation"))]
+    let validation_shutdown_deadline: Option<Instant> = None;
     #[cfg(feature = "validation")]
     let background_runtime = match build_app_ui_background_runtime() {
         Ok(runtime) => runtime,
@@ -2546,8 +2606,32 @@ fn run_app_ui_with_initial_state_on_event_loop(
     #[cfg(not(feature = "validation"))]
     let background_runtime = build_app_ui_background_runtime()?;
     let background_runtime_guard = background_runtime.enter();
+    let host_startup_deadline =
+        validation_shutdown_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(5));
+    let host = match AppUiHost::try_new(initial_state) {
+        Ok(host) => host,
+        Err(failure) => {
+            let primary = failure.diagnostic().clone();
+            let closed = failure.shutdown_until(host_startup_deadline);
+            let cleanup_released = closed.shutdown.all_created_resources_released();
+            #[cfg(feature = "validation")]
+            if let Some(return_slot) = validation_return.as_ref() {
+                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                    app_state: closed.app_state,
+                    ui_shutdown: None,
+                });
+            }
+            #[cfg(not(feature = "validation"))]
+            drop(closed.app_state);
+            return Err(format!(
+                "{primary}; Window Host startup cleanup_all_created_resources_released={cleanup_released}; cleanup={:?}",
+                closed.shutdown
+            )
+            .into());
+        }
+    };
     let mut host = AppUiHostSessionOwner::new(
-        AppUiHost::new(initial_state),
+        host,
         #[cfg(feature = "validation")]
         validation_return,
         #[cfg(feature = "validation")]
@@ -2615,29 +2699,50 @@ fn run_app_ui_with_initial_state_on_event_loop(
     let preview_work_event_pending = Arc::new(AtomicBool::new(false));
     let worker_event_pending = Arc::clone(&preview_work_event_pending);
     let worker_event_proxy = preview_work_event_proxy.clone();
-    preview_work_watch
-        .install_waker(move || {
-            queue_preview_work_event(&worker_event_pending, || {
-                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
-            });
-        })
-        .map_err(|failure| {
-            let (reason, callback) = failure.into_parts();
-            // The native Adapter retains ownership on rejection. These captures
-            // were never accepted by the Preview retirement owner.
-            drop(callback);
-            anyhow::Error::new(reason)
-        })?;
-    let mut session = AppUiWindowSession::from_window_and_surface(
+    if let Err(failure) = preview_work_watch.install_waker(move || {
+        queue_preview_work_event(&worker_event_pending, || {
+            worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+        });
+    }) {
+        let (reason, callback) = failure.into_parts();
+        // The native Adapter retains ownership on rejection. These captures
+        // were never accepted by the Preview retirement owner.
+        drop(callback);
+        return Err(close_failed_viewer_gpu_startup(
+            viewer_gpu_startup,
+            host_startup_deadline,
+            reason,
+        ));
+    }
+    let prepared_session = match AppUiPreparedWindowSession::prepare(
         AppUiWindowRole::Startup,
         startup_window,
         startup_surface,
         &adapter,
         &device,
         &queue,
-        &mut host,
+        &host,
         Some(&mut viewer_gpu_startup),
-    )?;
+    ) {
+        Ok(prepared) => prepared,
+        Err(primary) => {
+            return Err(close_failed_viewer_gpu_startup(
+                viewer_gpu_startup,
+                host_startup_deadline,
+                primary,
+            ));
+        }
+    };
+    let mut session = match prepared_session.publish(&mut host, Some(&mut viewer_gpu_startup)) {
+        Ok(session) => session,
+        Err(primary) => {
+            return Err(close_failed_viewer_gpu_startup(
+                viewer_gpu_startup,
+                host_startup_deadline,
+                primary,
+            ));
+        }
+    };
     let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
     let pending_actions = PendingUiActions::default();
     tracing::info!(
@@ -6810,6 +6915,164 @@ fn invalidate_display_dependent_gpu_preview(session: &mut AppUiWindowSession, ho
     host.mark_dirty();
 }
 
+/// A fully prepared native Window/Surface/Renderer candidate that has not
+/// changed Host-visible display or Viewer publication state.
+struct AppUiPreparedWindowSession {
+    session: AppUiWindowSession,
+    bounds: Rect,
+}
+
+impl AppUiPreparedWindowSession {
+    #[cfg(feature = "validation")]
+    fn surface_generation_id(&self) -> AppUiSurfaceGenerationId {
+        self.session.surface_generation_id
+    }
+
+    fn prepare(
+        role: AppUiWindowRole,
+        window: Arc<winit::window::Window>,
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        host: &AppUiHost,
+        viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let surface_generation_id = AppUiSurfaceGenerationId::next()?;
+        apply_window_corner_preference(&window, window_corner_preference_for_role(role));
+
+        let size = window.inner_size();
+        let mut config = surface
+            .get_default_config(adapter, size.width, size.height)
+            .ok_or("Failed surface config")?;
+        let intent = app_ui_surface_presentation_intent_for_role(role, host);
+        let display_output_contract =
+            app_ui_display_output_contract(&window, &surface, adapter, intent)?;
+        let surface_color_contract = display_output_contract.surface_color;
+        config.format = surface_color_contract.format;
+        config.color_space = surface_color_contract.color_space;
+        surface.configure(device, &config);
+        tracing::info!(
+            format = ?surface_color_contract.format,
+            color_space = ?surface_color_contract.color_space,
+            encoding = ?surface_color_contract.encoding,
+            hdr_mode = ?surface_color_contract.hdr_mode,
+            display_target = ?display_output_contract.display_target,
+            display_hdr_info = ?display_output_contract.display_hdr_info,
+            display_tone_map_headroom =
+                ?display_output_contract.display_hdr_info.tone_map_headroom(),
+            available_formats = ?display_output_contract.available_formats,
+            format_color_spaces = ?display_output_contract.format_color_spaces,
+            present_modes = ?display_output_contract.present_modes,
+            alpha_modes = ?display_output_contract.alpha_modes,
+            "app UI surface color contract"
+        );
+
+        let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
+        let (color_engine, display_management_policy) = host.resolved_display_color_management();
+        let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
+            super::display_probe_impl::DisplaySnapshotTarget {
+                name: display_output_contract.display_target.name.clone(),
+                position: display_output_contract.display_target.position,
+                physical_size: display_output_contract.display_target.physical_size,
+                native_display_id: display_output_contract.display_target.native_display_id,
+                scale_factor: display_output_contract.display_target.scale_factor_ppm as f64
+                    / 1_000_000.0,
+            },
+            display_output_contract.surface_color.format,
+            display_output_contract.surface_color.color_space,
+            &format!("{:?}", display_output_contract.surface_color.hdr_mode),
+            &display_output_contract.supported_surface_color_spaces_for_selected_format(),
+            display_output_contract.display_hdr_info.clone(),
+            &color_engine,
+            &display_management_policy,
+            host.active_program_output_color_space(),
+            "Startup",
+        );
+        let initial_snapshot = initial_display_resolution.snapshot;
+        let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
+        let frame_renderer =
+            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
+        if let Some(startup) = viewer_gpu_startup {
+            startup.install_runtime(ViewerGpuExecutionRuntime::new(adapter, device, queue)?);
+            startup
+                .runtime()
+                .expect("installed Window runtime")
+                .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
+        }
+
+        let session = AppUiWindowSession {
+            viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
+            surface_generation_id,
+            role,
+            window,
+            surface,
+            config: config.clone(),
+            display_output_contract,
+            display_snapshot: Some(initial_snapshot),
+            display_calibration: initial_display_resolution.calibration,
+            renderer_adapter,
+            color_engine,
+            display_management_policy,
+            frame_renderer,
+            renderer_device: device.clone(),
+            renderer_queue: queue.clone(),
+            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
+            viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
+            viewer_gpu_submissions: ViewerGpuSubmissionLifecycle::new(),
+            staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
+            viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
+            program_scopes_registered: false,
+            program_scopes_refresh_requested: false,
+            program_scopes_analysis_identity: None,
+            viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
+            render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
+            router: build_event_router(
+                host.active_root().id(),
+                &host.preferences().shortcut_overrides,
+            ),
+            ui_runtime: WinitUiRuntime::new(),
+            last_cursor: Point::new(0.0, 0.0),
+            last_window_cursor_icon: None,
+            current_bounds: std::cell::Cell::new(bounds),
+            modifiers_state: Modifiers::none(),
+            pending_initial_redraw: true,
+            event_loop_telemetry: AppUiEventLoopTelemetry::default(),
+            playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
+        };
+        Ok(Self { session, bounds })
+    }
+
+    fn publish(
+        mut self,
+        host: &mut AppUiHost,
+        viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    ) -> Result<AppUiWindowSession, Box<dyn std::error::Error>> {
+        if let Some(startup) = viewer_gpu_startup {
+            let (progress, runtime) = startup
+                .activate()
+                .ok_or("prepared Window GPU generation was incomplete at publication")?;
+            self.session.viewer_gpu_device_progress =
+                ViewerGpuDeviceGenerationMember::new(progress);
+            self.session.viewer_gpu_execution = ViewerGpuDeviceGenerationMember::new(runtime);
+        }
+
+        // These are the only Host-visible candidate mutations. They occur after
+        // every fallible native/GPU preparation step and after activation has
+        // proved a complete generation.
+        TreeWalker::layout(host.active_root_mut(), self.bounds);
+        host.set_display_output_snapshot(self.session.display_snapshot.as_ref());
+        host.clear_viewer_cpu_fallback();
+        if self.session.viewer_gpu_device_progress.generation_id().is_some() {
+            host.set_native_decoded_frame_import_support(
+                self.session.viewer_gpu_execution.native_import_support(),
+                self.session.viewer_gpu_execution.native_decode_device_root(),
+            );
+        }
+        Ok(self.session)
+    }
+}
+
 impl AppUiWindowSession {
     fn take_viewer_gpu_generation_retirement(
         &mut self,
@@ -6849,138 +7112,6 @@ impl AppUiWindowSession {
                 native_retirement_error_logged: false,
             },
         ))
-    }
-
-    fn from_window_and_surface(
-        role: AppUiWindowRole,
-        window: Arc<winit::window::Window>,
-        surface: wgpu::Surface<'static>,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        host: &mut AppUiHost,
-        mut viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let surface_generation_id = AppUiSurfaceGenerationId::next()?;
-        apply_window_corner_preference(&window, window_corner_preference_for_role(role));
-
-        let size = window.inner_size();
-        let mut config = surface
-            .get_default_config(adapter, size.width, size.height)
-            .ok_or("Failed surface config")?;
-        let intent = app_ui_surface_presentation_intent_for_role(role, host);
-        let display_output_contract =
-            app_ui_display_output_contract(&window, &surface, adapter, intent)?;
-        let surface_color_contract = display_output_contract.surface_color;
-        config.format = surface_color_contract.format;
-        config.color_space = surface_color_contract.color_space;
-        surface.configure(device, &config);
-        tracing::info!(
-            format = ?surface_color_contract.format,
-            color_space = ?surface_color_contract.color_space,
-            encoding = ?surface_color_contract.encoding,
-            hdr_mode = ?surface_color_contract.hdr_mode,
-            display_target = ?display_output_contract.display_target,
-            display_hdr_info = ?display_output_contract.display_hdr_info,
-            display_tone_map_headroom =
-                ?display_output_contract.display_hdr_info.tone_map_headroom(),
-            available_formats = ?display_output_contract.available_formats,
-            format_color_spaces = ?display_output_contract.format_color_spaces,
-            present_modes = ?display_output_contract.present_modes,
-            alpha_modes = ?display_output_contract.alpha_modes,
-            "app UI surface color contract"
-        );
-
-        let bounds = Rect::new(0.0, 0.0, size.width as f32, size.height as f32);
-        TreeWalker::layout(host.active_root_mut(), bounds);
-
-        let (color_engine, display_management_policy) = host.resolved_display_color_management();
-        let initial_display_resolution = super::display_probe_impl::resolve_display_snapshot(
-            super::display_probe_impl::DisplaySnapshotTarget {
-                name: display_output_contract.display_target.name.clone(),
-                position: display_output_contract.display_target.position,
-                physical_size: display_output_contract.display_target.physical_size,
-                native_display_id: display_output_contract.display_target.native_display_id,
-                scale_factor: display_output_contract.display_target.scale_factor_ppm as f64
-                    / 1_000_000.0,
-            },
-            display_output_contract.surface_color.format,
-            display_output_contract.surface_color.color_space,
-            &format!("{:?}", display_output_contract.surface_color.hdr_mode),
-            &display_output_contract.supported_surface_color_spaces_for_selected_format(),
-            display_output_contract.display_hdr_info.clone(),
-            &color_engine,
-            &display_management_policy,
-            host.active_program_output_color_space(),
-            "Startup",
-        );
-        let initial_snapshot = initial_display_resolution.snapshot;
-        let renderer_adapter = AppUiRendererAdapterDiagnostics::from_adapter(adapter);
-        host.set_display_output_snapshot(Some(&initial_snapshot));
-
-        let frame_renderer =
-            AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
-        if let Some(startup) = viewer_gpu_startup.as_deref_mut() {
-            startup.install_runtime(ViewerGpuExecutionRuntime::new(adapter, device, queue)?);
-            startup
-                .runtime()
-                .expect("installed Window runtime")
-                .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
-        }
-        let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
-        host.clear_viewer_cpu_fallback();
-
-        let mut session = Self {
-            viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
-            surface_generation_id,
-            role,
-            window,
-            surface,
-            config: config.clone(),
-            display_output_contract,
-            display_snapshot: Some(initial_snapshot),
-            display_calibration: initial_display_resolution.calibration,
-            renderer_adapter,
-            color_engine,
-            display_management_policy,
-            frame_renderer,
-            renderer_device: device.clone(),
-            renderer_queue: queue.clone(),
-            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
-            viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
-            viewer_gpu_submissions,
-            staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
-            viewer_gpu_deferred_cleanup: WindowViewerGpuDeferredCleanup::None,
-            program_scopes_registered: false,
-            program_scopes_refresh_requested: false,
-            program_scopes_analysis_identity: None,
-            viewer_gpu_output_telemetry: AppUiViewerGpuOutputTelemetry::default(),
-            render_diagnostic_reporter: AppUiRenderDiagnosticReporter::default(),
-            router: build_event_router(
-                host.active_root().id(),
-                &host.preferences().shortcut_overrides,
-            ),
-            ui_runtime: WinitUiRuntime::new(),
-            last_cursor: Point::new(0.0, 0.0),
-            last_window_cursor_icon: None,
-            current_bounds: std::cell::Cell::new(bounds),
-            modifiers_state: Modifiers::none(),
-            pending_initial_redraw: true,
-            event_loop_telemetry: AppUiEventLoopTelemetry::default(),
-            playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
-        };
-        if let Some(startup) = viewer_gpu_startup {
-            // Assemble all UI state before moving GPU owners or publishing native
-            // decode authority. The None replacement shell stays genuinely empty.
-            let (progress, runtime) = startup.activate().expect("completed Window GPU startup");
-            session.viewer_gpu_device_progress = ViewerGpuDeviceGenerationMember::new(progress);
-            session.viewer_gpu_execution = ViewerGpuDeviceGenerationMember::new(runtime);
-            host.set_native_decoded_frame_import_support(
-                session.viewer_gpu_execution.native_import_support(),
-                session.viewer_gpu_execution.native_decode_device_root(),
-            );
-        }
-        Ok(session)
     }
 }
 
@@ -7095,28 +7226,28 @@ fn replace_window_session(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let old_role = session.role;
     let old_surface_generation = session.surface_generation_id;
-    // Native-window replacement does not replace the wgpu device generation.
-    // Revoke publication authority now, but keep every submitted media/GPU
-    // owner resident until its exact callback arrives.
-    clear_viewer_spatial_presentation(session, host);
-    session.window.set_visible(false);
-
     let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
     let surface = instance.create_surface(window.clone())?;
     let queue = session.renderer_queue.clone();
-    let mut next_session = AppUiWindowSession::from_window_and_surface(
+    let mut prepared = AppUiPreparedWindowSession::prepare(
         role, window, surface, adapter, device, &queue, host, None,
     )?;
+    // Native-window replacement does not replace the wgpu device generation.
+    // The complete candidate is prepared before the active Window is hidden or
+    // its publication authority is revoked.
+    clear_viewer_spatial_presentation(session, host);
+    session.window.set_visible(false);
     handoff_window_viewer_gpu_device_generation(
         &mut session.viewer_gpu_device_progress,
-        &mut next_session.viewer_gpu_device_progress,
+        &mut prepared.session.viewer_gpu_device_progress,
         &mut session.viewer_gpu_execution,
-        &mut next_session.viewer_gpu_execution,
+        &mut prepared.session.viewer_gpu_execution,
         &mut session.viewer_gpu_submissions,
-        &mut next_session.viewer_gpu_submissions,
+        &mut prepared.session.viewer_gpu_submissions,
         &mut session.viewer_gpu_deferred_cleanup,
-        &mut next_session.viewer_gpu_deferred_cleanup,
+        &mut prepared.session.viewer_gpu_deferred_cleanup,
     );
+    let next_session = prepared.publish(host, None)?;
     tracing::info!(
         ?old_role,
         ?role,
