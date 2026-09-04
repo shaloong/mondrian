@@ -1144,7 +1144,7 @@ fn ffmpeg_proxy_command(
     let filter_graph = format!(
         "{setparams},setsar=1,scale=-2:{height}:flags=lanczos:in_range={scale_range}:out_range={scale_range}"
     );
-    let mut cmd = crate::ffmpeg_command();
+    let mut cmd = crate::ffmpeg_command()?;
     cmd.arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")

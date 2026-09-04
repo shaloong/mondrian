@@ -4072,7 +4072,7 @@ mod tests {
             "mondrian-media-frame-hdr-probe-{}.mp4",
             std::process::id()
         ));
-        let output = std::process::Command::new("ffmpeg")
+        let output = crate::ffmpeg_command().expect("admit HDR probe fixture command")
             .args([
                 "-y",
                 "-hide_banner",

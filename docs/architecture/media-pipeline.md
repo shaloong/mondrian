@@ -12,6 +12,24 @@ decode-contract Interface rather than silently entering color management.
 
 `mondrian-media` owns FFmpeg-based media inspection, decode support, waveform/proxy/cache primitives, and audio buffers.
 
+## Command admission
+
+`ffmpeg_command` and `ffprobe_command` return `Result<Command, FfmpegCommandError>`.
+The Media-owned resolver distinguishes no installed qualification authority,
+an admitted exact command, and rejected authority. Only the first may resolve
+packaged/development tools; rejection never manufactures an executable pathname.
+The original qualification error is retained as a typed source, including when
+carried through Core's existing opaque domain-error carrier rather than a
+reverse Core-to-Media dependency.
+
+An audio Session admission failure precedes child/pump ownership and releases
+its unused physical permit normally. Audio Source does not cache that error as
+a string-only media-window failure. Preview's external and runtime hardware
+recovery policies reject it instead of starting an in-process software retry.
+Proxy construction propagates it before the supervisor can start a child.
+This is command-construction admission, not an atomic check at actual spawn;
+sealed namespace/child leases and mapped-loader identity remain separate work.
+
 ## Camera RAW Adapter
 
 `.dng` is an admitted picture extension only after the probe proves exactly one

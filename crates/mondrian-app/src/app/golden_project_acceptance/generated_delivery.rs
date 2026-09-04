@@ -804,7 +804,7 @@ pub(super) fn export_and_probe(
         "export reported a precision or output-transform correctness failure"
     );
     let output_path = completed.output_path;
-    let probe = probe_export_output(&output_path).map_err(anyhow::Error::msg)?;
+    let probe = probe_export_output(&output_path)?;
     assert_probe_matches_contract(
         &probe,
         export,

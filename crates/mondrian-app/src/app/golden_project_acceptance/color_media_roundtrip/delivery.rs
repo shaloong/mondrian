@@ -77,7 +77,7 @@ pub(super) fn execute_export_roundtrip(
         EXPORT_TIMEOUT,
     )?;
     let output_sha256 = sha256_file(&execution.output_path)?;
-    let probe = probe_export_output(&execution.output_path).map_err(anyhow::Error::msg)?;
+    let probe = probe_export_output(&execution.output_path)?;
     let video = probe.video.as_ref().context("color-media export has no video stream")?;
     ensure!(
         video.codec_name.as_deref() == Some("h264")

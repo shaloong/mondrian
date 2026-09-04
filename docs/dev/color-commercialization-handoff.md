@@ -202,23 +202,45 @@ Remaining local COL-047 implementation/validation blocks:
    expensive. Performance evidence/owner support extraction and
    bounded production-linked owner tests are still unfinished; source protocol
    tests do not replace App Runtime/GPU/physical closure qualification.
-3. Make qualified FFmpeg command rejection a typed error; a command pointing
-   at an assumed-nonexistent sentinel executable is not fail-closed admission.
-4. Close the capsule lifecycle: sealed namespace, spawn-time admission,
+3. Close the capsule lifecycle: sealed namespace, spawn-time admission,
    retained child leases, explicit Windows access-control evidence, and
    fallible process-owner cleanup. Static owners do not run TempDir cleanup
    at process exit. Never recover orphans by deleting a filename-prefix glob.
-5. Add pre-loader authority and post-load image/object attestation. Current
+4. Add pre-loader authority and post-load image/object attestation. Current
    loaded-module canonical paths do not prove the identity of an image mapped
    before the retained source handle was acquired. Do not substitute a partial
    PE hash for complete image identity.
-6. Run the locally executable real Windows campaign smoke after those
+5. Run the locally executable real Windows campaign smoke after those
    boundaries close. A short smoke cannot certify the physical 72-hour run.
-7. Qualify the CPU-output bottleneck recommendation: the current generic
+6. Qualify the CPU-output bottleneck recommendation: the current generic
    `move_preview_output_boundary_to_gpu` action is not universally applicable.
    Diagnostics must preserve mandatory CPU cache publication, respect route
    requirements, and distinguish processor/memory optimization from legal GPU
    output admission (including a hybrid path if actually supported).
+
+The typed FFmpeg command-construction boundary now distinguishes absent,
+admitted and rejected authority. Only absence may resolve packaged/PATH tools;
+rejection returns the original typed cause without a sentinel command. Audio
+admission releases unused physical permits, avoids string-only failure caching,
+and retains rejection even against a concurrent cancellation after decode.
+Preview cannot treat it as recoverable codec failure. Export hardware and Smart
+Render do not choose a fallback route after rejection; ordinary unsupported
+hardware/output mismatch still can. Public artifact validation and independent
+verification retain typed causes, and Golden/CLI fixtures use the same resolver.
+Private stem/DPX validation retains its terminal-only string diagnostics; some
+terminal paths prioritize concurrent cancellation, never success or fallback.
+Fixture encoding failures after successful admission retain their prior skip
+policy. These are command-construction contracts, not spawn-time/loader or
+physical qualification. Export's standalone validation feature explicitly enables
+the Media validation contract rather than relying on workspace unification.
+Local validation on 2026-09-04: Media library433 passed/8 ignored and Export
+library255 passed/8 ignored, both with validation enabled and serial test
+execution. Export includes real independent full decode, pipe layouts,
+high-precision image/mezzanine/stem/H.264 delivery, Smart Render and HDR10
+metadata checks. This is developer-run regression evidence, not a sealed
+performance or 72-hour qualification baseline. Ordinary Media/Export library
+Clippy and full workspace/all-target/all-feature Clippy passed with warnings
+denied; format and diff checks passed as well.
 
 A same-user filesystem race and an attacker able to inject into the process
 are distinct threat models. Any solution requiring a new privileged broker or

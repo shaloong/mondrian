@@ -6,7 +6,7 @@ authors.workspace    = true
 license.workspace    = true
 
 [features]
-validation = ["mondrian-renderer/validation"]
+validation = ["mondrian-renderer/validation", "mondrian-media/validation"]
 
 [dependencies]
 mondrian-storage  = { workspace = true }

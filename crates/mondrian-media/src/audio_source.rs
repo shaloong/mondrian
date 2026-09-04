@@ -1259,7 +1259,9 @@ impl AudioSourceCache {
             )
             .and_then(|buffer| self.validate_window(&key, buffer));
         let decode_duration_us = decode_started.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        if cancellation.is_canceled() {
+        let admission_rejected =
+            decoded.as_ref().is_err_and(crate::FfmpegCommandError::is_cause_of);
+        if cancellation.is_canceled() && !admission_rejected {
             self.finish_in_flight(&key);
             return Err(canceled_audio_decode(&key.source.path));
         }
@@ -1306,9 +1308,12 @@ impl AudioSourceCache {
                 state.decode_max_duration_us = state.decode_max_duration_us.max(decode_duration_us);
                 state.failures.retain(|failure| failure.key != key);
                 state.in_flight.retain(|in_flight| in_flight != &key);
-                state
-                    .failures
-                    .push_front(AudioSourceFailureEntry { key, reason: reason.clone() });
+                // Admission belongs to the installed toolchain, not the media
+                // window. Revalidate on the next request without converting
+                // its typed source into a cached, recoverable DecodeFailed.
+                if !crate::FfmpegCommandError::is_cause_of(&error) {
+                    state.failures.push_front(AudioSourceFailureEntry { key, reason });
+                }
                 while state.failures.len() > AUDIO_SOURCE_FAILURE_CAPACITY {
                     state.failures.pop_back();
                 }
@@ -1473,6 +1478,68 @@ pub(super) fn audio_frame_timestamp(frame: i64, sample_rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn command_admission_failure_is_not_cached_as_a_recoverable_decode_error() {
+        struct RejectedDecoder {
+            calls: AtomicU64,
+            cancel_before_reject: bool,
+        }
+        impl AudioWindowDecoder for RejectedDecoder {
+            fn decode_window(
+                &self,
+                _source: &AudioSourceIdentity,
+                _start_frame: i64,
+                _frame_count: usize,
+                _sample_rate: u32,
+                _channel_layout: AudioChannelLayout,
+                cancellation: &ExecutionCancellationToken,
+            ) -> Result<AudioBuffer> {
+                self.calls.fetch_add(1, Ordering::Relaxed);
+                if self.cancel_before_reject {
+                    cancellation.cancel();
+                }
+                Err(crate::FfmpegCommandError::from(
+                    crate::QualifiedFfmpegToolchainError::CapsuleNamespaceChanged,
+                )
+                .into())
+            }
+        }
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source");
+        file.write_all(b"source").expect("source identity");
+        for cancel_before_reject in [false, true] {
+            let decoder =
+                Arc::new(RejectedDecoder { calls: AtomicU64::new(0), cancel_before_reject });
+            let cache = Arc::new(AudioSourceCache::with_decoder(
+                8_000,
+                1,
+                2,
+                128 * 1024,
+                1,
+                decoder.clone(),
+            ));
+            let reader =
+                cache.open(file.path(), stereo_selection(file.path(), 0)).expect("open source");
+            for _ in 0..2 {
+                let error = reader.read_interleaved(0, 2, &mut [0.0; 4]).expect_err("deny decode");
+                assert!(crate::FfmpegCommandError::is_cause_of(&error));
+            }
+            assert_eq!(
+                decoder.calls.load(Ordering::Relaxed),
+                2,
+                "each request revalidates authority"
+            );
+            let diagnostics = cache.diagnostics();
+            assert_eq!(diagnostics.entries, 0);
+            assert_eq!(
+                diagnostics.failures, 0,
+                "no string-only failure cache entry"
+            );
+            assert_eq!(diagnostics.decode_failures, 2);
+            assert!(cache.state.lock().in_flight.is_empty());
+        }
+    }
     use crate::audio::decode_audio_file_with_ffmpeg_cli;
     use crate::info::ChannelLayout;
     use crate::MediaFileFingerprint;

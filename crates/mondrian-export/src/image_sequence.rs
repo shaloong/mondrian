@@ -598,7 +598,7 @@ fn validate_dpx16_frame(
             path.display()
         ));
     }
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = mondrian_media::ffmpeg_command().map_err(|error| error.to_string())?;
     let output = command
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -777,7 +777,8 @@ mod tests {
             let bytes = encoding.frame.pack_rgba_f32(&rgba).expect("pack exact master frame");
             match encoding.adapter {
                 ImageSequenceEncoderAdapter::FfmpegImage2 => {
-                    let mut command = mondrian_media::ffmpeg_command();
+                    let mut command =
+                        mondrian_media::ffmpeg_command().expect("admit image fixture command");
                     command
                         .arg("-y")
                         .arg("-hide_banner")

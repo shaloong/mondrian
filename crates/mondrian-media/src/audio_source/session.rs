@@ -1273,10 +1273,21 @@ impl DecodeSession {
         start_frame: i64,
         permit: DecoderSessionPermit,
     ) -> std::result::Result<Self, Box<DecodeSessionSpawnFailure>> {
+        Self::spawn_with_command(key, start_frame, permit, crate::ffmpeg_command)
+    }
+
+    fn spawn_with_command(
+        key: &SessionKey,
+        start_frame: i64,
+        permit: DecoderSessionPermit,
+        command: impl FnOnce() -> std::result::Result<Command, crate::FfmpegCommandError>,
+    ) -> std::result::Result<Self, Box<DecodeSessionSpawnFailure>> {
         let (input_start_frame, exact_trim_frames) =
             exact_seek_partition(start_frame, key.sample_rate);
         let pan_filter = identity_pan_filter(key.channel_layout);
-        let mut command = crate::ffmpeg_command();
+        let mut command = command().map_err(|error| {
+            Box::new(DecodeSessionSpawnFailure { error: Box::new(error.into()), owner: None })
+        })?;
         command.arg("-v").arg("error").arg("-nostdin");
         if input_start_frame > 0 {
             command
@@ -1786,6 +1797,36 @@ fn hide_child_window(_command: &mut Command) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn rejected_command_releases_permit_without_creating_a_partial_child_owner() {
+        let pool = Arc::new(DecoderSessionPermitPool::new(1));
+        let cancellation = ExecutionCancellationToken::new();
+        let shutdown = AudioWindowDecoderShutdownSignal::new();
+        let faulted = AtomicBool::new(false);
+        let key = test_session_key(0);
+        let permit = pool
+            .acquire(&cancellation, &shutdown, &faulted, &key.source.path)
+            .expect("one physical permit");
+        assert_eq!(pool.diagnostics(), (1, 1, 1));
+        let failure = DecodeSession::spawn_with_command(&key, 0, permit, || {
+            Err(crate::QualifiedFfmpegToolchainError::CapsuleNamespaceChanged.into())
+        })
+        .err()
+        .expect("admission rejected before spawn");
+        assert!(
+            failure.owner.is_none(),
+            "no child or pump owner was created"
+        );
+        assert!(crate::FfmpegCommandError::is_cause_of(&failure.error));
+        assert_eq!(pool.diagnostics(), (0, 1, 1));
+        let next = pool
+            .acquire(&cancellation, &shutdown, &faulted, &key.source.path)
+            .expect("permit can be reacquired without teardown");
+        drop(next);
+        assert_eq!(pool.diagnostics(), (0, 1, 1));
+    }
     use crate::info::ChannelLayout;
     use mondrian_core::MediaFileFingerprint;
     use std::path::PathBuf;

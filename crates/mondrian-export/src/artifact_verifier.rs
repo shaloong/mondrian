@@ -350,7 +350,8 @@ fn full_decode(
     let deadline = Instant::now()
         .checked_add(timeout)
         .ok_or(IndependentExportArtifactVerificationError::DeadlineOverflow)?;
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = mondrian_media::ffmpeg_command()
+        .map_err(IndependentExportArtifactVerificationError::CommandAdmission)?;
     command
         .args([
             "-hide_banner",
@@ -486,7 +487,10 @@ pub enum IndependentExportArtifactVerificationError {
     Cancelled,
     /// Existing typed probe failed.
     #[error("export artifact probe failed: {0}")]
-    Probe(String),
+    Probe(#[source] crate::validator::ExportValidationError),
+    /// Exact executable admission failed before any decode child was created.
+    #[error("independent decode command admission failed: {0}")]
+    CommandAdmission(#[source] mondrian_media::FfmpegCommandError),
     /// Probe found no selected media streams.
     #[error("export artifact has no independently decodable video or audio stream")]
     NoDecodableStreams,
@@ -569,6 +573,7 @@ mod tests {
         let root = tempfile::tempdir().expect("temp root");
         let path = root.path().join("artifact.mp4");
         let status = mondrian_media::ffmpeg_command()
+            .expect("admit fixture FFmpeg command")
             .args([
                 "-y",
                 "-hide_banner",

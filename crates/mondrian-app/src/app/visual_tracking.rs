@@ -1533,8 +1533,20 @@ mod tests {
     use super::*;
 
     fn generate_translation_fixture(root: &std::path::Path) -> Option<PathBuf> {
-        if std::process::Command::new("ffmpeg").arg("-version").output().is_err() {
-            return None;
+        let mut availability =
+            mondrian_media::ffmpeg_command().expect("admit tracking fixture probe");
+        let development_search_path = availability.get_program() == std::ffi::OsStr::new("ffmpeg");
+        match availability.arg("-version").output() {
+            Err(error)
+                if development_search_path && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                return None
+            }
+            Err(error) => panic!("tracking fixture version probe could not execute: {error}"),
+            Ok(output) => assert!(
+                output.status.success(),
+                "tracking fixture version probe failed: {output:?}"
+            ),
         }
         let frames = root.join("frames");
         std::fs::create_dir_all(&frames).expect("create tracking frames");
@@ -1557,7 +1569,8 @@ mod tests {
                 .expect("write tracking source frame");
         }
         let video = root.join("translation.mp4");
-        let status = std::process::Command::new("ffmpeg")
+        let status = mondrian_media::ffmpeg_command()
+            .expect("admit tracking fixture encoder")
             .args([
                 "-y",
                 "-hide_banner",

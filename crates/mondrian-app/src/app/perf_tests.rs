@@ -72,7 +72,6 @@ use std::cmp;
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8840,11 +8839,20 @@ fn generate_preview_media_fixture_with_size(
     height: u32,
     duration_secs: u32,
 ) -> anyhow::Result<bool> {
-    if Command::new("ffmpeg").arg("-version").output().is_err() {
-        return Ok(false);
+    let mut availability = mondrian_media::ffmpeg_command()?;
+    let development_search_path = availability.get_program() == std::ffi::OsStr::new("ffmpeg");
+    match availability.arg("-version").output() {
+        Err(error) if development_search_path && error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(false)
+        }
+        Err(error) => return Err(error.into()),
+        Ok(output) => anyhow::ensure!(
+            output.status.success(),
+            "FFmpeg fixture version probe failed: {output:?}"
+        ),
     }
 
-    let status = Command::new("ffmpeg")
+    let status = mondrian_media::ffmpeg_command()?
         .arg("-y")
         .arg("-hide_banner")
         .arg("-loglevel")

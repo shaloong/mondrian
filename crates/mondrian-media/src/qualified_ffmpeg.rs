@@ -283,20 +283,14 @@ impl PreparedFfmpegToolchain {
         }
     }
 
-    pub(crate) fn ffmpeg_command(&self) -> Command {
-        if self.validate_current().is_ok() {
-            self.ffmpeg.command()
-        } else {
-            Command::new(self._snapshot_directory.path().join("invalid-ffmpeg-identity"))
-        }
+    pub(crate) fn ffmpeg_command(&self) -> Result<Command, QualifiedFfmpegToolchainError> {
+        self.validate_current()?;
+        Ok(self.ffmpeg.command())
     }
 
-    pub(crate) fn ffprobe_command(&self) -> Command {
-        if self.validate_current().is_ok() {
-            self.ffprobe.command()
-        } else {
-            Command::new(self._snapshot_directory.path().join("invalid-ffprobe-identity"))
-        }
+    pub(crate) fn ffprobe_command(&self) -> Result<Command, QualifiedFfmpegToolchainError> {
+        self.validate_current()?;
+        Ok(self.ffprobe.command())
     }
 
     fn same_identity(&self, other: &Self) -> bool {
@@ -351,12 +345,12 @@ pub fn install_process_ffmpeg_toolchain(
     }
 }
 
-pub(crate) fn process_ffmpeg_command() -> Option<Command> {
-    PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffmpeg_command())
+pub(crate) fn process_ffmpeg_command() -> Result<Option<Command>, QualifiedFfmpegToolchainError> {
+    PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffmpeg_command()).transpose()
 }
 
-pub(crate) fn process_ffprobe_command() -> Option<Command> {
-    PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffprobe_command())
+pub(crate) fn process_ffprobe_command() -> Result<Option<Command>, QualifiedFfmpegToolchainError> {
+    PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffprobe_command()).transpose()
 }
 
 #[cfg(windows)]
@@ -1598,6 +1592,31 @@ mod tests {
             _snapshot_directory: capsule,
             namespace_poisoned: AtomicBool::new(false),
         });
+        // Even a present old sentinel pathname must not become a Command.
+        fs::write(
+            toolchain._snapshot_directory.path().join("invalid-ffmpeg-identity"),
+            b"not authority",
+        )
+        .expect("create former sentinel pathname");
+        assert!(matches!(
+            toolchain.ffmpeg_command(),
+            Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged)
+        ));
+        assert!(matches!(
+            toolchain.ffprobe_command(),
+            Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged)
+        ));
+        fs::remove_file(toolchain._snapshot_directory.path().join("invalid-ffmpeg-identity"))
+            .expect("remove former sentinel");
+        fs::remove_file(toolchain._snapshot_directory.path().join("poison.dll"))
+            .expect("restore namespace");
+        assert!(
+            matches!(
+                toolchain.ffmpeg_command(),
+                Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged)
+            ),
+            "namespace poisoning is sticky after restoration"
+        );
         assert!(matches!(
             install_process_ffmpeg_toolchain(toolchain),
             Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged)

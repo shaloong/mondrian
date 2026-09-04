@@ -108,7 +108,10 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
             }));
         }
     };
-    let mut command = crate::ffmpeg_command();
+    let mut command = match crate::ffmpeg_command() {
+        Ok(command) => command,
+        Err(error) => return Some(Err(error.into())),
+    };
     command
         .arg("-v")
         .arg("error")

@@ -335,7 +335,6 @@ fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
         eprintln!("COL-038 qualification tools are not present; skipping local HITL fixture");
         return;
     }
-    let ffmpeg = PathBuf::from("ffmpeg.exe");
     let root = tempfile::tempdir().expect("qualification root");
     let package = root.path().join("package");
     let work = root.path().join("work");
@@ -343,7 +342,8 @@ fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
     std::fs::create_dir(&work).expect("work directory");
     let prores = work.join("picture.prores");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=black:s=1920x1080:r=25:d=0.04")
             .args([
@@ -363,7 +363,8 @@ fn real_imf_rdd45_track_files_and_package_pass_photon_reimport() {
     );
     let wave = work.join("audio.wav");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("anullsrc=channel_layout=stereo:sample_rate=48000")
             .args([
@@ -477,7 +478,6 @@ fn real_smpte_dcp_tracks_and_package_pass_independent_verifier() {
     toolchain
         .qualify_for(ProfessionalDeliveryProfile::SmpteDcp2kFlat24)
         .expect("qualified DCP toolchain");
-    let ffmpeg = PathBuf::from("ffmpeg.exe");
     let root = tempfile::tempdir().expect("qualification root");
     let package = root.path().join("package");
     let work = root.path().join("work");
@@ -485,7 +485,8 @@ fn real_smpte_dcp_tracks_and_package_pass_independent_verifier() {
     std::fs::create_dir(&package).expect("package directory");
     std::fs::create_dir_all(&j2c).expect("J2C directory");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=black:s=1998x1080:r=24:d=1")
             .args([
@@ -511,7 +512,8 @@ fn real_smpte_dcp_tracks_and_package_pass_independent_verifier() {
     );
     let wave = work.join("audio.wav");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("anullsrc=channel_layout=stereo:sample_rate=48000")
             .args(["-t", "1", "-c:a", "pcm_s24le", "-ar", "48000", "-ac", "2"])
@@ -590,11 +592,11 @@ fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
     toolchain
         .qualify_for(ProfessionalDeliveryProfile::As11X9NabaHd720p5994)
         .expect("qualified AS-11 toolchain");
-    let ffmpeg = PathBuf::from("ffmpeg.exe");
     let root = tempfile::tempdir().expect("qualification root");
     let avc = root.path().join("picture.h264");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=black:s=1280x720:r=60000/1001:d=1.001")
             .args([
@@ -624,7 +626,8 @@ fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
     );
     let wave = root.path().join("audio.wav");
     run_qualification_command(
-        Command::new(&ffmpeg)
+        mondrian_media::ffmpeg_command()
+            .expect("admit professional qualification fixture command")
             .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("anullsrc=channel_layout=stereo:sample_rate=48000")
             .args([

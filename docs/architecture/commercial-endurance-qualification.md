@@ -150,6 +150,14 @@ The implementation is split at existing authority boundaries:
   for accidental change but is not an atomic hostile-same-user check across
   command construction and spawn. macOS/Linux fail closed pending their
   descriptor/immutable-image Adapter qualification.
+  Command construction itself returns a typed rejection, not a deliberately
+  invalid executable pathname. Media preserves that cause through persistent
+  audio admission, its failure cache and Preview recovery; Export distinguishes
+  it from opportunistic hardware or Smart Render incompatibility. Golden retains
+  typed probe errors. Real CLI test fixtures use the same resolver; availability
+  probes may skip only a genuinely absent unqualified search-path tool, not a
+  denied capsule or failed packaged/qualified launch. These checks do not close
+  the explicitly separate construction-to-spawn race or child-lease inventory.
 - `mondrian-app::app::endurance_workload` owns the bounded regular-file read,
   SHA-256/profile binding, strict phase-specific JSON schema, fixed policy and
   duration/counter validation, plus the exact pre-start capability inventory.

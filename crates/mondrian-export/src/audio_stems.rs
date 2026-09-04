@@ -125,7 +125,7 @@ fn validate_wave_stem(
     channel_layout: AudioChannelLayout,
     sample_frames: u64,
 ) -> Result<(), String> {
-    let probe = probe_export_output(path)?;
+    let probe = probe_export_output(path).map_err(|error| error.to_string())?;
     let container = probe
         .container_format
         .as_deref()

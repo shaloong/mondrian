@@ -589,7 +589,8 @@ mod tests {
                 _ => unreachable!("professional test matrix is MOV/MXF only"),
             };
             let output_path = temp.join(format!("case-{index}.{extension}"));
-            let mut command = mondrian_media::ffmpeg_command();
+            let mut command =
+                mondrian_media::ffmpeg_command().expect("admit mezzanine fixture command");
             command
                 .arg("-y")
                 .arg("-hide_banner")

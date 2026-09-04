@@ -94,6 +94,20 @@ are rechecked against the published path after decode so a changing artifact
 cannot produce a receipt. Bounded snapshot copying reads at most one byte past
 the policy ceiling before rejecting a growing or oversized file.
 
+Command admission is a distinct failure before any probe/decode child exists.
+The public artifact-probe/validation Interfaces return `ExportValidationError`,
+retaining `CommandAdmission` and its Media-owned source separately from ordinary
+output validation errors. Smart Render may retry pixel rendering for an output
+contract mismatch, never for rejected FFprobe authority. Hardware encoder
+selection similarly admits its command before the opportunistic probe/fallback
+decision. Ordinary encoding and remux convert errors to diagnostic text at
+terminal failure/reporting Interfaces. Private stem and DPX validators still
+convert earlier, but their callers can only fail or cancel, never retry another
+route or publish success. Concurrent cancellation can take precedence over the
+diagnostic in those terminal-only paths; Smart Render retains admission failure
+before considering cancellation. The independent verifier retains typed command
+and probe causes in its own error.
+
 The result is a structured report plus the SHA-256 of its canonical JSON. The
 receipt fields are private and bind the caller's stable Export job/artifact
 identity, so App capture can construct

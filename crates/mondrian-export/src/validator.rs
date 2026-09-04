@@ -22,6 +22,24 @@ const FFPROBE_FRAME_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
 const FFPROBE_KEYFRAME_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const FFPROBE_STDERR_TAIL_LIMIT: usize = 64 * 1024;
 
+/// A finished-artifact validation failure, preserving command admission
+/// separately from output/codec evidence that may permit a render retry.
+#[derive(Debug, thiserror::Error)]
+pub enum ExportValidationError {
+    /// No FFprobe child was authorized; trying another render route cannot repair this.
+    #[error(transparent)]
+    CommandAdmission(#[from] mondrian_media::FfmpegCommandError),
+    /// The artifact, probe execution or decoded evidence did not satisfy its contract.
+    #[error("{0}")]
+    Output(String),
+}
+
+impl From<String> for ExportValidationError {
+    fn from(message: String) -> Self {
+        Self::Output(message)
+    }
+}
+
 /// Exact stream and duration contract that a finished export must prove.
 #[derive(Debug, Clone)]
 pub struct ExportValidationExpectations {
@@ -501,7 +519,7 @@ pub(crate) const fn expected_audio_constraints(
 pub fn validate_export_output(
     output_path: &Path,
     expectations: &ExportValidationExpectations,
-) -> Result<ExportOutputProbe, String> {
+) -> Result<ExportOutputProbe, ExportValidationError> {
     validate_export_output_cancellable(
         output_path,
         expectations,
@@ -515,11 +533,11 @@ pub fn validate_export_output_cancellable(
     output_path: &Path,
     expectations: &ExportValidationExpectations,
     cancellation: &ExecutionCancellationToken,
-) -> Result<ExportOutputProbe, String> {
+) -> Result<ExportOutputProbe, ExportValidationError> {
     let metadata = std::fs::metadata(output_path)
         .map_err(|err| format!("读取导出文件失败 {}: {}", output_path.display(), err))?;
     if metadata.len() == 0 {
-        return Err(format!("导出文件大小为 0: {}", output_path.display()));
+        return Err(format!("导出文件大小为 0: {}", output_path.display()).into());
     }
 
     let report = ffprobe_report(output_path, cancellation)?;
@@ -567,7 +585,7 @@ pub fn validate_export_output_cancellable(
             validate_static_hdr_metadata(side_data, expected)?;
         }
         (Some(ExpectedStaticHdrMetadata::Absent | ExpectedStaticHdrMetadata::Exact(_)), None) => {
-            return Err("未取得导出成品首帧，无法证明静态 HDR metadata 合同".to_string());
+            return Err("未取得导出成品首帧，无法证明静态 HDR metadata 合同".to_string().into());
         }
     }
     Ok(build_output_probe(&report, side_data))
@@ -604,7 +622,7 @@ fn validate_frame_scan(
 /// Probe an export into stable typed evidence without applying a delivery
 /// expectation. Video outputs must expose a decodable first frame so HDR
 /// metadata presence cannot silently remain unknown.
-pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
+pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, ExportValidationError> {
     probe_export_output_cancellable(path, &ExecutionCancellationToken::new())
 }
 
@@ -612,7 +630,7 @@ pub fn probe_export_output(path: &Path) -> Result<ExportOutputProbe, String> {
 pub fn probe_export_output_cancellable(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<ExportOutputProbe, String> {
+) -> Result<ExportOutputProbe, ExportValidationError> {
     let report = ffprobe_report(path, cancellation)?;
     let has_video = report
         .streams
@@ -629,7 +647,7 @@ pub fn probe_export_output_cancellable(
 }
 
 /// Probe only stream presence and duration for lightweight media admission.
-pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
+pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, ExportValidationError> {
     let report = ffprobe_report(path, &ExecutionCancellationToken::new())?;
     Ok(summarize_report(&report))
 }
@@ -637,8 +655,8 @@ pub fn probe_media_summary(path: &Path) -> Result<MediaStreamSummary, String> {
 fn ffprobe_report(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<FfprobeReport, String> {
-    let mut command = mondrian_media::ffprobe_command();
+) -> Result<FfprobeReport, ExportValidationError> {
+    let mut command = mondrian_media::ffprobe_command()?;
     command
         .arg("-v")
         .arg("error")
@@ -656,22 +674,18 @@ fn ffprobe_report(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "ffprobe 失败（{}）: {}",
-            output.status,
-            stderr.trim()
-        ));
+        return Err(format!("ffprobe 失败（{}）: {}", output.status, stderr.trim()).into());
     }
 
     serde_json::from_slice::<FfprobeReport>(&output.stdout)
-        .map_err(|err| format!("解析 ffprobe 结果失败: {}", err))
+        .map_err(|err| format!("解析 ffprobe 结果失败: {}", err).into())
 }
 
 fn ffprobe_video_frame_window(
     path: &Path,
     cancellation: &ExecutionCancellationToken,
-) -> Result<Vec<FfprobeFrame>, String> {
-    let mut command = mondrian_media::ffprobe_command();
+) -> Result<Vec<FfprobeFrame>, ExportValidationError> {
+    let mut command = mondrian_media::ffprobe_command()?;
     command
         .arg("-v")
         .arg("error")
@@ -698,13 +712,14 @@ fn ffprobe_video_frame_window(
             "ffprobe HDR metadata 校验失败（{}）: {}",
             output.status,
             stderr.trim()
-        ));
+        )
+        .into());
     }
 
     let report = serde_json::from_slice::<FfprobeFrameReport>(&output.stdout)
         .map_err(|err| format!("解析 ffprobe 开场帧信号证据失败: {err}"))?;
     if report.frames.is_empty() {
-        Err("ffprobe 未能解码导出视频的开场帧窗口".to_string())
+        Err("ffprobe 未能解码导出视频的开场帧窗口".to_string().into())
     } else {
         Ok(report.frames)
     }
@@ -716,7 +731,7 @@ fn validate_finished_video_coding(
     expected: &ExpectedVideoConstraints,
     coding: crate::video_encoding::ResolvedVideoCodingStructure,
     cancellation: &ExecutionCancellationToken,
-) -> Result<(), String> {
+) -> Result<(), ExportValidationError> {
     let max_interval_frames = match coding {
         crate::video_encoding::ResolvedVideoCodingStructure::H26xLongGop {
             keyframe_interval_frames,
@@ -741,7 +756,7 @@ fn validate_finished_video_coding(
     let fps_num = expected.fps_num.ok_or_else(|| "导出 GOP 校验缺少帧率分子".to_owned())?;
     let fps_den = expected.fps_den.ok_or_else(|| "导出 GOP 校验缺少帧率分母".to_owned())?;
 
-    let mut command = mondrian_media::ffprobe_command();
+    let mut command = mondrian_media::ffprobe_command()?;
     command
         .arg("-v")
         .arg("error")
@@ -766,7 +781,8 @@ fn validate_finished_video_coding(
             "ffprobe GOP 校验失败（{}）: {}",
             output.status,
             String::from_utf8_lossy(&output.stderr).trim()
-        ));
+        )
+        .into());
     }
     let keyframes = serde_json::from_slice::<FfprobeKeyframeReport>(&output.stdout)
         .map_err(|error| format!("解析 ffprobe GOP 结果失败: {error}"))?;
@@ -780,6 +796,7 @@ fn validate_finished_video_coding(
         fps_den,
         max_interval_frames,
     )
+    .map_err(ExportValidationError::from)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2198,7 +2215,7 @@ mod tests {
             "mondrian-export-signal-validation-{}.mp4",
             std::process::id()
         ));
-        let status = Command::new("ffmpeg")
+        let status = mondrian_media::ffmpeg_command().expect("admit signal fixture command")
             .args([
                 "-y",
                 "-hide_banner",
@@ -2268,7 +2285,7 @@ mod tests {
             "mondrian-export-hdr10-validation-{}.mp4",
             std::process::id()
         ));
-        let output = Command::new("ffmpeg")
+        let output = mondrian_media::ffmpeg_command().expect("admit signal fixture command")
             .args([
                 "-y",
                 "-hide_banner",
@@ -2345,6 +2362,6 @@ mod tests {
         let mismatch = validate_export_output(&path, &expectations)
             .expect_err("a mismatched post-encode MaxCLL contract must fail");
         let _ = std::fs::remove_file(path);
-        assert!(mismatch.contains("实际 1000/400"));
+        assert!(mismatch.to_string().contains("实际 1000/400"));
     }
 }

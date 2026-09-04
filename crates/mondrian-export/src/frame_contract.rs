@@ -545,7 +545,8 @@ mod tests {
         ] {
             let mut frame = Vec::new();
             contract.fill_black_opaque(&mut frame, 1, 1);
-            let mut child = mondrian_media::ffmpeg_command();
+            let mut child =
+                mondrian_media::ffmpeg_command().expect("admit rawvideo fixture command");
             child
                 .arg("-hide_banner")
                 .arg("-loglevel")

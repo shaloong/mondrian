@@ -68,7 +68,7 @@ pub use decoder::{
     RendererHwAccelDeviceContextInstallError,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
-pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command};
+pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command, FfmpegCommandError};
 pub use info::{
     interpret_video_color_metadata, is_picture_file_extension, parse_video_color_metadata_hint,
     probe_media_info, AudioStreamInfo, DetectedColorInterpretation, MediaInfo, MediaProbeSnapshot,

@@ -2955,7 +2955,8 @@ fn render_professional_pcm24_wave(
             )
         })?)
     };
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = mondrian_media::ffmpeg_command()
+        .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3034,7 +3035,8 @@ fn render_professional_picture_essence(
             directory
         }
     };
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = mondrian_media::ffmpeg_command()
+        .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
     command
         .arg("-hide_banner")
         .arg("-nostdin")
@@ -3447,7 +3449,10 @@ fn execute_audio_stems_export(
                 "audio-stem layout {channel_layout} has no explicit WAV lowering"
             ));
         };
-        let mut command = mondrian_media::ffmpeg_command();
+        let mut command = match mondrian_media::ffmpeg_command() {
+            Ok(command) => command,
+            Err(error) => return JobExecutionResult::Failed(error.to_string()),
+        };
         command
             .arg("-y")
             .arg("-hide_banner")
@@ -4104,7 +4109,7 @@ fn execute_timeline_export(
                 ) {
                     Ok(encoder) => Some(encoder),
                     Err(_) if cancel.is_canceled() => return JobExecutionResult::Cancelled,
-                    Err(error) => return JobExecutionResult::Failed(error),
+                    Err(error) => return JobExecutionResult::Failed(error.to_string()),
                 }
             }
             ResolvedExportArtifactEncoding::ImageSequence { .. } => None,
@@ -4165,7 +4170,10 @@ fn execute_timeline_export(
             }
             return outcome;
         }
-        let mut cmd = mondrian_media::ffmpeg_command();
+        let mut cmd = match mondrian_media::ffmpeg_command() {
+            Ok(command) => command,
+            Err(error) => return JobExecutionResult::Failed(error.to_string()),
+        };
         let frame_contract = export_frame_contract(&delivery);
         let pix_fmt = frame_contract.ffmpeg_pix_fmt();
         cmd.arg("-y")
@@ -4584,7 +4592,10 @@ fn execute_resident_hevc_export(
             "resident HEVC route lost its media-file contract".to_owned(),
         );
     };
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = match mondrian_media::ffmpeg_command() {
+        Ok(command) => command,
+        Err(error) => return ResidentExportAttemptOutcome::Failed(error.to_string()),
+    };
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -4755,7 +4766,8 @@ fn try_execute_smart_render(
         return Ok(None);
     }
 
-    let mut command = mondrian_media::ffmpeg_command();
+    let mut command = mondrian_media::ffmpeg_command()
+        .map_err(|error| JobExecutionResult::Failed(error.to_string()))?;
     command
         .arg("-y")
         .arg("-hide_banner")
@@ -4862,13 +4874,11 @@ fn try_execute_smart_render(
         );
         return Ok(None);
     }
-    match validate_export_output_cancellable(output_path, expectations, cancel) {
-        Ok(_) => {}
-        Err(_) if cancel.is_canceled() => return Err(JobExecutionResult::Cancelled),
-        Err(error) => {
-            tracing::debug!(%error, "Smart Render output contract validation failed");
-            return Ok(None);
-        }
+    if !smart_render_validation_allows_completion(
+        validate_export_output_cancellable(output_path, expectations, cancel),
+        cancel,
+    )? {
+        return Ok(None);
     }
     if let Err(reason) = validate_snapshot_media_revisions(timeline) {
         tracing::debug!(%reason, "Smart Render source revision changed before completion");
@@ -4880,6 +4890,23 @@ fn try_execute_smart_render(
         payload_bytes: source_packets.payload_bytes,
         packet_identity_verified: true,
     }))
+}
+
+fn smart_render_validation_allows_completion(
+    result: Result<crate::validator::ExportOutputProbe, crate::validator::ExportValidationError>,
+    cancel: &ExecutionCancellationToken,
+) -> Result<bool, JobExecutionResult> {
+    match result {
+        Ok(_) => Ok(true),
+        Err(error @ crate::validator::ExportValidationError::CommandAdmission(_)) => {
+            Err(JobExecutionResult::Failed(error.to_string()))
+        }
+        Err(_) if cancel.is_canceled() => Err(JobExecutionResult::Cancelled),
+        Err(error) => {
+            tracing::debug!(%error, "Smart Render output contract validation failed");
+            Ok(false)
+        }
+    }
 }
 
 fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Result<(), String> {
@@ -9873,6 +9900,61 @@ pub(crate) use helpers::*;
 
 #[cfg(test)]
 mod tests {
+    fn ffmpeg_is_available_for_test() -> bool {
+        let mut command = mondrian_media::ffmpeg_command().expect("admit test FFmpeg command");
+        // Only the unqualified resolver emits this bare search-path name.
+        // Packaged and qualified commands must never turn a launch failure into a skip.
+        let development_search_path = command.get_program() == std::ffi::OsStr::new("ffmpeg");
+        match command.arg("-version").output() {
+            Ok(output) => {
+                assert!(
+                    output.status.success(),
+                    "FFmpeg version probe failed: {:?}",
+                    output
+                );
+                true
+            }
+            Err(error)
+                if development_search_path && error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                false
+            }
+            Err(error) => panic!("FFmpeg version probe could not execute: {error}"),
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn smart_render_admission_rejection_never_requests_pixel_fallback() {
+        for canceled in [false, true] {
+            let error = mondrian_media::FfmpegCommandError::from(
+                mondrian_media::QualifiedFfmpegToolchainError::CapsuleNamespaceChanged,
+            );
+            let cancellation = mondrian_core::ExecutionCancellationToken::new();
+            if canceled {
+                cancellation.cancel();
+            }
+            let result =
+                super::smart_render_validation_allows_completion(Err(error.into()), &cancellation);
+            assert!(
+                matches!(result, Err(super::JobExecutionResult::Failed(message)) if message.contains("capsule namespace"))
+            );
+        }
+    }
+
+    #[test]
+    fn smart_render_output_mismatch_retains_pixel_fallback() {
+        assert!(matches!(
+            super::smart_render_validation_allows_completion(
+                Err(crate::validator::ExportValidationError::Output(
+                    "codec mismatch".to_owned()
+                )),
+                &mondrian_core::ExecutionCancellationToken::new(),
+            ),
+            Ok(false)
+        ));
+    }
+
     use super::*;
     use crate::preset::{
         Av1Profile, ExportChromaSampling, ExportParameter, ExportVideoSignal, HevcProfile,
@@ -10913,7 +10995,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_publishes_png_sequence_only_after_manifest_validation() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping PNG sequence integration test: FFmpeg unavailable");
             return;
         }
@@ -10951,7 +11033,7 @@ mod tests {
 
     #[test]
     fn executor_publishes_every_high_precision_image_master_after_exact_validation() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping high-precision image-master test: FFmpeg unavailable");
             return;
         }
@@ -11001,7 +11083,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_publishes_all_program_outputs_as_validated_audio_stems() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping audio-stem integration test: FFmpeg unavailable");
             return;
         }
@@ -11064,7 +11146,7 @@ mod tests {
 
     #[test]
     fn audio_stem_block_interleave_reuses_bounded_decode_windows_across_outputs() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping audio-stem decode-sharing test: FFmpeg unavailable");
             return;
         }
@@ -11209,7 +11291,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_publishes_probe_qualified_h264_media() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping H.264 integration test: FFmpeg unavailable");
             return;
         }
@@ -11244,7 +11326,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_export_freezes_and_reports_broadcast_qc_before_publication() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping broadcast QC export integration test: FFmpeg unavailable");
             return;
         }
@@ -11338,7 +11420,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_publishes_each_professional_mezzanine_family() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping professional mezzanine integration test: FFmpeg unavailable");
             return;
         }
@@ -11403,14 +11485,15 @@ mod tests {
 
     #[test]
     fn ffmpeg_executor_smart_renders_full_identity_video_with_packet_proof() {
-        if mondrian_media::ffmpeg_command().arg("-version").output().is_err() {
+        if !ffmpeg_is_available_for_test() {
             eprintln!("skipping Smart Render integration test: FFmpeg unavailable");
             return;
         }
         let directory = tempfile::tempdir().expect("temporary Smart Render parent");
         let source = directory.path().join("source.mp4");
         let output = directory.path().join("smart-rendered.mp4");
-        let mut make_source = mondrian_media::ffmpeg_command();
+        let mut make_source =
+            mondrian_media::ffmpeg_command().expect("admit Smart Render fixture command");
         let generated = make_source
             .arg("-y")
             .arg("-hide_banner")

@@ -90,10 +90,7 @@ pub fn verify_ffmpeg_runtime() -> Result<()> {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(error) => {
-            return Err(runtime_error(
-                runtime_path,
-                format!("installed exact FFmpeg toolchain failed revalidation: {error}"),
-            ));
+            return Err(crate::FfmpegCommandError::from(error).into());
         }
     }
     ensure_ffmpeg_initialized(runtime_path)?;

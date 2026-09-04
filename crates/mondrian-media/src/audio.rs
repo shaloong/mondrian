@@ -1064,7 +1064,7 @@ pub(crate) fn decode_audio_file_with_ffmpeg_cli(
         asset_id: path.display().to_string(),
         reason: format!("audio output layout {channel_layout:?} has no explicit FFmpeg lowering"),
     })?;
-    let output = crate::ffmpeg_command()
+    let output = crate::ffmpeg_command()?
         .arg("-v")
         .arg("error")
         .arg("-i")

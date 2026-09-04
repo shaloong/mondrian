@@ -449,6 +449,16 @@ fn runtime_decode_error_allows_hardware_recovery(error: &MondrianError) -> bool 
     matches!(error, MondrianError::DecodeFailed { .. })
 }
 
+fn admit_external_decode_recovery(error: MondrianError) -> Result<()> {
+    if crate::FfmpegCommandError::is_cause_of(&error) {
+        return Err(error);
+    }
+    preview_trace(format!(
+        "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {error}"
+    ));
+    Ok(())
+}
+
 fn mark_runtime_hardware_fallback(
     mut outcome: PreviewDecodeOutcome,
     requested_hardware: PreviewHardwareDecodeRequest,
@@ -471,6 +481,23 @@ fn mark_runtime_hardware_fallback(
 #[cfg(test)]
 mod runtime_recovery_tests {
     use super::*;
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn command_admission_rejection_cannot_enter_either_software_recovery_path() {
+        let error: MondrianError = crate::FfmpegCommandError::from(
+            crate::QualifiedFfmpegToolchainError::CapsuleNamespaceChanged,
+        )
+        .into();
+        let error = admit_external_decode_recovery(error).expect_err("no software retry");
+        assert!(crate::FfmpegCommandError::is_cause_of(&error));
+        assert!(!runtime_decode_error_allows_hardware_recovery(&error));
+        assert!(admit_external_decode_recovery(MondrianError::DecodeFailed {
+            asset_id: "ordinary codec failure".to_owned(),
+            reason: "unsupported external decoder".to_owned(),
+        })
+        .is_ok());
+    }
 
     #[test]
     fn runtime_software_recovery_never_weakens_required_gpu_residency() {
@@ -2965,9 +2992,7 @@ fn decode_preview_frame_outcome_in_sessions(
                         ));
                     }
                     Err(err) => {
-                        preview_trace(format!(
-                            "[preview] external ffmpeg CPU RGBA decode failed, fallback software: {err}"
-                        ));
+                        admit_external_decode_recovery(err)?;
                     }
                 }
             }

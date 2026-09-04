@@ -86,7 +86,27 @@ pub(crate) fn resolve_video_encoder(
     adapter: Option<&ActiveGraphicsAdapterIdentity>,
     static_hdr_metadata: bool,
     cancellation: &ExecutionCancellationToken,
-) -> Result<ResolvedVideoEncoder, String> {
+) -> mondrian_core::Result<ResolvedVideoEncoder> {
+    resolve_video_encoder_with_probe(
+        codec,
+        adapter,
+        static_hdr_metadata,
+        cancellation,
+        mondrian_media::ffmpeg_command,
+        |command, candidate| {
+            probe_encoder(command, candidate, codec, output_pixel_format, cancellation)
+        },
+    )
+}
+
+fn resolve_video_encoder_with_probe(
+    codec: &VideoCodecConfig,
+    adapter: Option<&ActiveGraphicsAdapterIdentity>,
+    static_hdr_metadata: bool,
+    cancellation: &ExecutionCancellationToken,
+    command: impl FnOnce() -> Result<Command, mondrian_media::FfmpegCommandError>,
+    probe: impl FnOnce(&mut Command, ResolvedVideoEncoder) -> Result<(), String>,
+) -> mondrian_core::Result<ResolvedVideoEncoder> {
     let software = software_encoder(codec);
     if static_hdr_metadata {
         tracing::info!(
@@ -106,9 +126,11 @@ pub(crate) fn resolve_video_encoder(
         return Ok(software);
     };
     if cancellation.is_canceled() {
-        return Err("hardware encoder probe canceled".to_owned());
+        return Err(mondrian_core::MondrianError::Cancelled);
     }
-    match probe_encoder(candidate, codec, output_pixel_format, cancellation) {
+    // Failed identity admission is fatal, not evidence of an unsupported GPU.
+    let mut command = command()?;
+    match probe(&mut command, candidate) {
         Ok(()) => {
             tracing::info!(
                 encoder = candidate.ffmpeg_name(codec),
@@ -172,12 +194,12 @@ const fn hardware_candidate(
 }
 
 fn probe_encoder(
+    command: &mut Command,
     encoder: ResolvedVideoEncoder,
     codec: &VideoCodecConfig,
     output_pixel_format: &str,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<(), String> {
-    let mut command = mondrian_media::ffmpeg_command();
     command
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -192,7 +214,7 @@ fn probe_encoder(
         .arg("-pix_fmt")
         .arg(output_pixel_format);
     apply_video_encoder_args(
-        &mut command,
+        command,
         codec,
         ResolvedVideoCodingStructure::H26xLongGop {
             keyframe_interval_frames: 60,
@@ -204,7 +226,7 @@ fn probe_encoder(
     );
     command.arg("-f").arg("null").arg("-");
     let output = run_supervised_command(
-        &mut command,
+        command,
         None,
         SupervisedProcessPolicy {
             stdout: SupervisedStreamCapture::Drain,
@@ -401,6 +423,50 @@ mod tests {
             profile: H264Profile::High,
             rate_control: VideoRateControl::constant_quality(18),
         }
+    }
+
+    fn test_adapter() -> ActiveGraphicsAdapterIdentity {
+        ActiveGraphicsAdapterIdentity {
+            name: "protocol-only adapter".to_owned(),
+            vendor: NVIDIA_VENDOR_ID,
+            device: 0,
+            backend: "test".to_owned(),
+        }
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn command_admission_failure_does_not_probe_or_select_software() {
+        let result = resolve_video_encoder_with_probe(
+            &h264(),
+            Some(&test_adapter()),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Err(mondrian_media::QualifiedFfmpegToolchainError::CapsuleNamespaceChanged.into()),
+            |_, _| panic!("an unadmitted command must not reach the encoder probe"),
+        );
+        let error = result.expect_err("must not return a software encoder");
+        let mondrian_core::MondrianError::Other(source) = error else {
+            panic!("typed admission cause");
+        };
+        assert!(source.is::<mondrian_media::FfmpegCommandError>());
+    }
+
+    #[test]
+    fn admitted_but_unsupported_hardware_retains_software_fallback() {
+        let selected = resolve_video_encoder_with_probe(
+            &h264(),
+            Some(&test_adapter()),
+            false,
+            &ExecutionCancellationToken::new(),
+            || Ok(Command::new("protocol-only-not-spawned")),
+            |_, candidate| {
+                assert_eq!(candidate, ResolvedVideoEncoder::NvidiaNvenc);
+                Err("unsupported driver".to_owned())
+            },
+        )
+        .expect("ordinary codec fallback remains legal");
+        assert_eq!(selected, ResolvedVideoEncoder::Libx264);
     }
 
     #[test]

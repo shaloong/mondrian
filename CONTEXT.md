@@ -472,7 +472,10 @@ rename/delete sharing on the capsule directory, revalidates the exact capsule
 entry set before every command, verifies fixed bounded outputs, the production
 semantic baseline, and the process-loaded canonical-path closure, then installs that
 exact CLI pair process-wide. A changed capsule or different later identity is
-rejected. The machine-specific factory remains responsible for enforcing this
+rejected through a typed command-admission error, never a fabricated executable
+path or alternate packaged/PATH command. Audio failure caching and Preview/
+Export acceleration fallback must preserve that rejection; it is not ordinary
+decoder, hardware-codec or output-contract incompatibility. The machine-specific factory remains responsible for enforcing this
 admission before constructing any App or worker.
 This Windows evidence does not yet bind a previously mapped module image to the
 later retained file object, and capsule revalidation is not atomic with process
