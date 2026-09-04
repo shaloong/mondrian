@@ -158,6 +158,7 @@ mod packaged_worker;
 mod playback;
 pub(crate) mod viewer_gpu_device_progress;
 pub(crate) mod viewer_gpu_publication;
+pub(crate) mod viewer_gpu_startup;
 pub(crate) mod viewer_gpu_submission;
 pub(crate) use playback::{
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,

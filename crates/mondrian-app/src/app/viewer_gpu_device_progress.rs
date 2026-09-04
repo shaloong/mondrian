@@ -815,18 +815,6 @@ impl ViewerGpuDeviceProgressOwner {
         let _ = self.worker.enqueue_generation_retirement(Box::new(retirement));
     }
 
-    /// Transfer the retirement envelope and wait within an explicit bound.
-    #[cfg(any(test, feature = "validation"))]
-    #[cfg(feature = "validation")]
-    pub(crate) fn retire_device_generation_and_wait(
-        self,
-        retirement: impl ViewerGpuDeviceGenerationRetirement,
-        timeout: Duration,
-    ) -> ViewerGpuDeviceProgressShutdownEvidence {
-        let deadline = Instant::now().checked_add(timeout).unwrap_or_else(Instant::now);
-        self.retire_device_generation_until(retirement, deadline)
-    }
-
     /// Transfer the retirement envelope and wait against one caller-owned deadline.
     #[cfg(any(test, feature = "validation"))]
     pub(crate) fn retire_device_generation_until(

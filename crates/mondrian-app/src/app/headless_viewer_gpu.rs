@@ -27,6 +27,7 @@ use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceProgressStartError, ViewerGpuDeviceProgressWake,
 };
 use crate::app::viewer_gpu_publication::{ViewerGpuPhysicalPublication, ViewerGpuPublicationSlots};
+use crate::app::viewer_gpu_startup::ViewerGpuStartupOwner;
 use crate::app::viewer_gpu_submission::{
     ViewerGpuCompletedSubmission, ViewerGpuRetiredSubmission, ViewerGpuSubmissionAdmissionError,
     ViewerGpuSubmissionId, ViewerGpuSubmissionLifecycle, ViewerGpuSubmissionPoll,
@@ -728,15 +729,7 @@ impl HeadlessViewerGpuAdapter {
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
             .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
-        // Install the one callback for this generation before constructing any
-        // runtime, timestamp, or queue-consuming Adapter component.
-        let device_progress =
-            ViewerGpuDeviceProgressOwner::new(&device, ViewerGpuDeviceProgressWake::default())?;
-        let runtime = ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
-            &adapter, &device, &queue, policy,
-        )?;
-        let timestamp_ring =
-            GpuTimestampQueryRing::new(&device, &queue, HEADLESS_GPU_TIMESTAMP_RING_CAPACITY);
+        // CPU-only fallible state must precede progress/Renderer worker creation.
         let native_import_gpu_timing =
             HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
         let adapter_info = HeadlessViewerGpuAdapterInfo {
@@ -748,11 +741,21 @@ impl HeadlessViewerGpuAdapter {
             driver: raw_adapter_info.driver,
             driver_info: raw_adapter_info.driver_info,
         };
-        Ok(Self {
-            device_progress: ViewerGpuDeviceGenerationMember::new(device_progress),
+        // Retain partial ownership through every subsequent error and unwind.
+        let mut startup =
+            ViewerGpuStartupOwner::new(&device, &queue, ViewerGpuDeviceProgressWake::default())?;
+        let timestamp_ring =
+            GpuTimestampQueryRing::new(&device, &queue, HEADLESS_GPU_TIMESTAMP_RING_CAPACITY);
+        startup.install_runtime(
+            ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
+                &adapter, &device, &queue, policy,
+            )?,
+        );
+        let mut adapter = Self {
+            device_progress: ViewerGpuDeviceGenerationMember::empty(),
             device,
             queue,
-            runtime: ViewerGpuDeviceGenerationMember::new(runtime),
+            runtime: ViewerGpuDeviceGenerationMember::empty(),
             timestamp_ring,
             adapter_info,
             native_import_gpu_timing,
@@ -761,7 +764,11 @@ impl HeadlessViewerGpuAdapter {
             physical_outputs: ViewerGpuPublicationSlots::default(),
             #[cfg(any(test, feature = "validation"))]
             staged_successors: PreviewGpuFrameStaging::default(),
-        })
+        };
+        let (progress, runtime) = startup.activate().expect("completed Headless GPU startup");
+        adapter.device_progress = ViewerGpuDeviceGenerationMember::new(progress);
+        adapter.runtime = ViewerGpuDeviceGenerationMember::new(runtime);
+        Ok(adapter)
     }
 
     /// Retain one CPU-complete ticketless frame without consuming GPU

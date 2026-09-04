@@ -52,6 +52,25 @@ Native encoded input accepts both RGBA16F and RGBA32F without inserting a
 conversion to half precision. Compact-YUV and native materialization currently
 produce the product RGBA32F intermediate and feed the same OCIO input boundary.
 
+App's shared `ViewerGpuStartupOwner` covers the interval before a complete
+Window/Headless Adapter exists. It starts the sole progress owner with retained
+device/queue handles and immediately owns any successfully constructed Renderer.
+Failure or unwind transfers that exact partial envelope to the existing progress
+worker; absence of a Renderer is explicit, not an invented upload-worker receipt.
+No UI Window/Surface or second reaper thread enters the envelope. Window callers
+establish this guard before Preview waker installation or old-generation reopen
+retirement, not merely inside the session constructor. All remaining UI assembly
+precedes activation and publication of native decode authority. Headless prepares
+fallible CPU-only timing metadata before worker creation. Successful activation
+moves the progress/Renderer pair once and clears the guard's device/queue handles,
+so an initial-window guard cannot pin a later-retired device during the event loop.
+Reopen retirement spends the existing validation deadline, never a fresh timeout.
+
+This guard is a lifetime-safety prerequisite, not complete startup qualification:
+ordinary failure still uses asynchronous Drop. Owning failure propagation and
+public terminal receipts must close the remaining constructor/bind/campaign seams
+before such a failure can claim synchronously verified cleanup.
+
 ## Working Float Policy
 
 `working_float_policy` is the single Renderer Module deciding the transient

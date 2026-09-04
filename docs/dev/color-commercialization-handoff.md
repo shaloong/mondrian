@@ -18,6 +18,19 @@ also passed. The input test exposed and corrected a stale RGBA16F-only
 guard rejecting the product RGBA32F native intermediate. Do not upgrade old
 receipts or call this complete startup/normal lifetime qualification yet.
 
+The partial-startup lifetime-safety prerequisite adds one shared GPU startup guard
+to Window and Headless: caller-side construction coverage, explicit optional
+Renderer ownership, asynchronous retirement on failure/unwind, move-only
+activation without residual device/queue handles, and delayed native decode
+publication. Device reopen now uses its original validation deadline. This does
+not yet implement an owning startup error or public terminal receipt; those
+remain item 1 below. Real shared-guard protocol tests are distinct from a complete
+Window-construction fault-injection or campaign-return regression.
+Its local Release verification passed three real-GPU guard tests, 25 progress
+protocol tests, one real Headless retirement test and two Window lifecycle tests
+(31 focused tests total). The injected constructor panic is intentional and
+caught; these tests do not certify complete startup/public-result qualification.
+
 ## Local Windows work still in progress
 
 COL-047 default performance owner-closure receipts now cover Project, App UI,
@@ -109,10 +122,15 @@ Remaining local COL-047 implementation/validation blocks:
    consume them through the shared shutdown deadline, rather than returning
    only an error and later reporting App-only closure. Preserve typed startup
    failure evidence past the product entrypoint, even when cleanup succeeds.
-   Cover partial Window/Headless GPU construction and preserve normal raw
+   Preserve failed partial Window/Headless GPU guards through bounded cleanup and normal raw
    terminal receipts as well as the optional campaign snapshot. The now-verified
    Renderer retirement/progress protocol is the shared prerequisite, not proof
    that these constructor/public-result paths already close.
+   Also retain the exact GPU terminal kind and retirement-requested flag:
+   Endurance currently loses `DeviceDestroyed` in its count-only projection,
+   unlike Perf/Window qualification. Safe physical release and a healthy normal
+   qualification must stay separate predicates; this is a protocol finding,
+   not an observed local device failure.
 2. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
    warning suppression.

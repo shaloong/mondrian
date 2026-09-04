@@ -1926,6 +1926,7 @@ fn reopen_window_surface_and_device(
     host: &mut AppUiHost,
     session: &mut AppUiWindowSession,
     event_proxy: &winit::event_loop::EventLoopProxy<AppUiUserEvent>,
+    deadline: Instant,
 ) -> Result<AppUiSurfaceDeviceReopenTransition, Box<dyn std::error::Error>> {
     let surface_generation_before = session.surface_generation_id.get();
     let device_generation_before = session
@@ -1941,8 +1942,9 @@ fn reopen_window_surface_and_device(
     let next_surface = instance.create_surface(next_window.clone())?;
     let (next_device, next_queue) = request_app_ui_device(adapter)?;
     let completion_proxy = event_proxy.clone();
-    let next_progress = ViewerGpuDeviceProgressOwner::new(
+    let mut next_startup = crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
         &next_device,
+        &next_queue,
         ViewerGpuDeviceProgressWake::new(move || {
             let _ = completion_proxy.send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
         }),
@@ -1951,8 +1953,7 @@ fn reopen_window_surface_and_device(
     clear_viewer_spatial_presentation(session, host);
     session.window.set_visible(false);
     let (retiring_progress, retirement) = session.take_viewer_gpu_generation_retirement()?;
-    let shutdown =
-        retiring_progress.retire_device_generation_and_wait(retirement, Duration::from_secs(10));
+    let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
     let (shutdown_receipt_json, shutdown_receipt_sha256) =
         seal_clean_viewer_gpu_shutdown(shutdown)?;
 
@@ -1964,7 +1965,7 @@ fn reopen_window_surface_and_device(
         &next_device,
         &next_queue,
         host,
-        Some(next_progress),
+        Some(&mut next_startup),
     )?;
     let surface_generation_after = next_session.surface_generation_id.get();
     let device_generation_after = next_session
@@ -2046,6 +2047,7 @@ fn advance_surface_device_reopen_validation(
                 host,
                 session,
                 event_proxy,
+                validation.deadline,
             )?;
             validation.state = AppUiSurfaceDeviceReopenValidationState::AwaitingReopenedPicture(
                 Box::new(AppUiSurfaceDeviceReopenAwaitingPicture {
@@ -2592,8 +2594,11 @@ fn run_app_ui_with_initial_state_on_event_loop(
         let _ = viewer_gpu_completion_event_proxy
             .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
     });
-    let viewer_gpu_device_progress =
-        ViewerGpuDeviceProgressOwner::new(&device, viewer_gpu_progress_wake)?;
+    let mut viewer_gpu_startup = crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
+        &device,
+        &queue,
+        viewer_gpu_progress_wake,
+    )?;
 
     let preview_work_watch = host.preview_work_watch();
     let preview_work_event_pending = Arc::new(AtomicBool::new(false));
@@ -2612,7 +2617,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
         &device,
         &queue,
         &mut host,
-        Some(viewer_gpu_device_progress),
+        Some(&mut viewer_gpu_startup),
     )?;
     let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
     let pending_actions = PendingUiActions::default();
@@ -6835,7 +6840,7 @@ impl AppUiWindowSession {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         host: &mut AppUiHost,
-        viewer_gpu_device_progress: Option<ViewerGpuDeviceProgressOwner>,
+        mut viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let surface_generation_id = AppUiSurfaceGenerationId::next()?;
         apply_window_corner_preference(&window, window_corner_preference_for_role(role));
@@ -6896,28 +6901,18 @@ impl AppUiWindowSession {
 
         let frame_renderer =
             AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
-        let viewer_gpu_execution = if viewer_gpu_device_progress.is_some() {
-            let runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
-            runtime.install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
-            host.set_native_decoded_frame_import_support(
-                runtime.native_import_support(),
-                runtime.native_decode_device_root(),
-            );
-            ViewerGpuDeviceGenerationMember::new(runtime)
-        } else {
-            // Native-window replacement receives the existing generation below;
-            // do not create a worker or overwrite that generation's capabilities.
-            ViewerGpuDeviceGenerationMember::empty()
-        };
-        let viewer_gpu_device_progress = match viewer_gpu_device_progress {
-            Some(progress) => ViewerGpuDeviceGenerationMember::new(progress),
-            None => ViewerGpuDeviceGenerationMember::empty(),
-        };
+        if let Some(startup) = viewer_gpu_startup.as_deref_mut() {
+            startup.install_runtime(ViewerGpuExecutionRuntime::new(adapter, device, queue)?);
+            startup
+                .runtime()
+                .expect("installed Window runtime")
+                .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
+        }
         let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
         host.clear_viewer_cpu_fallback();
 
-        Ok(Self {
-            viewer_gpu_device_progress,
+        let mut session = Self {
+            viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember::empty(),
             surface_generation_id,
             role,
             window,
@@ -6932,7 +6927,7 @@ impl AppUiWindowSession {
             frame_renderer,
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
-            viewer_gpu_execution,
+            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::empty(),
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions,
             staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),
@@ -6954,7 +6949,19 @@ impl AppUiWindowSession {
             pending_initial_redraw: true,
             event_loop_telemetry: AppUiEventLoopTelemetry::default(),
             playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
-        })
+        };
+        if let Some(startup) = viewer_gpu_startup {
+            // Assemble all UI state before moving GPU owners or publishing native
+            // decode authority. The None replacement shell stays genuinely empty.
+            let (progress, runtime) = startup.activate().expect("completed Window GPU startup");
+            session.viewer_gpu_device_progress = ViewerGpuDeviceGenerationMember::new(progress);
+            session.viewer_gpu_execution = ViewerGpuDeviceGenerationMember::new(runtime);
+            host.set_native_decoded_frame_import_support(
+                session.viewer_gpu_execution.native_import_support(),
+                session.viewer_gpu_execution.native_decode_device_root(),
+            );
+        }
+        Ok(session)
     }
 }
 
