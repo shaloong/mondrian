@@ -292,90 +292,12 @@ pub use super::preview_work_notification::{
 };
 pub use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
-/// Synchronous terminal evidence for every worker owned by Preview Runtime.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PreviewRuntimeShutdownEvidence {
-    /// Evidence schema version.
-    pub schema_version: u32,
-    /// Workers that successfully started during this Runtime lifetime.
-    pub workers_started: u32,
-    /// Started workers synchronously joined by the shutdown caller.
-    pub workers_terminated: u32,
-    /// Joined workers whose thread body panicked.
-    pub worker_panics: u32,
-    /// Joined workers whose opaque panic payload could not safely be released.
-    pub worker_panic_payloads_abandoned: u32,
-    /// Workers detached because shutdown ran on that same worker thread.
-    pub current_thread_detachments: u32,
-    /// Workers previously transferred to the ordinary asynchronous UI reaper.
-    pub unverified_async_reaps: u32,
-    /// Workers still running at the shared qualification deadline.
-    pub worker_timeouts: u32,
-    /// Worker handles detached after the shared qualification deadline.
-    pub worker_deadline_detachments: u32,
-    /// Exact required visual-dependency observer receipt; absent is unverified.
-    pub visual_dependency_worker: Option<PreviewOwnedWorkerShutdown>,
-    /// Exact callback registration, invocation and retirement-owner receipt.
-    pub work_callbacks: Option<PreviewWorkCallbackEvidence>,
-    /// Exact startup and terminal evidence for the persistent Timeline render cache.
-    pub(crate) timeline_render_cache:
-        crate::app::preview_render_cache::PreviewTimelineRenderCacheShutdownEvidence,
-}
-
-impl PreviewRuntimeShutdownEvidence {
-    /// Whether every started worker returned synchronously and without panic.
-    pub const fn all_workers_terminated(self) -> bool {
-        self.schema_version == 4
-            && matches!(self.work_callbacks, Some(callbacks) if callbacks.all_resources_released())
-            && matches!(
-                self.visual_dependency_worker,
-                Some(PreviewOwnedWorkerShutdown::Terminated)
-            )
-            && self.workers_started == self.workers_terminated
-            && self.workers_started
-                >= 1 + matches!(self.timeline_render_cache.worker, Some(worker) if worker.worker_started)
-                    as u32
-                    + matches!(self.work_callbacks, Some(callbacks) if callbacks.worker_started)
-                        as u32
-            && self.worker_panics == 0
-            && self.worker_panic_payloads_abandoned == 0
-            && self.current_thread_detachments == 0
-            && self.unverified_async_reaps == 0
-            && self.worker_timeouts == 0
-            && self.worker_deadline_detachments == 0
-            && self.timeline_render_cache.all_resources_released()
-    }
-
-    fn record(&mut self, outcome: PreviewOwnedWorkerShutdown) {
-        match outcome {
-            PreviewOwnedWorkerShutdown::NotStarted => {}
-            PreviewOwnedWorkerShutdown::Terminated => {
-                self.workers_started = self.workers_started.saturating_add(1);
-                self.workers_terminated = self.workers_terminated.saturating_add(1);
-            }
-            PreviewOwnedWorkerShutdown::Panicked
-            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
-                self.workers_started = self.workers_started.saturating_add(1);
-                self.workers_terminated = self.workers_terminated.saturating_add(1);
-                self.worker_panics = self.worker_panics.saturating_add(1);
-                if outcome == PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned {
-                    self.worker_panic_payloads_abandoned =
-                        self.worker_panic_payloads_abandoned.saturating_add(1);
-                }
-            }
-            PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
-                self.workers_started = self.workers_started.saturating_add(1);
-                self.current_thread_detachments = self.current_thread_detachments.saturating_add(1);
-            }
-            PreviewOwnedWorkerShutdown::TimedOutDetached => {
-                self.workers_started = self.workers_started.saturating_add(1);
-                self.worker_timeouts = self.worker_timeouts.saturating_add(1);
-                self.worker_deadline_detachments =
-                    self.worker_deadline_detachments.saturating_add(1);
-            }
-        }
-    }
-}
+pub use super::preview_shutdown_evidence::PreviewRuntimeShutdownEvidence;
+#[cfg(any(test, feature = "validation"))]
+pub use super::preview_shutdown_evidence::{
+    PreviewStartupInventory, PreviewStartupOwnerState, PreviewStartupShutdownEvidence,
+    PreviewStartupWorkerShutdown,
+};
 
 /// Production Preview composition root shared by Window and Headless Adapters.
 ///
@@ -684,223 +606,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             MediaPreviewScheduler::default(),
             PreviewWorkerIsolation::DirectTestAdapter,
         )
-    }
-
-    fn with_worker_count_and_scheduler(
-        decode_cpu_budget: PreviewDecodeCpuBudget,
-        worker_count: usize,
-        scheduler: MediaPreviewScheduler,
-        worker_isolation: PreviewWorkerIsolation,
-    ) -> Self {
-        let (work_notifier, work_watch) = preview_work_notification_channel();
-        let timeline_render_cache =
-            crate::app::preview_render_cache::PreviewTimelineRenderCache::start(
-                work_notifier.clone(),
-            );
-        let (job_tx, job_rx) = scheduler.job_queue();
-        let (result_tx, result_rx) =
-            mpsc::sync_channel::<MediaPreviewResult>(MEDIA_PREVIEW_COMPLETED_RESULT_QUEUE_CAPACITY);
-        let shutdown = Arc::new(PreviewShutdownSignal::default());
-        let decode_residency = Arc::new(PreviewDecodeResidencyCoordinator::new_with_notifier(
-            work_notifier.clone(),
-        ));
-        let decode_worker_resources = mondrian_media::PreviewDecodeWorkerResources::default();
-        let initial_frame_store = mondrian_playback::PreviewFrameStoreConfig::default();
-        let (visual_execution, visual_execution_start_failure) =
-            match VisualExecutionTask::new_with_notifier(
-                mondrian_playback::SystemMonotonicRuntimeClock::default(),
-                VisualExecutionTaskConfig::default(),
-                work_notifier.clone(),
-            ) {
-                Ok(task) => (Some(task), None),
-                Err(error) => {
-                    tracing::error!("failed to start Preview visual execution worker: {error}");
-                    (None, Some(error.to_string()))
-                }
-            };
-        let (cpu_fallback_task, cpu_fallback_start_failure) =
-            match PreviewCpuFallbackTask::new(work_notifier.clone()) {
-                Ok(task) => (Some(task), None),
-                Err(error) => {
-                    tracing::error!("failed to start Preview CPU fallback worker: {error}");
-                    (None, Some(error.to_string()))
-                }
-            };
-        let mut decode_worker_count = 0;
-        let mut workers = Vec::new();
-        let mut decode_execution_observers = Vec::new();
-        let (demux_worker_executable, mut media_worker_start_failure) = if worker_count == 0
-            || !worker_isolation.requires_packaged_worker()
-        {
-            (None, None)
-        } else {
-            match super::packaged_worker::discover_preview_demux_worker() {
-                Ok(executable) => (Some(executable), None),
-                Err(error) => {
-                    tracing::error!(
-                        %error,
-                        "Preview media workers were not started because required demux isolation is unavailable"
-                    );
-                    scheduler.close();
-                    (None, Some(error.to_string()))
-                }
-            }
-        };
-        for worker_index in 0..worker_count {
-            if worker_isolation.requires_packaged_worker() && demux_worker_executable.is_none() {
-                break;
-            }
-            let worker_jobs = job_rx.clone();
-            let worker_results = result_tx.clone();
-            let worker_work_notifier = work_notifier.clone();
-            let worker_scheduler = scheduler.clone();
-            let worker_shutdown = Arc::clone(&shutdown);
-            let worker_decode_residency = Arc::clone(&decode_residency);
-            let worker_lane = media_preview_worker_lane(worker_index, worker_count);
-            let (worker_decode_context_bootstrap, execution_observer) =
-                match demux_worker_executable.clone() {
-                    Some(executable) => mondrian_media::PreviewDecodeSessionContext::observed_bootstrap_with_demux_worker(executable),
-                    #[cfg(test)]
-                    None if worker_isolation == PreviewWorkerIsolation::DirectTestAdapter => {
-                        mondrian_media::PreviewDecodeSessionContext::observed_bootstrap()
-                    }
-                    None => unreachable!("required packaged worker was checked before spawn"),
-                };
-            let worker_decode_context_bootstrap = worker_decode_context_bootstrap
-                .with_worker_resources(decode_worker_resources.clone())
-                .with_decoder_thread_limit(match worker_lane {
-                    MediaPreviewWorkerLane::NonPlayback => {
-                        decode_cpu_budget.decoder_threads_per_worker
-                    }
-                    MediaPreviewWorkerLane::Any | MediaPreviewWorkerLane::Playback => {
-                        decode_cpu_budget.max_decoder_threads_per_worker
-                    }
-                });
-            decode_residency.register_worker(worker_lane);
-            match std::thread::Builder::new()
-                .name(format!("mondrian-preview-worker-{worker_index}"))
-                .spawn(move || {
-                    media_preview_worker(
-                        worker_lane,
-                        worker_jobs,
-                        worker_results,
-                        worker_work_notifier,
-                        worker_scheduler,
-                        worker_shutdown,
-                        worker_decode_residency,
-                        worker_decode_context_bootstrap,
-                    )
-                }) {
-                Ok(handle) => {
-                    workers.push(handle);
-                    decode_execution_observers.push((worker_lane, execution_observer));
-                    decode_worker_count += 1;
-                }
-                Err(err) => {
-                    decode_residency.unregister_worker(worker_lane);
-                    if media_worker_start_failure.is_none() {
-                        media_worker_start_failure = Some(format!(
-                            "failed to start Preview media worker {worker_index}: {err}"
-                        ));
-                    }
-                    tracing::warn!(
-                        worker_index,
-                        "failed to start production preview worker: {err}"
-                    );
-                }
-            }
-        }
-        if worker_count > 0 && decode_worker_count == 0 {
-            scheduler.close();
-            media_worker_start_failure.get_or_insert_with(|| {
-                "no configured Preview media worker could be started".to_owned()
-            });
-        }
-        decode_worker_resources.reconfigure_session_residency(
-            mondrian_media::PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(
-                initial_frame_store.current_media_working_set_resource_unit_limit,
-                decode_worker_count.max(1),
-            ),
-        );
-
-        Self {
-            work_notifier: work_notifier.clone(),
-            work_watch,
-            jobs: job_tx,
-            results: RefCell::new(result_rx),
-            workers: RefCell::new(workers),
-            unverified_async_worker_reaps: Cell::new(0),
-            shutdown,
-            decode_residency,
-            observed_decode_residency_retry_revision: Cell::new(0),
-            decode_residency_waiting: Cell::new(None),
-            decode_worker_resources,
-            frame_store: RefCell::new(PreviewFrameStoreAdapter::default()),
-            media_aggregate_capacity_waiting: Cell::new(false),
-            media_existing_work_waiters: RefCell::new(HashMap::new()),
-            media_existing_work_retry_pending: Cell::new(false),
-            media_existing_work_waiter_registrations: Cell::new(0),
-            media_existing_work_retry_acknowledgements: Cell::new(0),
-            scrub_adaptation: RefCell::new(PreviewScrubAdaptationState::default()),
-            execution: RefCell::new(PreviewExecutionCoordinator::default()),
-            transport_playing: Cell::new(false),
-            transport_epoch: Cell::new(None),
-            playback_pressure: Cell::new(PlaybackPressureState::default()),
-            #[cfg(test)]
-            last_video_preroll_observation: Cell::new(None),
-            applied_resource_decision: Cell::new(None),
-            applied_resource_trim: Cell::new(
-                crate::app::execution_resource_coordination::ResourceTrimRequest::None,
-            ),
-            heterogeneous_effect_decision: Cell::new(
-                crate::app::execution_resource_coordination::PreviewHeterogeneousEffectExecutionDecision::conservative_baseline(),
-            ),
-            scheduler,
-            title_task: RefCell::new(PreviewTitleTask::with_notifier(work_notifier.clone())),
-            visual_execution,
-            visual_execution_start_failure,
-            visual_execution_health_failed: Cell::new(false),
-            cpu_fallback_task,
-            cpu_fallback_start_failure,
-            viewer_cpu_fallback_active: Cell::new(false),
-            viewer_signal_monitoring: Cell::new((
-                mondrian_core::ProgramScopesTap::default(),
-                mondrian_core::SignalMonitoringSettings::default(),
-            )),
-            cpu_fallback_in_flight: RefCell::new(None),
-            cpu_fallback_failure: RefCell::new(None),
-            timeline_render_cache: RefCell::new(timeline_render_cache),
-            visual_ready: RefCell::new(HashMap::new()),
-            visual_failures: RefCell::new(HashMap::new()),
-            media_execution_failures: RefCell::new(HashMap::new()),
-            media_worker_health_failed: Cell::new(media_worker_start_failure.is_some()),
-            media_worker_start_failure,
-            last_current_media_admission: Cell::new(None),
-            last_gpu_loading_reason: Cell::new(None),
-            visual_terminal_candidates: RefCell::new(Vec::new()),
-            visual_program_authoring_session: Cell::new(None),
-            visual_programs: RefCell::new(mondrian_renderer::PreparedVisualProgramCache::default()),
-            future_media_window: RefCell::new(request_scheduler::FutureMediaWindowCache::default()),
-            visual_dependencies: PreviewVisualDependencyObserver::new_with_notifier(
-                work_notifier.clone(),
-            ),
-            visual_dependency_health_failed: Cell::new(false),
-            scratch: RefCell::new(TimelineCompositeScratch::default()),
-            evaluation_working_set: RefCell::new(EvaluationWorkingSet::new()),
-            evaluation_working_set_clock: Cell::new(0),
-            last_color_rejection: RefCell::new(None),
-            unavailability_evidence: RefCell::new(PreviewUnavailabilityEvidence::default()),
-            display_snapshot: RefCell::new(None),
-            display_snapshot_identity: Cell::new(None),
-            last_gallery_capture: RefCell::new(None),
-            hardware_decode_admission: Cell::new(PreviewHardwareDecodeAdmissionState::default()),
-            decode_cpu_budget,
-            decode_worker_count,
-            decode_execution_watch: PreviewDecodeWorkerExecutionWatch::new(
-                decode_execution_observers,
-            ),
-            metrics: PreviewMetrics::default(),
-        }
     }
 
     /// Clone the payload-free completion watch shared by every Preview worker.
@@ -2583,13 +2288,18 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownE
 fn join_preview_workers_until(
     handles: Vec<JoinHandle<()>>,
     deadline: Instant,
-) -> PreviewRuntimeShutdownEvidence {
+) -> (
+    PreviewRuntimeShutdownEvidence,
+    Vec<PreviewOwnedWorkerShutdown>,
+) {
+    let mut outcomes = Vec::with_capacity(handles.len());
     let mut evidence = PreviewRuntimeShutdownEvidence {
         schema_version: 4,
         ..PreviewRuntimeShutdownEvidence::default()
     };
     for handle in handles {
         let outcome = PreviewOwnedWorkerShutdown::join_until(handle, deadline);
+        outcomes.push(outcome);
         match outcome {
             PreviewOwnedWorkerShutdown::Panicked
             | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
@@ -2605,7 +2315,7 @@ fn join_preview_workers_until(
         }
         evidence.record(outcome);
     }
-    evidence
+    (evidence, outcomes)
 }
 
 /// Borrowed projection of a resolved evaluation consumed by the GPU producer.
@@ -2717,6 +2427,11 @@ mod presentation;
 mod request_scheduler;
 mod result_pump;
 mod service_lifecycle;
+mod startup;
+#[cfg(test)]
+pub(crate) use startup::PreviewStartupCheckpoint;
+#[cfg(any(test, feature = "validation"))]
+pub(crate) use startup::{PreviewStartupFailure, PreviewStartupOwner};
 mod timeline_evaluation;
 mod title_adapter;
 

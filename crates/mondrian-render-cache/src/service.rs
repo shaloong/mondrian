@@ -214,7 +214,7 @@ pub struct TimelineRenderCacheService {
 }
 
 /// Synchronous terminal evidence for the cache service's sole worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct TimelineRenderCacheShutdownEvidence {
     /// Whether this service instance owned a worker when shutdown began.
     pub worker_started: bool,

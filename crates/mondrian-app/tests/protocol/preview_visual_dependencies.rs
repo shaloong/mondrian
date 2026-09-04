@@ -1,6 +1,40 @@
 use super::*;
 
 #[test]
+fn prepared_observer_has_no_worker_or_health_and_cannot_start_after_close() {
+    let mut observer = PreviewVisualDependencyObserver::prepare(PreviewWorkNotifier::default());
+    assert!(!observer.is_healthy());
+    assert!(observer.worker.is_none());
+    assert_eq!(
+        observer.shutdown_and_wait(),
+        PreviewOwnedWorkerShutdown::NotStarted
+    );
+    assert!(observer.start_in_place().is_err());
+    assert!(!observer.is_healthy());
+    assert!(observer.worker.is_none());
+}
+
+#[test]
+fn in_place_observer_retains_real_handle_across_later_construction_unwind() {
+    let mut observer = PreviewVisualDependencyObserver::prepare(PreviewWorkNotifier::default());
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        observer.start_in_place().expect("real native worker");
+        panic!("failure in next Runtime construction step");
+    }));
+    assert!(panic.is_err());
+    assert!(observer.worker.is_some());
+    assert!(
+        observer.start_in_place().is_err(),
+        "never replace an installed owner"
+    );
+    assert_eq!(
+        observer.shutdown_until(Instant::now() + Duration::from_secs(5)),
+        PreviewOwnedWorkerShutdown::Terminated
+    );
+    assert!(!observer.is_healthy());
+}
+
+#[test]
 fn observer_terminal_notification_sees_unhealthy_before_normal_or_panic_wake() {
     for panicking in [false, true] {
         let (notifier, watch) =

@@ -138,6 +138,8 @@ mod endurance_shutdown;
 pub mod endurance_source_inventory;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_workload;
+#[cfg(any(test, feature = "validation"))]
+mod execution_panic_diagnostic;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;
@@ -188,6 +190,7 @@ pub(crate) mod preview_render_cache;
 mod preview_render_cache_identity;
 pub mod preview_runtime;
 pub(crate) mod preview_scheduler_policy;
+pub(crate) mod preview_shutdown_evidence;
 pub(crate) mod preview_timeline_execution;
 pub(crate) mod preview_title_task;
 pub mod preview_unavailability;

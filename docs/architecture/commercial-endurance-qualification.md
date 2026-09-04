@@ -997,3 +997,34 @@ The [living commercialization handoff](../dev/color-commercialization-handoff.md
 separates remaining local implementation and failed performance gates from
 native-platform implementation and physical qualification work. Clean smoke
 owner receipts cannot erase a timing failure or close those transfer items.
+
+## Unpublished Preview construction
+
+Preview prepares a complete unpublished Runtime before native construction.
+The startup Module installs cache, visual, CPU fallback, media and dependency
+observer owners in place. The cache and observer expose inert preparation;
+the observer is unhealthy until startup and terminal health is published before
+its final wake. Title and callback workers remain lazy and absent before
+publication. Existing ordinary startup degradation policies remain unchanged.
+
+Headless, Golden and performance startup use the owning fallible Interface.
+A caught later unwind returns the partial Runtime outside the diagnostic;
+closure uses the existing Runtime consuming path and the original absolute
+Preview-to-GPU deadline. A private owner enum makes complete and partial Preview
+ownership exclusive. Unknown in-progress construction and opaque unwind-payload
+abandonment remain unverified; an outer factory that never returns inventory
+does not become a clean NotStarted case.
+
+The production shutdown-evidence Module separates the normal schema-4 predicate
+from schema-1 partial-start evidence. The latter binds per-owner startup states
+and exact media/visual/fallback/title join outcomes to the unmodified aggregate,
+observer, callback and persistent-cache raw receipts. It rejects extra/missing
+workers, contradictory states/counts, pre-publication callback/title activity,
+faults and deadline detachments. Performance startup serializes this receipt as
+`preview_startup`, never inside the normal `previews` qualification array.
+Clean partial cleanup never changes the original operation failure to success.
+
+The bounded protocol target compiles the real evidence/cache/observer Modules;
+it does not replace Runtime factory, Golden/Headless/performance integration or
+physical GPU tests. Window initial/reopen ownership, whole-operation Golden
+closure and durable success-receipt history remain separate unfinished work.

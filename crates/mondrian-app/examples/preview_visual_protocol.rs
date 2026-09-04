@@ -20,6 +20,16 @@ mod preview_visual_execution_task;
 #[path = "../src/app/preview_visual_dependencies.rs"]
 mod preview_visual_dependencies;
 
+#[cfg(test)]
+#[allow(dead_code)] // Actual cache Adapter; Runtime wiring is tested in App.
+#[path = "../src/app/preview_render_cache.rs"]
+mod preview_render_cache;
+
+#[cfg(test)]
+#[allow(dead_code)] // Production evidence predicates, independent of large Runtime wiring.
+#[path = "../src/app/preview_shutdown_evidence.rs"]
+mod preview_shutdown_evidence;
+
 #[cfg(not(test))]
 fn main() -> std::process::ExitCode {
     eprintln!(

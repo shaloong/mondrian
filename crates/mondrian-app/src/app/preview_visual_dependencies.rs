@@ -82,6 +82,15 @@ pub(crate) struct PreviewVisualDependencyObserver {
     shutdown: Arc<AtomicBool>,
     healthy: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    startup: Option<ObserverStartup>,
+}
+
+/// Inert transports retained by the observer before native worker creation.
+struct ObserverStartup {
+    command_rx: mpsc::Receiver<ObservationCommand>,
+    result_tx: mpsc::SyncSender<DependencyRefreshResult>,
+    timing: ObservationTiming,
+    notifier: PreviewWorkNotifier,
 }
 
 struct DependencyRefreshResult {
@@ -96,14 +105,23 @@ enum DueObservationOutcome {
 }
 
 impl PreviewVisualDependencyObserver {
-    /// Start an observer publishing refresh readiness into a shared work watch.
-    pub(crate) fn new_with_notifier(work_notifier: PreviewWorkNotifier) -> Self {
-        Self::with_configuration(
+    /// Prepare an unpublished, unhealthy observer without starting a worker.
+    pub(crate) fn prepare(work_notifier: PreviewWorkNotifier) -> Self {
+        Self::prepare_with_configuration(
             ObservationTiming::default(),
             OBSERVATION_COMMAND_CAPACITY,
             REFRESH_RESULT_CAPACITY,
             work_notifier,
         )
+    }
+
+    /// Install the returned native handle before any caller-side diagnostics.
+    pub(crate) fn start_in_place(&mut self) -> std::io::Result<()> {
+        self.start_with_spawn(|task| {
+            std::thread::Builder::new()
+                .name("mondrian-preview-visual-dependencies".to_owned())
+                .spawn(task)
+        })
     }
 
     #[cfg(test)]
@@ -124,6 +142,7 @@ impl PreviewVisualDependencyObserver {
         )
     }
 
+    #[cfg(test)]
     fn with_configuration(
         timing: ObservationTiming,
         command_capacity: usize,
@@ -143,6 +162,7 @@ impl PreviewVisualDependencyObserver {
         )
     }
 
+    #[cfg(test)]
     fn with_configuration_and_spawn(
         timing: ObservationTiming,
         command_capacity: usize,
@@ -150,34 +170,29 @@ impl PreviewVisualDependencyObserver {
         work_notifier: PreviewWorkNotifier,
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::sync_channel::<ObservationCommand>(command_capacity);
-        let (result_tx, result_rx) = mpsc::sync_channel::<DependencyRefreshResult>(result_capacity);
-        let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = Arc::clone(&shutdown);
-        let healthy = Arc::new(AtomicBool::new(true));
-        let worker_health = Arc::clone(&healthy);
-        let failed_start_notifier = work_notifier.clone();
-        let worker = spawn(Box::new(move || {
-            let _health_guard = WorkerHealthGuard {
-                healthy: worker_health,
-                notifier: work_notifier.clone(),
-            };
-            dependency_observer_worker(
-                command_rx,
-                result_tx,
-                work_notifier,
-                worker_shutdown,
-                timing,
-            );
-        }))
-        .ok();
-        if worker.is_none() {
-            healthy.store(false, Ordering::Release);
-            failed_start_notifier.retry_became_actionable();
-            tracing::warn!(
+        let mut observer = Self::prepare_with_configuration(
+            timing,
+            command_capacity,
+            result_capacity,
+            work_notifier,
+        );
+        if let Err(error) = observer.start_with_spawn(spawn) {
+            tracing::warn!(%error,
                 "failed to start Preview visual dependency observer; dependent Preview execution will fail closed"
             );
         }
+        observer
+    }
+
+    fn prepare_with_configuration(
+        timing: ObservationTiming,
+        command_capacity: usize,
+        result_capacity: usize,
+        work_notifier: PreviewWorkNotifier,
+    ) -> Self {
+        let (command_tx, command_rx) = mpsc::sync_channel::<ObservationCommand>(command_capacity);
+        let (result_tx, result_rx) = mpsc::sync_channel::<DependencyRefreshResult>(result_capacity);
+        let shutdown = Arc::new(AtomicBool::new(false));
         Self {
             command_tx,
             result_rx: RefCell::new(result_rx),
@@ -185,8 +200,57 @@ impl PreviewVisualDependencyObserver {
             pending: RefCell::new(HashMap::new()),
             recency: RefCell::new(VecDeque::new()),
             shutdown,
-            healthy,
-            worker,
+            healthy: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            startup: Some(ObserverStartup {
+                command_rx,
+                result_tx,
+                timing,
+                notifier: work_notifier,
+            }),
+        }
+    }
+
+    fn start_with_spawn(
+        &mut self,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> std::io::Result<()> {
+        if self.shutdown.load(Ordering::Acquire) {
+            return Err(std::io::Error::other(
+                "Preview dependency observer is already closed",
+            ));
+        }
+        let startup = self.startup.take().ok_or_else(|| {
+            std::io::Error::other("Preview dependency observer startup already attempted")
+        })?;
+        let worker_shutdown = Arc::clone(&self.shutdown);
+        let worker_health = Arc::clone(&self.healthy);
+        let failed_start_notifier = startup.notifier.clone();
+        // Publish before spawn so a worker that immediately exits cannot have
+        // its terminal unhealthy state overwritten by the construction caller.
+        self.healthy.store(true, Ordering::Release);
+        match spawn(Box::new(move || {
+            let _health_guard = WorkerHealthGuard {
+                healthy: worker_health,
+                notifier: startup.notifier.clone(),
+            };
+            dependency_observer_worker(
+                startup.command_rx,
+                startup.result_tx,
+                startup.notifier,
+                worker_shutdown,
+                startup.timing,
+            );
+        })) {
+            Ok(worker) => {
+                self.worker = Some(worker);
+                Ok(())
+            }
+            Err(error) => {
+                self.healthy.store(false, Ordering::Release);
+                failed_start_notifier.retry_became_actionable();
+                Err(error)
+            }
         }
     }
 

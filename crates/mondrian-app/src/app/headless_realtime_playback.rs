@@ -888,10 +888,26 @@ impl HeadlessRealtimePlaybackSession {
     pub(crate) fn with_gpu_adapter(
         gpu: HeadlessViewerGpuAdapter,
     ) -> Result<Self, HeadlessExecutionStartFailure> {
-        let preview = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-            HeadlessPreviewRuntime::new,
-        )) {
-            Ok(preview) => preview,
+        Self::with_gpu_adapter_and_preview_factory(gpu, HeadlessPreviewRuntime::try_new)
+    }
+
+    fn with_gpu_adapter_and_preview_factory(
+        gpu: HeadlessViewerGpuAdapter,
+        create: impl FnOnce() -> Result<
+            HeadlessPreviewRuntime,
+            super::preview_runtime::PreviewStartupFailure<
+                super::headless_viewer_gpu::HeadlessViewerGpuOutput,
+            >,
+        >,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        let preview = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(create)) {
+            Ok(Ok(preview)) => preview,
+            Ok(Err(failure)) => {
+                return Err(HeadlessExecutionStartFailure::partial_preview(
+                    failure,
+                    Some(gpu),
+                ))
+            }
             Err(payload) => {
                 return Err(HeadlessExecutionStartFailure::adapter(
                     startup_panic_diagnostic(payload),
@@ -1743,6 +1759,47 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a real GPU adapter"]
+    fn partial_preview_startup_keeps_existing_gpu_owner() {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let gpu = HeadlessViewerGpuAdapter::new().unwrap_or_else(|failure| {
+            panic!(
+                "real GPU creation failed: {:#}",
+                failure.into_closed_error(deadline)
+            );
+        });
+        let result =
+            HeadlessRealtimePlaybackSession::with_gpu_adapter_and_preview_factory(gpu, || {
+                HeadlessPreviewRuntime::try_start_with_checkpoint_for_test(0, |stage| {
+                    if stage == super::super::preview_runtime::PreviewStartupCheckpoint::CpuFallback
+                    {
+                        panic!("partial Preview with existing GPU");
+                    }
+                })
+            });
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(session) => {
+                let (preview, gpu) = session.into_shutdown_owners();
+                let _ = preview.shutdown_until(deadline);
+                let _ = gpu.shutdown_until(deadline);
+                panic!("constructor checkpoint not reached");
+            }
+        };
+        let (diagnostic, receipt) = failure.shutdown_until(deadline);
+        assert!(diagnostic.to_string().contains("partial Preview with existing GPU"));
+        assert!(receipt.preview.is_none());
+        assert!(receipt.preview_startup.is_some());
+        assert!(matches!(
+            receipt.gpu,
+            super::super::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::Adapter(
+                _
+            )
+        ));
+        assert!(receipt.all_created_resources_released(), "{receipt:?}");
+    }
+
     use super::*;
 
     #[test]

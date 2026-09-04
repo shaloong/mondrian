@@ -9,7 +9,10 @@ use std::time::Instant;
 
 use super::headless_preview_presentation::HeadlessPreviewRuntime;
 use super::headless_viewer_gpu::HeadlessViewerGpuAdapter;
+use super::headless_viewer_gpu::HeadlessViewerGpuOutput;
 use super::preview_runtime::PreviewRuntimeShutdownEvidence;
+use super::preview_runtime::{PreviewStartupFailure, PreviewStartupOwner};
+use super::preview_shutdown_evidence::PreviewStartupShutdownEvidence;
 use super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence;
 use super::viewer_gpu_startup::{ViewerGpuStartupOwner, ViewerGpuStartupShutdownEvidence};
 
@@ -45,6 +48,8 @@ pub struct HeadlessStartupShutdownEvidence {
     pub opaque_panic_payload_abandoned: bool,
     /// Present only when a Preview Runtime was actually constructed.
     pub preview: Option<PreviewRuntimeShutdownEvidence>,
+    /// Present only for an unpublished, partially constructed Preview Runtime.
+    pub preview_startup: Option<PreviewStartupShutdownEvidence>,
     /// Exact GPU creation stage and its actual consuming receipt.
     pub gpu: HeadlessStartupGpuShutdownEvidence,
 }
@@ -54,7 +59,12 @@ impl HeadlessStartupShutdownEvidence {
     pub fn all_created_resources_released(&self) -> bool {
         !self.preview_construction_unverified
             && !self.opaque_panic_payload_abandoned
+            && !(self.preview.is_some() && self.preview_startup.is_some())
             && self.preview.as_ref().is_none_or(|preview| preview.all_workers_terminated())
+            && self
+                .preview_startup
+                .as_ref()
+                .is_none_or(|preview| preview.all_created_resources_released())
             && self.gpu.all_created_resources_released()
     }
 }
@@ -65,12 +75,18 @@ enum StartupGpuOwner {
     Adapter(Box<HeadlessViewerGpuAdapter>),
 }
 
+enum StartupPreviewOwner {
+    NotStarted,
+    Partial(Box<PreviewStartupOwner<HeadlessViewerGpuOutput>>),
+    Runtime(Box<HeadlessPreviewRuntime>),
+}
+
 /// Owning failure, deliberately not an anyhow-convertible execution error.
 #[must_use = "retain the actual startup owners until consuming shutdown"]
 pub(crate) struct HeadlessExecutionStartFailure {
     preview_construction_unverified: bool,
     diagnostic: anyhow::Error,
-    preview: Option<Box<HeadlessPreviewRuntime>>,
+    preview: StartupPreviewOwner,
     gpu: StartupGpuOwner,
 }
 
@@ -79,7 +95,10 @@ impl fmt::Debug for HeadlessExecutionStartFailure {
         formatter
             .debug_struct("HeadlessExecutionStartFailure")
             .field("diagnostic", &self.diagnostic)
-            .field("preview_created", &self.preview.is_some())
+            .field(
+                "preview_created",
+                &!matches!(self.preview, StartupPreviewOwner::NotStarted),
+            )
             .field(
                 "gpu",
                 &match self.gpu {
@@ -103,7 +122,7 @@ impl HeadlessExecutionStartFailure {
     pub(crate) fn before_progress(diagnostic: anyhow::Error) -> Self {
         Self {
             diagnostic,
-            preview: None,
+            preview: StartupPreviewOwner::NotStarted,
             gpu: StartupGpuOwner::NotStarted,
             preview_construction_unverified: false,
         }
@@ -121,7 +140,7 @@ impl HeadlessExecutionStartFailure {
     pub(crate) fn partial(diagnostic: anyhow::Error, owner: ViewerGpuStartupOwner) -> Self {
         Self {
             diagnostic,
-            preview: None,
+            preview: StartupPreviewOwner::NotStarted,
             gpu: StartupGpuOwner::Partial(Box::new(owner)),
             preview_construction_unverified: false,
         }
@@ -135,7 +154,7 @@ impl HeadlessExecutionStartFailure {
     ) -> Self {
         Self {
             diagnostic,
-            preview: Some(Box::new(preview)),
+            preview: StartupPreviewOwner::Runtime(Box::new(preview)),
             gpu: StartupGpuOwner::Adapter(Box::new(gpu)),
             preview_construction_unverified: false,
         }
@@ -145,19 +164,35 @@ impl HeadlessExecutionStartFailure {
     pub(crate) fn adapter(diagnostic: anyhow::Error, gpu: HeadlessViewerGpuAdapter) -> Self {
         Self {
             diagnostic,
-            preview: None,
+            preview: StartupPreviewOwner::NotStarted,
             gpu: StartupGpuOwner::Adapter(Box::new(gpu)),
             preview_construction_unverified: true,
+        }
+    }
+
+    /// Retain known partial Preview ownership, optionally alongside an existing GPU.
+    pub(crate) fn partial_preview(
+        failure: PreviewStartupFailure<HeadlessViewerGpuOutput>,
+        gpu: Option<HeadlessViewerGpuAdapter>,
+    ) -> Self {
+        let (diagnostic, owner) = failure.into_parts();
+        Self {
+            diagnostic,
+            preview: StartupPreviewOwner::Partial(Box::new(owner)),
+            gpu: gpu.map_or(StartupGpuOwner::NotStarted, |gpu| {
+                StartupGpuOwner::Adapter(Box::new(gpu))
+            }),
+            preview_construction_unverified: false,
         }
     }
 
     /// Attach the Preview-first caller's existing owner without replacing one.
     pub(crate) fn with_preview(mut self, preview: HeadlessPreviewRuntime) -> Self {
         assert!(
-            self.preview.is_none(),
+            matches!(self.preview, StartupPreviewOwner::NotStarted),
             "startup Preview is installed exactly once"
         );
-        self.preview = Some(Box::new(preview));
+        self.preview = StartupPreviewOwner::Runtime(Box::new(preview));
         self
     }
 
@@ -168,8 +203,10 @@ impl HeadlessExecutionStartFailure {
 
     /// Close producer admission before any consumer or App begins joining.
     pub(crate) fn begin_shutdown(&mut self) {
-        if let Some(preview) = &mut self.preview {
-            preview.begin_endurance_shutdown();
+        match &mut self.preview {
+            StartupPreviewOwner::NotStarted => {}
+            StartupPreviewOwner::Partial(preview) => preview.begin_shutdown(),
+            StartupPreviewOwner::Runtime(preview) => preview.begin_endurance_shutdown(),
         }
     }
 
@@ -179,7 +216,11 @@ impl HeadlessExecutionStartFailure {
         deadline: Instant,
     ) -> (anyhow::Error, HeadlessStartupShutdownEvidence) {
         self.begin_shutdown();
-        let preview = self.preview.take().map(|preview| preview.shutdown_until(deadline));
+        let (preview, preview_startup) = match self.preview {
+            StartupPreviewOwner::NotStarted => (None, None),
+            StartupPreviewOwner::Partial(preview) => (None, Some(preview.shutdown_until(deadline))),
+            StartupPreviewOwner::Runtime(preview) => (Some(preview.shutdown_until(deadline)), None),
+        };
         let gpu = match self.gpu {
             StartupGpuOwner::NotStarted => HeadlessStartupGpuShutdownEvidence::NotStarted,
             StartupGpuOwner::Partial(owner) => HeadlessStartupGpuShutdownEvidence::Partial(
@@ -191,14 +232,13 @@ impl HeadlessExecutionStartFailure {
                 HeadlessStartupGpuShutdownEvidence::Adapter(owner.shutdown_until(deadline))
             }
         };
-        let opaque_panic_payload_abandoned = self
-            .diagnostic
-            .downcast_ref::<StartupPanic>()
-            .is_some_and(|panic| panic.opaque_payload_abandoned);
+        let opaque_panic_payload_abandoned =
+            super::execution_panic_diagnostic::opaque_panic_payload_abandoned(&self.diagnostic);
         (
             self.diagnostic,
             HeadlessStartupShutdownEvidence {
                 preview,
+                preview_startup,
                 gpu,
                 opaque_panic_payload_abandoned,
                 preview_construction_unverified: self.preview_construction_unverified,
@@ -224,43 +264,42 @@ pub struct HeadlessStartupClosedFailure {
     pub evidence: HeadlessStartupShutdownEvidence,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{operation} panicked: {detail}; opaque_payload_abandoned={opaque_payload_abandoned}")]
-struct StartupPanic {
-    operation: &'static str,
-    detail: String,
-    opaque_payload_abandoned: bool,
-}
-
-/// Preserve a caught startup panic as a diagnostic, separately from live owners.
-pub(crate) fn startup_panic_diagnostic(payload: Box<dyn std::any::Any + Send>) -> anyhow::Error {
-    execution_panic_diagnostic(payload, "Headless startup")
-}
-
-/// Convert an unwind payload without executing an opaque user destructor.
-pub(crate) fn execution_panic_diagnostic(
-    payload: Box<dyn std::any::Any + Send>,
-    operation: &'static str,
-) -> anyhow::Error {
-    let detail = payload
-        .downcast_ref::<&str>()
-        .map(|value| (*value).to_owned())
-        .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "opaque startup panic payload".to_owned());
-    // Opaque payload destructors can themselves panic or carry foreign owners.
-    // Match the product's explicit abandonment policy instead of unwinding here.
-    let opaque_payload_abandoned = !(payload.is::<&'static str>() || payload.is::<String>());
-    if opaque_payload_abandoned {
-        std::mem::forget(payload);
-    } else {
-        drop(payload);
-    }
-    StartupPanic { operation, detail, opaque_payload_abandoned }.into()
-}
+pub(crate) use super::execution_panic_diagnostic::startup_panic_diagnostic;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_partial_preview_retains_diagnostic_and_exclusive_raw_inventory() {
+        let failure = match HeadlessPreviewRuntime::try_start_with_checkpoint_for_test(0, |stage| {
+            if stage == super::super::preview_runtime::PreviewStartupCheckpoint::Observer {
+                panic!("partial Preview original failure");
+            }
+        }) {
+            Err(failure) => failure,
+            Ok(runtime) => {
+                let _ = runtime.shutdown_and_wait();
+                panic!("injection not reached");
+            }
+        };
+        let (diagnostic, receipt) = HeadlessExecutionStartFailure::partial_preview(failure, None)
+            .shutdown_until(Instant::now() + std::time::Duration::from_secs(5));
+        assert!(diagnostic.to_string().contains("partial Preview original failure"));
+        assert!(!receipt.preview_construction_unverified);
+        assert!(receipt.preview.is_none());
+        assert!(receipt.preview_startup.is_some());
+        assert!(receipt.all_created_resources_released());
+        assert!(receipt
+            .preview_startup
+            .as_ref()
+            .expect("partial")
+            .runtime
+            .all_workers_terminated());
+        let mut contradictory = receipt.clone();
+        contradictory.preview = Some(receipt.preview_startup.expect("partial").runtime);
+        assert!(!contradictory.all_created_resources_released());
+    }
 
     #[test]
     fn startup_before_progress_preserves_original_error_without_inventing_owners() {

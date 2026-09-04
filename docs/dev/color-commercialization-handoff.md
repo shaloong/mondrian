@@ -176,9 +176,46 @@ validator's adversarial fixtures passed; the full workspace/all-target/all-featu
 Clippy, format and diff gates passed. This does not close the remaining internal
 constructor, Window, durable-success or physical qualification work below.
 
-Remaining local COL-047 implementation/validation blocks:
+The internal Preview partial-construction block is implemented and its runtime
+gates passed on 2026-09-05. A complete unpublished Runtime retains each returned
+cache/visual/fallback/media/observer owner before subsequent construction, and
+Headless/Golden/Perf keep its owning failure separate from normal Preview.
+The partial schema-1 predicate reconciles exact owner states and outcomes with
+the unchanged normal schema-4 receipt. Unknown native construction, opaque
+payload abandonment and original-deadline timeouts remain failures. A cache
+timeout now correctly counts a started/detached worker rather than NotStarted.
 
-1. Finish internal Preview partial-construction guards. The Waveform follow-on
+Local release verification passed 57 bounded protocol cases and 41 App cases:
+5 Runtime startup, 4 Headless startup, 1 Golden, 2 Perf failures, 15 Preview
+shutdown, 9 Endurance coordinator, 2 App shutdown, 2 explicitly selected actual
+GPU cases and 1 Project lifecycle smoke. The protocol/App binaries overlap in
+three evidence-predicate cases; these are execution counts, not 98 distinct
+behaviors. Project create/open/save maxima were 391/92/76 ms with clean raw
+receipts, and the strict PowerShell owner/case/suite corpus passed. App lib-test
+rebuild took 24m25s; this is iteration cost, not a realtime performance baseline.
+Full workspace/all-target/all-feature Clippy with warnings denied passed in
+7m03s; final format and diff checks passed. No capacity failure or target cleanup
+occurred. This does not close COL-047 as a whole.
+
+Remaining COL-047 checklist (ten subitems; retain every item in block reports):
+
+1. Other callbacks/GPU closure and native wake health.
+2. Window initial/reopen: App/Host/Thumbnail/catalog/old/candidate/UI ownership,
+   original failures, and unique returned App receipt.
+3. Golden whole-operation closure.
+4. Successful raw receipt retention/history/durable serialization, including Export.
+5. Performance-support deep Module extraction and bounded production-linked tests.
+6. Capsule namespace/spawn authority/child leases/ACL/fallible cleanup.
+7. Pre-loader authority and mapped-object identity.
+8. Actual Windows campaign smoke after the ownership prerequisites.
+9. Route-qualified CPU/GPU optimization advice preserving CPU publication and
+   valid hybrid routes.
+10. Physical 72-hour campaign and independent replay.
+
+Detailed implementation history and remaining boundaries:
+
+1. Preview/Waveform ownership history; other callbacks/GPU and Window remain.
+   The Waveform follow-on
    below has passed its focused ownership regressions. A constructor
    unwind before returning an owner is now explicitly unverified, not a clean
    NotStarted inventory. Include every Preview worker (including dependency
@@ -193,7 +230,7 @@ Remaining local COL-047 implementation/validation blocks:
    dependencies and native search paths came from the freshly built Cargo graph.
    Final strict PowerShell, format/diff, ordinary App library Clippy and full
    workspace/all-target/all-feature Clippy gates passed with warnings denied.
-   These changes do not close Preview internal construction or every other-owner/GPU
+   That earlier block did not yet close internal construction or every other-owner/GPU
    callback panic path. The subsequent Work Watch block now owns bounded
    registrations and off-producer retirement, opaque payload/capture abandonment,
    original-deadline immutable receipts, and rejected reentrant/concurrent

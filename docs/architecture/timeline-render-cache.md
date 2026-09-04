@@ -119,3 +119,12 @@ Future explicit background Timeline rendering may populate the same Interface
 under its own resource slot. Export does not consult this cache unless a future
 immutable delivery policy explicitly opts in and validates compatible quality;
 the default Export path always renders from its frozen production snapshot.
+
+Preview prepares its cache Adapter before creating native workers. Production
+still requires attempting the cache; a deliberately disabled test cache is a
+different state from required-but-unattempted or failed construction. The actual
+returned service is installed before subsequent diagnostics/construction can
+unwind. Its owner-free native shutdown facts are serializable without replacing
+the consuming receipt with a projected success flag. Partial Preview closure
+binds these facts to exact startup inventory; normal Preview qualification still
+requires the existing required-cache closure predicate.

@@ -8,7 +8,6 @@
 use std::collections::VecDeque;
 #[cfg(not(test))]
 use std::path::PathBuf;
-#[cfg(not(test))]
 use std::sync::Arc;
 #[cfg(any(test, feature = "validation"))]
 use std::time::Instant;
@@ -21,8 +20,8 @@ use mondrian_render_cache::{
 };
 use mondrian_renderer::CpuColorFrame;
 
-use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_work_notification::PreviewWorkNotifier;
+use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
 const NEGATIVE_IDENTITY_CAPACITY: usize = 256;
 #[cfg(not(test))]
@@ -37,61 +36,74 @@ pub(crate) struct PreviewTimelineRenderCache {
     start_failure: Option<String>,
     ready: Option<(TimelineRenderCacheIdentity, CpuColorFrame)>,
     negative: VecDeque<TimelineRenderCacheIdentity>,
+    #[cfg(test)]
+    startup_config: Option<Result<TimelineRenderCacheConfig, String>>,
 }
 
 impl PreviewTimelineRenderCache {
-    pub(crate) fn start(work_notifier: PreviewWorkNotifier) -> Self {
+    /// Inert product adapter; test-disabled policy is not an unstarted worker.
+    pub(crate) fn prepare() -> Self {
+        Self::prepare_required(!cfg!(test))
+    }
+
+    fn prepare_required(required: bool) -> Self {
+        Self {
+            service: None,
+            required,
+            start_failure: None,
+            ready: None,
+            negative: VecDeque::new(),
+            #[cfg(test)]
+            startup_config: None,
+        }
+    }
+
+    /// Install a real service before logging or returning to Runtime construction.
+    pub(crate) fn start_in_place(&mut self, work_notifier: PreviewWorkNotifier) {
         #[cfg(test)]
-        {
-            let _ = work_notifier;
-            Self {
-                service: None,
-                required: false,
-                start_failure: None,
-                ready: None,
-                negative: VecDeque::new(),
-            }
+        if let Some(config) = self.startup_config.take() {
+            self.start_with_config(config, work_notifier);
         }
         #[cfg(not(test))]
-        {
-            let config = default_config();
-            let notifier = Arc::new(move || {
-                work_notifier.result_became_pollable();
-            });
-            match config.and_then(|config| {
-                TimelineRenderCacheService::start_with_notifier(config, notifier)
-                    .map_err(|error| error.to_string())
-            }) {
-                Ok(service) => Self {
-                    service: Some(service),
-                    required: true,
-                    start_failure: None,
-                    ready: None,
-                    negative: VecDeque::new(),
-                },
-                Err(error) => {
-                    tracing::warn!(%error, "Timeline render cache is unavailable");
-                    Self {
-                        service: None,
-                        required: true,
-                        start_failure: Some(error),
-                        ready: None,
-                        negative: VecDeque::new(),
-                    }
-                }
+        self.start_with_config(default_config(), work_notifier);
+    }
+
+    /// Required native cache configuration for production-linked construction tests.
+    #[cfg(test)]
+    pub(crate) fn prepare_with_config_for_test(
+        config: Result<TimelineRenderCacheConfig, String>,
+    ) -> Self {
+        let mut cache = Self::prepare_required(true);
+        cache.startup_config = Some(config);
+        cache
+    }
+
+    fn start_with_config(
+        &mut self,
+        config: Result<TimelineRenderCacheConfig, String>,
+        work_notifier: PreviewWorkNotifier,
+    ) {
+        assert!(self.required && self.service.is_none() && self.start_failure.is_none());
+        let notifier = Arc::new(move || {
+            work_notifier.result_became_pollable();
+        });
+        match config.and_then(|config| {
+            TimelineRenderCacheService::start_with_notifier(config, notifier)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(service) => self.service = Some(service),
+            Err(error) => {
+                self.start_failure = Some(error);
+                tracing::warn!(error = ?self.start_failure, "Timeline render cache is unavailable");
             }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn with_service(service: TimelineRenderCacheService) -> Self {
-        Self {
-            service: Some(service),
-            required: true,
-            start_failure: None,
-            ready: None,
-            negative: VecDeque::new(),
-        }
+        let mut cache = Self::prepare_required(true);
+        cache.service = Some(service);
+        cache
     }
 
     #[cfg(test)]
@@ -184,6 +196,16 @@ impl PreviewTimelineRenderCache {
         self.start_failure.as_deref()
     }
 
+    /// Whether construction returned a native worker still owned by this adapter.
+    pub(crate) fn worker_started(&self) -> bool {
+        self.service.is_some()
+    }
+
+    /// Whether the product policy requires attempting a native cache worker.
+    pub(crate) fn required(&self) -> bool {
+        self.required
+    }
+
     pub(crate) fn shutdown_and_wait(&mut self) -> PreviewTimelineRenderCacheShutdownEvidence {
         let Some(service) = self.service.take() else {
             return self.no_worker_shutdown_evidence();
@@ -195,6 +217,8 @@ impl PreviewTimelineRenderCache {
     fn worker_outcome(evidence: TimelineRenderCacheShutdownEvidence) -> PreviewOwnedWorkerShutdown {
         if evidence.current_thread_skipped {
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped
+        } else if evidence.timed_out || evidence.detached {
+            PreviewOwnedWorkerShutdown::TimedOutDetached
         } else if evidence.worker_panicked {
             PreviewOwnedWorkerShutdown::Panicked
         } else if evidence.worker_started && evidence.worker_terminated {
@@ -248,13 +272,9 @@ impl PreviewTimelineRenderCache {
 
     #[cfg(test)]
     pub(crate) fn with_start_failure_for_test(detail: impl Into<String>) -> Self {
-        Self {
-            service: None,
-            required: true,
-            start_failure: Some(detail.into()),
-            ready: None,
-            negative: VecDeque::new(),
-        }
+        let mut cache = Self::prepare_required(true);
+        cache.start_failure = Some(detail.into());
+        cache
     }
 
     fn remember_negative(&mut self, identity: TimelineRenderCacheIdentity) {
@@ -270,7 +290,7 @@ impl PreviewTimelineRenderCache {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct PreviewTimelineRenderCacheShutdownEvidence {
     pub(crate) schema_version: u32,
     pub(crate) required: bool,
@@ -324,6 +344,54 @@ mod tests {
     use mondrian_core::{WorkingColorSpace, WorkingRgbaF32Frame};
     use mondrian_render_cache::{TimelineRenderCacheAlpha, TimelineRenderCacheFormat};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn cache_timeout_retains_started_worker_in_preview_aggregate() {
+        let cache = PreviewTimelineRenderCache::prepare_required(true);
+        let receipt = cache.shutdown_evidence(TimelineRenderCacheShutdownEvidence {
+            worker_started: true,
+            worker_terminated: false,
+            worker_panicked: false,
+            current_thread_skipped: false,
+            timed_out: true,
+            detached: true,
+        });
+        assert_eq!(
+            receipt.aggregate_outcome,
+            PreviewOwnedWorkerShutdown::TimedOutDetached
+        );
+        assert!(!receipt.all_resources_released());
+    }
+
+    #[test]
+    fn required_unstarted_cache_is_not_test_disabled_or_failed() {
+        let mut required = PreviewTimelineRenderCache::prepare_required(true);
+        let receipt = required.shutdown_and_wait();
+        assert!(receipt.required);
+        assert!(!receipt.start_failed);
+        assert!(receipt.worker.is_none());
+        assert!(!receipt.all_resources_released());
+        let mut disabled = PreviewTimelineRenderCache::prepare_required(false);
+        assert!(disabled.shutdown_and_wait().all_resources_released());
+    }
+
+    #[test]
+    fn cache_in_place_start_retains_worker_through_later_construction_unwind() {
+        let temp = tempfile::tempdir().expect("cache root");
+        let config =
+            TimelineRenderCacheConfig::new(temp.path().to_path_buf(), 1_048_576, 1_048_576, 2)
+                .expect("config");
+        let mut cache = PreviewTimelineRenderCache::prepare_required(true);
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            cache.start_with_config(Ok(config), PreviewWorkNotifier::default());
+            assert!(cache.service.is_some());
+            panic!("later Runtime constructor failed");
+        }));
+        assert!(failure.is_err());
+        let receipt = cache.shutdown_until(Instant::now() + Duration::from_secs(5));
+        assert!(receipt.all_resources_released());
+        assert!(receipt.worker.expect("actual cache worker").worker_terminated);
+    }
 
     fn wait_until(mut condition: impl FnMut() -> bool) {
         let deadline = Instant::now() + Duration::from_secs(5);

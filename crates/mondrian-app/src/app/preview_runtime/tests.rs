@@ -13466,7 +13466,7 @@ fn bounded_preview_shutdown_detaches_a_worker_at_the_absolute_deadline() {
         }
     });
 
-    let evidence = join_preview_workers_until(vec![worker], Instant::now());
+    let (evidence, _) = join_preview_workers_until(vec![worker], Instant::now());
 
     assert_eq!(evidence.schema_version, 4);
     assert_eq!(evidence.workers_started, 1);

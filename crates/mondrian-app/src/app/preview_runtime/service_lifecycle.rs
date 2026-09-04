@@ -253,28 +253,41 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     /// only when it has completed. Any worker still running at `deadline` is
     /// detached and recorded fail-closed.
     #[cfg(any(test, feature = "validation"))]
-    pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewRuntimeShutdownEvidence {
+    pub(crate) fn shutdown_until(self, deadline: Instant) -> PreviewRuntimeShutdownEvidence {
+        self.shutdown_until_with_inventory(deadline).0
+    }
+
+    /// The same consuming path retains per-owner outcomes for failed construction.
+    #[cfg(any(test, feature = "validation"))]
+    pub(super) fn shutdown_until_with_inventory(
+        mut self,
+        deadline: Instant,
+    ) -> (
+        PreviewRuntimeShutdownEvidence,
+        crate::app::preview_shutdown_evidence::PreviewStartupWorkerShutdown,
+    ) {
         self.begin_endurance_shutdown();
         let handles = self.workers.borrow_mut().drain(..).collect::<Vec<_>>();
-        let mut evidence = join_preview_workers_until(handles, deadline);
+        let (mut evidence, media) = join_preview_workers_until(handles, deadline);
         let unverified_async_reaps = self.unverified_async_worker_reaps.get();
         evidence.workers_started = evidence.workers_started.saturating_add(unverified_async_reaps);
         evidence.unverified_async_reaps = unverified_async_reaps;
-        evidence.record(
-            self.visual_execution
-                .take()
-                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
-                    task.shutdown_until(deadline)
-                }),
-        );
-        evidence.record(
-            self.cpu_fallback_task
-                .take()
-                .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
-                    task.shutdown_until(deadline)
-                }),
-        );
-        evidence.record(self.title_task.borrow_mut().shutdown_until(deadline));
+        let visual = self
+            .visual_execution
+            .take()
+            .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                task.shutdown_until(deadline)
+            });
+        evidence.record(visual);
+        let cpu_fallback = self
+            .cpu_fallback_task
+            .take()
+            .map_or(PreviewOwnedWorkerShutdown::NotStarted, |task| {
+                task.shutdown_until(deadline)
+            });
+        evidence.record(cpu_fallback);
+        let title = self.title_task.borrow_mut().shutdown_until(deadline);
+        evidence.record(title);
         let observer = self.visual_dependencies.shutdown_until(deadline);
         evidence.record(observer);
         evidence.visual_dependency_worker = Some(observer);
@@ -286,7 +299,15 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             evidence.record(worker);
         }
         evidence.work_callbacks = Some(callbacks);
-        evidence
+        (
+            evidence,
+            crate::app::preview_shutdown_evidence::PreviewStartupWorkerShutdown {
+                media,
+                visual,
+                cpu_fallback,
+                title,
+            },
+        )
     }
 
     fn begin_shutdown(&self) -> bool {

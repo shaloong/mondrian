@@ -2913,15 +2913,29 @@ fn finish_perf_owner_run<T>(
 }
 
 fn create_perf_preview(app: AppState) -> anyhow::Result<(AppState, HeadlessPreviewRuntime)> {
-    create_perf_preview_with(app, HeadlessPreviewRuntime::new)
+    create_perf_preview_with(app, HeadlessPreviewRuntime::try_new)
 }
 
 fn create_perf_preview_with(
     app: AppState,
-    create: impl FnOnce() -> HeadlessPreviewRuntime,
+    create: impl FnOnce() -> Result<
+        HeadlessPreviewRuntime,
+        super::preview_runtime::PreviewStartupFailure<
+            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
+        >,
+    >,
 ) -> anyhow::Result<(AppState, HeadlessPreviewRuntime)> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(create)) {
-        Ok(preview) => Ok((app, preview)),
+        Ok(Ok(preview)) => Ok((app, preview)),
+        Ok(Err(failure)) => Err(shutdown_perf_startup::<
+            super::headless_viewer_gpu::HeadlessViewerGpuOutput,
+        >(
+            app,
+            Vec::new(),
+            super::headless_execution_startup::HeadlessExecutionStartFailure::partial_preview(
+                failure, None,
+            ),
+        )),
         Err(payload) => Err(shutdown_perf_startup::<
             super::headless_viewer_gpu::HeadlessViewerGpuOutput,
         >(
@@ -2949,7 +2963,7 @@ fn run_with_perf_owners<O: Clone, T>(
     }))
     .unwrap_or_else(|payload| {
         Err(
-            super::headless_execution_startup::execution_panic_diagnostic(
+            super::execution_panic_diagnostic::execution_panic_diagnostic(
                 payload,
                 "performance operation",
             ),
@@ -3006,6 +3020,7 @@ fn shutdown_perf_startup<O: Clone>(
         .map(|preview| preview.shutdown_until(deadline))
         .collect::<Vec<_>>();
     let (diagnostic, mut headless) = failure.shutdown_until(deadline);
+    let headless_closed = headless.all_created_resources_released();
     previews.extend(headless.preview.take());
     let all_previews_closed = previews.iter().all(|receipt| receipt.all_workers_terminated());
     let previews = previews
@@ -3014,14 +3029,14 @@ fn shutdown_perf_startup<O: Clone>(
         .map(|(index, evidence)| PerfPreviewClosureReport::from_evidence(index, evidence))
         .collect::<Vec<_>>();
     let app = PerfAppClosureReport::from_evidence(&app.shutdown_for_endurance(deadline));
-    let all_resources_released = all_previews_closed
-        && headless.all_created_resources_released()
-        && app.all_resources_released;
+    let all_resources_released =
+        all_previews_closed && headless_closed && app.all_resources_released;
     diagnostic.context(format!(
         "performance startup failed; startup_closure={}",
         serde_json::json!({
             "shared_deadline_budget_ms": budget_ms,
             "previews": previews,
+            "preview_startup": headless.preview_startup,
             "gpu": headless.gpu,
             "opaque_panic_payload_abandoned": headless.opaque_panic_payload_abandoned,
             "preview_construction_unverified": headless.preview_construction_unverified,
@@ -3041,7 +3056,7 @@ fn run_with_realtime_perf_owners<T>(
     }))
     .unwrap_or_else(|payload| {
         Err(
-            super::headless_execution_startup::execution_panic_diagnostic(
+            super::execution_panic_diagnostic::execution_panic_diagnostic(
                 payload,
                 "performance operation",
             ),
@@ -3319,6 +3334,34 @@ fn performance_preview_construction_panic_still_consumes_app() {
     assert!(detail.contains("\"preview_construction_unverified\":true"));
     assert!(detail.contains("\"app\":"));
     assert!(detail.contains("\"all_resources_released\":false"));
+}
+
+#[test]
+fn performance_partial_preview_failure_keeps_partial_receipt_outside_normal_previews() {
+    let error = match create_perf_preview_with(AppState::new(), || {
+        HeadlessPreviewRuntime::try_start_with_checkpoint_for_test(0, |stage| {
+            if stage == super::preview_runtime::PreviewStartupCheckpoint::Visual {
+                panic!("injected partial Preview constructor");
+            }
+        })
+    }) {
+        Err(error) => error,
+        Ok((app, runtime)) => {
+            let _ = runtime.shutdown_and_wait();
+            let _ = app.shutdown_for_endurance(Instant::now() + Duration::from_secs(5));
+            panic!("injected failure not reached");
+        }
+    };
+    let detail = error.to_string();
+    let json = detail.split("startup_closure=").nth(1).expect("startup receipt");
+    let receipt: serde_json::Value = serde_json::from_str(json).expect("exact startup JSON");
+    assert_eq!(receipt["previews"], serde_json::json!([]));
+    assert_eq!(receipt["preview_construction_unverified"], false);
+    assert_eq!(receipt["preview_startup"]["schema_version"], 1);
+    assert_eq!(
+        receipt["preview_startup"]["inventory"]["visual"],
+        "installed"
+    );
 }
 
 #[test]

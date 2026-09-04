@@ -65,10 +65,23 @@ pub(super) struct GoldenHeadlessPreview {
 
 impl GoldenHeadlessPreview {
     pub(super) fn new(deadline: Instant) -> anyhow::Result<Self> {
-        let runtime = std::panic::catch_unwind(std::panic::AssertUnwindSafe(HeadlessPreviewRuntime::new))
+        Self::with_preview_factory(deadline, HeadlessPreviewRuntime::try_new)
+    }
+
+    fn with_preview_factory(
+        deadline: Instant,
+        create: impl FnOnce() -> Result<
+            HeadlessPreviewRuntime,
+            crate::app::preview_runtime::PreviewStartupFailure<
+                crate::app::headless_viewer_gpu::HeadlessViewerGpuOutput,
+            >,
+        >,
+    ) -> anyhow::Result<Self> {
+        let runtime = std::panic::catch_unwind(std::panic::AssertUnwindSafe(create))
             .map_err(|payload| crate::app::headless_execution_startup::HeadlessExecutionStartFailure::preview_construction(
                 crate::app::headless_execution_startup::startup_panic_diagnostic(payload),
-            ).into_closed_error(deadline))?;
+            ).into_closed_error(deadline))?
+            .map_err(|failure| crate::app::headless_execution_startup::HeadlessExecutionStartFailure::partial_preview(failure, None).into_closed_error(deadline))?;
         let gpu = match HeadlessViewerGpuAdapter::new() {
             Ok(gpu) => gpu,
             Err(failure) => return Err(failure.with_preview(runtime).into_closed_error(deadline)),
@@ -234,5 +247,47 @@ impl GoldenHeadlessPreview {
             reused_cpu_raster_presentations: self.reused_cpu_raster_presentations,
             completed_demands: self.completed_demands,
         }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn golden_partial_preview_startup_closes_before_attempting_gpu() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let error = match GoldenHeadlessPreview::with_preview_factory(deadline, || {
+            HeadlessPreviewRuntime::try_start_with_checkpoint_for_test(0, |stage| {
+                if stage == crate::app::preview_runtime::PreviewStartupCheckpoint::CpuFallback {
+                    panic!("Golden partial Preview original failure");
+                }
+            })
+        }) {
+            Err(error) => error,
+            Ok(preview) => {
+                let _ = preview.runtime.shutdown_until(deadline);
+                let _ = preview.gpu.shutdown_until(deadline);
+                panic!("constructor checkpoint not reached");
+            }
+        };
+        let closed = error
+            .downcast_ref::<crate::app::headless_execution_startup::HeadlessStartupClosedFailure>()
+            .expect("owner-free closed startup error");
+        assert!(closed
+            .diagnostic
+            .to_string()
+            .contains("Golden partial Preview original failure"));
+        assert!(closed.evidence.preview.is_none());
+        assert!(closed.evidence.preview_startup.is_some());
+        assert_eq!(
+            closed.evidence.gpu,
+            crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::NotStarted
+        );
+        assert!(
+            closed.evidence.all_created_resources_released(),
+            "{:?}",
+            closed.evidence
+        );
     }
 }
