@@ -1,33 +1,29 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg width="100%" height="100%" viewBox="0 0 128 128" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linejoin:round;stroke-miterlimit:2;">
-    <g transform="matrix(1,0,0,1,-333.522777,0)">
-        <g id="画板3" transform="matrix(1,0,0,1,333.522777,0)">
-            <rect x="0" y="0" width="128" height="128" style="fill:none;"/>
-            <g transform="matrix(1,0,0,1,-333,14)">
-                <path d="M386.079,54.778C386.079,54.778 369.385,9.194 422.741,18.35C402.516,-3.667 343.07,16.235 386.079,54.778Z" style="fill:rgb(18,18,18);"/>
-            </g>
-            <g transform="matrix(1,0,0,1,-333.522777,0)">
-                <path d="M402.079,31.858C402.079,31.858 385.843,36.895 386.601,68.778C386.601,68.778 374.993,37.078 402.079,31.858Z" style="fill:rgb(234,56,52);"/>
-            </g>
-            <g transform="matrix(0,-1,1,0,13.777839,460.777839)">
-                <path d="M385.689,29.325C369.79,33.977 386.079,54.778 386.079,54.778C343.07,16.235 402.516,-3.667 422.741,18.35C399.434,14.35 389.493,20.796 385.689,29.325Z" style="fill:rgb(18,18,18);"/>
-            </g>
-            <g transform="matrix(1,0,0,1,-333.522777,0)">
-                <path d="M402.079,74.699C402.079,74.699 381.278,90.988 376.626,75.089C387.621,79.994 402.079,74.699 402.079,74.699Z" style="fill:rgb(45,129,201);"/>
-            </g>
-            <g transform="matrix(-1,-0,0,-1,460.555677,114)">
-                <path d="M386.079,54.778C386.079,54.778 369.385,9.194 422.741,18.35C402.516,-3.667 343.07,16.235 386.079,54.778Z" style="fill:rgb(18,18,18);"/>
-            </g>
-            <g transform="matrix(1,0,0,1,-333.522777,0)">
-                <path d="M401.841,104.213C432.755,89.616 408,59.222 408,59.222C435.515,83.88 421.096,100.909 401.841,104.213Z" style="fill:rgb(253,208,57);"/>
-            </g>
-            <g transform="matrix(-0,1,-1,-0,113.777839,-332.777839)">
-                <path d="M386.079,54.778C386.079,54.778 369.385,9.194 422.741,18.35C402.516,-3.667 343.07,16.235 386.079,54.778Z" style="fill:rgb(18,18,18);"/>
-            </g>
-            <g transform="matrix(0.103996,0,0,0.103996,21.281992,57.344273)">
-                <circle cx="410.767" cy="64" r="52" style="fill:rgb(18,18,18);"/>
+<svg width="100%" height="100%" viewBox="0 0 128 128" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xml:space="preserve" xmlns:serif="http://www.serif.com/" style="fill-rule:evenodd;clip-rule:evenodd;stroke-linecap:round;stroke-linejoin:round;stroke-miterlimit:1.5;">
+    <rect id="画板1" x="0" y="0" width="128" height="128" style="fill:none;"/>
+    <g id="画板11" serif:id="画板1">
+        <g>
+            <clipPath id="_clip1">
+                <path d="M116,38L116,90C116,104.35 104.35,116 90,116L38,116C23.65,116 12,104.35 12,90L12,38C12,23.65 23.65,12 38,12L90,12C104.35,12 116,23.65 116,38Z"/>
+            </clipPath>
+            <g clip-path="url(#_clip1)">
+                <path d="M116,38L116,90C116,104.35 104.35,116 90,116L38,116C23.65,116 12,104.35 12,90L12,38C12,23.65 23.65,12 38,12L90,12C104.35,12 116,23.65 116,38Z" style="fill:rgb(242,242,242);"/>
+                <g transform="matrix(1.017033,0,0,1.017033,-1.975794,4.196758)">
+                    <rect x="58.88" y="7.673" width="57.12" height="57.12" style="fill:rgb(234,56,52);"/>
+                </g>
+                <g transform="matrix(1.083542,0,0,1.083542,-1.002502,-9.690849)">
+                    <rect x="12" y="73.633" width="42.367" height="42.367" style="fill:rgb(45,129,201);"/>
+                </g>
+                <g transform="matrix(1,0,0,1,10.259129,0)">
+                    <rect x="84.557" y="94.816" width="21.184" height="21.184" style="fill:rgb(253,208,57);"/>
+                </g>
+                <path d="M94.816,116L94.816,70.093" style="fill:none;stroke:rgb(18,18,18);stroke-width:4.17px;"/>
+                <path d="M116,94.816L94.816,94.816" style="fill:none;stroke:rgb(18,18,18);stroke-width:4.17px;"/>
+                <path d="M57.907,12L57.907,116" style="fill:none;stroke:rgb(18,18,18);stroke-width:4.17px;"/>
+                <path d="M12,70.093L116,70.093" style="fill:none;stroke:rgb(18,18,18);stroke-width:4.17px;"/>
             </g>
         </g>
+        <path d="M116,38L116,90C116,104.35 104.35,116 90,116L38,116C23.65,116 12,104.35 12,90L12,38C12,23.65 23.65,12 38,12L90,12C104.35,12 116,23.65 116,38Z" style="fill:none;stroke:black;stroke-width:4.17px;"/>
     </g>
 </svg>
