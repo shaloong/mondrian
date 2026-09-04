@@ -5,6 +5,25 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
+## Remaining scope at a glance
+
+All eight IDs below remain open as complete deliverables. Historical `done`
+labels for a software milestone do not certify native implementation on other
+platforms, measured performance, physical I/O, or independent reference frames.
+Detailed local subitems and evidence follow below; keep this roster in every
+completed-block report.
+
+| Priority / ID | Remaining deliverable | Execution boundary |
+| --- | --- | --- |
+| P0 COL-010 | Actual HDR/P3/ICC Viewer qualification | Qualified display hardware |
+| P1 COL-031 | Cold-start cancellation latency, eligible local diagnostics, complete sealed performance matrix | Local software work; full baseline needs a qualifying machine with at least 32 GiB RAM |
+| P2 COL-042 | DeckLink/AJA native bridge and SDI output qualification | Vendor implementation plus physical I/O |
+| P2 COL-043 | Genlock and reference-monitor qualification | Physical reference chain |
+| P2 COL-044 | ANC/VANC, captions/timecode and broadcast QC chain | Physical ancillary-data capture and independent QC |
+| P2 COL-045 | Matching Blender/Resolve/Premiere reference frames | Exact application versions, matching contracts and independent captures |
+| P2 COL-046 | Native macOS/Linux implementation and platform/driver/display matrix | Implement and execute on each target OS; Windows passes do not transfer |
+| P2 COL-047 | Remaining constructor/callback/Window/Golden ownership, raw receipts, bounded verification support, capsule/loader authority, Windows smoke, route-qualified optimization guidance, 72-hour campaign and replay | Local implementation first; full campaign and independent physical qualification remain separate |
+
 Lifecycle audit caveat: historical clean receipts cover their declared owner
 inventory, not every renderer thread. The upload JoinHandle was previously
 discarded. The active implementation now retains it behind consuming Renderer
@@ -134,7 +153,8 @@ constructor, Window, durable-success or physical qualification work below.
 
 Remaining local COL-047 implementation/validation blocks:
 
-1. Finish internal Preview/Waveform partial-construction guards. A constructor
+1. Finish internal Preview partial-construction guards. The Waveform follow-on
+   below has passed its focused ownership regressions. A constructor
    unwind before returning an owner is now explicitly unverified, not a clean
    NotStarted inventory. Include every Preview worker (including dependency
    observation) and preserve the original caller deadline. Preview worker joins
@@ -148,7 +168,7 @@ Remaining local COL-047 implementation/validation blocks:
    dependencies and native search paths came from the freshly built Cargo graph.
    Final strict PowerShell, format/diff, ordinary App library Clippy and full
    workspace/all-target/all-feature Clippy gates passed with warnings denied.
-   These changes do not close internal construction or every other-owner/GPU
+   These changes do not close Preview internal construction or every other-owner/GPU
    callback panic path. The subsequent Work Watch block now owns bounded
    registrations and off-producer retirement, opaque payload/capture abandonment,
    original-deadline immutable receipts, and rejected reentrant/concurrent
@@ -158,6 +178,31 @@ Remaining local COL-047 implementation/validation blocks:
    Strict Rust/PowerShell validation rejects missing nullable fields, scalar-enum
    shape errors and contradictory named/aggregate worker counts. GPU progress
    callback/join closure and native event delivery health remain separate work.
+   The following Waveform startup slice prepares a complete unpublished owner,
+   installs SourceCache and analysis handles before later startup steps, and
+   retains exact partial-stage failure inventory through Endurance shutdown.
+   Production SourceCache construction no longer performs redundant erased
+   initialization callbacks after decoder startup. Normal one-worker closure
+   remains mandatory; partial startup uses a separate predicate and the same
+   consuming implementation. Ordinary Window construction preserves its existing
+   degraded/panic policy. Waveform/SourceCache validation on 2026-09-04 passed
+   53 Media source tests, 21 App Waveform tests, nine Endurance coordinator
+   tests and three explicitly selected real-GPU tests covering two partial startup
+   stages, active-session closure and the public failed-binding error receipt.
+   Both WAV/AAC window-parity gates passed. Full workspace/all-target/all-feature
+   Clippy, format/diff and strict PowerShell owner/case/suite checks passed;
+   the latter used the explicitly selected archived Project report. Default
+   ignored tests were not counted. The supplemental App rebuild took 26m09s;
+   this is iteration cost, not realtime qualification. Supplemental real-file
+   cancellation testing exposed a separate cold-start latency defect: physical
+   permits are released asynchronously, not necessarily at read return, and
+   both observations can exceed the unchanged 50 ms requirement. Actual child,
+   pump and shutdown-owner receipts closed completely; this is not evidence of
+   a leak or a stable timing qualification. Final direct-FFmpeg WAV/AAC samples
+   passed at approximately 34 ms read return and 36 ms physical release, but
+   earlier repeated failures remain recorded. Isolate cold-start cancellation
+   and qualify controlled-load WAV/AAC behavior; preserve typed command-admission failures, physical
+   capacity and retained owner evidence rather than moving waits onto callers.
    Final local Work Watch validation on 2026-09-04: 46 actual-source protocol
    tests and 59 production-linked App targeted tests passed, including the
    explicitly selected real-GPU Headless startup/binding failure and panic case.

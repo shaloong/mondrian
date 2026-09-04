@@ -35,7 +35,12 @@ use state::{
 };
 
 mod analysis;
+mod startup;
 mod state;
+pub use startup::{
+    AudioWaveformStartupFailure, AudioWaveformStartupPanic, AudioWaveformStartupShutdownEvidence,
+    AudioWaveformStartupStage,
+};
 #[cfg(test)]
 mod tests;
 
@@ -108,11 +113,15 @@ pub struct AudioWaveformShutdownEvidence {
 impl AudioWaveformShutdownEvidence {
     /// Return true only for a current, complete, panic-free owner closure.
     pub fn all_resources_released(self) -> bool {
+        self.analysis_resources_released(1) && self.source_cache.all_resources_released()
+    }
+
+    fn analysis_resources_released(self, expected_workers: u32) -> bool {
         self.schema_version == 1
             && self.workers_configured == 1
-            && self.workers_started == 1
+            && self.workers_started == expected_workers
             && self.worker_start_failures == 0
-            && self.workers_terminated == 1
+            && self.workers_terminated == expected_workers
             && self.worker_panics == 0
             && self.worker_failures == 0
             && self.worker_timeouts == 0
@@ -123,7 +132,6 @@ impl AudioWaveformShutdownEvidence {
             && self.running_requests_remaining == 0
             && self.awaiting_publication_remaining == 0
             && self.external_source_cache_references == 0
-            && self.source_cache.all_resources_released()
     }
 }
 
@@ -311,88 +319,6 @@ impl WaveformDispatchGate {
 }
 
 impl AudioWaveformService {
-    /// Start a bounded waveform analysis service and its dedicated worker.
-    pub fn new() -> Arc<Self> {
-        let (_, pcm_cache_byte_budget) =
-            waveform_cache_partition(WAVEFORM_SOURCE_CACHE_BYTE_BUDGET);
-        let source_cache = Arc::new(AudioSourceCache::new_bounded_with_sessions(
-            WAVEFORM_SAMPLE_RATE,
-            WAVEFORM_DECODE_WINDOW_SECONDS,
-            waveform_pcm_entry_capacity(pcm_cache_byte_budget),
-            pcm_cache_byte_budget,
-            1,
-        ));
-        let (job_tx, job_rx) = mpsc::sync_channel(WAVEFORM_JOB_QUEUE_CAPACITY);
-        let (result_tx, result_rx) = mpsc::sync_channel(WAVEFORM_JOB_QUEUE_CAPACITY + 1);
-        let worker_cache = Arc::clone(&source_cache);
-        let dispatch_gate = WaveformDispatchGate::new();
-        let worker_dispatch_gate = Arc::clone(&dispatch_gate);
-        let worker_activity = Arc::new(SingleWorkerActivity::default());
-        let physical_worker_activity = Arc::clone(&worker_activity);
-        let worker_terminal = Arc::new(AtomicU8::new(WAVEFORM_WORKER_TERMINAL_RUNNING));
-        let physical_worker_terminal = Arc::clone(&worker_terminal);
-        let worker = std::thread::Builder::new()
-            .name("mondrian-waveform-analysis".to_owned())
-            .spawn(move || {
-                let terminal = match catch_unwind(AssertUnwindSafe(|| {
-                    waveform_worker(
-                        job_rx,
-                        result_tx,
-                        worker_cache,
-                        worker_dispatch_gate,
-                        physical_worker_activity,
-                    )
-                })) {
-                    Ok(WaveformWorkerExit::JobChannelClosed) => WAVEFORM_WORKER_TERMINAL_RETURNED,
-                    Ok(
-                        WaveformWorkerExit::ResultTransportFull
-                        | WaveformWorkerExit::ResultTransportDisconnected,
-                    ) => WAVEFORM_WORKER_TERMINAL_FAILED,
-                    Err(payload) => {
-                        let abandoned = dispose_canonical_or_abandon_opaque_panic_payload(payload);
-                        physical_worker_terminal.store(
-                            if abandoned {
-                                WAVEFORM_WORKER_TERMINAL_PANICKED_OWNER_ABANDONED
-                            } else {
-                                WAVEFORM_WORKER_TERMINAL_PANICKED
-                            },
-                            Ordering::Release,
-                        );
-                        return;
-                    }
-                };
-                physical_worker_terminal.store(terminal, Ordering::Release);
-            });
-        let (worker, workers_started, worker_start_failures, worker_owner_abandonments) =
-            match worker {
-                Ok(worker) => (Some(worker), 1, 0, 0),
-                Err(error) => {
-                    let error_kind = error.kind();
-                    let owner_abandoned = u32::from(abandon_opaque_io_error(error));
-                    tracing::error!(?error_kind, "failed to start waveform analysis worker");
-                    (None, 0, 1, owner_abandoned)
-                }
-            };
-        Arc::new(Self {
-            resource_policy: Mutex::new(()),
-            state: Mutex::new(WaveformState::default()),
-            jobs: Mutex::new(Some(job_tx)),
-            results: Mutex::new(result_rx),
-            source_cache: Mutex::new(Some(source_cache)),
-            dispatch_gate,
-            worker_activity,
-            worker_terminal,
-            shutdown: Mutex::new(WaveformShutdownControl {
-                worker,
-                boundary: None,
-                receipt: None,
-                workers_started,
-                worker_start_failures,
-                worker_owner_abandonments,
-            }),
-        })
-    }
-
     /// Create a shallow, cloneable lookup Adapter for presentation code.
     pub fn source(self: &Arc<Self>) -> AudioWaveformSource {
         AudioWaveformSource { service: Arc::downgrade(self) }
@@ -1149,8 +1075,10 @@ impl Drop for AudioWaveformService {
         let shutdown = self.shutdown.get_mut();
         if shutdown.worker.as_ref().is_some_and(JoinHandle::is_finished) {
             let worker = shutdown.worker.take();
-            if let Some(worker) = worker {
-                let _ = worker.join();
+            if let Some(worker) = worker
+                && let Err(payload) = worker.join()
+            {
+                dispose_canonical_or_abandon_opaque_panic_payload(payload);
             }
         }
     }

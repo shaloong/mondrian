@@ -583,6 +583,17 @@ impl AudioWindowDecoder for PersistentFfmpegAudioWindowDecoder {
 }
 
 impl PersistentFfmpegAudioWindowDecoder {
+    /// Transfer the concrete startup owner without invoking an erased hook.
+    pub(super) fn into_cache_parts(
+        self,
+    ) -> (
+        Arc<dyn AudioWindowDecoder>,
+        Arc<AudioWindowDecoderShutdownSignal>,
+    ) {
+        let signal = Arc::clone(&self.shutdown_signal);
+        (Arc::new(self), signal)
+    }
+
     pub(super) fn with_capacity(session_capacity: usize) -> Self {
         Self::with_state_and_spawner(
             DecoderState::new(session_capacity),

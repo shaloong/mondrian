@@ -170,6 +170,14 @@ silently assembled from different pathname opens.
 
 ## Bounded audio source windows
 
+Production source-cache construction prepares its normalized limits and inert
+cache state before starting the persistent decoder retirement worker. The
+concrete decoder receives the final capacity once and transfers its exact
+shutdown signal with the decoder owner; only ownership moves remain afterward.
+There is no initial erased reconfiguration/shutdown-signal callback. Online
+reconfiguration remains unchanged. This is unwind-safe assembly, not recovery
+from allocator abort, process termination, or a non-returning native spawn.
+
 Playback and Export do not decode complete audio sources into resident memory.
 `AudioSourceCache` opens fingerprinted source readers and supplies exact
 interleaved PCM through aligned ten-second windows. One weighted LRU spans all
@@ -339,8 +347,9 @@ authority.
 
 Stdout has two bounded 64 KiB look-ahead chunks and stderr retains only its
 latest 64 KiB while always draining the pipe. Generation cancellation is
-polled every 5 ms while waiting for output, then kills, waits, and joins the
-child and both pump threads. Partial EOF is accepted only on a complete
+polled every 5 ms while waiting for output, then hands the child and both pump
+threads to bounded asynchronous retirement for kill/wait/join. Physical permits
+remain occupied until that retirement completes. Partial EOF is accepted only on a complete
 interleaved frame boundary. The cache additionally provides single-flight per
 complete source-window key, so concurrent consumers share one decode result
 instead of serially reopening the Session. None of this work runs in the CPAL
@@ -362,6 +371,12 @@ canceled-result semantics, and zero success/failure admission. It does not
 apply a wall-clock SLA to a synthetic worker because caller-to-join time also
 contains unbounded host scheduler delay. The manual real-child qualification
 gate remains the sole owner of the 50 ms FFmpeg kill/wait/join requirement.
+It observes read return and physical-permit release separately under that same
+original limit and subsequently consumes actual child/pump shutdown evidence.
+The 2026-09-04 Windows cold-start probe found complete eventual resource closure
+but repeated timing failures (including direct FFmpeg execution); no 50 ms
+qualification is claimed. Cancellation at permit admission can occur before
+native process creation, whose synchronous startup is still part of the latency.
 
 ## Waveform analysis
 
@@ -411,6 +426,19 @@ external cache references; and
 the nested cache receipt. Default, stale, timeout, panic, retained adapter, or
 incomplete cache evidence fails closed. Worker publication uses nonblocking
 bounded transport, so shutdown does not depend on a UI result drain.
+
+`waveform_service::startup` owns unpublished construction: prepare channels and
+the complete inert service first, install the returned SourceCache, then install
+the returned analysis JoinHandle before activation. `try_start` retains that
+service outside its unwind region and returns an owning failure with the exact
+Prepared/SourceCache/AnalysisWorker inventory and safe original diagnostic.
+Consuming failure shutdown calls the existing service protocol with the caller's
+unchanged deadline. Its distinct startup receipt permits only the exact created
+inventory, requires real schema-5 evidence whenever a source cache exists, and
+never changes the normal one-worker qualification predicate. Unknown panic
+payloads are explicitly abandoned and fail clean closure. Ordinary `new` retains
+its existing panic propagation and OS-spawn-failure degraded-service policy;
+ordinary Drop is best effort, including safe opaque join-payload disposal.
 
 The product `AppUiHost` arms its final process watchdog first, signals Preview
 and Waveform, and gives Waveform a bounded 750 ms share before requesting event-

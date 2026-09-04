@@ -860,9 +860,17 @@ this failure into the phase before propagating its diagnostic and returns
 One absolute deadline covers Preview, GPU, optional Waveform, and App cleanup.
 An absent Renderer receipt is valid only for explicitly observed pre-Renderer
 startup, never for a complete runtime. Cleanup success does not qualify a failed
-start. Opaque panic payload abandonment and Preview/Waveform constructor unwinds
-before an owner returns are explicitly unverified, not inferred empty inventory.
-The latter still require internal partial-construction guards. Window partial
+start. Waveform's owning startup Interface retains its complete unpublished
+service and exact Prepared/SourceCache/AnalysisWorker inventory across unwind.
+Endurance installs this owner before copying its safe original diagnostic and
+returns a separate `waveform_startup` receipt, mutually exclusive with a complete
+Waveform receipt. Both use the ordinary Waveform consuming implementation and
+the unchanged operation deadline; only the partial predicate admits an actually
+unstarted analysis worker or explicitly absent cache. Production SourceCache
+construction prepares inert state before its concrete decoder and transfers
+that owner without erased initialization hooks. Opaque panic abandonment,
+Preview internal constructor unwinds, and any factory that fails without
+returning its inventory remain unverified, never inferred empty. Window partial
 startup and successful campaign durable raw-receipt reporting remain follow-ons.
 
 Perf uses a separate failed-start inventory projection; normal runtime requirements

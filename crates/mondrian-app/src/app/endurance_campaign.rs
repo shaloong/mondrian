@@ -53,7 +53,10 @@ pub use super::viewer_gpu_device_progress::{
     ViewerGpuDeviceProgressShutdownEvidence as EnduranceGpuShutdownEvidence,
 };
 pub use super::viewer_gpu_startup::ViewerGpuStartupShutdownEvidence;
-use super::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
+use super::waveform_service::{
+    AudioWaveformService, AudioWaveformShutdownEvidence, AudioWaveformStartupFailure,
+    AudioWaveformStartupShutdownEvidence,
+};
 use super::AppState;
 
 /// Actual consuming receipts for a failed execution-group startup.
@@ -67,6 +70,8 @@ pub struct EnduranceStartupOwnerClosure {
     pub headless: HeadlessStartupShutdownEvidence,
     /// Present only if Waveform construction actually returned its owner.
     pub waveform: Option<AudioWaveformShutdownEvidence>,
+    /// Exact partial Waveform construction inventory, mutually exclusive with a complete owner.
+    pub waveform_startup: Option<AudioWaveformStartupShutdownEvidence>,
 }
 
 impl EnduranceStartupOwnerClosure {
@@ -76,6 +81,10 @@ impl EnduranceStartupOwnerClosure {
             && self.app.all_resources_released()
             && self.headless.all_created_resources_released()
             && self.waveform.as_ref().is_none_or(|receipt| receipt.all_resources_released())
+            && !(self.waveform.is_some() && self.waveform_startup.is_some())
+            && self
+                .waveform_startup
+                .is_none_or(|receipt| receipt.all_created_resources_released())
     }
 }
 
@@ -85,6 +94,7 @@ pub struct EnduranceExecutionStartFailure {
     waveform_construction_unverified: bool,
     headless: HeadlessExecutionStartFailure,
     waveform: Option<Arc<AudioWaveformService>>,
+    waveform_startup: Option<AudioWaveformStartupFailure>,
 }
 
 impl std::fmt::Debug for EnduranceExecutionStartFailure {
@@ -113,9 +123,13 @@ impl EnduranceExecutionStartFailure {
         if let Some(waveform) = &self.waveform {
             waveform.begin_shutdown();
         }
+        if let Some(waveform) = &self.waveform_startup {
+            waveform.begin_shutdown();
+        }
         app.begin_endurance_shutdown();
         let (diagnostic, headless) = self.headless.shutdown_until(deadline);
         let waveform = self.waveform.map(|owner| owner.shutdown_until(deadline));
+        let waveform_startup = self.waveform_startup.map(|owner| owner.shutdown_until(deadline));
         let app = app.shutdown_for_endurance(deadline);
         (
             diagnostic,
@@ -123,6 +137,7 @@ impl EnduranceExecutionStartFailure {
                 app,
                 headless,
                 waveform,
+                waveform_startup,
                 waveform_construction_unverified: self.waveform_construction_unverified,
             },
         )
@@ -243,29 +258,56 @@ impl EnduranceExecutionOwners {
         app: &AppState,
         create: impl FnOnce() -> Result<HeadlessRealtimePlaybackSession, HeadlessExecutionStartFailure>,
     ) -> Result<Self, EnduranceExecutionStartFailure> {
+        Self::start_with_factories(app, create, AudioWaveformService::try_start)
+    }
+
+    pub(super) fn start_with_factories(
+        app: &AppState,
+        create: impl FnOnce() -> Result<HeadlessRealtimePlaybackSession, HeadlessExecutionStartFailure>,
+        create_waveform: impl FnOnce() -> Result<Arc<AudioWaveformService>, AudioWaveformStartupFailure>,
+    ) -> Result<Self, EnduranceExecutionStartFailure> {
         let realtime = create().map_err(|headless| EnduranceExecutionStartFailure {
             headless,
             waveform: None,
+            waveform_startup: None,
             waveform_construction_unverified: false,
         })?;
         let mut waveform = None;
+        let mut waveform_startup = None;
         let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            waveform = Some(AudioWaveformService::new());
+            match create_waveform() {
+                Ok(owner) => waveform = Some(owner),
+                Err(failure) => {
+                    // Retain the live partial owner before erasing its diagnostic.
+                    waveform_startup = Some(failure);
+                    let diagnostic = waveform_startup
+                        .as_ref()
+                        .expect("installed failed Waveform owner")
+                        .diagnostic()
+                        .clone();
+                    return Err(anyhow::Error::new(diagnostic));
+                }
+            }
             waveform
                 .as_ref()
                 .expect("created Waveform owner")
                 .set_library(app.asset_library_handle());
+            Ok(())
         }));
-        if let Err(payload) = setup {
+        let diagnostic = match setup {
+            Ok(Ok(())) => None,
+            Ok(Err(diagnostic)) => Some(diagnostic),
+            Err(payload) => Some(startup_panic_diagnostic(payload)),
+        };
+        if let Some(diagnostic) = diagnostic {
             let (preview, gpu) = realtime.into_shutdown_owners();
             return Err(EnduranceExecutionStartFailure {
-                waveform_construction_unverified: waveform.is_none(),
-                headless: HeadlessExecutionStartFailure::binding(
-                    startup_panic_diagnostic(payload),
-                    preview,
-                    gpu,
-                ),
+                // A factory that unwinds without returning any inventory stays
+                // unverified; owning Waveform failures retain their exact stage.
+                waveform_construction_unverified: waveform.is_none() && waveform_startup.is_none(),
+                headless: HeadlessExecutionStartFailure::binding(diagnostic, preview, gpu),
                 waveform,
+                waveform_startup,
             });
         }
         Ok(Self {

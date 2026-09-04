@@ -1140,6 +1140,11 @@ and other transient interaction state remain owned by the existing Widgets and
 must not depend on Preview readiness or redraw cadence.
 
 Timeline audio waveforms are not a Widget or Window execution feature.
+The Waveform startup Module installs each returned source-cache/analysis owner
+before the next startup step. Endurance uses its owning `try_start` Interface
+and retains a separate partial-stage receipt through failed setup; the ordinary
+Window constructor preserves its existing infallible/degraded startup policy.
+This does not qualify Window's separate initial/reopen owner inventory.
 `AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,
 polls its bounded completion pump, and injects an `AudioWaveformSource` handle
 into the Timeline model. The Timeline lookup supplies `AssetId`, an

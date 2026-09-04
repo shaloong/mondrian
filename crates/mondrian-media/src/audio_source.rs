@@ -462,11 +462,11 @@ pub struct AudioSourceCacheDiagnostics {
     pub in_flight_decodes: usize,
     /// Peak simultaneous distinct source-window decodes.
     pub peak_in_flight_decodes: usize,
-    /// Resident or admitted persistent decode-session slots.
+    /// Physical session permits, including admitted, active and retiring owners.
     pub decoder_sessions: usize,
-    /// Configured persistent decode-session slot capacity.
+    /// Configured physical persistent decode-session capacity.
     pub decoder_session_capacity: usize,
-    /// Peak resident or admitted persistent decode-session slots.
+    /// Peak physical permits; retirement retains capacity until child/pump closure.
     pub decoder_peak_sessions: usize,
     /// Persistent decoder process opens.
     pub decoder_session_opens: u64,
@@ -668,15 +668,12 @@ impl AudioSourceCache {
     /// online through [`Self::reconfigure`]. These initial limits are therefore
     /// a safe startup baseline, not a fixed product entitlement.
     pub fn new(sample_rate: u32) -> Self {
-        Self::with_decoder(
+        Self::with_persistent_decoder(
             sample_rate,
             AUDIO_SOURCE_WINDOW_SECONDS,
             AUDIO_SOURCE_CACHE_ENTRY_CAPACITY,
             AUDIO_SOURCE_CACHE_BYTE_BUDGET,
             AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
-            Arc::new(PersistentFfmpegAudioWindowDecoder::with_capacity(
-                AUDIO_SOURCE_DECODER_SESSION_CAPACITY,
-            )),
         )
     }
 
@@ -733,16 +730,46 @@ impl AudioSourceCache {
         byte_budget: usize,
         decoder_session_capacity: usize,
     ) -> Self {
-        Self::with_decoder(
+        Self::with_persistent_decoder(
             sample_rate,
             window_seconds,
             entry_capacity,
             byte_budget,
             decoder_session_capacity,
-            Arc::new(PersistentFfmpegAudioWindowDecoder::with_capacity(
-                decoder_session_capacity,
-            )),
         )
+    }
+
+    fn with_persistent_decoder(
+        sample_rate: u32,
+        window_seconds: usize,
+        entry_capacity: usize,
+        byte_budget: usize,
+        decoder_session_capacity: usize,
+    ) -> Self {
+        // Prepare all cache state before starting the decoder's retirement
+        // worker. Its constructor already installs this normalized capacity;
+        // do not call erased reconfiguration hooks during construction.
+        let sample_rate = sample_rate.max(8_000);
+        let config =
+            AudioSourceCacheConfig::new(entry_capacity, byte_budget, decoder_session_capacity);
+        let state = Mutex::new(AudioSourceCacheState::new(config));
+        let configuration = Mutex::new(());
+        let window_ready = Condvar::new();
+        let shutdown_requested = AtomicBool::new(false);
+        let (decoder, decoder_shutdown_signal) =
+            PersistentFfmpegAudioWindowDecoder::with_capacity(config.decoder_session_capacity)
+                .into_cache_parts();
+        // Only ownership moves remain after the real decoder returns.
+        Self {
+            sample_rate,
+            window_frames: (sample_rate as usize).saturating_mul(window_seconds.max(1)),
+            configuration,
+            state,
+            window_ready,
+            decoder,
+            decoder_shutdown_signal: Some(decoder_shutdown_signal),
+            shutdown_requested,
+        }
     }
 
     fn with_decoder(
@@ -1478,6 +1505,20 @@ pub(super) fn audio_frame_timestamp(frame: i64, sample_rate: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_source_startup_normalizes_once_and_owns_real_teardown() {
+        for requested in [0, 1, 65] {
+            let cache = AudioSourceCache::new_bounded_with_sessions(1, 0, 0, 0, requested);
+            let diagnostics = cache.diagnostics();
+            assert_eq!(cache.sample_rate(), 8_000);
+            assert_eq!(diagnostics.decoder_session_capacity, requested.clamp(1, 64));
+            let receipt = cache.shutdown_until(Instant::now() + Duration::from_secs(2));
+            assert_eq!(receipt.decoder_shutdown_workers_started, 1);
+            assert_eq!(receipt.decoder_shutdown_workers_terminated, 1);
+            assert!(receipt.all_resources_released(), "{receipt:?}");
+        }
+    }
 
     #[cfg(feature = "validation")]
     #[test]
@@ -2693,13 +2734,35 @@ mod tests {
         let canceled_at = Instant::now();
         cancellation.cancel();
         let error = worker.join().expect("decode worker returns").expect_err("decode cancels");
+        let read_return_elapsed = canceled_at.elapsed();
+        // Logical cancellation returns before asynchronous physical retirement.
+        // Both observations retain the same original 50 ms qualification limit.
+        let physical_deadline = canceled_at + Duration::from_millis(50);
+        while Instant::now() < physical_deadline && cache.diagnostics().decoder_sessions != 0 {
+            std::thread::yield_now();
+        }
+        let physical_release_elapsed = canceled_at.elapsed();
+        let diagnostics = cache.diagnostics();
+        let receipt = Arc::try_unwrap(cache)
+            .ok()
+            .expect("only the test owns the source cache")
+            .shutdown_until(Instant::now() + Duration::from_secs(2));
+        eprintln!("real-child cancellation: read={read_return_elapsed:?}, physical_observation={physical_release_elapsed:?}, remaining={}, receipt={receipt:?}", diagnostics.decoder_sessions);
+        assert!(receipt.all_resources_released(), "{receipt:?}");
+        assert_eq!(receipt.child_processes_observed, 1);
+        assert_eq!(receipt.stdout_pump_threads_joined, 1);
+        assert_eq!(receipt.stderr_pump_threads_joined, 1);
         assert!(
-            canceled_at.elapsed() <= Duration::from_millis(50),
+            read_return_elapsed <= Duration::from_millis(50),
             "persistent decode cancellation exceeded 50 ms: {:?}",
-            canceled_at.elapsed()
+            read_return_elapsed
+        );
+        assert!(
+            physical_release_elapsed <= Duration::from_millis(50),
+            "physical cancellation observation exceeded 50 ms: {physical_release_elapsed:?}; remaining={}",
+            diagnostics.decoder_sessions
         );
         assert!(error.to_string().contains("canceled"));
-        let diagnostics = cache.diagnostics();
         assert_eq!(diagnostics.entries, 0);
         assert_eq!(diagnostics.failures, 0);
         assert_eq!(diagnostics.in_flight_decodes, 0);

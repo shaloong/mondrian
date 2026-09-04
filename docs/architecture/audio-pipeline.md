@@ -919,8 +919,9 @@ window. Resident bytes, effective limits, reconfiguration/trim totals,
 hits/misses, decodes, failures, oversize windows, in-flight single-flight
 leaders, and evictions are structured diagnostics. The concrete decoder uses
 an independently reconfigurable LRU pool of isolated persistent FFmpeg child
-Sessions. Idle sessions above a reduced capacity terminate immediately. Busy
-sessions finish their current window and then converge; diagnostics expose the
+Sessions. Idle sessions above a reduced capacity enter bounded asynchronous
+retirement immediately; their physical permits remain occupied until child and
+pump closure. Busy sessions finish their current window and then converge; diagnostics expose the
 temporary over-capacity count instead of pretending the trim already happened.
 Sequential windows reuse continuous `f32le` output, while a non-contiguous miss
 restarts only the matching fingerprint/output-contract Session with bounded
@@ -1382,8 +1383,12 @@ The automated suite must prove:
   matrix results are sample-identical;
 - a manual external AAC parity gate compares a cold window, sequential boundary,
   and evicted-window random restart against one sequential reference decode;
-- a manual real-child cancellation gate requires kill/wait/join observation
-  within 50 ms and zero success/failure cache admission;
+- a manual real-child cancellation gate separately observes read return and
+  physical-permit release against one original 50 ms limit, then consumes the
+  raw source shutdown receipt to verify the actual child/pump joins and zero
+  success/failure cache admission. Read return alone is not physical closure.
+  Local cold-start cancellation exceeded that limit on 2026-09-04; it remains
+  an open performance qualification defect, not a passing gate or a leak claim;
 - concurrent identical window misses elect one decode leader and one follower
   cache hit;
 - deterministic professional-audio acceptance tests reject missing/fake output
