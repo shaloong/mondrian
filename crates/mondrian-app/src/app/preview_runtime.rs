@@ -2284,7 +2284,6 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownE
     evidence
 }
 
-#[cfg(any(test, feature = "validation"))]
 fn join_preview_workers_until(
     handles: Vec<JoinHandle<()>>,
     deadline: Instant,
@@ -2428,10 +2427,9 @@ mod request_scheduler;
 mod result_pump;
 mod service_lifecycle;
 mod startup;
-#[cfg(test)]
-pub(crate) use startup::PreviewStartupCheckpoint;
+pub(crate) use startup::PreviewStartupOwner;
 #[cfg(any(test, feature = "validation"))]
-pub(crate) use startup::{PreviewStartupFailure, PreviewStartupOwner};
+pub(crate) use startup::{PreviewStartupCheckpoint, PreviewStartupFailure};
 mod timeline_evaluation;
 mod title_adapter;
 

@@ -11,7 +11,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(any(test, feature = "validation"))]
 use std::time::Duration;
-#[cfg(any(test, feature = "validation"))]
 use std::time::Instant;
 
 #[path = "preview_work_notification/callbacks.rs"]
@@ -212,7 +211,6 @@ impl PreviewWorkWatch {
     }
 
     /// Consume callback ownership under the Runtime's original deadline.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(&self, deadline: Instant) -> PreviewWorkCallbackEvidence {
         self.shared.callbacks.shutdown(Some(deadline))
     }

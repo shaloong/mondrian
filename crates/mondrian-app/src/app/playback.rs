@@ -221,6 +221,15 @@ impl AppAudioPlayback {
         }
     }
 
+    fn output_device_selection(&self) -> mondrian_media::RealtimeAudioOutputDeviceSelection {
+        match self {
+            Self::Available(playback) => playback.output_device_selection(),
+            Self::Unavailable { .. } => {
+                mondrian_media::RealtimeAudioOutputDeviceSelection::SystemDefault
+            }
+        }
+    }
+
     #[cfg(all(feature = "validation", test))]
     fn request_controlled_output_recycle(
         &self,
@@ -238,6 +247,13 @@ impl AppAudioPlayback {
 }
 
 impl AppState {
+    /// Snapshot the machine-local audio-output intent without polling playback.
+    pub fn audio_output_device_selection(
+        &self,
+    ) -> mondrian_media::RealtimeAudioOutputDeviceSelection {
+        self.audio_playback.output_device_selection()
+    }
+
     /// Publish a latest-wins user/runtime audio-output selection.
     ///
     /// This preference is deliberately outside Project authoring. A changed

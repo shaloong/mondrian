@@ -132,6 +132,10 @@ Output selection uses CPAL's cross-process stable `DeviceId`, not display name
 or enumeration index. `SystemDefault` and `Specific(DeviceId)` are distinct
 runtime intents. A specific identity that is absent fails closed and remains
 recoverable; it is never redirected to a similarly named or default device.
+The output manager and `AudioPlayback` expose a read-only snapshot of that
+latest-wins intent. App UI Host startup uses the snapshot only to roll back a
+failed machine-local preferences transaction; it does not poll the audio worker,
+negotiate a stream, or turn device intent into Project author state.
 The worker observes selection changes and low-frequency system-default identity
 changes outside the callback, destroys the old stream, publishes typed loss
 evidence, and then negotiates a fresh generation. Catalog enumeration is a

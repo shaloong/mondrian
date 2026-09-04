@@ -119,6 +119,13 @@ impl AudioWaveformService {
         Self::try_start_with(|_, _| {}, spawn_analysis)
     }
 
+    #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn try_start_with_checkpoint_for_host(
+        mut checkpoint: impl FnMut(AudioWaveformStartupStage),
+    ) -> Result<Arc<Self>, AudioWaveformStartupFailure> {
+        Self::try_start_with(move |stage, _service| checkpoint(stage), spawn_analysis)
+    }
+
     fn try_start_with(
         checkpoint: impl FnMut(AudioWaveformStartupStage, &Arc<Self>),
         spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,

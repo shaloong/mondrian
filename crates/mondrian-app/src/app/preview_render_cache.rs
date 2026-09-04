@@ -9,7 +9,6 @@ use std::collections::VecDeque;
 #[cfg(not(test))]
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(any(test, feature = "validation"))]
 use std::time::Instant;
 
 use mondrian_core::WorkingColorSpace;
@@ -228,14 +227,12 @@ impl PreviewTimelineRenderCache {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn begin_shutdown(&mut self) {
         if let Some(service) = self.service.as_mut() {
             service.begin_shutdown();
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(
         &mut self,
         deadline: Instant,

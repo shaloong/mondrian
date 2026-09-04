@@ -1142,9 +1142,11 @@ must not depend on Preview readiness or redraw cadence.
 Timeline audio waveforms are not a Widget or Window execution feature.
 The Waveform startup Module installs each returned source-cache/analysis owner
 before the next startup step. Endurance uses its owning `try_start` Interface
-and retains a separate partial-stage receipt through failed setup; the ordinary
-Window constructor preserves its existing infallible/degraded startup policy.
-This does not qualify Window's separate initial/reopen owner inventory.
+and retains a separate partial-stage receipt through failed setup. The product
+Host constructor now uses that same owning Interface; an ordinary OS thread-spawn
+failure still publishes the existing degraded complete service, while an unwind
+returns the actual partial owner to the Host startup transaction. This does not
+qualify Window's separate old/candidate GPU or event-loop owner inventory.
 `AppUiHost` owns one UI-independent `AudioWaveformService` composition instance,
 polls its bounded completion pump, and injects an `AudioWaveformSource` handle
 into the Timeline model. The Timeline lookup supplies `AssetId`, an
@@ -2123,6 +2125,36 @@ portably canceled: shutdown revokes publication and records failure if the
 worker is still live at the original deadline. Production-required initial
 discovery and deliberately test-disabled discovery remain distinct.
 
+Host construction is an owning transaction in `app_ui::host::startup`. It takes
+the unique `AppState` before resolving the preferences path, loading preferences,
+changing process theme, or preparing a service. The default path is resolved once
+and the same path is loaded and retained. Thumbnail, Waveform, Preview, and catalog
+owners are installed before the next checkpoint; Waveform and Preview retain
+mutually exclusive partial-versus-complete receipts. Catalog startup distinguishes
+Prepared, InProgress, ordinary thread-spawn failure, and Started rather than
+inferring state from terminal counters. Root/recovery/startup-row construction is
+inside the same unwind boundary.
+
+Failure first closes admission for every installed service, then consumes all of
+them against one caller-owned absolute deadline. Only afterward does it return the
+same live App with the primary diagnostic and raw receipts. Audio-output intent,
+Viewer display policy, and the exact pre-start process theme are restored and
+read back before the receipt can claim success. Opaque panic ownership is retained
+without running its destructor and makes the whole-start predicate fail closed.
+The complete Host declares execution-service fields before its App field so even
+ordinary unwind destroys service owners first. `Drop` remains a best-effort
+fallback and never manufactures qualification evidence.
+
+The feature-gated `host_startup_qualification` Cargo example links the real product
+Host and RequiredPackaged Preview. It builds two successful routes and injects all
+18 Host boundaries, three Waveform boundaries, and five Preview boundaries,
+including one actual packaged media worker. It verifies App/EventBus identity,
+state-marker preservation, exact partial/complete inventory closure, and opaque
+payload rejection. Cargo example executables resolve the packaged product worker
+from their shared profile root just like `deps` executables. This qualifies the
+Host-only transaction; Window old/candidate GPU replacement, native event-loop
+handback, and durable success-receipt history remain separate work.
+
 The domain-neutral App owned-worker Module now owns the same join algorithm
 used by Preview, Thumbnail and catalog; Preview's existing public outcome name
 remains a compatibility alias. The bounded `window_service_protocol` Cargo
@@ -2130,6 +2162,6 @@ example compiles actual Thumbnail/catalog source and existing access/activity
 Modules. It does not replace actual Host, native Window, GPU or campaign tests.
 
 Window error merging preserves a published operation error, event-loop failure
-and UI cleanup failure independently. Full owning Host construction, old/new
-GPU-generation replacement, unique App handback and durable successful raw
-receipt propagation remain separate unfinished lifecycle work.
+and UI cleanup failure independently. Old/new GPU-generation replacement,
+whole-Window unique App handback and durable successful raw receipt propagation
+remain separate unfinished lifecycle work.

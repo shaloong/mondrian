@@ -31,7 +31,6 @@ impl PreviewStartupOwnerState {
         }
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn matches_closed(self, outcome: PreviewOwnedWorkerShutdown) -> bool {
         match self {
             Self::Installed => outcome == PreviewOwnedWorkerShutdown::Terminated,
@@ -73,7 +72,6 @@ impl PreviewStartupInventory {
 }
 
 /// Exact outcomes recorded by the sole Runtime consuming shutdown algorithm.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PreviewStartupWorkerShutdown {
     /// Only installed media workers, preserving their construction order.
@@ -87,7 +85,6 @@ pub struct PreviewStartupWorkerShutdown {
 }
 
 /// Owner-free closure of a partial Preview, never normal-runtime qualification.
-#[cfg(any(test, feature = "validation"))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PreviewStartupShutdownEvidence {
     /// Partial-construction evidence schema.
@@ -102,7 +99,6 @@ pub struct PreviewStartupShutdownEvidence {
     pub runtime: PreviewRuntimeShutdownEvidence,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl PreviewStartupShutdownEvidence {
     /// Prove closure of only the actual created inventory, rejecting unknowns.
     pub fn all_created_resources_released(&self) -> bool {

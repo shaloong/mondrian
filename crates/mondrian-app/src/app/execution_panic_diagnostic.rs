@@ -10,6 +10,7 @@ struct ExecutionPanic {
 }
 
 /// Preserve a caught startup panic as a diagnostic, separately from live owners.
+#[cfg(any(test, feature = "validation"))]
 pub(crate) fn startup_panic_diagnostic(payload: Box<dyn std::any::Any + Send>) -> anyhow::Error {
     execution_panic_diagnostic(payload, "Headless startup")
 }

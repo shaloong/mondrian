@@ -78,6 +78,14 @@ test = true
 harness = true
 bench = false
 
+[[example]]
+name = "host_startup_qualification"
+path = "examples/host_startup_qualification.rs"
+required-features = ["validation"]
+test = true
+harness = true
+bench = false
+
 [dependencies]
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }

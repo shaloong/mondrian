@@ -798,6 +798,10 @@ trait AudioOutputAdapter: Send {
     fn set_device_selection(&self, _selection: RealtimeAudioOutputDeviceSelection) -> bool {
         false
     }
+
+    fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        RealtimeAudioOutputDeviceSelection::SystemDefault
+    }
     #[cfg(feature = "validation")]
     fn request_controlled_recycle(
         &self,
@@ -1202,6 +1206,10 @@ impl AudioOutputAdapter for RealtimeAudioOutputManager {
 
     fn set_device_selection(&self, selection: RealtimeAudioOutputDeviceSelection) -> bool {
         RealtimeAudioOutputManager::set_device_selection(self, selection)
+    }
+
+    fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        RealtimeAudioOutputManager::device_selection(self)
     }
 
     #[cfg(feature = "validation")]
@@ -2709,6 +2717,11 @@ impl AudioPlayback {
         selection: RealtimeAudioOutputDeviceSelection,
     ) -> bool {
         self.output.set_device_selection(selection)
+    }
+
+    /// Snapshot the machine-local output-device intent.
+    pub fn output_device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        self.output.device_selection()
     }
 
     /// Most recent successful physical device/configuration negotiation.

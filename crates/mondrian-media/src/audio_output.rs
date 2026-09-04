@@ -535,6 +535,11 @@ impl RealtimeAudioOutputManager {
         true
     }
 
+    /// Snapshot the latest-wins device intent without advancing the worker.
+    pub fn device_selection(&self) -> RealtimeAudioOutputDeviceSelection {
+        self.device_selection.lock().clone()
+    }
+
     #[cfg(feature = "validation")]
     pub(crate) fn request_controlled_recycle(
         &self,
@@ -842,8 +847,13 @@ mod tests {
                 .expect("specific identity"),
         };
         assert!(manager.set_device_selection(specific.clone()));
+        assert_eq!(manager.device_selection(), specific);
         assert!(!manager.set_device_selection(specific));
         assert!(manager.set_device_selection(RealtimeAudioOutputDeviceSelection::SystemDefault));
+        assert_eq!(
+            manager.device_selection(),
+            RealtimeAudioOutputDeviceSelection::SystemDefault
+        );
     }
 
     #[test]

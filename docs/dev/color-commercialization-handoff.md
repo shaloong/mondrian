@@ -223,19 +223,41 @@ not independent commercial or physical qualification. No capacity failure or
 target cleanup occurred. Another project's Cargo process was observed but not
 modified; this is not an isolated performance baseline.
 
-This slice does not close Window construction/reopen ownership. Next implement
-an inert Host startup owner that takes the unique App before preferences or any
-factory, retains existing Preview/Waveform partial owners and actual prepared
-Thumbnail/catalog Adapters, and returns the same App after UI-only failure
-cleanup. Old/candidate GPU, event-loop handback and final App receipt remain the
-following Window transaction work; do not silently include them in a Host-only
-completion claim.
+The following Host-only construction slice is now implemented. The deep startup
+Module takes the unique App before resolving/loading one default preferences path,
+captures audio/display/theme state, and installs Thumbnail, Waveform, Preview, and
+catalog owners before later checkpoints. A failed transaction first signals all
+owners, consumes partial or complete receipts under one original deadline,
+restores and reads back App/process configuration, and returns the same live App
+with its primary diagnostic. Opaque payload abandonment fails closed. Complete
+Host field order also keeps the App alive until after UI execution services.
+
+The production-linked validation example uses RequiredPackaged Preview rather
+than a test Adapter. Local dev qualification on 2026-09-05 passed two normal
+routes, all 18 Host checkpoints, three Waveform checkpoints, five Preview
+checkpoints including an actual packaged media worker, and one hostile opaque
+payload case. The first run exposed that Cargo `examples/` executables resolved
+the product worker from the wrong directory; shared profile-root discovery now
+handles both `deps/` and `examples/`, and the complete rerun passed. The separate
+window-service protocol passed 92/92 with one explicit native test ignored, and
+the audio intent getter regression passed 1/1. Final release product build passed
+in 13m26s; the same-profile release qualifier built in 13m38s and executed in
+1.10s. Full workspace/all-target/all-feature Clippy with warnings denied passed
+in 3m03s. Final format/diff checks passed. These link durations are developer
+iteration observations, not realtime performance evidence. No capacity failure,
+target cleanup, branch switch, or concurrent agent build occurred.
+
+This is not whole Window construction/reopen qualification. Next extend the
+Window transaction across old/candidate GPU generation, native event-loop state,
+Host success/failure handback, and one final unique App receipt. Durable successful
+raw-receipt history remains separate work.
 
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.
-2. Window initial/reopen: App/Host/Thumbnail/catalog/old/candidate/UI ownership,
-   original failures, and unique returned App receipt.
+2. Window initial/reopen: Host/Thumbnail/catalog startup ownership is complete;
+   old/candidate GPU, native event-loop/UI ownership, original failure merging,
+   and the final unique returned App receipt remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.

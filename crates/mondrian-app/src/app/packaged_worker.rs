@@ -4,7 +4,7 @@
 //! share executable discovery while retaining independent protocols,
 //! lifecycles, cancellation, and evidence.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
@@ -63,11 +63,7 @@ fn discover_packaged_app_worker(override_environment: &str, purpose: &str) -> Op
     // every hidden worker mode so its FFmpeg ABI and private runtime closure
     // remain identical to the App process.
     let directory = current.parent()?;
-    let profile_directory = if directory.file_name().is_some_and(|name| name == "deps") {
-        directory.parent()?
-    } else {
-        directory
-    };
+    let profile_directory = executable_profile_directory(directory);
     let candidate = profile_directory.join(format!("mondrian{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate)
 }
@@ -96,11 +92,7 @@ fn discover_required_packaged_app_worker(
             current_executable: current,
         });
     };
-    let profile_directory = if directory.file_name().is_some_and(|name| name == "deps") {
-        directory.parent().unwrap_or(directory)
-    } else {
-        directory
-    };
+    let profile_directory = executable_profile_directory(directory);
     let candidate = profile_directory.join(format!("mondrian{}", std::env::consts::EXE_SUFFIX));
     candidate.is_file().then_some(candidate).ok_or(
         PackagedWorkerDiscoveryError::ProductExecutableMissing {
@@ -110,9 +102,28 @@ fn discover_required_packaged_app_worker(
     )
 }
 
+fn executable_profile_directory(directory: &Path) -> &Path {
+    if directory.file_name().is_some_and(|name| name == "deps" || name == "examples") {
+        directory.parent().unwrap_or(directory)
+    } else {
+        directory
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_test_and_example_directories_share_the_product_profile_root() {
+        let profile = Path::new("target").join("debug");
+        assert_eq!(executable_profile_directory(&profile.join("deps")), profile);
+        assert_eq!(
+            executable_profile_directory(&profile.join("examples")),
+            profile
+        );
+        assert_eq!(executable_profile_directory(&profile), profile);
+    }
 
     #[test]
     fn missing_override_does_not_become_worker_authority() {

@@ -16,14 +16,12 @@ pub(crate) enum PreviewStartupCheckpoint {
 }
 
 /// Failed construction retains the unpublished Runtime, not just diagnostics.
-#[cfg(any(test, feature = "validation"))]
 #[must_use = "consume the partial Runtime under the original shutdown deadline"]
 pub(crate) struct PreviewStartupFailure<O: Clone> {
     diagnostic: anyhow::Error,
     owner: PreviewStartupOwner<O>,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl<O: Clone> std::fmt::Debug for PreviewStartupFailure<O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreviewStartupFailure")
@@ -33,7 +31,6 @@ impl<O: Clone> std::fmt::Debug for PreviewStartupFailure<O> {
     }
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl<O: Clone> PreviewStartupFailure<O> {
     pub(crate) fn into_parts(self) -> (anyhow::Error, PreviewStartupOwner<O>) {
         (self.diagnostic, self.owner)
@@ -41,14 +38,12 @@ impl<O: Clone> PreviewStartupFailure<O> {
 }
 
 /// Move-only, thread-affine owner of the actual partial Preview inventory.
-#[cfg(any(test, feature = "validation"))]
 pub(crate) struct PreviewStartupOwner<O: Clone> {
     runtime: Box<PreviewProductionRuntime<O>>,
     inventory: PreviewStartupInventory,
     opaque_panic_payload_abandoned: bool,
 }
 
-#[cfg(any(test, feature = "validation"))]
 impl<O: Clone> PreviewStartupOwner<O> {
     pub(crate) fn begin_shutdown(&mut self) {
         self.runtime.begin_endurance_shutdown();
@@ -71,7 +66,6 @@ impl<O: Clone> PreviewStartupOwner<O> {
 
 impl<O: Clone> PreviewProductionRuntime<O> {
     /// Start production Preview while retaining all returned owners on unwind.
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn try_new() -> Result<Self, PreviewStartupFailure<O>> {
         let budget = preview_decode_cpu_budget();
         let workers = media_preview_worker_count().min(budget.preview_worker_count);
@@ -85,6 +79,20 @@ impl<O: Clone> PreviewProductionRuntime<O> {
     }
 
     #[cfg(any(test, feature = "validation"))]
+    pub(crate) fn try_start_with_checkpoint_for_host(
+        checkpoint: impl FnMut(PreviewStartupCheckpoint),
+    ) -> Result<Self, PreviewStartupFailure<O>> {
+        let budget = preview_decode_cpu_budget();
+        let workers = media_preview_worker_count().min(budget.preview_worker_count);
+        Self::try_start_with(
+            budget,
+            workers,
+            MediaPreviewScheduler::default(),
+            PreviewWorkerIsolation::RequiredPackaged,
+            checkpoint,
+        )
+    }
+
     fn try_start_with(
         budget: PreviewDecodeCpuBudget,
         workers: usize,
@@ -100,7 +108,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         )
     }
 
-    #[cfg(any(test, feature = "validation"))]
     fn try_start_prepared(
         runtime: Self,
         workers: usize,

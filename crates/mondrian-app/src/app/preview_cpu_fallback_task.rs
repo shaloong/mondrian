@@ -128,7 +128,6 @@ impl PreviewCpuFallbackTask {
         self.stop_worker()
     }
 
-    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
         self.stop_worker_until(deadline)
     }

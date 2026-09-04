@@ -67,6 +67,20 @@ pub struct AudioDeviceCatalogShutdownEvidence {
     pub results_missing: u64,
 }
 
+/// Exact Host-startup state of one freshly prepared catalog Adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioDeviceCatalogStartupState {
+    /// The inert Adapter exists and native discovery has not been attempted.
+    Prepared,
+    /// Native discovery was entered but did not return a typed outcome.
+    InProgress,
+    /// Native worker creation returned an ordinary operating-system failure.
+    OrdinaryFailed,
+    /// A native discovery worker handle was returned.
+    Started,
+}
+
 impl AudioDeviceCatalogShutdownEvidence {
     /// No unknown, unjoined, panicked or detached discovery attempt remains.
     pub fn all_resources_released(self) -> bool {
@@ -77,6 +91,43 @@ impl AudioDeviceCatalogShutdownEvidence {
                 == self.workers_started.saturating_add(self.worker_start_failures)
             && self.workers_started == self.workers_joined
             && self.worker_start_failures == 0
+            && self.worker_panics == 0
+            && self.panic_payloads_abandoned == 0
+            && self.deadline_detachments == 0
+            && self.current_thread_detachments == 0
+            && self.results_missing == 0
+    }
+
+    /// Closure of exactly the attempts made before a later Host startup failure.
+    /// A required but not-yet-attempted initial discovery is valid partial inventory.
+    pub fn all_created_resources_released(self, startup: AudioDeviceCatalogStartupState) -> bool {
+        let counts_match = match startup {
+            AudioDeviceCatalogStartupState::Prepared => {
+                self.startup_attempts == 0
+                    && self.workers_started == 0
+                    && self.worker_start_failures == 0
+                    && self.workers_joined == 0
+            }
+            AudioDeviceCatalogStartupState::InProgress => false,
+            AudioDeviceCatalogStartupState::OrdinaryFailed => {
+                self.startup_attempts == 1
+                    && self.workers_started == 0
+                    && self.worker_start_failures == 1
+                    && self.workers_joined == 0
+            }
+            AudioDeviceCatalogStartupState::Started => {
+                self.startup_attempts == 1
+                    && self.workers_started == 1
+                    && self.worker_start_failures == 0
+                    && self.workers_joined == 1
+            }
+        };
+        counts_match
+            && self.schema_version == 1
+            && self.admission_closed
+            && self.startup_attempts
+                == self.workers_started.saturating_add(self.worker_start_failures)
+            && self.workers_started == self.workers_joined
             && self.worker_panics == 0
             && self.panic_payloads_abandoned == 0
             && self.deadline_detachments == 0

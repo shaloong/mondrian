@@ -97,6 +97,32 @@ fn catalog_requires_attempted_production_discovery_and_exact_counts() {
 }
 
 #[test]
+fn catalog_partial_startup_predicate_requires_the_exact_fresh_shape() {
+    let mut prepared = AudioOutputDeviceCatalogAdapter::prepare();
+    let receipt = prepared.shutdown_until(Instant::now());
+    assert!(receipt.all_created_resources_released(AudioDeviceCatalogStartupState::Prepared));
+    assert!(!receipt.all_created_resources_released(AudioDeviceCatalogStartupState::InProgress));
+
+    let mut started = AudioOutputDeviceCatalogAdapter::prepare();
+    assert!(started.start_discovery(fixture_discovery));
+    poll_terminal(&mut started);
+    let receipt = started.shutdown_until(Instant::now());
+    assert!(receipt.all_created_resources_released(AudioDeviceCatalogStartupState::Started));
+    assert!(!receipt.all_created_resources_released(AudioDeviceCatalogStartupState::Prepared));
+
+    let ordinary_failure = AudioDeviceCatalogShutdownEvidence {
+        schema_version: 1,
+        admission_closed: true,
+        initial_discovery_required: true,
+        startup_attempts: 1,
+        worker_start_failures: 1,
+        ..AudioDeviceCatalogShutdownEvidence::default()
+    };
+    assert!(ordinary_failure
+        .all_created_resources_released(AudioDeviceCatalogStartupState::OrdinaryFailed));
+}
+
+#[test]
 #[ignore = "explicitly exercises native audio-device enumeration"]
 fn catalog_actual_native_discovery_has_a_joined_shutdown_receipt() {
     let mut adapter = AudioOutputDeviceCatalogAdapter::prepare();

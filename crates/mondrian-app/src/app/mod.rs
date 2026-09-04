@@ -138,8 +138,7 @@ mod endurance_shutdown;
 pub mod endurance_source_inventory;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_workload;
-#[cfg(any(test, feature = "validation"))]
-mod execution_panic_diagnostic;
+pub(crate) mod execution_panic_diagnostic;
 pub(crate) mod execution_resource_coordination;
 pub(crate) mod execution_resource_slots;
 pub(crate) mod exporting;

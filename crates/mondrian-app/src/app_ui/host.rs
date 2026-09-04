@@ -31,7 +31,6 @@ use crate::app::playback_preview::{
 use crate::app::preview_execution::{
     PreviewGpuFrame, PreviewGpuFrameState, PreviewGpuHeterogeneousExecution, PreviewOutputKey,
 };
-#[cfg(feature = "validation")]
 use crate::app::preview_runtime::PreviewRuntimeShutdownEvidence;
 use crate::app::preview_runtime::{
     PreviewColorRejection, PreviewPresentationCandidate, PreviewPresentationState,
@@ -72,7 +71,7 @@ use crate::app_ui::panels::{ViewerPreviewSource, ViewerPreviewState};
 use crate::app_ui::pending_close_dialog::PendingCloseDialogAction;
 use crate::app_ui::playback_feedback::ViewerPlaybackFeedback;
 use crate::app_ui::preferences_store::{
-    app_ui_preferences_path, load_app_ui_preferences, persist_app_ui_preferences_to,
+    app_ui_preferences_path, load_app_ui_preferences_from, persist_app_ui_preferences_to,
     AppUiPreferences,
 };
 use crate::app_ui::preview::{viewer_frame_content, WindowPreviewAdapter, WindowPreviewSnapshot};
@@ -89,6 +88,21 @@ const WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 #[cfg(all(feature = "validation", test))]
 const VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[path = "host/startup.rs"]
+mod startup;
+pub use crate::app_ui::audio_device_catalog::{
+    AudioDeviceCatalogShutdownEvidence, AudioDeviceCatalogStartupState,
+};
+#[cfg(feature = "validation")]
+pub use startup::{
+    qualify_app_ui_host_startup_ownership, AppUiHostStartupQualificationCase,
+    AppUiHostStartupQualificationError, AppUiHostStartupQualificationReport,
+};
+pub use startup::{
+    AppUiHostStartupCatalogShutdown, AppUiHostStartupClosed, AppUiHostStartupDiagnostic,
+    AppUiHostStartupFailure, AppUiHostStartupFailureKind, AppUiHostStartupPreviewShutdown,
+    AppUiHostStartupShutdownEvidence, AppUiHostStartupStage, AppUiHostStartupWaveformShutdown,
+};
 /// Window-host commands produced while draining app UI actions.
 ///
 /// These are native shell side effects, not editor-state mutations. Entrypoints
@@ -147,7 +161,6 @@ impl AppUiBackgroundTaskPollOutcome {
 pub struct AppUiHost {
     startup: AppUiStartupScreen,
     root: AppUiAppRoot,
-    app_state: RefCell<AppState>,
     preferences: AppUiPreferences,
     preferences_path: PathBuf,
     recovery_candidates: Vec<CrashRecoveryCandidate>,
@@ -155,6 +168,9 @@ pub struct AppUiHost {
     audio_device_catalog: AudioOutputDeviceCatalogAdapter,
     waveform_service: Arc<AudioWaveformService>,
     preview_service: WindowPreviewAdapter,
+    // Declaration order is destruction order. The unique App must outlive all
+    // Window execution-service owners even on an ordinary unwind.
+    app_state: RefCell<AppState>,
     window_preview_state: RefCell<ViewerPreviewState>,
     playback_feedback: ViewerPlaybackFeedback,
     /// Exact observation that most recently crossed a running frame boundary.
@@ -198,87 +214,35 @@ fn window_preview_state_external_texture_key(state: &ViewerPreviewState) -> Opti
     }
 }
 
+fn panic_after_failed_startup(failure: Box<AppUiHostStartupFailure>) -> ! {
+    let diagnostic = failure.diagnostic().clone();
+    let closed = failure.shutdown_until(Instant::now() + WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT);
+    panic!(
+        "{diagnostic}; cleanup_all_created_resources_released={}; cleanup={:?}",
+        closed.shutdown.all_created_resources_released(),
+        closed.shutdown
+    )
+}
+
 impl AppUiHost {
     /// Create a host from an initial application state snapshot.
     pub fn new(app_state: AppState) -> Self {
-        Self::new_with_preferences_path(
-            app_state,
-            load_app_ui_preferences(),
-            app_ui_preferences_path(),
-        )
+        match Self::try_new(app_state) {
+            Ok(host) => host,
+            Err(failure) => panic_after_failed_startup(failure),
+        }
     }
 
     /// Create a host from explicit preferences and path.
+    #[cfg(test)]
     pub(crate) fn new_with_preferences_path(
-        mut app_state: AppState,
+        app_state: AppState,
         preferences: AppUiPreferences,
         preferences_path: PathBuf,
     ) -> Self {
-        app_state.set_audio_output_device_selection(preferences.audio_output_device.clone());
-        app_state.set_viewer_display_management(preferences.display_management.clone());
-        let system_theme_preset = ThemePreset::Dark;
-        set_theme_preset(preferences.theme_preference.resolve(system_theme_preset));
-        let asset_thumbnails = AssetThumbnailAdapter::new();
-        asset_thumbnails.set_color_context(app_state.thumbnail_color_context().ok());
-        let waveform_service = AudioWaveformService::new();
-        waveform_service.set_library(app_state.asset_library_handle());
-        let preview_service = WindowPreviewAdapter::new();
-        preview_service.synchronize_transport_intent(app_state.preview_transport_intent());
-        preview_service.set_viewer_signal_monitoring(
-            preferences.video_scopes.tap,
-            preferences.video_scopes.monitoring,
-        );
-        apply_execution_resource_policy(
-            &app_state,
-            &asset_thumbnails,
-            &waveform_service,
-            &preview_service,
-        );
-        let window_preview_state = preview_service.viewer_preview_for_state(&app_state);
-        let window_preview_snapshot =
-            WindowPreviewSnapshot::new(&window_preview_state, &preview_service);
-        let audio_device_catalog = AudioOutputDeviceCatalogAdapter::new();
-        let mut root = AppUiAppRoot::from_app_state_with_preferences_thumbnails_and_preview(
-            &app_state,
-            &preferences,
-            Some(&asset_thumbnails),
-            Some(&window_preview_snapshot),
-            Some(waveform_service.source()),
-        );
-        root.set_audio_output_device_catalog(audio_device_catalog.state().clone());
-        let playback_feedback = root.viewer_playback_feedback();
-        let mode = if app_state.has_open_project() {
-            AppUiMode::Workspace
-        } else {
-            AppUiMode::Startup
-        };
-        let recovery_candidates = discover_crash_recovery_candidates();
-        let mut startup = AppUiStartupScreen::new();
-        startup.set_recent_projects(startup_recent_projects_from_preferences(&preferences));
-        startup.set_recovery_projects(startup_recovery_projects_from_candidates(
-            &recovery_candidates,
-        ));
-        Self {
-            startup,
-            root,
-            app_state: RefCell::new(app_state),
-            preferences,
-            preferences_path,
-            recovery_candidates,
-            asset_thumbnails,
-            audio_device_catalog,
-            waveform_service,
-            preview_service,
-            window_preview_state: RefCell::new(window_preview_state),
-            playback_feedback,
-            last_playback_frame_advance_at: Cell::new(None),
-            mode,
-            system_theme_preset,
-            ui_dirty: Cell::new(false),
-            preview_dirty: Cell::new(false),
-            pending_close_action: None,
-            quiescing_close_action: None,
-            pending_gallery_capture_name: RefCell::new(None),
+        match Self::try_new_with_preferences_path(app_state, preferences, preferences_path) {
+            Ok(host) => host,
+            Err(failure) => panic_after_failed_startup(failure),
         }
     }
 

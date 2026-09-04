@@ -21,7 +21,19 @@ pub struct AssetThumbnailAdapter {
 impl AssetThumbnailAdapter {
     /// Create a Window Adapter with one production service instance.
     pub fn new() -> Self {
-        Self { service: AssetThumbnailService::new() }
+        let adapter = Self::prepare();
+        adapter.start_in_place();
+        adapter
+    }
+
+    /// Prepare the complete Adapter before starting its native worker.
+    pub(crate) fn prepare() -> Self {
+        Self { service: AssetThumbnailService::prepare() }
+    }
+
+    /// Install the actual native worker into the already-owned Adapter.
+    pub(crate) fn start_in_place(&self) {
+        self.service.start_in_place();
     }
 
     /// Forward the Project-owned engine plus Project future-Sequence defaults.
