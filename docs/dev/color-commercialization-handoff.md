@@ -137,11 +137,23 @@ Remaining local COL-047 implementation/validation blocks:
 1. Finish internal Preview/Waveform partial-construction guards. A constructor
    unwind before returning an owner is now explicitly unverified, not a clean
    NotStarted inventory. Include every Preview worker (including dependency
-   observation), capture any dependency-observer runtime health failure, and
-   preserve the original caller deadline. Also harden Preview worker-join panic
-   payload disposal: the existing `join().is_err()` can run an opaque payload
-   destructor and unwind cleanup a second time; the new Headless/Perf operation
-   panic converter does not itself fix that worker-level seam.
+   observation) and preserve the original caller deadline. Preview worker joins
+   now share a consuming Module that never destroys opaque unwind payloads on
+   the shutdown stack and retains separate abandonment counts. Dependency-worker
+   health is also projected without waiting for evaluation/result polling.
+   The linked App block passed 113 focused release tests, including five actual
+   Headless GPU startup/shutdown cases. After adding failure-safe test-gate cleanup,
+   the separate actual-source protocol harness passed all 20 cases; the two
+   corrected disconnect/Drop cases also passed 16 repeated executions. Its
+   dependencies and native search paths came from the freshly built Cargo graph.
+   Final strict PowerShell, format/diff, ordinary App library Clippy and full
+   workspace/all-target/all-feature Clippy gates passed with warnings denied.
+   These changes do not close
+   internal construction or every callback/other-owner panic path. In particular,
+   Preview work-watch `invoke_waker` still drops the caught payload via `is_ok()`;
+   its worker-exit notification can therefore re-unwind inside a Drop. Retaining
+   callback owners, recording their failures and publishing observer terminal
+   wakes safely belongs to the next lifecycle block, alongside GPU progress joins.
    Finish Window initial/reopen candidate
    owning failures and their separate old/candidate/UI receipts, preserving the
    original error and unique returned App owner.
@@ -172,6 +184,15 @@ Remaining local COL-047 implementation/validation blocks:
    No broad warning suppression was added. Keep bounded protocol-test execution distinct from
    unnecessarily repeated release linking of every product/tool executable;
    preserve the real public-interface compile checks and test coverage.
+   The initial `preview_visual_protocol` target compiles the three actual Preview
+   source Modules independently of the giant App lib-test unit. Test cases are
+   still inline in those sources, so moving them to independent files and
+   extracting performance evidence/owner support remain unfinished. Do not claim
+   that this target alone eliminates ordinary App library/binary build costs.
+   Both `cargo test --test` and `cargo rustc --test` still scheduled package
+   executables locally. The bounded execution above used direct `rustc` with
+   recorded exact Cargo library artifacts/native paths and the existing runtime
+   DLL directory; a general reproducible bounded runner remains follow-on work.
 3. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
 4. Close the capsule lifecycle: sealed namespace, spawn-time admission,

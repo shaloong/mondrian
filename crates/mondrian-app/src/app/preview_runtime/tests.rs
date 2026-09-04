@@ -13322,6 +13322,61 @@ fn synchronous_preview_shutdown_rejects_panicked_worker_as_complete() {
 }
 
 #[test]
+fn preview_shutdown_continues_after_opaque_worker_panic() {
+    struct HostilePayload(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for HostilePayload {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("must not destroy opaque payload while closing Preview");
+        }
+    }
+    for bounded in [false, true] {
+        let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+        let drops = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let payload = HostilePayload(Arc::clone(&drops));
+        runtime.workers.borrow_mut().push(std::thread::spawn(move || {
+            std::panic::panic_any(payload);
+        }));
+        let evidence = if bounded {
+            runtime.shutdown_until(Instant::now() + Duration::from_secs(2))
+        } else {
+            runtime.shutdown_and_wait()
+        };
+        assert_eq!(evidence.workers_started, 4);
+        assert_eq!(evidence.workers_terminated, 4);
+        assert_eq!(evidence.worker_panics, 1);
+        assert_eq!(evidence.worker_panic_payloads_abandoned, 1);
+        assert_eq!(
+            evidence.visual_dependency_worker,
+            Some(PreviewOwnedWorkerShutdown::Terminated)
+        );
+        assert!(!evidence.all_workers_terminated());
+        assert_eq!(drops.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+}
+
+#[test]
+fn preview_dependency_worker_exit_is_visible_without_evaluation_or_result_poll() {
+    let mut runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    assert!(!runtime.diagnostics().visual_dependency_health_failed);
+    assert_eq!(
+        runtime.visual_dependencies.shutdown_and_wait(),
+        PreviewOwnedWorkerShutdown::Terminated
+    );
+    assert!(
+        !runtime.visual_dependency_health_failed.get(),
+        "no evaluation has latched the exit"
+    );
+    assert!(runtime.diagnostics().visual_dependency_health_failed);
+    assert!(runtime.diagnostics().visual_dependency_health_failed);
+    let evidence = runtime.shutdown_and_wait();
+    assert!(
+        !evidence.all_workers_terminated(),
+        "an already consumed observer cannot invent a receipt"
+    );
+}
+
+#[test]
 fn bounded_preview_shutdown_detaches_a_worker_at_the_absolute_deadline() {
     let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_release = Arc::clone(&release);

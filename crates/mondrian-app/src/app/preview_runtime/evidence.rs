@@ -27,6 +27,8 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             visual_program_cache: self.visual_programs.borrow().diagnostics(),
             future_media_window: self.future_media_window.borrow().diagnostics(),
             visual_execution_health_failed: self.visual_execution_health_failed.get(),
+            visual_dependency_health_failed: self.visual_dependency_health_failed.get()
+                || !self.visual_dependencies.is_healthy(),
             render_requests: self.metrics.render_requests.get(),
             ready_frames: self.metrics.ready_frames.get(),
             loading_frames: self.metrics.loading_frames.get(),

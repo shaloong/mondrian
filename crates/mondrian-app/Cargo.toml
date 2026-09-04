@@ -61,6 +61,11 @@ path = "src/bin/ui_pipeline_test.rs"
 name = "viewer_gpu_output_budget"
 path = "src/bin/viewer_gpu_output_budget.rs"
 
+[[test]]
+name = "preview_visual_protocol"
+path = "tests/preview_visual_protocol.rs"
+required-features = ["validation"]
+
 [dependencies]
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }

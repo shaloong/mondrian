@@ -157,7 +157,8 @@ impl PreviewCpuFallbackTask {
 impl Drop for PreviewCpuFallbackTask {
     fn drop(&mut self) {
         match self.stop_worker_until(Instant::now()) {
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 tracing::warn!("Preview CPU fallback worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {

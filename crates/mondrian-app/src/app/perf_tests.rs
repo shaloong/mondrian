@@ -257,6 +257,7 @@ struct PerfPreviewClosureReport {
     workers_started: u32,
     workers_terminated: u32,
     worker_panics: u32,
+    worker_panic_payloads_abandoned: u32,
     current_thread_detachments: u32,
     unverified_async_reaps: u32,
     worker_timeouts: u32,
@@ -2676,6 +2677,7 @@ fn preview_owned_worker_outcome_label(outcome: PreviewOwnedWorkerShutdown) -> &'
         PreviewOwnedWorkerShutdown::NotStarted => "not_started",
         PreviewOwnedWorkerShutdown::Terminated => "terminated",
         PreviewOwnedWorkerShutdown::Panicked => "panicked",
+        PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => "panicked_payload_abandoned",
         PreviewOwnedWorkerShutdown::CurrentThreadSkipped => "current_thread_skipped",
         PreviewOwnedWorkerShutdown::TimedOutDetached => "timed_out_detached",
     }
@@ -2693,6 +2695,7 @@ impl PerfPreviewClosureReport {
             workers_started: evidence.workers_started,
             workers_terminated: evidence.workers_terminated,
             worker_panics: evidence.worker_panics,
+            worker_panic_payloads_abandoned: evidence.worker_panic_payloads_abandoned,
             current_thread_detachments: evidence.current_thread_detachments,
             unverified_async_reaps: evidence.unverified_async_reaps,
             worker_timeouts: evidence.worker_timeouts,

@@ -344,7 +344,8 @@ impl PreviewTitleTask {
 impl Drop for PreviewTitleTask {
     fn drop(&mut self) {
         match self.stop_worker_until(Instant::now()) {
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 tracing::warn!("Basic Title Preview worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {

@@ -874,6 +874,36 @@ existing short grace only when no explicit consuming shutdown took its handle.
 Schema-2 historical Preview evidence is not upgraded to cover this additional
 owner; the strict performance validator requires schema 3.
 
+The ordinary Preview worker-lifecycle Module owns both consuming join policies
+for media and auxiliary workers. Only exact string panic payloads are destroyed
+on the joining thread; opaque payloads are deliberately retained and reported
+as `PanickedPayloadAbandoned`. The aggregate receipt records the actual join,
+panic, and payload abandonment separately; either fault rejects clean closure.
+This is an additive taxonomy within the same schema-3 worker inventory: old
+healthy receipts already require zero panics, while a present abandonment field
+must independently be a typed zero. It is not general foreign-code crash
+containment or proof that every callback/constructor unwind path is closed.
+
+Ordinary visual-task Drop closes admission without waiting for active execution;
+its return is not zero-residency evidence. Qualification uses the consuming join
+Interface before asserting zero physical leases. Separate controlled-worker
+tests cover nonblocking Drop and eventual lease release, and result-backpressure
+shutdown covers the explicit join and immediate post-join zero inventory.
+
+The `preview_visual_protocol` validation test target directly compiles the actual
+worker-lifecycle, work-notification and visual-task source Modules, retaining
+their private protocol tests without copying their Implementation. Its narrow
+test-only unused-method allowances do not affect the production library. This
+target does not build the giant App lib-test unit; it remains distinct from
+linked App Runtime and real Headless GPU closure tests. Cargo may still rebuild
+the ordinary package library/binaries, and the inline tests have not yet been
+moved out of production source inputs.
+
+Preview diagnostics read the dependency observer's live health stamp directly,
+without requiring an evaluation or result poll to latch its exit. Headless owner
+capture includes that fact in cumulative fatal evidence. An explicit test-driven
+observer stop proves this observation seam, not an injected physical fault.
+
 Fast synthetic tests prove schema, hashing, deterministic verdicts, accounting,
 leak detection, chunk tamper rejection, frozen repeated-Export ordering and
 fault latching, persistent Timeline rate/extent/guard-frame admission and exact

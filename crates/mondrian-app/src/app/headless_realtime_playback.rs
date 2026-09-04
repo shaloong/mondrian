@@ -1209,6 +1209,7 @@ fn project_headless_endurance_owner_snapshot(
     .ok_or_else(|| anyhow::anyhow!("Headless owned-resource inventory overflowed usize"))?;
     let preview_fatal_errors = [
         u64::from(preview.visual_execution_health_failed),
+        u64::from(preview.visual_dependency_health_failed),
         u64::from(preview.media_worker_health_failed),
         preview.worker_disconnected_drops,
         u64::from(preview.timeline_render_cache_start_failed),
@@ -1994,5 +1995,28 @@ mod tests {
         assert_eq!(projected.owned_resource_units(), 38);
         assert_eq!(projected.gpu_device_losses(), 4);
         assert_eq!(projected.fatal_errors(), 29);
+    }
+
+    #[test]
+    fn owner_projection_counts_unpolled_dependency_worker_failure() {
+        let project = |preview| {
+            project_headless_endurance_owner_snapshot(
+                preview,
+                HeadlessViewerGpuEnduranceSnapshot::test_fixture(0, 0, 0, 0, 0),
+                mondrian_media::AudioPlaybackSnapshot::execution_unavailable(),
+                false,
+                AppBackgroundEnduranceSnapshot::default(),
+            )
+            .expect("valid owner projection")
+        };
+        let healthy = crate::app::preview_runtime::PreviewDiagnostics::default();
+        let failed = crate::app::preview_runtime::PreviewDiagnostics {
+            visual_dependency_health_failed: true,
+            ..healthy
+        };
+        assert_eq!(
+            project(failed).fatal_errors(),
+            project(healthy).fatal_errors() + 1
+        );
     }
 }

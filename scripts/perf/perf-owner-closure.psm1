@@ -8,7 +8,7 @@ $script:IntegerLeaves = @(
     "requested_workers", "started_workers", "terminated_workers", "panicked_workers",
     "timed_out_workers", "detached_workers", "unexpected_worker_exits",
     "queued_work_remaining", "running_work_remaining", "owned_resources_remaining",
-    "cumulative_failures", "workers_started", "workers_terminated", "worker_panics",
+    "cumulative_failures", "workers_started", "workers_terminated", "worker_panics", "worker_panic_payloads_abandoned",
     "current_thread_detachments", "unverified_async_reaps", "worker_timeouts",
     "worker_deadline_detachments", "render_cache_schema_version",
     "retired_library_generations_remaining", "outstanding_frames_before_shutdown",
@@ -147,6 +147,13 @@ function Assert-CleanPreview {
         "worker_timeouts", "worker_deadline_detachments"
     )) {
         Assert-Zero $Preview.$leaf "$Context.$leaf"
+    }
+    # Additive panic taxonomy within the unchanged schema-3 owner inventory.
+    # Older clean receipts already require worker_panics=0; if the more precise
+    # abandonment fact is present it must independently be a typed zero.
+    if ($null -ne $Preview.PSObject.Properties["worker_panic_payloads_abandoned"]) {
+        Assert-Fields $Preview @("worker_panic_payloads_abandoned") $Context
+        Assert-Zero $Preview.worker_panic_payloads_abandoned "$Context.worker_panic_payloads_abandoned"
     }
     Assert-Bool $Preview.render_cache_required $true "$Context.render_cache_required"
     Assert-Bool $Preview.render_cache_start_failed $false "$Context.render_cache_start_failed"

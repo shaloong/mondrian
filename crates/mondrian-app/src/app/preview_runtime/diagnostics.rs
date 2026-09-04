@@ -211,6 +211,8 @@ pub struct PreviewDiagnostics {
     pub future_media_window: PreviewFutureMediaWindowDiagnostics,
     /// Whether the sole visual execution worker terminated unexpectedly.
     pub visual_execution_health_failed: bool,
+    /// Whether the dependency observer is unavailable, including unpolled worker exit.
+    pub visual_dependency_health_failed: bool,
     /// Viewer preview render requests received by the service.
     pub render_requests: u64,
     /// Requests that produced a current ready frame.

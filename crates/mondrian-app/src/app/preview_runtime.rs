@@ -287,52 +287,7 @@ pub(crate) enum PreviewVisualGpuCompletionDisposition {
     TerminalCandidate(mondrian_playback::FrameDeliveryCandidate),
 }
 
-/// Outcome of synchronously reclaiming one Preview-owned worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PreviewOwnedWorkerShutdown {
-    /// No worker handle was created or retained for this owner.
-    NotStarted,
-    /// The real worker returned and was joined.
-    Terminated,
-    /// The real worker was joined after unwinding.
-    Panicked,
-    /// Joining on the same thread would deadlock, so closure is unproved.
-    CurrentThreadSkipped,
-    /// The shared deadline expired; the worker remains detached.
-    TimedOutDetached,
-}
-
-impl PreviewOwnedWorkerShutdown {
-    pub(crate) fn join(worker: JoinHandle<()>) -> Self {
-        if worker.thread().id() == thread::current().id() {
-            drop(worker);
-            Self::CurrentThreadSkipped
-        } else if worker.join().is_err() {
-            Self::Panicked
-        } else {
-            Self::Terminated
-        }
-    }
-
-    pub(crate) fn join_until(worker: JoinHandle<()>, deadline: Instant) -> Self {
-        if worker.thread().id() == thread::current().id() {
-            drop(worker);
-            return Self::CurrentThreadSkipped;
-        }
-        while !worker.is_finished() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(1));
-        }
-        if !worker.is_finished() {
-            drop(worker);
-            return Self::TimedOutDetached;
-        }
-        if worker.join().is_err() {
-            Self::Panicked
-        } else {
-            Self::Terminated
-        }
-    }
-}
+pub use super::preview_worker_lifecycle::PreviewOwnedWorkerShutdown;
 
 /// Synchronous terminal evidence for every worker owned by Preview Runtime.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -345,6 +300,8 @@ pub struct PreviewRuntimeShutdownEvidence {
     pub workers_terminated: u32,
     /// Joined workers whose thread body panicked.
     pub worker_panics: u32,
+    /// Joined workers whose opaque panic payload could not safely be released.
+    pub worker_panic_payloads_abandoned: u32,
     /// Workers detached because shutdown ran on that same worker thread.
     pub current_thread_detachments: u32,
     /// Workers previously transferred to the ordinary asynchronous UI reaper.
@@ -370,6 +327,7 @@ impl PreviewRuntimeShutdownEvidence {
             )
             && self.workers_started == self.workers_terminated
             && self.worker_panics == 0
+            && self.worker_panic_payloads_abandoned == 0
             && self.current_thread_detachments == 0
             && self.unverified_async_reaps == 0
             && self.worker_timeouts == 0
@@ -384,10 +342,15 @@ impl PreviewRuntimeShutdownEvidence {
                 self.workers_started = self.workers_started.saturating_add(1);
                 self.workers_terminated = self.workers_terminated.saturating_add(1);
             }
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 self.workers_started = self.workers_started.saturating_add(1);
                 self.workers_terminated = self.workers_terminated.saturating_add(1);
                 self.worker_panics = self.worker_panics.saturating_add(1);
+                if outcome == PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned {
+                    self.worker_panic_payloads_abandoned =
+                        self.worker_panic_payloads_abandoned.saturating_add(1);
+                }
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
                 self.workers_started = self.workers_started.saturating_add(1);
@@ -2588,7 +2551,8 @@ fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownE
     for handle in handles {
         let outcome = PreviewOwnedWorkerShutdown::join(handle);
         match outcome {
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 tracing::warn!("production preview worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
@@ -2616,7 +2580,8 @@ fn join_preview_workers_until(
     for handle in handles {
         let outcome = PreviewOwnedWorkerShutdown::join_until(handle, deadline);
         match outcome {
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 tracing::warn!("production preview worker panicked during bounded shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {

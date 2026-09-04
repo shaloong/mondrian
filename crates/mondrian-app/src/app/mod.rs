@@ -195,6 +195,7 @@ pub(crate) mod preview_viewer_plan;
 pub(crate) mod preview_visual_dependencies;
 pub(crate) mod preview_visual_execution_task;
 pub(crate) mod preview_work_notification;
+mod preview_worker_lifecycle;
 pub mod product_action;
 mod project_library_generation;
 mod project_lifecycle;

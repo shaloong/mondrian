@@ -189,6 +189,7 @@ Assert-Rejected { Assert-MondrianPerfCases @($rows[0], $rows[0], $rows[2]) "proj
 $preview = [pscustomobject]@{
     owner_slot = 0; schema_version = 3; workers_started = 2; workers_terminated = 2
     visual_dependency_worker = 'terminated'
+    worker_panic_payloads_abandoned = 0
     worker_panics = 0; current_thread_detachments = 0; unverified_async_reaps = 0
     worker_timeouts = 0; worker_deadline_detachments = 0; render_cache_schema_version = 1
     render_cache_required = $true; render_cache_start_failed = $false
@@ -205,6 +206,14 @@ $second.owner_slot = 1
 $good.owner_closure.preview_owner_count = 2
 $good.owner_closure.previews = @($preview, $second)
 Assert-MondrianCleanOwnerClosure $good "two distinct Preview owners" 2 $false
+foreach ($abandoned in @(1, "0", $null)) {
+    $bad = Copy-JsonValue $good
+    $bad.owner_closure.previews[0].worker_panic_payloads_abandoned = $abandoned
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "opaque worker panic" 2 $false } "opaque worker panic counter $abandoned"
+}
+$historical = Copy-JsonValue $good
+$historical.owner_closure.previews[0].PSObject.Properties.Remove("worker_panic_payloads_abandoned")
+Assert-MondrianCleanOwnerClosure $historical "healthy schema-3 inventory before additive panic taxonomy" 2 $false
 foreach ($outcome in @($null, 'not-started', 'panicked', 'timed-out-detached', 'current-thread-skipped')) {
     $bad = Copy-JsonValue $good
     $bad.owner_closure.previews[0].visual_dependency_worker = $outcome

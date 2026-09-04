@@ -772,7 +772,8 @@ impl VisualExecutionTask {
 impl Drop for VisualExecutionTask {
     fn drop(&mut self) {
         match self.stop_worker_until(Instant::now()) {
-            PreviewOwnedWorkerShutdown::Panicked => {
+            PreviewOwnedWorkerShutdown::Panicked
+            | PreviewOwnedWorkerShutdown::PanickedPayloadAbandoned => {
                 tracing::warn!("Preview visual execution worker panicked during shutdown");
             }
             PreviewOwnedWorkerShutdown::CurrentThreadSkipped => {
@@ -1601,12 +1602,68 @@ mod tests {
             "worker never reached bounded result backpressure",
         );
 
-        drop(task);
+        // Ordinary Drop deliberately detaches an active worker. This assertion
+        // needs the consuming join seam, not a race against eventual cleanup.
+        assert_eq!(
+            task.shutdown_and_wait(),
+            PreviewOwnedWorkerShutdown::Terminated
+        );
 
         let diagnostics = broker.diagnostics();
         assert!(diagnostics.closed);
         assert_eq!(diagnostics.pending_requests, 0);
         assert_eq!(diagnostics.queued_work, 0);
         assert_eq!(diagnostics.in_flight_work, 0);
+    }
+
+    #[test]
+    fn ordinary_drop_closes_admission_without_waiting_for_active_execution() {
+        struct ReleaseGateOnDrop(VisualExecutionTestGate);
+        impl Drop for ReleaseGateOnDrop {
+            fn drop(&mut self) {
+                self.0.release();
+            }
+        }
+
+        let task = VisualExecutionTask::new(
+            ManualClock::new(timestamp(1)),
+            VisualExecutionTaskConfig::new(4, 4, 1),
+        )
+        .expect("visual task");
+        let broker = task.broker.clone();
+        let gate = VisualExecutionTestGate::new();
+        // Also release the worker if submission, setup, or a pre-release
+        // assertion fails. Dropping arbitrary gate clones must not release it.
+        let _release_gate = ReleaseGateOnDrop(gate.clone());
+        assert_queued(task.submit(admission(
+            [10; 32],
+            11,
+            None,
+            payload(&[51]).with_gate(gate.clone()),
+        )));
+        gate.wait_until_entered();
+        assert_queued(task.submit(admission([11; 32], 11, None, payload(&[52]))));
+        let (closed_tx, closed_rx) = mpsc::channel();
+        let closing_broker = broker.clone();
+        let dropper = thread::spawn(move || {
+            drop(task);
+            closed_tx.send(closing_broker.diagnostics()).expect("observe Drop return");
+        });
+        let closed = closed_rx.recv_timeout(Duration::from_secs(2));
+        // Release the real worker even if Drop incorrectly waited for it.
+        gate.release();
+        dropper.join().expect("Drop caller returned");
+        let diagnostics = closed.expect("ordinary Drop must not wait for active execution");
+        assert!(diagnostics.closed);
+        assert_eq!(diagnostics.pending_requests, 0);
+        assert_eq!(diagnostics.queued_work, 0);
+        assert_eq!(
+            diagnostics.in_flight_work, 1,
+            "physical execution is still gated"
+        );
+        wait_until(
+            || broker.diagnostics().in_flight_work == 0,
+            "detached execution did not release its lease after the gate opened",
+        );
     }
 }
