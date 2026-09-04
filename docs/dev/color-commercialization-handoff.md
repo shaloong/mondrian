@@ -22,9 +22,10 @@ The partial-startup lifetime-safety prerequisite adds one shared GPU startup gua
 to Window and Headless: caller-side construction coverage, explicit optional
 Renderer ownership, asynchronous retirement on failure/unwind, move-only
 activation without residual device/queue handles, and delayed native decode
-publication. Device reopen now uses its original validation deadline. This does
-not yet implement an owning startup error or public terminal receipt; those
-remain item 1 below. Real shared-guard protocol tests are distinct from a complete
+publication. Device reopen now uses its original validation deadline. This
+was only the prerequisite for owning startup errors and terminal receipts.
+The new Headless implementation below supplies those seams; Window remains
+item 1 below. Real shared-guard protocol tests are distinct from a complete
 Window-construction fault-injection or campaign-return regression.
 Its local Release verification passed three real-GPU guard tests, 25 progress
 protocol tests, one real Headless retirement test and two Window lifecycle tests
@@ -123,16 +124,33 @@ physical fault injection. Full workspace/all-target/all-feature Clippy, format
 and diff checks passed. These are developer validation results, not a sealed
 realtime or 72-hour qualification baseline.
 
+The subsequent Headless failed-start block passed 115 focused release tests,
+including real GPU constructor errors/unwinds, binding errors/unwinds, the
+public campaign error receipt, shared startup guards, and a normal active
+Headless/native-scheduling shutdown. Preview schema-3 and the strict PowerShell
+validator's adversarial fixtures passed; the full workspace/all-target/all-feature
+Clippy, format and diff gates passed. This does not close the remaining internal
+constructor, Window, durable-success or physical qualification work below.
+
 Remaining local COL-047 implementation/validation blocks:
 
-1. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
-   consume them through the shared shutdown deadline, rather than returning
-   only an error and later reporting App-only closure. Preserve typed startup
-   failure evidence past the product entrypoint, even when cleanup succeeds.
-   Preserve failed partial Window/Headless GPU guards through bounded cleanup and normal raw
-   terminal receipts as well as the optional campaign snapshot. The now-verified
-   Renderer retirement/progress protocol is the shared prerequisite, not proof
-   that these constructor/public-result paths already close.
+1. Finish internal Preview/Waveform partial-construction guards. A constructor
+   unwind before returning an owner is now explicitly unverified, not a clean
+   NotStarted inventory. Include every Preview worker (including dependency
+   observation), capture any dependency-observer runtime health failure, and
+   preserve the original caller deadline. Also harden Preview worker-join panic
+   payload disposal: the existing `join().is_err()` can run an opaque payload
+   destructor and unwind cleanup a second time; the new Headless/Perf operation
+   panic converter does not itself fix that worker-level seam.
+   Finish Window initial/reopen candidate
+   owning failures and their separate old/candidate/UI receipts, preserving the
+   original error and unique returned App owner.
+   Headless GPU construction/binding now retains exact partial/complete owners;
+   Endurance installs failed startup before error propagation and returns a
+   dedicated Startup receipt. Perf factory and direct GPU/CPAL paths consume
+   failures; Golden uses the same binder. Live DeviceDestroyed counting now
+   shares terminal classification. Preview schema 3 requires the actual
+   dependency-observer join; historical schema 2 does not cover that owner.
    The current raw-terminal block preserves complete Realtime/App-only receipts
    separately from the optional snapshot and attaches them to public campaign
    failures, including failures after clean shutdown. Next-phase preparation
@@ -141,13 +159,16 @@ Remaining local COL-047 implementation/validation blocks:
    Endurance/Perf/Window normal qualification predicate, rejecting
    `DeviceDestroyed`. This is a protocol finding, not an observed hardware fault.
    Public successful campaign returns still expose the manifest only; raw
-   success reporting and owning partial-start inventories remain incomplete.
-   Include Golden acceptance constructor callers in that migration. Live
-   Headless GPU snapshot counters also still omit `DeviceDestroyed`; the
-   current fix preserves and rejects it in the consuming terminal receipt.
+   success reporting and Window/internal-constructor inventories remain incomplete.
+   Golden's normal whole-operation closure must also be covered, not only
+   returned-owner bind failures. Preview-first outer constructor unwinds now
+   consume the existing App and retain unverified internal-inventory facts.
 2. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
-   warning suppression. Keep bounded protocol-test execution distinct from
+   warning suppression. The standalone non-validation App lib Clippy exposes
+   existing dead-code groups across shutdown adapters and diagnostic facts;
+   the required all-feature workspace gate is a different configuration and
+   does not prove this one clean. Keep bounded protocol-test execution distinct from
    unnecessarily repeated release linking of every product/tool executable;
    preserve the real public-interface compile checks and test coverage.
 3. Make qualified FFmpeg command rejection a typed error; a command pointing

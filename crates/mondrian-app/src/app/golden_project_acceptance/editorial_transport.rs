@@ -986,7 +986,8 @@ pub(super) fn execute_editorial_stage(
         secondary_after: extract_secondary_after,
     };
 
-    let mut viewer = GoldenHeadlessPreview::new()?;
+    let mut viewer =
+        GoldenHeadlessPreview::new(std::time::Instant::now() + VIEWER_PRESENTATION_TIMEOUT)?;
     let time_base = state.active_sequence().context("active Sequence is absent")?.time_base();
     let scrub_before = state.playback_evidence_report();
     let target_frames = vec![5, 15, 30];

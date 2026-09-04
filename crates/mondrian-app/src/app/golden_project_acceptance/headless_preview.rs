@@ -4,17 +4,17 @@ use std::collections::BTreeSet;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, ensure, Context};
+use anyhow::{bail, ensure};
 use serde::Serialize;
 
 use crate::app::headless_preview_presentation::{
     present_headless_preview_output, HeadlessCompletedGpuDisposition, HeadlessPresentedOutput,
     HeadlessPreviewCandidate, HeadlessPreviewRuntime,
 };
+use crate::app::headless_realtime_playback::HeadlessRealtimePlaybackSession;
 use crate::app::headless_viewer_gpu::{
     HeadlessGpuCompletionDeadline, HeadlessViewerGpuAdapter, HeadlessViewerGpuAdapterInfo,
 };
-use crate::app::native_video_import::resolve_playback_hardware_decode_admission;
 use crate::app::playback_preview::pump_playback_preview;
 use crate::app::AppState;
 
@@ -64,19 +64,18 @@ pub(super) struct GoldenHeadlessPreview {
 }
 
 impl GoldenHeadlessPreview {
-    pub(super) fn new() -> anyhow::Result<Self> {
-        let runtime = HeadlessPreviewRuntime::new();
-        let mut gpu =
-            HeadlessViewerGpuAdapter::new().context("create Golden Headless Viewer GPU Adapter")?;
-        gpu.install_completion_waker(runtime.work_watch().completion_waker());
-        let hardware_admission =
-            resolve_playback_hardware_decode_admission(&gpu.native_import_support());
-        runtime
-            .set_renderer_hardware_decode_admission(
-                hardware_admission,
-                gpu.native_decode_device_root(),
-            )
-            .context("install Golden renderer-qualified decoder device")?;
+    pub(super) fn new(deadline: Instant) -> anyhow::Result<Self> {
+        let runtime = std::panic::catch_unwind(std::panic::AssertUnwindSafe(HeadlessPreviewRuntime::new))
+            .map_err(|payload| crate::app::headless_execution_startup::HeadlessExecutionStartFailure::preview_construction(
+                crate::app::headless_execution_startup::startup_panic_diagnostic(payload),
+            ).into_closed_error(deadline))?;
+        let gpu = match HeadlessViewerGpuAdapter::new() {
+            Ok(gpu) => gpu,
+            Err(failure) => return Err(failure.with_preview(runtime).into_closed_error(deadline)),
+        };
+        let session = HeadlessRealtimePlaybackSession::with_shutdown_owners(runtime, gpu)
+            .map_err(|failure| failure.into_closed_error(deadline))?;
+        let (runtime, gpu) = session.into_shutdown_owners();
         Ok(Self {
             runtime,
             gpu,

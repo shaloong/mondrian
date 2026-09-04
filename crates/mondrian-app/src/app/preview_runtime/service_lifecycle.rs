@@ -213,6 +213,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }),
         );
         evidence.record(self.title_task.borrow_mut().shutdown_and_wait());
+        let observer = self.visual_dependencies.shutdown_and_wait();
+        evidence.record(observer);
+        evidence.visual_dependency_worker = Some(observer);
         let render_cache = self.timeline_render_cache.borrow_mut().shutdown_and_wait();
         evidence.record(render_cache.aggregate_outcome);
         evidence.timeline_render_cache = render_cache;
@@ -232,6 +235,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             task.begin_shutdown();
         }
         self.title_task.borrow_mut().begin_shutdown();
+        self.visual_dependencies.begin_shutdown();
         self.timeline_render_cache.borrow_mut().begin_shutdown();
     }
 
@@ -264,6 +268,9 @@ impl<O: Clone> PreviewProductionRuntime<O> {
                 }),
         );
         evidence.record(self.title_task.borrow_mut().shutdown_until(deadline));
+        let observer = self.visual_dependencies.shutdown_until(deadline);
+        evidence.record(observer);
+        evidence.visual_dependency_worker = Some(observer);
         let render_cache = self.timeline_render_cache.borrow_mut().shutdown_until(deadline);
         evidence.record(render_cache.aggregate_outcome);
         evidence.timeline_render_cache = render_cache;
@@ -272,6 +279,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
     fn begin_shutdown(&self) -> bool {
         self.jobs.close();
+        self.visual_dependencies.begin_shutdown();
         let already_shutdown = self.shutdown.request();
         self.future_media_window.borrow_mut().clear();
         self.retire_obsolete_transport_work();

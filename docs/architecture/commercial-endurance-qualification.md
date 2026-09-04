@@ -825,6 +825,42 @@ regression gate, not qualification evidence from a physical campaign.
 
 ## Qualification boundary
 
+### Headless failed-start ownership
+
+The validation-only `headless_execution_startup` Module separates live owning
+failures from owner-free diagnostics. The GPU construction guard stays outside
+the unwind boundary; activation follows all fallible assembly. Failure carries
+the actual NotStarted, partial generation (with an explicit Renderer-created
+fact), or complete Adapter inventory. Decoder binding retains both Preview and
+the complete Adapter, including publication/lifecycle owners. Endurance installs
+this failure into the phase before propagating its diagnostic and returns
+`EnduranceTerminalOwners::Startup`, independently of a normal snapshot.
+
+One absolute deadline covers Preview, GPU, optional Waveform, and App cleanup.
+An absent Renderer receipt is valid only for explicitly observed pre-Renderer
+startup, never for a complete runtime. Cleanup success does not qualify a failed
+start. Opaque panic payload abandonment and Preview/Waveform constructor unwinds
+before an owner returns are explicitly unverified, not inferred empty inventory.
+The latter still require internal partial-construction guards. Window partial
+startup and successful campaign durable raw-receipt reporting remain follow-ons.
+
+Perf uses a separate failed-start inventory projection; normal runtime requirements
+are unchanged. CPAL, resolution-scale and accelerated-native-surface operations
+run within consuming owner wrappers, with successful reports published only after
+closure validation. Golden startup uses the same binder and consumes an owning
+failure against its caller's absolute deadline before converting it to anyhow.
+Live and terminal GPU counters share the same terminal-kind classification,
+including `DeviceDestroyed` as a fatal qualification fault.
+
+Preview shutdown evidence schema 3 adds the actual visual-dependency observer
+join outcome to both its named receipt and aggregate worker inventory. Normal
+qualification requires `Terminated`, rejecting absent, never-started, panicked,
+same-thread and timed-out outcomes. The observer receives shutdown admission
+before any join and uses the same caller deadline. Its ordinary Drop retains the
+existing short grace only when no explicit consuming shutdown took its handle.
+Schema-2 historical Preview evidence is not upgraded to cover this additional
+owner; the strict performance validator requires schema 3.
+
 Fast synthetic tests prove schema, hashing, deterministic verdicts, accounting,
 leak detection, chunk tamper rejection, frozen repeated-Export ordering and
 fault latching, persistent Timeline rate/extent/guard-frame admission and exact

@@ -552,6 +552,7 @@ enum RuntimeState {
 }
 
 struct PhaseOwners {
+    startup_failure: Option<super::endurance_campaign::EnduranceExecutionStartFailure>,
     kind: EndurancePhaseKind,
     app: Option<AppState>,
     authority: Option<PreparedEndurancePhaseAuthority>,
@@ -603,6 +604,7 @@ impl PhaseOwners {
             FreshEndurancePhaseInputs::Test(_) => (None, None, VecDeque::new()),
         };
         let owners = Self {
+            startup_failure: None,
             kind: requirement.kind,
             app: Some(fresh.app_state),
             authority: Some(fresh.authority),
@@ -656,6 +658,7 @@ impl PhaseOwners {
     ) -> Self {
         Self {
             kind,
+            startup_failure: None,
             app: Some(app_state),
             authority,
             execution: None,
@@ -705,9 +708,7 @@ impl PhaseOwners {
         }
         match self.kind {
             EndurancePhaseKind::PlaybackReference | EndurancePhaseKind::ConcurrentRecovery => {
-                let execution = EnduranceExecutionOwners::start(self.app_ref()?)
-                    .map_err(|error| error.to_string())?;
-                self.execution = Some(execution);
+                self.install_execution_result(EnduranceExecutionOwners::start(self.app_ref()?))?;
                 let app = self.app.as_mut().ok_or("phase App owner is missing")?;
                 let execution = self.execution.as_mut().ok_or("execution owner disappeared")?;
                 let timeline = PersistentTimelinePlaybackPhase::start(
@@ -760,6 +761,26 @@ impl PhaseOwners {
 
     fn app_ref(&self) -> Result<&AppState, String> {
         self.app.as_ref().ok_or_else(|| "phase App owner is missing".to_owned())
+    }
+
+    fn install_execution_result(
+        &mut self,
+        result: Result<
+            EnduranceExecutionOwners,
+            super::endurance_campaign::EnduranceExecutionStartFailure,
+        >,
+    ) -> Result<(), String> {
+        match result {
+            Ok(execution) => {
+                self.execution = Some(execution);
+                Ok(())
+            }
+            Err(failure) => {
+                let detail = format!("start execution owners: {:#}", failure.diagnostic());
+                self.startup_failure = Some(failure);
+                Err(detail)
+            }
+        }
     }
 
     fn recovery_due(&self, deadline_run_us: u64) -> Result<bool, String> {
@@ -1421,6 +1442,15 @@ where
                     capture_facts,
                     workers,
                 )
+            } else if let Some(failure) = owners.startup_failure.take() {
+                let (diagnostic, closure) = failure.shutdown_until(app, deadline);
+                failures.push(format!("execution startup failed: {diagnostic:#}"));
+                let workers = closure.all_created_resources_released();
+                (
+                    EnduranceTerminalOwners::Startup(Box::new(closure)),
+                    EnduranceCaptureFacts::failed_continuous_export(),
+                    workers,
+                )
             } else {
                 let app_shutdown = app.shutdown_for_endurance(deadline);
                 let workers = app_shutdown.all_resources_released();
@@ -1889,6 +1919,76 @@ mod tests {
         runtime.begin_phase_preparation();
         assert!(runtime.begin_phase(&requirement, &workload, 0).is_err());
         assert_eq!(runtime.factory.build_calls.get(), 0);
+        assert!(runtime.snapshot().is_err());
+    }
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn headless_startup_bind_failure_retains_exact_phase_receipt_through_public_error_seam() {
+        use crate::app::headless_preview_presentation::HeadlessPreviewRuntime;
+        use crate::app::headless_realtime_playback::{
+            configure_headless_gpu_decode_admission, HeadlessRealtimePlaybackSession,
+        };
+        use crate::app::headless_viewer_gpu::HeadlessViewerGpuAdapter;
+        let (mut runtime, _temporary) = failed_setup_runtime();
+        let mut owners = PhaseOwners::failed_before_start(
+            EndurancePhaseKind::PlaybackReference,
+            AppState::new(),
+            None,
+            0,
+            1,
+            0,
+            "startup failure".to_owned(),
+        );
+        let result = EnduranceExecutionOwners::start_with_headless(
+            owners.app_ref().expect("retained App"),
+            || {
+                let gpu = HeadlessViewerGpuAdapter::new()?;
+                HeadlessRealtimePlaybackSession::bind(
+                    HeadlessPreviewRuntime::new(),
+                    gpu,
+                    |preview, gpu| {
+                        configure_headless_gpu_decode_admission(preview, gpu)?;
+                        anyhow::bail!("injected phase decoder bind failure");
+                    },
+                )
+            },
+        );
+        let detail = owners.install_execution_result(result).expect_err("injected bind failure");
+        assert!(detail.contains("injected phase decoder bind failure"));
+        assert!(owners.startup_failure.is_some());
+        assert!(
+            owners.execution.is_none()
+                && owners.timeline.is_none()
+                && owners.reference.is_none()
+                && owners.export.is_none()
+        );
+        owners.fault = Some(detail.clone());
+        runtime.state = RuntimeState::Owned(Box::new(owners));
+        let error = runtime
+            .run_with_terminal_evidence::<()>(|runtime| {
+                let (closure, _) = runtime.shutdown_phase()?;
+                assert_eq!(closure.status, EndurancePhaseTerminalStatus::Failed);
+                assert!(closure.playback_workers_terminated);
+                Err(runtime_error(detail))
+            })
+            .expect_err("original failure with owner-free receipt");
+        let EnduranceCampaignError::WithTerminalEvidence { primary, terminal } = error else {
+            panic!("lost terminal receipt")
+        };
+        assert!(primary.to_string().contains("injected phase decoder bind failure"));
+        let EnduranceTerminalOwners::Startup(closure) = terminal.owners else {
+            panic!("startup misreported as normal/App-only")
+        };
+        assert!(closure.all_created_resources_released(), "{closure:?}");
+        assert!(closure.waveform.is_none());
+        assert!(!closure.waveform_construction_unverified);
+        assert!(closure.headless.preview.is_some());
+        assert!(matches!(
+            closure.headless.gpu,
+            crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::Adapter(_)
+        ));
+        assert!(runtime.shutdown_phase().is_err());
         assert!(runtime.snapshot().is_err());
     }
 

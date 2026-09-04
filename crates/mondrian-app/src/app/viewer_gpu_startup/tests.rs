@@ -55,8 +55,10 @@ fn partial_startup_error_before_renderer_joins_without_inventing_renderer() {
     let receipt = startup
         .shutdown_until(Instant::now() + Duration::from_secs(10))
         .expect("actual progress owner");
-    assert_joined(receipt);
-    assert_eq!(receipt.renderer_retirement, None);
+    assert!(!receipt.renderer_created);
+    assert!(receipt.all_created_resources_released());
+    assert_joined(receipt.progress);
+    assert_eq!(receipt.progress.renderer_retirement, None);
 }
 
 #[test]
@@ -84,8 +86,11 @@ fn partial_startup_panic_after_renderer_keeps_worker_until_consuming_shutdown() 
     let receipt = startup
         .shutdown_until(Instant::now() + Duration::from_secs(10))
         .expect("actual progress owner");
-    assert_joined(receipt);
+    assert!(receipt.renderer_created);
+    assert!(receipt.all_created_resources_released());
+    assert_joined(receipt.progress);
     assert!(receipt
+        .progress
         .renderer_retirement
         .expect("actual Renderer worker receipt")
         .is_healthy());

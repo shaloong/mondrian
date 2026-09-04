@@ -875,36 +875,52 @@ pub(crate) struct HeadlessRealtimePlaybackSession {
     driver: Option<HeadlessRealtimePlaybackDriver>,
 }
 
-type HeadlessRealtimeBindFailure = Box<(
-    anyhow::Error,
-    HeadlessPreviewRuntime,
-    HeadlessViewerGpuAdapter,
-)>;
+use super::headless_execution_startup::{startup_panic_diagnostic, HeadlessExecutionStartFailure};
 
 impl HeadlessRealtimePlaybackSession {
     /// Create and bind the default real Headless GPU Adapter.
-    pub(crate) fn new() -> anyhow::Result<Self> {
-        let gpu = HeadlessViewerGpuAdapter::new().context("create Headless Viewer GPU Adapter")?;
+    pub(crate) fn new() -> Result<Self, HeadlessExecutionStartFailure> {
+        let gpu = HeadlessViewerGpuAdapter::new()?;
         Self::with_gpu_adapter(gpu)
     }
 
     /// Bind an explicitly configured Adapter without entering realtime residency.
-    pub(crate) fn with_gpu_adapter(gpu: HeadlessViewerGpuAdapter) -> anyhow::Result<Self> {
-        let preview = HeadlessPreviewRuntime::new();
-        Self::with_shutdown_owners(preview, gpu).map_err(|failure| {
-            let (error, _, _) = *failure;
-            error
-        })
+    pub(crate) fn with_gpu_adapter(
+        gpu: HeadlessViewerGpuAdapter,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        let preview = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            HeadlessPreviewRuntime::new,
+        )) {
+            Ok(preview) => preview,
+            Err(payload) => {
+                return Err(HeadlessExecutionStartFailure::adapter(
+                    startup_panic_diagnostic(payload),
+                    gpu,
+                ))
+            }
+        };
+        Self::with_shutdown_owners(preview, gpu)
     }
 
     /// Bind already-owned Preview/GPU resources while preserving both owners
     /// for an exact consuming shutdown if admission setup fails.
     pub(crate) fn with_shutdown_owners(
         preview: HeadlessPreviewRuntime,
+        gpu: HeadlessViewerGpuAdapter,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        Self::bind(preview, gpu, configure_headless_gpu_decode_admission)
+    }
+
+    pub(super) fn bind(
+        preview: HeadlessPreviewRuntime,
         mut gpu: HeadlessViewerGpuAdapter,
-    ) -> Result<Self, HeadlessRealtimeBindFailure> {
-        if let Err(error) = configure_headless_gpu_decode_admission(&preview, &mut gpu) {
-            return Err(Box::new((error, preview, gpu)));
+        bind: impl FnOnce(&HeadlessPreviewRuntime, &mut HeadlessViewerGpuAdapter) -> anyhow::Result<()>,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bind(&preview, &mut gpu)))
+                .unwrap_or_else(|payload| Err(startup_panic_diagnostic(payload)));
+        if let Err(error) = result {
+            return Err(HeadlessExecutionStartFailure::binding(error, preview, gpu));
         }
         Ok(Self { preview, gpu, driver: None })
     }
@@ -1719,6 +1735,35 @@ fn execute_headless_gpu_candidate_after_completion_drain<O: HeadlessGpuExecution
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn headless_startup_binding_failure_and_panic_keep_the_complete_pair() {
+        for panic in [false, true] {
+            let preview = HeadlessPreviewRuntime::new();
+            let gpu = HeadlessViewerGpuAdapter::new().expect("real GPU");
+            let result = HeadlessRealtimePlaybackSession::bind(preview, gpu, |preview, gpu| {
+                configure_headless_gpu_decode_admission(preview, gpu)?;
+                assert!(!panic, "injected decoder binding panic");
+                anyhow::bail!("injected decoder binding error");
+            });
+            let failure = match result {
+                Err(failure) => failure,
+                Ok(_) => panic!("fault not reached"),
+            };
+            let (diagnostic, receipt) =
+                failure.shutdown_until(Instant::now() + Duration::from_secs(10));
+            assert!(format!("{diagnostic:#}").contains("injected decoder binding"));
+            assert!(receipt.preview.as_ref().expect("actual Preview").all_workers_terminated());
+            assert!(receipt.all_created_resources_released(), "{receipt:?}");
+            assert!(matches!(
+                receipt.gpu,
+                crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::Adapter(
+                    _
+                )
+            ));
+        }
+    }
 
     #[test]
     fn non_gpu_output_is_an_explicit_usable_binding() {

@@ -14,6 +14,7 @@ use std::sync::{mpsc, Arc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::preview_runtime::PreviewOwnedWorkerShutdown;
 use super::preview_work_notification::PreviewWorkNotifier;
 
 const OBSERVED_PROGRAM_CAPACITY: usize = 128;
@@ -170,6 +171,29 @@ impl PreviewVisualDependencyObserver {
         self.healthy.load(Ordering::Acquire)
     }
 
+    /// Close observation admission before any Preview owner starts joining.
+    pub(crate) fn begin_shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+        let _ = self.command_tx.try_send(ObservationCommand::Shutdown);
+    }
+
+    /// Consume the actual handle with the caller's unchanged absolute deadline.
+    pub(crate) fn shutdown_until(&mut self, deadline: Instant) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(PreviewOwnedWorkerShutdown::NotStarted, |worker| {
+            PreviewOwnedWorkerShutdown::join_until(worker, deadline)
+        })
+    }
+
+    /// Join the actual worker for the explicitly unbounded shutdown interface.
+    pub(crate) fn shutdown_and_wait(&mut self) -> PreviewOwnedWorkerShutdown {
+        self.begin_shutdown();
+        self.worker.take().map_or(
+            PreviewOwnedWorkerShutdown::NotStarted,
+            PreviewOwnedWorkerShutdown::join,
+        )
+    }
+
     /// Observe the exact immutable program used for one Sequence evaluation.
     ///
     /// Repeated frame evaluations of the same `Arc` are deduplicated without
@@ -288,28 +312,16 @@ impl Drop for WorkerHealthGuard {
 
 impl Drop for PreviewVisualDependencyObserver {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Release);
-        let _ = self.command_tx.try_send(ObservationCommand::Shutdown);
         // Resource checks may be blocked in an operating-system filesystem
         // call. Give an ordinary worker a small bounded opportunity to finish,
         // but never make application shutdown depend on unbounded filesystem
         // latency.
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-        let deadline = Instant::now() + WORKER_JOIN_GRACE;
-        while !worker.is_finished() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        if worker.is_finished() {
-            if worker.join().is_err() {
-                tracing::warn!("Preview visual dependency observer panicked during shutdown");
-            }
-        } else {
-            tracing::warn!(
-                "Preview visual dependency observer did not stop within the bounded shutdown grace; detaching a possibly blocked filesystem observation"
-            );
-            drop(worker);
+        match self.shutdown_until(Instant::now() + WORKER_JOIN_GRACE) {
+            PreviewOwnedWorkerShutdown::NotStarted | PreviewOwnedWorkerShutdown::Terminated => {}
+            outcome => tracing::warn!(
+                ?outcome,
+                "Preview visual dependency observer did not return cleanly"
+            ),
         }
     }
 }
@@ -439,6 +451,47 @@ fn touch_worker_recency(recency: &mut VecDeque<SequenceId>, sequence_id: Sequenc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_observer_shutdown_consumes_worker_exactly_once() {
+        let mut observer = PreviewVisualDependencyObserver::with_timing(test_timing());
+        assert_eq!(
+            observer.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            PreviewOwnedWorkerShutdown::Terminated
+        );
+        assert_eq!(
+            observer.shutdown_until(Instant::now()),
+            PreviewOwnedWorkerShutdown::NotStarted
+        );
+    }
+
+    #[test]
+    fn dependency_observer_shutdown_retains_panic_and_does_not_renew_expired_deadline() {
+        let mut observer = PreviewVisualDependencyObserver::with_timing(test_timing());
+        assert_eq!(
+            observer.shutdown_and_wait(),
+            PreviewOwnedWorkerShutdown::Terminated
+        );
+        observer.worker = Some(std::thread::spawn(|| {
+            panic!("injected dependency worker panic")
+        }));
+        assert_eq!(
+            observer.shutdown_until(Instant::now() + Duration::from_secs(5)),
+            PreviewOwnedWorkerShutdown::Panicked
+        );
+        let (release, released) = mpsc::channel();
+        let (finished, finish) = mpsc::channel();
+        observer.worker = Some(std::thread::spawn(move || {
+            released.recv().expect("release controlled worker");
+            finished.send(()).expect("observe return");
+        }));
+        assert_eq!(
+            observer.shutdown_until(Instant::now()),
+            PreviewOwnedWorkerShutdown::TimedOutDetached
+        );
+        release.send(()).expect("release test thread");
+        finish.recv_timeout(Duration::from_secs(5)).expect("test thread returned");
+    }
     use mondrian_core::automation::{ParameterResourceReference, PropertyValue};
     use mondrian_core::{AssetId, Color, FramePosition, Rational, TimelineTime};
     use mondrian_effects::{EffectNode, EffectNodeExt, EffectType};

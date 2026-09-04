@@ -289,11 +289,16 @@ pub(crate) enum PreviewVisualGpuCompletionDisposition {
 
 /// Outcome of synchronously reclaiming one Preview-owned worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PreviewOwnedWorkerShutdown {
+pub enum PreviewOwnedWorkerShutdown {
+    /// No worker handle was created or retained for this owner.
     NotStarted,
+    /// The real worker returned and was joined.
     Terminated,
+    /// The real worker was joined after unwinding.
     Panicked,
+    /// Joining on the same thread would deadlock, so closure is unproved.
     CurrentThreadSkipped,
+    /// The shared deadline expired; the worker remains detached.
     TimedOutDetached,
 }
 
@@ -348,6 +353,8 @@ pub struct PreviewRuntimeShutdownEvidence {
     pub worker_timeouts: u32,
     /// Worker handles detached after the shared qualification deadline.
     pub worker_deadline_detachments: u32,
+    /// Exact required visual-dependency observer receipt; absent is unverified.
+    pub visual_dependency_worker: Option<PreviewOwnedWorkerShutdown>,
     /// Exact startup and terminal evidence for the persistent Timeline render cache.
     pub(crate) timeline_render_cache:
         crate::app::preview_render_cache::PreviewTimelineRenderCacheShutdownEvidence,
@@ -356,7 +363,11 @@ pub struct PreviewRuntimeShutdownEvidence {
 impl PreviewRuntimeShutdownEvidence {
     /// Whether every started worker returned synchronously and without panic.
     pub const fn all_workers_terminated(self) -> bool {
-        self.schema_version == 2
+        self.schema_version == 3
+            && matches!(
+                self.visual_dependency_worker,
+                Some(PreviewOwnedWorkerShutdown::Terminated)
+            )
             && self.workers_started == self.workers_terminated
             && self.worker_panics == 0
             && self.current_thread_detachments == 0
@@ -2571,7 +2582,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
 
 fn join_preview_workers(handles: Vec<JoinHandle<()>>) -> PreviewRuntimeShutdownEvidence {
     let mut evidence = PreviewRuntimeShutdownEvidence {
-        schema_version: 2,
+        schema_version: 3,
         ..PreviewRuntimeShutdownEvidence::default()
     };
     for handle in handles {
@@ -2598,7 +2609,7 @@ fn join_preview_workers_until(
     deadline: Instant,
 ) -> PreviewRuntimeShutdownEvidence {
     let mut evidence = PreviewRuntimeShutdownEvidence {
-        schema_version: 2,
+        schema_version: 3,
         ..PreviewRuntimeShutdownEvidence::default()
     };
     for handle in handles {

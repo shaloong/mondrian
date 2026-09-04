@@ -145,6 +145,8 @@ mod gallery_authoring;
 pub mod golden_project_acceptance;
 mod grade_authoring;
 #[cfg(any(test, feature = "validation"))]
+pub(crate) mod headless_execution_startup;
+#[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_preview_presentation;
 #[cfg(any(test, feature = "validation"))]
 pub(crate) mod headless_realtime_playback;

@@ -37,6 +37,11 @@ use super::endurance_workload::{EnduranceWorkloadError, PreparedEnduranceWorkloa
 use super::execution_resource_coordination::{
     ExecutionResourcePressure, ExecutionResourcePressureSource, ResourceTrimRequest,
 };
+use super::headless_execution_startup::{startup_panic_diagnostic, HeadlessExecutionStartFailure};
+pub use super::headless_execution_startup::{
+    HeadlessStartupClosedFailure, HeadlessStartupGpuShutdownEvidence,
+    HeadlessStartupShutdownEvidence,
+};
 use super::headless_realtime_playback::{
     capture_headless_endurance_owner_snapshot, HeadlessEnduranceOwnerSnapshot,
     HeadlessEnduranceShutdownProjection, HeadlessGpuExecutionDisposition,
@@ -47,8 +52,82 @@ pub use super::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationTerminalKind,
     ViewerGpuDeviceProgressShutdownEvidence as EnduranceGpuShutdownEvidence,
 };
+pub use super::viewer_gpu_startup::ViewerGpuStartupShutdownEvidence;
 use super::waveform_service::{AudioWaveformService, AudioWaveformShutdownEvidence};
 use super::AppState;
+
+/// Actual consuming receipts for a failed execution-group startup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnduranceStartupOwnerClosure {
+    /// Waveform construction unwound before returning a consuming owner.
+    pub waveform_construction_unverified: bool,
+    /// The unique App owner consumed under the same deadline.
+    pub app: AppEnduranceShutdownEvidence,
+    /// Actual Headless creation stage and cleanup, not a normal session snapshot.
+    pub headless: HeadlessStartupShutdownEvidence,
+    /// Present only if Waveform construction actually returned its owner.
+    pub waveform: Option<AudioWaveformShutdownEvidence>,
+}
+
+impl EnduranceStartupOwnerClosure {
+    /// Whether all created owners closed without qualifying the failed startup.
+    pub fn all_created_resources_released(&self) -> bool {
+        !self.waveform_construction_unverified
+            && self.app.all_resources_released()
+            && self.headless.all_created_resources_released()
+            && self.waveform.as_ref().is_none_or(|receipt| receipt.all_resources_released())
+    }
+}
+
+/// Opaque owning startup failure. Consume it before erasing its diagnostic.
+#[must_use = "consume failed execution startup with the actual App owner"]
+pub struct EnduranceExecutionStartFailure {
+    waveform_construction_unverified: bool,
+    headless: HeadlessExecutionStartFailure,
+    waveform: Option<Arc<AudioWaveformService>>,
+}
+
+impl std::fmt::Debug for EnduranceExecutionStartFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EnduranceExecutionStartFailure")
+            .field("headless", &self.headless)
+            .field("waveform_created", &self.waveform.is_some())
+            .finish()
+    }
+}
+
+impl EnduranceExecutionStartFailure {
+    /// Original structured diagnostic; borrowing does not release any owner.
+    pub fn diagnostic(&self) -> &anyhow::Error {
+        self.headless.diagnostic()
+    }
+
+    /// Consume the failed startup and App with one unchanged absolute deadline.
+    pub fn shutdown_until(
+        mut self,
+        mut app: AppState,
+        deadline: Instant,
+    ) -> (anyhow::Error, EnduranceStartupOwnerClosure) {
+        self.headless.begin_shutdown();
+        if let Some(waveform) = &self.waveform {
+            waveform.begin_shutdown();
+        }
+        app.begin_endurance_shutdown();
+        let (diagnostic, headless) = self.headless.shutdown_until(deadline);
+        let waveform = self.waveform.map(|owner| owner.shutdown_until(deadline));
+        let app = app.shutdown_for_endurance(deadline);
+        (
+            diagnostic,
+            EnduranceStartupOwnerClosure {
+                app,
+                headless,
+                waveform,
+                waveform_construction_unverified: self.waveform_construction_unverified,
+            },
+        )
+    }
+}
 
 /// Synchronous closure across Headless and every AppState execution owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,12 +235,43 @@ pub(super) struct EnduranceCachePressureObservation {
 
 impl EnduranceExecutionOwners {
     /// Start real software execution owners without admitting a campaign phase.
-    pub fn start(app: &AppState) -> Result<Self, EnduranceCampaignError> {
-        let realtime = HeadlessRealtimePlaybackSession::new()
-            .map_err(|error| EnduranceCampaignError::Runtime(error.to_string()))?;
-        let waveform = AudioWaveformService::new();
-        waveform.set_library(app.asset_library_handle());
-        Ok(Self { realtime: Some(realtime), waveform })
+    pub fn start(app: &AppState) -> Result<Self, EnduranceExecutionStartFailure> {
+        Self::start_with_headless(app, HeadlessRealtimePlaybackSession::new)
+    }
+
+    pub(super) fn start_with_headless(
+        app: &AppState,
+        create: impl FnOnce() -> Result<HeadlessRealtimePlaybackSession, HeadlessExecutionStartFailure>,
+    ) -> Result<Self, EnduranceExecutionStartFailure> {
+        let realtime = create().map_err(|headless| EnduranceExecutionStartFailure {
+            headless,
+            waveform: None,
+            waveform_construction_unverified: false,
+        })?;
+        let mut waveform = None;
+        let setup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            waveform = Some(AudioWaveformService::new());
+            waveform
+                .as_ref()
+                .expect("created Waveform owner")
+                .set_library(app.asset_library_handle());
+        }));
+        if let Err(payload) = setup {
+            let (preview, gpu) = realtime.into_shutdown_owners();
+            return Err(EnduranceExecutionStartFailure {
+                waveform_construction_unverified: waveform.is_none(),
+                headless: HeadlessExecutionStartFailure::binding(
+                    startup_panic_diagnostic(payload),
+                    preview,
+                    gpu,
+                ),
+                waveform,
+            });
+        }
+        Ok(Self {
+            realtime: Some(realtime),
+            waveform: waveform.expect("completed Waveform setup"),
+        })
     }
 
     pub(super) fn begin_realtime_window(
@@ -395,7 +505,7 @@ impl EnduranceExecutionOwners {
                     ),
                 };
             let preview = PreviewRuntimeShutdownEvidence {
-                schema_version: 2,
+                schema_version: 3,
                 unverified_async_reaps: 1,
                 ..PreviewRuntimeShutdownEvidence::default()
             };
@@ -754,6 +864,8 @@ impl EnduranceRuntimeClosure {
 /// Raw receipts for the exact owner inventory consumed by a product phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnduranceTerminalOwners {
+    /// Exact partial-start inventory; no successful-session snapshot is fabricated.
+    Startup(Box<EnduranceStartupOwnerClosure>),
     /// Actual complete Headless, Waveform and App consuming shutdown receipts.
     Realtime(Box<EnduranceExecutionOwnerClosure>),
     /// Actual App shutdown where no execution group was installed.
@@ -764,6 +876,7 @@ impl EnduranceTerminalOwners {
     /// Borrow the one App receipt without copying or reinterpreting its inventory.
     pub fn app(&self) -> &AppEnduranceShutdownEvidence {
         match self {
+            Self::Startup(owners) => &owners.app,
             Self::Realtime(owners) => &owners.app,
             Self::AppOnly(app) => app,
         }

@@ -134,10 +134,10 @@ function Assert-CleanPreview {
         "owner_slot", "schema_version", "workers_started", "workers_terminated", "worker_panics",
         "current_thread_detachments", "unverified_async_reaps", "worker_timeouts",
         "worker_deadline_detachments", "render_cache_schema_version",
-        "render_cache_required", "render_cache_start_failed", "render_cache_worker",
+        "render_cache_required", "render_cache_start_failed", "render_cache_worker", "visual_dependency_worker",
         "render_cache_aggregate_outcome", "all_resources_released"
     ) $Context
-    if ([uint64]$Preview.schema_version -ne 2 -or
+    if ([uint64]$Preview.schema_version -ne 3 -or
         [uint64]$Preview.render_cache_schema_version -ne 1 -or
         [uint64]$Preview.workers_started -ne [uint64]$Preview.workers_terminated) {
         throw "$Context has an unknown schema or incomplete worker inventory"
@@ -150,6 +150,7 @@ function Assert-CleanPreview {
     }
     Assert-Bool $Preview.render_cache_required $true "$Context.render_cache_required"
     Assert-Bool $Preview.render_cache_start_failed $false "$Context.render_cache_start_failed"
+    if ($Preview.visual_dependency_worker -cne 'terminated') { throw "$Context.visual_dependency_worker did not join cleanly" }
     if ([string]$Preview.render_cache_aggregate_outcome -ne "terminated") {
         throw "$Context render-cache aggregate did not terminate"
     }

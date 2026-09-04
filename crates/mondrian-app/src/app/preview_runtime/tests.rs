@@ -13253,13 +13253,40 @@ fn synchronous_preview_shutdown_reclaims_complete_worker_inventory() {
 
     let evidence = runtime.shutdown_and_wait();
 
-    assert_eq!(evidence.schema_version, 2);
-    assert_eq!(evidence.workers_started, 4);
-    assert_eq!(evidence.workers_terminated, 4);
+    assert_eq!(evidence.schema_version, 3);
+    assert_eq!(evidence.workers_started, 5);
+    assert_eq!(evidence.workers_terminated, 5);
+    assert_eq!(
+        evidence.visual_dependency_worker,
+        Some(PreviewOwnedWorkerShutdown::Terminated)
+    );
     assert_eq!(evidence.worker_panics, 0);
     assert_eq!(evidence.current_thread_detachments, 0);
     assert_eq!(evidence.unverified_async_reaps, 0);
     assert!(evidence.all_workers_terminated());
+}
+
+#[test]
+fn preview_shutdown_requires_explicit_healthy_dependency_observer_receipt() {
+    let runtime = PreviewProductionRuntime::<()>::new_without_workers_for_test();
+    let mut evidence = runtime.shutdown_and_wait();
+    assert!(evidence.all_workers_terminated());
+    for outcome in [
+        None,
+        Some(PreviewOwnedWorkerShutdown::NotStarted),
+        Some(PreviewOwnedWorkerShutdown::Panicked),
+        Some(PreviewOwnedWorkerShutdown::TimedOutDetached),
+        Some(PreviewOwnedWorkerShutdown::CurrentThreadSkipped),
+    ] {
+        evidence.visual_dependency_worker = outcome;
+        assert!(!evidence.all_workers_terminated());
+    }
+    evidence.visual_dependency_worker = Some(PreviewOwnedWorkerShutdown::Terminated);
+    evidence.schema_version = 2;
+    assert!(
+        !evidence.all_workers_terminated(),
+        "old schema cannot acquire new inventory proof"
+    );
 }
 
 #[test]
@@ -13306,7 +13333,7 @@ fn bounded_preview_shutdown_detaches_a_worker_at_the_absolute_deadline() {
 
     let evidence = join_preview_workers_until(vec![worker], Instant::now());
 
-    assert_eq!(evidence.schema_version, 2);
+    assert_eq!(evidence.schema_version, 3);
     assert_eq!(evidence.workers_started, 1);
     assert_eq!(evidence.workers_terminated, 0);
     assert_eq!(evidence.worker_timeouts, 1);
@@ -13326,8 +13353,8 @@ fn synchronous_preview_shutdown_rejects_prior_async_reap_as_unverified() {
     let evidence = runtime.shutdown_and_wait();
 
     assert_eq!(evidence.unverified_async_reaps, 1);
-    assert_eq!(evidence.workers_started, 3);
-    assert_eq!(evidence.workers_terminated, 2);
+    assert_eq!(evidence.workers_started, 4);
+    assert_eq!(evidence.workers_terminated, 3);
     assert!(!evidence.all_workers_terminated());
 }
 

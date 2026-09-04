@@ -286,15 +286,25 @@ the coordinator must not take the final sample or admit the next phase.
 
 If a consumed phase later returns an error, inspect
 `EnduranceCampaignError::WithTerminalEvidence`: it keeps the original error and
-the complete owner-free Realtime or App-only shutdown receipt, including clean
+the complete owner-free Realtime, Startup or App-only shutdown receipt, including clean
 cleanup followed by publication failure. A receipt is not a successful terminal
 sample. Next-phase preparation clears only its error attachment before loading
 the next workload, and cannot make a missing terminal sample admissible.
 The shared GPU receipt retains both retirement-requested and exact terminal
 kind; explicit device destruction fails normal qualification just like loss or
-progress failure. Safe resource release is a separate claim. Partial GPU/Preview
-constructor/bind failure propagation and public raw success reports are not yet
-closed by this change.
+progress failure. Safe resource release is a separate claim. Headless GPU
+constructor/bind failures retain their actual owners until consuming cleanup;
+Startup receipts name partial Renderer inventory and optional Preview/Waveform.
+They never fabricate a normal-session snapshot or turn failed startup into a
+qualified phase. Preview/Waveform internal constructor unwinds before returning
+an owner remain explicitly unverified. Window partial-start receipts and public
+durable raw success reports are still open.
+
+Preview receipt schema 3 explicitly requires the real dependency-observer worker
+to join, alongside existing workers and render-cache evidence. Old schema-2
+records do not prove this inventory; the strict performance validator rejects
+them. Perf startup-error projections are distinct from normal runtime closure,
+and successful CPAL/native-surface reports are emitted after closure validation.
 
 At every profile cadence:
 

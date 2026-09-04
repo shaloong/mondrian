@@ -162,7 +162,8 @@ pub(crate) enum ViewerGpuDeviceProgressObservation {
 }
 
 /// Why one complete Viewer device generation became terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViewerGpuDeviceGenerationTerminalKind {
     /// wgpu reported an unexpected concrete device loss.
     DeviceLost,
@@ -170,6 +171,19 @@ pub enum ViewerGpuDeviceGenerationTerminalKind {
     DeviceDestroyed,
     /// The progress domain could no longer prove submitted work completion.
     ProgressFailure,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl ViewerGpuDeviceGenerationTerminalKind {
+    /// One unexpected physical device-loss observation.
+    pub const fn device_loss_count(self) -> u64 {
+        matches!(self, Self::DeviceLost) as u64
+    }
+
+    /// One non-loss terminal fault, including explicit device destruction.
+    pub const fn fatal_error_count(self) -> u64 {
+        matches!(self, Self::DeviceDestroyed | Self::ProgressFailure) as u64
+    }
 }
 
 /// First terminal of one Viewer device generation.
@@ -304,7 +318,7 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
 
 /// Bounded synchronous closure evidence for one Viewer GPU progress domain.
 #[cfg(any(test, feature = "validation"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ViewerGpuDeviceProgressShutdownEvidence {
     /// Whether this exact progress worker started.
     pub worker_started: bool,
@@ -334,6 +348,12 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
     /// while failing this stronger predicate. Partial startup has its own inventory
     /// and must not fabricate a Renderer receipt to satisfy normal qualification.
     pub const fn qualifies_normal_runtime(self) -> bool {
+        self.qualifies_created_inventory(true)
+    }
+
+    /// Check the explicitly observed startup inventory, never infer it from a
+    /// missing retirement receipt or use this predicate to release live owners.
+    pub(crate) const fn qualifies_created_inventory(self, renderer_created: bool) -> bool {
         self.worker_started
             && self.worker_terminated
             && !self.worker_panicked
@@ -341,27 +361,27 @@ impl ViewerGpuDeviceProgressShutdownEvidence {
             && self.retirement_requested
             && self.retirement_handoff_accepted
             && self.retirement_completed
-            && matches!(self.renderer_retirement, Some(receipt) if receipt.is_healthy())
+            && match self.renderer_retirement {
+                Some(receipt) => renderer_created && receipt.is_healthy(),
+                None => !renderer_created,
+            }
             && self.generation_terminal_kind.is_none()
     }
 
     /// Unexpected device losses observed through final shutdown.
     pub const fn device_loss_count(self) -> u64 {
-        matches!(
-            self.generation_terminal_kind,
-            Some(ViewerGpuDeviceGenerationTerminalKind::DeviceLost)
-        ) as u64
+        match self.generation_terminal_kind {
+            Some(kind) => kind.device_loss_count(),
+            None => 0,
+        }
     }
 
     /// Non-loss terminal faults, including explicit destruction during qualification.
     pub const fn fatal_error_count(self) -> u64 {
-        matches!(
-            self.generation_terminal_kind,
-            Some(
-                ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed
-                    | ViewerGpuDeviceGenerationTerminalKind::ProgressFailure
-            )
-        ) as u64
+        match self.generation_terminal_kind {
+            Some(kind) => kind.fatal_error_count(),
+            None => 0,
+        }
     }
 }
 

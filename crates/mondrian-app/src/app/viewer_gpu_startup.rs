@@ -12,6 +12,24 @@ use super::viewer_gpu_device_progress::{
     ViewerGpuDeviceProgressStartError, ViewerGpuDeviceProgressWake,
 };
 
+/// Exact created inventory and bounded retirement of a partial GPU generation.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ViewerGpuStartupShutdownEvidence {
+    /// Observed before retirement, not inferred from an absent terminal receipt.
+    pub renderer_created: bool,
+    /// Actual progress-worker and optional Renderer retirement facts.
+    pub progress: super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl ViewerGpuStartupShutdownEvidence {
+    /// Whether every actually created owner closed without a qualification fault.
+    pub const fn all_created_resources_released(self) -> bool {
+        self.progress.qualifies_created_inventory(self.renderer_created)
+    }
+}
+
 /// Owns a started progress worker and exactly the Renderer created so far.
 #[must_use = "activate the generation or retain it through consuming startup shutdown"]
 pub(crate) struct ViewerGpuStartupOwner {
@@ -67,16 +85,19 @@ impl ViewerGpuStartupOwner {
         Some(generation)
     }
 
-    /// Inspect partial retirement at the test seam using one unchanged deadline.
-    /// Production failure-return plumbing must retain the live guard before
-    /// promoting this to a bounded validation shutdown interface.
-    #[cfg(test)]
+    /// Consume the actual partial inventory using one unchanged caller deadline.
+    /// An already activated guard has no remaining owner and returns no receipt.
+    #[cfg(any(test, feature = "validation"))]
     pub(crate) fn shutdown_until(
         mut self,
         deadline: std::time::Instant,
-    ) -> Option<super::viewer_gpu_device_progress::ViewerGpuDeviceProgressShutdownEvidence> {
+    ) -> Option<ViewerGpuStartupShutdownEvidence> {
+        let renderer_created = self.runtime.is_some();
         let (progress, retirement) = self.take_retirement()?;
-        Some(progress.retire_device_generation_until(retirement, deadline))
+        Some(ViewerGpuStartupShutdownEvidence {
+            renderer_created,
+            progress: progress.retire_device_generation_until(retirement, deadline),
+        })
     }
 
     fn take_retirement(&mut self) -> Option<(ViewerGpuDeviceProgressOwner, StartupRetirement)> {

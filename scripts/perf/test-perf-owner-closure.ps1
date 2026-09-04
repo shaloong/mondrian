@@ -187,7 +187,8 @@ Assert-Rejected { Assert-MondrianPerfCases @($rows[0], $rows[0], $rows[2]) "proj
 
 # Separate actual owners may have identical terminal facts, but never the same slot.
 $preview = [pscustomobject]@{
-    owner_slot = 0; schema_version = 2; workers_started = 1; workers_terminated = 1
+    owner_slot = 0; schema_version = 3; workers_started = 2; workers_terminated = 2
+    visual_dependency_worker = 'terminated'
     worker_panics = 0; current_thread_detachments = 0; unverified_async_reaps = 0
     worker_timeouts = 0; worker_deadline_detachments = 0; render_cache_schema_version = 1
     render_cache_required = $true; render_cache_start_failed = $false
@@ -204,6 +205,14 @@ $second.owner_slot = 1
 $good.owner_closure.preview_owner_count = 2
 $good.owner_closure.previews = @($preview, $second)
 Assert-MondrianCleanOwnerClosure $good "two distinct Preview owners" 2 $false
+foreach ($outcome in @($null, 'not-started', 'panicked', 'timed-out-detached', 'current-thread-skipped')) {
+    $bad = Copy-JsonValue $good
+    $bad.owner_closure.previews[0].visual_dependency_worker = $outcome
+    Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "invalid dependency observer" 2 $false } "dependency observer $outcome"
+}
+$bad = Copy-JsonValue $good
+$bad.owner_closure.previews[0].schema_version = 2
+Assert-Rejected { Assert-MondrianCleanOwnerClosure $bad "old Preview inventory" 2 $false } "old Preview schema"
 $good.owner_closure.previews = @($preview, $preview)
 Assert-Rejected { Assert-MondrianCleanOwnerClosure $good "duplicate Preview" 2 $false } "duplicate Preview slot"
 

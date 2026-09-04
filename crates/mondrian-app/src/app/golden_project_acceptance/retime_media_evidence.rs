@@ -474,7 +474,8 @@ fn execute_fixture_retime_media_evidence(
     )?;
 
     state.seek(sample_frame)?;
-    let mut viewer = GoldenHeadlessPreview::new()?;
+    let mut viewer =
+        GoldenHeadlessPreview::new(std::time::Instant::now() + VIEWER_PRESENTATION_TIMEOUT)?;
     let reverse_presentation = viewer.present_current(state, VIEWER_PRESENTATION_TIMEOUT)?;
 
     let reverse_hold = dispatch_author_transition(

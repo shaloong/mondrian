@@ -5,6 +5,7 @@
 //! registry; successful completion means commands were submitted and the GPU
 //! queue reached the recorded presentation output.
 
+use super::headless_execution_startup::{startup_panic_diagnostic, HeadlessExecutionStartFailure};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 #[cfg(test)]
@@ -56,6 +57,11 @@ use mondrian_renderer::{
     ViewerGpuPresentationOutputLease, ViewerHeterogeneousGpuCompletedBatch, ViewerSourceRect,
 };
 const HEADLESS_GPU_TIMESTAMP_RING_CAPACITY: usize = 16;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeadlessGpuStartupStage {
+    ProgressStarted,
+    RendererCreated,
+}
 const HEADLESS_NATIVE_IMPORT_GPU_TIMING_DEFAULT_OBSERVATION_CAPACITY: usize = 65_536;
 const HEADLESS_NATIVE_IMPORT_GPU_TIMING_MAX_OBSERVATION_CAPACITY: usize = 1_048_576;
 static NEXT_HEADLESS_NATIVE_IMPORT_GPU_TIMING_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -668,7 +674,7 @@ impl HeadlessViewerGpuAdapter {
     /// Create a high-performance headless device with the same native-video
     /// feature selection used by the production Window Adapter. Native-import
     /// GPU timing is explicitly disabled by default.
-    pub(crate) fn new() -> Result<Self, HeadlessViewerGpuError> {
+    pub(crate) fn new() -> Result<Self, HeadlessExecutionStartFailure> {
         Self::new_with_native_import_gpu_timing_policy(NativeVideoImportGpuTimingPolicy::Disabled)
     }
 
@@ -679,7 +685,7 @@ impl HeadlessViewerGpuAdapter {
     /// frozen workload instead of relying on this convenience constructor.
     pub(crate) fn new_with_native_import_gpu_timing_policy(
         policy: NativeVideoImportGpuTimingPolicy,
-    ) -> Result<Self, HeadlessViewerGpuError> {
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
         let observation_capacity = match policy {
             NativeVideoImportGpuTimingPolicy::Disabled => 0,
             NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
@@ -697,75 +703,117 @@ impl HeadlessViewerGpuAdapter {
     pub(crate) fn new_with_native_import_gpu_timing_policy_and_observation_capacity(
         policy: NativeVideoImportGpuTimingPolicy,
         observation_capacity: usize,
-    ) -> Result<Self, HeadlessViewerGpuError> {
-        validate_native_import_gpu_timing_observation_capacity(policy, observation_capacity)?;
-        let instance =
-            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(request_adapter_with_native_video_preference(
-            &instance,
-            &wgpu::RequestAdapterOptions {
-                compatible_surface: None,
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                ..wgpu::RequestAdapterOptions::default()
-            },
-        ))
-        .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
-        let supported_features = adapter.features();
-        let raw_adapter_info = adapter.get_info();
-        let viewer_suffix_timing_features = gpu_timestamp_query_device_features(supported_features);
-        let native_import_timing_features = match policy {
-            NativeVideoImportGpuTimingPolicy::Disabled => wgpu::Features::empty(),
-            NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
-                gpu_timestamp_query_device_features(supported_features)
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        Self::construct(policy, observation_capacity, |_| Ok(()))
+    }
+
+    fn construct(
+        policy: NativeVideoImportGpuTimingPolicy,
+        observation_capacity: usize,
+        mut observe_stage: impl FnMut(HeadlessGpuStartupStage) -> anyhow::Result<()>,
+    ) -> Result<Self, HeadlessExecutionStartFailure> {
+        // The guard lives outside the catch boundary: unwinding never erases
+        // the worker inventory whose consuming receipt the caller still needs.
+        let mut startup = None;
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> anyhow::Result<Self> {
+                validate_native_import_gpu_timing_observation_capacity(
+                    policy,
+                    observation_capacity,
+                )?;
+                let instance = wgpu::Instance::new(
+                    wgpu::InstanceDescriptor::new_without_display_handle_from_env(),
+                );
+                let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+                    &instance,
+                    &wgpu::RequestAdapterOptions {
+                        compatible_surface: None,
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        force_fallback_adapter: false,
+                        ..wgpu::RequestAdapterOptions::default()
+                    },
+                ))
+                .map_err(|error| HeadlessViewerGpuError::Adapter(error.to_string()))?;
+                let supported_features = adapter.features();
+                let raw_adapter_info = adapter.get_info();
+                let viewer_suffix_timing_features =
+                    gpu_timestamp_query_device_features(supported_features);
+                let native_import_timing_features = match policy {
+                    NativeVideoImportGpuTimingPolicy::Disabled => wgpu::Features::empty(),
+                    NativeVideoImportGpuTimingPolicy::Enabled { .. } => {
+                        gpu_timestamp_query_device_features(supported_features)
+                    }
+                };
+                let descriptor = wgpu::DeviceDescriptor {
+                    required_features: native_video_texture_device_features(supported_features)
+                        | ocio_lut_filtering_device_features(supported_features)
+                        | viewer_suffix_timing_features
+                        | native_import_timing_features,
+                    ..wgpu::DeviceDescriptor::default()
+                };
+                let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
+                    .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
+                // CPU-only fallible state must precede progress/Renderer worker creation.
+                let native_import_gpu_timing =
+                    HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
+                let adapter_info = HeadlessViewerGpuAdapterInfo {
+                    name: raw_adapter_info.name,
+                    vendor: raw_adapter_info.vendor,
+                    device: raw_adapter_info.device,
+                    device_type: format!("{:?}", raw_adapter_info.device_type),
+                    backend: format!("{:?}", raw_adapter_info.backend),
+                    driver: raw_adapter_info.driver,
+                    driver_info: raw_adapter_info.driver_info,
+                };
+                // Retain partial ownership through every subsequent error and unwind.
+                startup = Some(ViewerGpuStartupOwner::new(
+                    &device,
+                    &queue,
+                    ViewerGpuDeviceProgressWake::default(),
+                )?);
+                observe_stage(HeadlessGpuStartupStage::ProgressStarted)?;
+                let timestamp_ring = GpuTimestampQueryRing::new(
+                    &device,
+                    &queue,
+                    HEADLESS_GPU_TIMESTAMP_RING_CAPACITY,
+                );
+                startup.as_mut().expect("created progress guard").install_runtime(
+                    ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
+                        &adapter, &device, &queue, policy,
+                    )
+                    .map_err(HeadlessViewerGpuError::from)?,
+                );
+                observe_stage(HeadlessGpuStartupStage::RendererCreated)?;
+                Ok(Self {
+                    device_progress: ViewerGpuDeviceGenerationMember::empty(),
+                    device,
+                    queue,
+                    runtime: ViewerGpuDeviceGenerationMember::empty(),
+                    timestamp_ring,
+                    adapter_info,
+                    native_import_gpu_timing,
+                    reported_orphaned_completion_count: 0,
+                    submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
+                    physical_outputs: ViewerGpuPublicationSlots::default(),
+                    #[cfg(any(test, feature = "validation"))]
+                    staged_successors: PreviewGpuFrameStaging::default(),
+                })
+            }))
+            .unwrap_or_else(|payload| Err(startup_panic_diagnostic(payload)));
+        let mut adapter = match result {
+            Ok(adapter) => adapter,
+            Err(diagnostic) => {
+                return Err(match startup {
+                    Some(owner) => HeadlessExecutionStartFailure::partial(diagnostic, owner),
+                    None => HeadlessExecutionStartFailure::before_progress(diagnostic),
+                })
             }
         };
-        let descriptor = wgpu::DeviceDescriptor {
-            required_features: native_video_texture_device_features(supported_features)
-                | ocio_lut_filtering_device_features(supported_features)
-                | viewer_suffix_timing_features
-                | native_import_timing_features,
-            ..wgpu::DeviceDescriptor::default()
-        };
-        let (device, queue) = pollster::block_on(adapter.request_device(&descriptor))
-            .map_err(|error| HeadlessViewerGpuError::Device(error.to_string()))?;
-        // CPU-only fallible state must precede progress/Renderer worker creation.
-        let native_import_gpu_timing =
-            HeadlessNativeVideoImportGpuTimingSession::new(observation_capacity)?;
-        let adapter_info = HeadlessViewerGpuAdapterInfo {
-            name: raw_adapter_info.name,
-            vendor: raw_adapter_info.vendor,
-            device: raw_adapter_info.device,
-            device_type: format!("{:?}", raw_adapter_info.device_type),
-            backend: format!("{:?}", raw_adapter_info.backend),
-            driver: raw_adapter_info.driver,
-            driver_info: raw_adapter_info.driver_info,
-        };
-        // Retain partial ownership through every subsequent error and unwind.
-        let mut startup =
-            ViewerGpuStartupOwner::new(&device, &queue, ViewerGpuDeviceProgressWake::default())?;
-        let timestamp_ring =
-            GpuTimestampQueryRing::new(&device, &queue, HEADLESS_GPU_TIMESTAMP_RING_CAPACITY);
-        startup.install_runtime(
-            ViewerGpuExecutionRuntime::new_with_native_import_gpu_timing_policy(
-                &adapter, &device, &queue, policy,
-            )?,
-        );
-        let mut adapter = Self {
-            device_progress: ViewerGpuDeviceGenerationMember::empty(),
-            device,
-            queue,
-            runtime: ViewerGpuDeviceGenerationMember::empty(),
-            timestamp_ring,
-            adapter_info,
-            native_import_gpu_timing,
-            reported_orphaned_completion_count: 0,
-            submission_lifecycle: ViewerGpuSubmissionLifecycle::new(),
-            physical_outputs: ViewerGpuPublicationSlots::default(),
-            #[cfg(any(test, feature = "validation"))]
-            staged_successors: PreviewGpuFrameStaging::default(),
-        };
-        let (progress, runtime) = startup.activate().expect("completed Headless GPU startup");
+        // Activation follows all fallible assembly. Only moves remain.
+        let (progress, runtime) = startup
+            .as_mut()
+            .and_then(ViewerGpuStartupOwner::activate)
+            .expect("completed Headless GPU startup");
         adapter.device_progress = ViewerGpuDeviceGenerationMember::new(progress);
         adapter.runtime = ViewerGpuDeviceGenerationMember::new(runtime);
         Ok(adapter)
@@ -823,20 +871,12 @@ impl HeadlessViewerGpuAdapter {
     pub(crate) fn endurance_snapshot(&self) -> HeadlessViewerGpuEnduranceSnapshot {
         let terminal = self.device_progress.generation_terminal();
         let terminal_kind = terminal.as_ref().map(|terminal| terminal.kind);
-        let device_lost = terminal_kind
-            == Some(
-                crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::DeviceLost,
-            );
-        let progress_failed = terminal_kind
-            == Some(
-                crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind::ProgressFailure,
-            );
         HeadlessViewerGpuEnduranceSnapshot {
             submission_owners: self.submission_lifecycle.active_count(),
             physical_output_owners: self.physical_outputs.active_count(),
             staged_successor_owners: self.staged_successors.len(),
-            device_loss_count: u64::from(device_lost),
-            fatal_error_count: u64::from(progress_failed),
+            device_loss_count: terminal_kind.map_or(0, |kind| kind.device_loss_count()),
+            fatal_error_count: terminal_kind.map_or(0, |kind| kind.fatal_error_count()),
         }
     }
 
@@ -2070,6 +2110,67 @@ fn duration_us(started: Instant, completed: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn headless_startup_invalid_policy_never_creates_a_progress_owner() {
+        let failure = match super::HeadlessViewerGpuAdapter::new_with_native_import_gpu_timing_policy_and_observation_capacity(super::NativeVideoImportGpuTimingPolicy::Disabled, 1) {
+            Err(failure) => failure,
+            Ok(_) => panic!("invalid observation policy accepted"),
+        };
+        assert!(failure.diagnostic().is::<super::HeadlessViewerGpuError>());
+        let (_, receipt) = failure.shutdown_until(std::time::Instant::now());
+        assert_eq!(
+            receipt.gpu,
+            crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence::NotStarted
+        );
+        assert!(receipt.all_created_resources_released());
+    }
+
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn headless_startup_constructor_failures_retain_exact_created_renderer_inventory() {
+        use crate::app::headless_execution_startup::HeadlessStartupGpuShutdownEvidence;
+        for stage in [
+            super::HeadlessGpuStartupStage::ProgressStarted,
+            super::HeadlessGpuStartupStage::RendererCreated,
+        ] {
+            for panic in [false, true] {
+                let result = super::HeadlessViewerGpuAdapter::construct(
+                    super::NativeVideoImportGpuTimingPolicy::Disabled,
+                    0,
+                    |observed| {
+                        if observed == stage {
+                            assert!(!panic, "injected Headless constructor panic");
+                            anyhow::bail!("injected Headless constructor error");
+                        }
+                        Ok(())
+                    },
+                );
+                let failure = match result {
+                    Err(failure) => failure,
+                    Ok(_) => panic!("fault not reached"),
+                };
+                let (error, receipt) = failure
+                    .shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+                assert!(format!("{error:#}").contains("injected Headless constructor"));
+                assert!(receipt.preview.is_none());
+                assert!(receipt.all_created_resources_released(), "{receipt:?}");
+                let HeadlessStartupGpuShutdownEvidence::Partial(partial) = receipt.gpu else {
+                    panic!("not a partial generation")
+                };
+                let renderer_created = stage == super::HeadlessGpuStartupStage::RendererCreated;
+                assert_eq!(partial.renderer_created, renderer_created);
+                assert_eq!(
+                    partial.progress.renderer_retirement.is_some(),
+                    renderer_created
+                );
+                assert_eq!(
+                    partial.progress.qualifies_normal_runtime(),
+                    renderer_created
+                );
+            }
+        }
+    }
+
     #[test]
     #[ignore = "requires a real local GPU"]
     fn real_gpu_retirement_carries_joined_renderer_receipt() {
