@@ -23,6 +23,8 @@ pub(crate) enum SingleWorkerPhase {
 /// Point-in-time physical worker facts.
 #[derive(Debug, Clone)]
 pub(crate) struct SingleWorkerActivitySnapshot<Identity> {
+    /// The domain permanently retired its result-publication transport.
+    pub(crate) publication_revoked: bool,
     /// Exact current physical identity and phase, when the worker owns one.
     pub(crate) current: Option<(Identity, SingleWorkerPhase)>,
     /// Completed identities whose results have not been consumed yet.
@@ -30,6 +32,7 @@ pub(crate) struct SingleWorkerActivitySnapshot<Identity> {
 }
 
 struct SingleWorkerActivityState<Identity> {
+    publication_revoked: bool,
     current: Option<(Identity, SingleWorkerPhase)>,
     awaiting_publication: HashSet<Identity>,
 }
@@ -37,6 +40,7 @@ struct SingleWorkerActivityState<Identity> {
 impl<Identity> Default for SingleWorkerActivityState<Identity> {
     fn default() -> Self {
         Self {
+            publication_revoked: false,
             current: None,
             awaiting_publication: HashSet::new(),
         }
@@ -85,10 +89,19 @@ where
         self.state.lock().awaiting_publication.remove(identity);
     }
 
+    /// Retire dropped result identities without hiding a still-running owner.
+    /// Late lease completion cannot repopulate a revoked publication transport.
+    pub(crate) fn revoke_publication(&self) {
+        let mut state = self.state.lock();
+        state.publication_revoked = true;
+        state.awaiting_publication.clear();
+    }
+
     /// Snapshot physical phase without exposing domain lifecycle state.
     pub(crate) fn snapshot(&self) -> SingleWorkerActivitySnapshot<Identity> {
         let state = self.state.lock();
         SingleWorkerActivitySnapshot {
+            publication_revoked: state.publication_revoked,
             current: state.current.clone(),
             awaiting_publication: state.awaiting_publication.iter().cloned().collect(),
         }
@@ -106,7 +119,9 @@ where
         if state.current.as_ref().is_some_and(|(current, _)| current == identity) {
             state.current = None;
         }
-        state.awaiting_publication.insert(identity.clone());
+        if !state.publication_revoked {
+            state.awaiting_publication.insert(identity.clone());
+        }
     }
 
     fn abandon(&self, identity: &Identity) {
@@ -169,6 +184,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revoked_transport_clears_committed_results_and_rejects_late_publication() {
+        let activity = Arc::new(SingleWorkerActivity::default());
+        let mut completed = activity.begin(1_u64);
+        completed.finish_for_publication();
+        completed.commit_publication();
+        drop(completed);
+        let mut running = activity.begin(2);
+        running.mark_running();
+        activity.revoke_publication();
+        let snapshot = activity.snapshot();
+        assert!(snapshot.publication_revoked);
+        assert!(snapshot.awaiting_publication.is_empty());
+        assert_eq!(snapshot.current, Some((2, SingleWorkerPhase::Running)));
+        running.finish_for_publication();
+        running.commit_publication();
+        drop(running);
+        let snapshot = activity.snapshot();
+        assert!(snapshot.current.is_none());
+        assert!(snapshot.awaiting_publication.is_empty());
+        // Already queued canceled work still owns a real physical lease.
+        let queued = activity.begin(3);
+        assert!(activity.snapshot().current.is_some());
+        drop(queued);
+        assert!(activity.snapshot().current.is_none());
+    }
 
     #[test]
     fn phase_and_publication_are_distinct_physical_states() {

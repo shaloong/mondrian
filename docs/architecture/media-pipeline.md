@@ -497,6 +497,25 @@ failure cache. A worker decodes through `PreviewDecodeRequest` with
 canonical source-to-working and working-to-sRGB output boundaries, and returns
 only a validated UI-independent `ThumbnailRasterFrame`.
 
+Thumbnail construction first prepares the complete inert owner and both bounded
+transports, then installs the actual native JoinHandle before later Host setup.
+Shutdown revokes shared admission, cancels pending/deferred requests, releases
+both request and result endpoints (including a worker blocked on a full result
+queue), and consumes the retained handle under the caller's original deadline.
+Transport retirement also revokes pending publication identities in the shared
+activity Module. Revocation cannot hide the current physical worker and late
+lease completion cannot recreate a dropped result's retained key. The receipt
+requires both current and awaiting-publication inventories to be empty.
+The immutable schema-1 receipt distinguishes prepared, ordinary failed startup,
+normal join, panic/payload abandonment and deadline detachment. A later call
+cannot repair a missed deadline; shared lookup handles cannot reopen admission.
+Consuming closure first tries to acquire unique lifecycle ownership. A concurrent
+startup/closer returns typed `LifecycleBusy` immediately, without inferred worker
+inventory or waiting for another caller's deadline. Ordinary short state locks
+mean the Interface is not a hard-realtime guarantee. Host retains this unavailable
+outcome separately and cannot admit it as a clean shutdown receipt.
+Ordinary Drop is a bounded fallback, not shutdown qualification.
+
 `app_ui::asset_thumbnails::AssetThumbnailAdapter` is a shallow Window Adapter.
 It maps a resident raster into `RasterImage` while sharing the same `Arc<[u8]>`;
 it owns no worker, queue, cache, color interpretation, generation, retry, or

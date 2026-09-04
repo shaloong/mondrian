@@ -2455,26 +2455,46 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
             Some("Window validation UI services returned no typed shutdown evidence".to_owned())
         }
     };
-    let operation_result = match (
+    let published = match result.lock() {
+        Ok(mut receipt) => receipt.take(),
+        Err(_) => Some(Err("Surface/device reopen result lock poisoned".to_owned())),
+    };
+    let operation_result = merge_window_operation_result(
+        published,
         ui_result.map_err(|error| error.to_string()),
         ui_service_failure,
-        result.lock(),
-    ) {
-        (Err(error), None, _) => Err(error),
-        (Err(error), Some(cleanup), _) => Err(format!(
-            "{error}; UI service cleanup also failed: {cleanup}"
-        )),
-        (Ok(()), Some(cleanup), _) => Err(cleanup),
-        (Ok(()), None, Ok(mut receipt)) => receipt.take().unwrap_or_else(|| {
-            Err("Surface/device reopen validation exited without a receipt".to_owned())
-        }),
-        (Ok(()), None, Err(_)) => Err("Surface/device reopen result lock poisoned".to_owned()),
-    };
+    );
     AppUiSurfaceDeviceReopenRun {
         app_state,
         result: operation_result,
         ui_shutdown,
         recovery_pump,
+    }
+}
+
+/// Preserve a published operation failure independently of loop and cleanup failures.
+#[cfg(feature = "validation")]
+fn merge_window_operation_result<T>(
+    published: Option<Result<T, String>>,
+    window: Result<(), String>,
+    cleanup: Option<String>,
+) -> Result<T, String> {
+    let result = match (published, window) {
+        (Some(Err(primary)), Err(window)) => {
+            Err(format!("{primary}; Window execution also failed: {window}"))
+        }
+        (_, Err(window)) => Err(window),
+        (Some(result), Ok(())) => result,
+        (None, Ok(())) => {
+            Err("Surface/device reopen validation exited without a receipt".to_owned())
+        }
+    };
+    match (result, cleanup) {
+        (Err(primary), Some(cleanup)) => Err(format!(
+            "{primary}; UI service cleanup also failed: {cleanup}"
+        )),
+        (Ok(_), Some(cleanup)) => Err(cleanup),
+        (result, None) => result,
     }
 }
 
@@ -7381,6 +7401,38 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "validation")]
+    #[test]
+    fn window_result_preserves_operation_loop_and_cleanup_failures() {
+        let result = super::merge_window_operation_result::<u32>(
+            Some(Err("original operation".to_owned())),
+            Ok(()),
+            Some("thumbnail timeout".to_owned()),
+        )
+        .expect_err("cleanup cannot replace operation failure");
+        assert!(result.starts_with("original operation"));
+        assert!(result.contains("thumbnail timeout"));
+        let result = super::merge_window_operation_result::<u32>(
+            Some(Err("original operation".to_owned())),
+            Err("event loop".to_owned()),
+            Some("catalog timeout".to_owned()),
+        )
+        .expect_err("all failures retained");
+        assert!(result.starts_with("original operation"));
+        assert!(result.contains("event loop"));
+        assert!(result.contains("catalog timeout"));
+        assert_eq!(
+            super::merge_window_operation_result(Some(Ok(7)), Ok(()), None),
+            Ok(7)
+        );
+        assert!(super::merge_window_operation_result::<u32>(None, Ok(()), None).is_err());
+        assert!(super::merge_window_operation_result(
+            Some(Ok(7)),
+            Ok(()),
+            Some("missing receipt".to_owned())
+        )
+        .is_err());
+    }
     use super::*;
     use crate::app::preview_work_notification::preview_work_notification_channel;
     use crate::app::viewer_gpu_output_residency::{

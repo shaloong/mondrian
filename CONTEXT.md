@@ -89,7 +89,7 @@ The persistence-owned transition that closes one exact Authoring Session's admis
 _Avoid_: UI-thread save wait, pending-count quiescence, empty-queue authority, barrier success substituted for required-save success, dropping a close ticket as success, editing against poisoned persistence admission, silent force-close after a protocol fault
 
 **Thumbnail Execution Service**:
-The UI-independent App Module that resolves exact source/color identity, admits and cancels deterministic still work, owns bounded raster/failure residency, and publishes terminal execution evidence. Its product output is a validated encoded RGBA raster; Widget payloads exist only in the Window Adapter.
+The UI-independent App Module that resolves exact source/color identity, admits and cancels deterministic still work, owns bounded raster/failure residency, and publishes terminal execution evidence. It retains its actual native worker and closes shared admission, bounded transports and publication identities before consuming that worker under one original deadline. Concurrent consuming closure is explicitly unavailable, never an invented empty inventory; later closure retains the first immutable receipt. Its product output is a validated encoded RGBA raster; Widget payloads exist only in the Window Adapter.
 _Avoid_: Widget-owned FFmpeg worker, unbounded completion channel, cache keyed only by AssetId, stale publication after relink or color-generation change, UI raster as execution payload
 
 **Proxy Generation Service**:

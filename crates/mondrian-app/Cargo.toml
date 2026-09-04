@@ -70,6 +70,14 @@ test = true
 harness = true
 bench = false
 
+[[example]]
+name = "window_service_protocol"
+path = "examples/window_service_protocol.rs"
+required-features = ["validation"]
+test = true
+harness = true
+bench = false
+
 [dependencies]
 mondrian-storage  = { workspace = true }
 mondrian-core     = { workspace = true }

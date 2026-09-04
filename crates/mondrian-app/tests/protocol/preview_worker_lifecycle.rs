@@ -1,3 +1,4 @@
+use super::OwnedWorkerShutdown as PreviewOwnedWorkerShutdown;
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};

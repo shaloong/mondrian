@@ -23,13 +23,20 @@ use crate::app::single_worker_activity::{SingleWorkerActivity, SingleWorkerPhase
 use analysis::{thumbnail_worker, ThumbnailColorContract};
 use state::{
     push_terminal, push_terminal_identity, retain_failure, retain_failure_entry, retire_deferred,
-    touch_asset, PendingThumbnail, ThumbnailCacheEntry, ThumbnailFailureKey, ThumbnailJob,
-    ThumbnailRequestKey, ThumbnailResult, ThumbnailState, ThumbnailWorkerIdentity,
+    touch_asset, PendingThumbnail, ThumbnailCacheEntry, ThumbnailDispatchOutcome,
+    ThumbnailFailureKey, ThumbnailJob, ThumbnailRequestKey, ThumbnailResult, ThumbnailState,
+    ThumbnailWorkerIdentity,
 };
 
+#[path = "thumbnail_service/analysis.rs"]
 mod analysis;
+#[path = "thumbnail_service/lifecycle.rs"]
+mod lifecycle;
+#[path = "thumbnail_service/state.rs"]
 mod state;
+pub use lifecycle::{ThumbnailShutdownEvidence, ThumbnailShutdownUnavailable};
 #[cfg(test)]
+#[path = "thumbnail_service/tests.rs"]
 mod tests;
 
 const THUMBNAIL_CACHE_ENTRY_CAPACITY: usize = 512;
@@ -249,8 +256,9 @@ pub enum ThumbnailWorkerPhase {
 /// Production owner for asset-thumbnail execution.
 pub struct AssetThumbnailService {
     state: Mutex<ThumbnailState>,
-    jobs: mpsc::SyncSender<ThumbnailJob>,
-    results: Mutex<mpsc::Receiver<ThumbnailResult>>,
+    jobs: Mutex<Option<mpsc::SyncSender<ThumbnailJob>>>,
+    results: Mutex<Option<mpsc::Receiver<ThumbnailResult>>>,
+    lifecycle: Mutex<lifecycle::ThumbnailLifecycle>,
     dispatch_gate: Arc<ThumbnailDispatchGate>,
     worker_activity: Arc<SingleWorkerActivity<ThumbnailWorkerIdentity>>,
 }
@@ -287,29 +295,22 @@ impl ThumbnailDispatchGate {
 impl AssetThumbnailService {
     /// Start a bounded thumbnail service and dedicated deterministic-still worker.
     pub fn new() -> Arc<Self> {
+        let service = Self::prepare();
+        service.start_in_place();
+        service
+    }
+
+    /// Prepare all service state without starting a native worker.
+    pub(crate) fn prepare() -> Arc<Self> {
         let (job_tx, job_rx) = mpsc::sync_channel(THUMBNAIL_JOB_QUEUE_CAPACITY);
         let (result_tx, result_rx) = mpsc::sync_channel(THUMBNAIL_JOB_QUEUE_CAPACITY + 1);
         let dispatch_gate = ThumbnailDispatchGate::new();
-        let worker_dispatch_gate = Arc::clone(&dispatch_gate);
         let worker_activity = Arc::new(SingleWorkerActivity::default());
-        let physical_worker_activity = Arc::clone(&worker_activity);
-        if let Err(error) = std::thread::Builder::new()
-            .name("mondrian-asset-thumbnails".to_owned())
-            .spawn(move || {
-                thumbnail_worker(
-                    job_rx,
-                    result_tx,
-                    worker_dispatch_gate,
-                    physical_worker_activity,
-                )
-            })
-        {
-            tracing::error!(%error, "failed to start asset thumbnail worker");
-        }
         Arc::new(Self {
             state: Mutex::new(ThumbnailState::default()),
-            jobs: job_tx,
-            results: Mutex::new(result_rx),
+            jobs: Mutex::new(Some(job_tx)),
+            results: Mutex::new(Some(result_rx)),
+            lifecycle: Mutex::new(lifecycle::ThumbnailLifecycle::prepared(job_rx, result_tx)),
             dispatch_gate,
             worker_activity,
         })
@@ -318,6 +319,9 @@ impl AssetThumbnailService {
     /// Rotate execution generation when the resolved Project thumbnail context changes.
     pub fn set_color_context(&self, context: Option<ProgramColorContext>) {
         let mut state = self.state.lock();
+        if state.closed {
+            return;
+        }
         if state.color_context == context {
             return;
         }
@@ -346,6 +350,9 @@ impl AssetThumbnailService {
     ) {
         let should_dispatch = {
             let mut state = self.state.lock();
+            if state.closed {
+                return;
+            }
             let cache_byte_budget = cache_byte_budget.max(1);
             if state.admit_automatic == admit_automatic
                 && state.dispatch_enabled == dispatch_enabled
@@ -367,6 +374,9 @@ impl AssetThumbnailService {
 
     /// Resolve or admit the exact thumbnail request without waiting for media work.
     pub fn thumbnail_for_asset(&self, asset: &AssetRecord) -> ThumbnailLookupState {
+        if self.dispatch_gate.shutdown.load(Ordering::Acquire) {
+            return ThumbnailLookupState::Unavailable;
+        }
         if !matches!(asset.kind, AssetKind::Video | AssetKind::StillImage) {
             return ThumbnailLookupState::Unavailable;
         }
@@ -455,7 +465,10 @@ impl AssetThumbnailService {
                 budget_exhausted = true;
                 break;
             }
-            let result = match results.try_recv() {
+            let Some(receiver) = results.as_ref() else {
+                break;
+            };
+            let result = match receiver.try_recv() {
                 Ok(result) => result,
                 Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => break,
             };
@@ -523,6 +536,9 @@ impl AssetThumbnailService {
             cancellation: cancellation.clone(),
         };
         let mut state = self.state.lock();
+        if state.closed {
+            return ThumbnailLookupState::Unavailable;
+        }
         if state.generation != generation || state.color_context.is_none() {
             cancellation.cancel();
             return ThumbnailLookupState::Loading;
@@ -553,13 +569,13 @@ impl AssetThumbnailService {
             state.deferred.push_back(job);
             return ThumbnailLookupState::Loading;
         }
-        match self.jobs.try_send(job) {
-            Ok(()) => ThumbnailLookupState::Loading,
-            Err(mpsc::TrySendError::Full(job)) => {
+        match self.send_job(job) {
+            ThumbnailDispatchOutcome::Sent => ThumbnailLookupState::Loading,
+            ThumbnailDispatchOutcome::Full(job) => {
                 state.deferred.push_back(job);
                 ThumbnailLookupState::Loading
             }
-            Err(mpsc::TrySendError::Disconnected(_)) => {
+            ThumbnailDispatchOutcome::Closed(_) => {
                 state.pending.remove(&key);
                 state.active.remove(&key.asset_id);
                 let failure = ThumbnailFailure::new(
@@ -583,7 +599,7 @@ impl AssetThumbnailService {
     fn dispatch_deferred(&self, max_jobs: usize) {
         for _ in 0..max_jobs {
             let mut state = self.state.lock();
-            if !state.dispatch_enabled {
+            if state.closed || !state.dispatch_enabled {
                 break;
             }
             let Some(job) = state.deferred.pop_front() else {
@@ -602,13 +618,13 @@ impl AssetThumbnailService {
                 );
                 continue;
             }
-            match self.jobs.try_send(job) {
-                Ok(()) => {}
-                Err(mpsc::TrySendError::Full(job)) => {
+            match self.send_job(job) {
+                ThumbnailDispatchOutcome::Sent => {}
+                ThumbnailDispatchOutcome::Full(job) => {
                     state.deferred.push_front(job);
                     break;
                 }
-                Err(mpsc::TrySendError::Disconnected(job)) => {
+                ThumbnailDispatchOutcome::Closed(job) => {
                     state.pending.remove(&job.key);
                     if state.active.get(&job.key.asset_id) == Some(&job.key) {
                         state.active.remove(&job.key.asset_id);
@@ -634,6 +650,9 @@ impl AssetThumbnailService {
     fn publish(&self, result: ThumbnailResult) -> bool {
         self.worker_activity.acknowledge_publication(&result.worker_identity());
         let mut state = self.state.lock();
+        if state.closed {
+            return false;
+        }
         let owns = state
             .pending
             .get(&result.key)
@@ -743,6 +762,9 @@ impl AssetThumbnailService {
         failure: ThumbnailFailure,
     ) -> ThumbnailLookupState {
         let mut state = self.state.lock();
+        if state.closed {
+            return ThumbnailLookupState::Unavailable;
+        }
         let key = ThumbnailFailureKey { asset_id, path, fingerprint, color };
         let duplicate = state
             .failures
@@ -767,8 +789,13 @@ impl AssetThumbnailService {
 
 impl Drop for AssetThumbnailService {
     fn drop(&mut self) {
-        self.dispatch_gate.shutdown.store(true, Ordering::Release);
-        self.dispatch_gate.changed.notify_all();
+        self.begin_shutdown();
+        let lifecycle = self.lifecycle.get_mut();
+        if lifecycle.worker.as_ref().is_some_and(std::thread::JoinHandle::is_finished)
+            && let Some(worker) = lifecycle.worker.take()
+        {
+            let _ = crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::join(worker);
+        }
     }
 }
 

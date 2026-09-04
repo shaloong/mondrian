@@ -2102,3 +2102,34 @@ discover/open/schedule/start/poll/stop Interfaces, binds an open Session to the
 exact Sequence revision and Project author generation, and stops it on edit,
 navigation invalidation, Project close, device loss, or required reference
 loss. See [Reference Output](reference-output.md).
+
+## UI auxiliary execution closure
+
+Host owns Thumbnail and audio-device discovery in addition to Preview and
+Waveform. Ordinary quit and validation begin all auxiliary shutdowns before
+waiting, and share one auxiliary consuming implementation with one absolute
+deadline. Validation retains each original auxiliary receipt alongside Preview;
+one clean worker cannot hide another worker's panic or timeout. Thumbnail's
+concurrent-close `LifecycleBusy` outcome is retained as an explicit failure to
+obtain a receipt, not normalized to a guessed NotStarted inventory. Ordinary quit
+keeps its existing asynchronous Preview policy and process-exit watchdog; that
+policy is not equivalent to complete validation qualification.
+
+The audio-device catalog retains the actual native handle and bounded cumulative
+startup/join/failure inventory across refreshes. Polling joins only a worker
+already known to have returned, never waits after result publication, and never
+destroys opaque panic payloads on the UI stack. Native enumeration cannot be
+portably canceled: shutdown revokes publication and records failure if the
+worker is still live at the original deadline. Production-required initial
+discovery and deliberately test-disabled discovery remain distinct.
+
+The domain-neutral App owned-worker Module now owns the same join algorithm
+used by Preview, Thumbnail and catalog; Preview's existing public outcome name
+remains a compatibility alias. The bounded `window_service_protocol` Cargo
+example compiles actual Thumbnail/catalog source and existing access/activity
+Modules. It does not replace actual Host, native Window, GPU or campaign tests.
+
+Window error merging preserves a published operation error, event-loop failure
+and UI cleanup failure independently. Full owning Host construction, old/new
+GPU-generation replacement, unique App handback and durable successful raw
+receipt propagation remain separate unfinished lifecycle work.

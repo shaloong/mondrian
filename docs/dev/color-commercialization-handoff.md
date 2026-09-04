@@ -197,6 +197,40 @@ Full workspace/all-target/all-feature Clippy with warnings denied passed in
 7m03s; final format and diff checks passed. No capacity failure or target cleanup
 occurred. This does not close COL-047 as a whole.
 
+The following UI auxiliary-owner slice retains actual Thumbnail and native
+audio-device catalog workers, shares ordinary-quit/validation closure under one
+absolute deadline, and preserves original Window errors alongside cleanup
+failures. Thumbnail closes shared admission and both bounded transports;
+activity publication is revoked without hiding current execution. Its original
+receipt is immutable, and concurrent closure is explicitly unavailable rather
+than a guessed empty inventory. Catalog retains cumulative native startup/join/
+panic/timeout facts across refreshes. Common native join behavior is reused by
+Preview, Thumbnail and catalog, including opaque panic-payload handling.
+
+Final local verification on 2026-09-05 passed 91 source-linked protocol tests,
+one explicitly selected actual native catalog test, and 57 Preview protocol
+tests. A real saturated-result regression first failed because dropped results
+retained publication identities; the failure remains archived and that exact
+case now passes after the activity revocation fix. App runtime gates passed37
+executions:2 Host validation,1 ordinary quit,1 explicit native Host,1 Window
+error merge,21 Waveform (14 service and7 startup),9 Endurance coordinator,
+1 actual GPU and1 Project smoke. App lib-test rebuild took19m04s. Project
+create/open/save maxima were299/69/50ms with clean raw owner receipts; the strict
+PowerShell owner/case/suite corpus passed. Final workspace/all-target/all-feature
+Clippy with warnings denied passed in2m17s; format and diff checks passed.
+The protocol execution counts overlap in shared native-join cases; they are
+not independent commercial or physical qualification. No capacity failure or
+target cleanup occurred. Another project's Cargo process was observed but not
+modified; this is not an isolated performance baseline.
+
+This slice does not close Window construction/reopen ownership. Next implement
+an inert Host startup owner that takes the unique App before preferences or any
+factory, retains existing Preview/Waveform partial owners and actual prepared
+Thumbnail/catalog Adapters, and returns the same App after UI-only failure
+cleanup. Old/candidate GPU, event-loop handback and final App receipt remain the
+following Window transaction work; do not silently include them in a Host-only
+completion claim.
+
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.

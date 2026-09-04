@@ -2,6 +2,10 @@
 //! source Modules. This is not full App or physical GPU lifecycle qualification.
 
 #[cfg(test)]
+#[path = "../src/app/owned_worker_lifecycle.rs"]
+mod owned_worker_lifecycle;
+
+#[cfg(test)]
 #[path = "../src/app/preview_worker_lifecycle.rs"]
 mod preview_worker_lifecycle;
 

@@ -50,6 +50,22 @@ impl AssetThumbnailAdapter {
     pub fn diagnostics(&self) -> ThumbnailDiagnostics {
         self.service.diagnostics()
     }
+
+    /// Revoke native work and publication before the Host joins any UI worker.
+    pub fn begin_shutdown(&self) {
+        self.service.begin_shutdown();
+    }
+
+    /// Consume the underlying worker using the shared Host deadline.
+    pub fn shutdown_until(
+        &self,
+        deadline: std::time::Instant,
+    ) -> Result<
+        crate::app::thumbnail_service::ThumbnailShutdownEvidence,
+        crate::app::thumbnail_service::ThumbnailShutdownUnavailable,
+    > {
+        self.service.shutdown_until(deadline)
+    }
 }
 
 impl Default for AssetThumbnailAdapter {

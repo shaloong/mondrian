@@ -58,7 +58,6 @@ use crate::app::ui_actions::{
     APP_SHELL_WINDOW_MINIMIZE, APP_SHELL_WINDOW_TOGGLE_MAXIMIZE,
 };
 use crate::app::waveform_service::AudioWaveformService;
-#[cfg(feature = "validation")]
 use crate::app::waveform_service::AudioWaveformShutdownEvidence;
 use crate::app::{
     discover_crash_recovery_candidates, AppState, CrashRecoveryCandidate,
@@ -352,12 +351,17 @@ impl AppUiHost {
         deadline: Instant,
     ) -> (AppState, AppUiServiceShutdownEvidence) {
         self.preview_service.begin_endurance_shutdown();
-        self.waveform_service.begin_shutdown();
+        self.begin_auxiliary_services_shutdown();
         let preview = self.preview_service.shutdown_until(deadline);
-        let waveform = self.waveform_service.shutdown_until(deadline);
+        let auxiliary = close_auxiliary_services_until(
+            &self.waveform_service,
+            &self.asset_thumbnails,
+            &mut self.audio_device_catalog,
+            deadline,
+        );
         (
             self.app_state.into_inner(),
-            AppUiServiceShutdownEvidence { preview, waveform },
+            AppUiServiceShutdownEvidence { preview, auxiliary },
         )
     }
 
@@ -2000,18 +2004,28 @@ impl AppUiHost {
         }
     }
 
-    fn shutdown_product_services_for_quit(&self) {
+    fn begin_auxiliary_services_shutdown(&mut self) {
+        self.waveform_service.begin_shutdown();
+        self.asset_thumbnails.begin_shutdown();
+        self.audio_device_catalog.begin_shutdown();
+    }
+
+    fn shutdown_product_services_for_quit(&mut self) {
         #[cfg(not(test))]
         super::window::arm_process_exit_watchdog();
+        let deadline = Instant::now() + WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT;
+        self.begin_auxiliary_services_shutdown();
         self.preview_service.shutdown();
-        self.waveform_service.begin_shutdown();
-        let evidence = self
-            .waveform_service
-            .shutdown_until(Instant::now() + WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT);
+        let evidence = close_auxiliary_services_until(
+            &self.waveform_service,
+            &self.asset_thumbnails,
+            &mut self.audio_device_catalog,
+            deadline,
+        );
         if !evidence.all_resources_released() {
             tracing::error!(
                 ?evidence,
-                "waveform service did not close cleanly before product exit"
+                "UI auxiliary services did not close cleanly before product exit"
             );
         }
     }
@@ -2022,13 +2036,45 @@ impl AppUiHost {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppUiServiceShutdownEvidence {
     pub(crate) preview: PreviewRuntimeShutdownEvidence,
-    pub(crate) waveform: AudioWaveformShutdownEvidence,
+    pub(crate) auxiliary: AppUiAuxiliaryShutdownEvidence,
 }
 
 #[cfg(feature = "validation")]
 impl AppUiServiceShutdownEvidence {
     pub(crate) fn all_resources_released(self) -> bool {
-        self.preview.all_workers_terminated() && self.waveform.all_resources_released()
+        self.preview.all_workers_terminated() && self.auxiliary.all_resources_released()
+    }
+}
+
+/// Exact auxiliary owner receipts shared by ordinary quit and validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AppUiAuxiliaryShutdownEvidence {
+    waveform: AudioWaveformShutdownEvidence,
+    thumbnails: Result<
+        crate::app::thumbnail_service::ThumbnailShutdownEvidence,
+        crate::app::thumbnail_service::ThumbnailShutdownUnavailable,
+    >,
+    catalog: crate::app_ui::audio_device_catalog::AudioDeviceCatalogShutdownEvidence,
+}
+
+impl AppUiAuxiliaryShutdownEvidence {
+    fn all_resources_released(self) -> bool {
+        self.waveform.all_resources_released()
+            && self.thumbnails.is_ok_and(|receipt| receipt.all_resources_released())
+            && self.catalog.all_resources_released()
+    }
+}
+
+fn close_auxiliary_services_until(
+    waveform: &AudioWaveformService,
+    thumbnails: &AssetThumbnailAdapter,
+    catalog: &mut AudioOutputDeviceCatalogAdapter,
+    deadline: Instant,
+) -> AppUiAuxiliaryShutdownEvidence {
+    AppUiAuxiliaryShutdownEvidence {
+        waveform: waveform.shutdown_until(deadline),
+        thumbnails: thumbnails.shutdown_until(deadline),
+        catalog: catalog.shutdown_until(deadline),
     }
 }
 
@@ -4224,6 +4270,11 @@ mod tests {
             waveform_shutdown.all_resources_released(),
             "{waveform_shutdown:#?}"
         );
+        let thumbnails = host.asset_thumbnails.shutdown_until(Instant::now()).expect("sole closer");
+        let catalog = host.audio_device_catalog.shutdown_until(Instant::now());
+        assert!(thumbnails.all_resources_released(), "{thumbnails:?}");
+        assert!(catalog.all_resources_released(), "{catalog:?}");
+        assert!(!host.audio_device_catalog.request_refresh());
     }
 
     #[cfg(feature = "validation")]
@@ -4240,6 +4291,36 @@ mod tests {
         assert!(ui_shutdown.all_resources_released(), "{ui_shutdown:#?}");
         let shutdown = state.shutdown_for_endurance(deadline);
         assert!(shutdown.all_resources_released(), "{shutdown:#?}");
+        assert!(ui_shutdown.auxiliary.thumbnails.expect("sole closer").worker_started);
+        // Test-disabled discovery is explicit, not proof of a native enumeration.
+        assert!(!ui_shutdown.auxiliary.catalog.initial_discovery_required);
+        let mut corrupted = ui_shutdown;
+        corrupted.auxiliary.thumbnails.as_mut().expect("sole closer").worker =
+            crate::app::owned_worker_lifecycle::OwnedWorkerShutdown::TimedOutDetached;
+        assert!(!corrupted.all_resources_released());
+        let mut corrupted = ui_shutdown;
+        corrupted.auxiliary.catalog.workers_started = 1;
+        assert!(!corrupted.all_resources_released());
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    #[ignore = "requires actual native audio-device enumeration"]
+    fn validation_host_native_ui_owners_close_with_the_same_app() {
+        let _theme_guard = crate::app_ui::test_utils::theme_test_guard();
+        let mut state = AppState::new();
+        state.set_status_hint("native UI closure identity", false);
+        let mut host = AppUiHost::new(state);
+        assert!(host.audio_device_catalog.request_refresh());
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let (state, ui) = host.into_validation_app_state_until(deadline);
+        let hint = state.status_hint.clone();
+        let app = state.shutdown_for_endurance(deadline);
+        assert!(ui.all_resources_released(), "{ui:?}");
+        assert!(app.all_resources_released(), "{app:?}");
+        assert_eq!(ui.auxiliary.catalog.workers_started, 1);
+        assert_eq!(ui.auxiliary.catalog.workers_joined, 1);
+        assert!(format!("{hint:?}").contains("native UI closure identity"));
     }
 
     #[cfg(feature = "validation")]

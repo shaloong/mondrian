@@ -168,6 +168,7 @@ pub(crate) mod viewer_gpu_submission;
 pub(crate) use playback::{
     FramePresentationDisposition, FramePresentationPreflight, FramePresentationPublication,
 };
+pub(crate) mod owned_worker_lifecycle;
 #[cfg(test)]
 mod playback_acceptance;
 pub(crate) mod playback_preview;
