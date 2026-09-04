@@ -43,6 +43,7 @@ objc2-core-video = { version = "0.3.2", default-features = false, features = ["s
 objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLDevice", "MTLPixelFormat", "MTLTexture"] }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 mondrian-effects = { workspace = true }
 image = { workspace = true, features = ["exr"] }
 pollster = "0.4"

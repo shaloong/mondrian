@@ -38,6 +38,35 @@ pub(crate) struct CpuYuvUploadRuntime {
     request_sender: mpsc::SyncSender<CpuYuvUploadWorkerCommand>,
     trim_requested: Arc<AtomicBool>,
     state: Mutex<CpuYuvUploadState>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+/// Consumed upload owner: no scheduling endpoints survive this transition.
+pub(crate) struct CpuYuvUploadRetirement {
+    worker: Option<std::thread::JoinHandle<()>>,
+    outcome: Option<crate::ViewerCpuYuvUploadWorkerExit>,
+    _slots: Vec<CpuYuvUploadSlot>,
+    _prepared: VecDeque<CpuYuvUploadWorkerResult>,
+    _used_buffers: Vec<wgpu::Buffer>,
+}
+
+impl CpuYuvUploadRetirement {
+    pub(crate) fn poll(&mut self) -> Option<crate::ViewerCpuYuvUploadWorkerExit> {
+        if let Some(outcome) = self.outcome {
+            return Some(outcome);
+        }
+        if !self.worker.as_ref()?.is_finished() {
+            return None;
+        }
+        let worker = self.worker.take()?;
+        let outcome = if worker.join().is_ok() {
+            crate::ViewerCpuYuvUploadWorkerExit::Returned
+        } else {
+            crate::ViewerCpuYuvUploadWorkerExit::Panicked
+        };
+        self.outcome = Some(outcome);
+        Some(outcome)
+    }
 }
 
 struct CpuYuvUploadState {
@@ -122,7 +151,19 @@ impl CpuYuvUploadRuntime {
         let worker_device = device.clone();
         let trim_requested = Arc::new(AtomicBool::new(false));
         let worker_trim_requested = Arc::clone(&trim_requested);
-        std::thread::Builder::new()
+        // Complete bounded owner allocation before starting physical execution.
+        let state = Mutex::new(CpuYuvUploadState {
+            slots: Vec::new(),
+            next_slot: 0,
+            generation: 1,
+            pending: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
+            prepared: VecDeque::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
+            result_receiver,
+            returned_sender,
+            used_buffers: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
+            completion_waker: None,
+        });
+        let worker = std::thread::Builder::new()
             .name("mondrian-viewer-yuv-upload".to_owned())
             .spawn(move || {
                 run_cpu_yuv_upload_worker(
@@ -134,21 +175,36 @@ impl CpuYuvUploadRuntime {
                 );
             })
             .map_err(|_| CpuYuvUploadWorkerStartError)?;
-        Ok(Self {
-            request_sender,
-            trim_requested,
-            state: Mutex::new(CpuYuvUploadState {
-                slots: Vec::new(),
-                next_slot: 0,
-                generation: 1,
-                pending: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
-                prepared: VecDeque::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
-                result_receiver,
-                returned_sender,
-                used_buffers: Vec::with_capacity(CPU_YUV_UPLOAD_WORKER_CAPACITY),
-                completion_waker: None,
-            }),
-        })
+        Ok(Self { request_sender, trim_requested, state, worker })
+    }
+
+    pub(crate) fn into_retirement(self) -> CpuYuvUploadRetirement {
+        let Self { request_sender, trim_requested: _, state, worker } = self;
+        let CpuYuvUploadState {
+            slots,
+            next_slot: _,
+            generation: _,
+            pending: _,
+            prepared,
+            result_receiver,
+            returned_sender,
+            used_buffers,
+            completion_waker: _,
+        } = state.into_inner();
+        drop(request_sender);
+        // A worker may be blocked publishing to a full bounded result queue.
+        // Closing admission alone cannot release that send.
+        drop(result_receiver);
+        // Late GPU map callbacks may retain other return-sender clones. Worker
+        // exit never depends on the return channel becoming disconnected.
+        drop(returned_sender);
+        CpuYuvUploadRetirement {
+            worker: Some(worker),
+            outcome: None,
+            _slots: slots,
+            _prepared: prepared,
+            _used_buffers: used_buffers,
+        }
     }
 
     pub(crate) fn install_completion_waker(&self, waker: impl Fn() + Send + Sync + 'static) {
@@ -831,6 +887,10 @@ pub(crate) enum CpuYuvMaterializationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("failed to start compact CPU YUV upload worker")]
 pub(crate) struct CpuYuvUploadWorkerStartError;
+
+#[cfg(test)]
+#[path = "cpu_yuv/retirement_tests.rs"]
+mod retirement_tests;
 
 #[cfg(test)]
 mod tests {

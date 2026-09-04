@@ -270,6 +270,7 @@ struct PerfPreviewClosureReport {
 
 #[derive(Debug, Clone, Serialize)]
 struct PerfGpuClosureReport {
+    renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     worker_started: bool,
     worker_terminated: bool,
     worker_panicked: bool,
@@ -2736,6 +2737,7 @@ impl PerfGpuClosureReport {
             && evidence.retirement_requested
             && evidence.retirement_handoff_accepted
             && evidence.retirement_completed
+            && evidence.renderer_retirement.is_some_and(|receipt| receipt.is_healthy())
             && generation_terminal_kind.is_none();
         Self {
             worker_started: evidence.worker_started,
@@ -2745,6 +2747,7 @@ impl PerfGpuClosureReport {
             retirement_requested: evidence.retirement_requested,
             retirement_handoff_accepted: evidence.retirement_handoff_accepted,
             retirement_completed: evidence.retirement_completed,
+            renderer_retirement: evidence.renderer_retirement,
             generation_terminal_kind,
             all_resources_released,
         }

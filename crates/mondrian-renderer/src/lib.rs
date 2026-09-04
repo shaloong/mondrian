@@ -52,6 +52,7 @@ mod timeline_effect_routes;
 pub mod timeline_render_plan;
 pub mod timeline_temporal;
 pub mod viewer_execution;
+mod viewer_retirement;
 pub mod viewer_runtime;
 pub mod viewer_working_set;
 #[cfg(feature = "validation")]
@@ -403,6 +404,9 @@ pub use viewer_execution::{
     ViewerGpuCpuYuvSource, ViewerGpuCrossDissolveLayer, ViewerGpuExecutionLayer,
     ViewerGpuMediaSource, ViewerGpuNativeSource, ViewerGpuSourceLayer, ViewerGpuTransitionInput,
     ViewerHeterogeneousGpuInput, ViewerNativeVideoImportRuntime,
+};
+pub use viewer_retirement::{
+    ViewerCpuYuvUploadWorkerExit, ViewerGpuExecutionRetirement, ViewerGpuRetirementReceipt,
 };
 pub use viewer_runtime::{
     ViewerGpuExecutionCpuStageTimings, ViewerGpuExecutionError, ViewerGpuExecutionGpuStage,

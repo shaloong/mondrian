@@ -31,6 +31,16 @@ use std::time::Instant;
 
 const REPORT_ENV: &str = "MONDRIAN_REALTIME_VISUAL_PERF_OUTPUT";
 
+#[path = "support/viewer_retirement.rs"]
+mod retirement_support;
+
+#[derive(serde::Serialize)]
+struct RetiredScenarioReport {
+    #[serde(flatten)]
+    report: mondrian_renderer::RealtimeVisualPerformanceReport,
+    renderer_retirement: mondrian_renderer::ViewerGpuRetirementReceipt,
+}
+
 struct GpuContext {
     _instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -101,11 +111,11 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
         } else {
             eprintln!("{json}");
         }
-        if !report.passed {
+        if !report.report.passed {
             return Err(anyhow!(
                 "realtime visual scenario {:?} failed: {:?}",
                 scenario,
-                report.root_causes
+                report.report.root_causes
             ));
         }
     }
@@ -115,6 +125,35 @@ async fn realtime_visual_gpu_matrix_gate() -> Result<()> {
 fn run_scenario(
     context: &GpuContext,
     scenario: RealtimeVisualScenarioId,
+) -> Result<RetiredScenarioReport> {
+    let mut runtime =
+        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        measure_scenario(context, scenario, &mut runtime)
+    }));
+    let retirement = retirement_support::retire_runtime(&context.device, runtime);
+    let measured = match result {
+        Ok(measured) => measured,
+        Err(panic) => {
+            if let Err(error) = retirement {
+                eprintln!("panic cleanup: {error:#}");
+            }
+            std::panic::resume_unwind(panic);
+        }
+    };
+    match (measured, retirement) {
+        (Ok(report), Ok(renderer_retirement)) => {
+            Ok(RetiredScenarioReport { report, renderer_retirement })
+        }
+        (Err(primary), Err(cleanup)) => Err(anyhow!("{primary:#}; retirement failed: {cleanup:#}")),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+fn measure_scenario(
+    context: &GpuContext,
+    scenario: RealtimeVisualScenarioId,
+    runtime: &mut ViewerGpuExecutionRuntime,
 ) -> Result<mondrian_renderer::RealtimeVisualPerformanceReport> {
     let workload = scenario.contract();
     let (graph, effect_plan) = build_effect_graph()?;
@@ -153,8 +192,6 @@ fn run_scenario(
         1_024,
         1_024,
     )?;
-    let mut runtime =
-        ViewerGpuExecutionRuntime::new(&context.adapter, &context.device, &context.queue)?;
     runtime.reconfigure_resource_grant(workload.resource_grant);
 
     for frame in 0..workload.warmup_frames {

@@ -488,6 +488,19 @@ _Avoid_: Renewing a timeout for each owner, treating `Drop` or an empty queue as
 The Export-owned sealed result of copying one bounded direct regular file into a verifier-owned immutable snapshot, hashing its encoded bytes, deriving the typed container/stream probe, fully decoding every advertised video/audio stream to EOF in a separately supervised FFmpeg process, hashing the decoded stream bytes, and proving unchanged published artifact size and digest afterward. It carries the stable Export job/artifact identity, validator identity, terminal frame/duration progress, canonical report, and report SHA-256. App may project an endurance artifact event only from this receipt and rejects a repeated artifact identity within one phase. It proves stable complete decodability and content identity, not source-pixel or colorimetric parity.
 _Avoid_: Publication counted as verification, opening-frame-only scans, caller-authored receipt hashes, unbounded decoder output, or TOCTOU-blind reports
 
+**Viewer Execution Retirement**:
+The consuming Renderer transition that closes CPU-YUV upload admission and
+retains its actual worker JoinHandle, native-copy residency, and GPU resources
+behind a poll-only owner. A cached terminal receipt proves the actual worker
+join and native-copy release, not the App submission lifecycle or whole-device
+queue barrier. Joined panic permits safe release but fails qualification. App
+progress carries the receipt through envelope release and final worker join;
+normal channel drain, unknown/timed-out retirement, and explicitly unconstructed
+runtime inventory are distinct. Native-window replacement transfers this same
+generation without creating a temporary worker.
+_Avoid_: Queue idle as worker termination, bool-only retirement evidence,
+detached upload worker, new generic reaper, UI-thread join
+
 **Viewer GPU Output Residency**:
 The UI-independent projection of declared Preview layers or completed renderer execution into typed decode, input-transform, working-residency, zero/low-copy, upload/readback, native bridge-copy count, and native-import evidence. Planned and executed residency are distinct; one immutable, device-scoped Renderer import-support snapshot—including exact handle/format routes and an explicit `ZeroCopy` or `GpuBridgeCopy` transfer mode—is shared with hardware-decode admission for the lifetime of a Renderer/Window Session. Media proves the exact decoded surface family and sampling facts; only the Renderer instance that owns the active Adapter/Device may prove import support. Zero-copy proves no CPU transfer and no decoder-surface pixel copy; it does not erase the deliberate YUV/RGB-to-encoded-RGBA32F or OCIO working-texture stages. Every direct Adapter retains the Media surface lease until a GPU completion terminal proves the final read.
 _Avoid_: Planned zero-copy success, Cartesian inference from aggregate capabilities, OS-name or device-less capability probes as execution evidence, independently probing a second graphics device, per-frame capability re-probe, mixing capability generations inside one frame record, dropping the Media lease at queue submission

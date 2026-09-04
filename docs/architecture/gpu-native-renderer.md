@@ -29,6 +29,29 @@ not a product-level App/Export Interface. The hidden `color::qualification`
 Adapter exposes exact internals only to ignored real-device gates that must
 measure cache reuse and resource residency. Production code cannot use it.
 
+## Viewer execution retirement
+
+`ViewerGpuExecutionRuntime::into_retirement` consumes recording/upload authority
+and returns a poll-only `ViewerGpuExecutionRetirement`. Runtime construction
+prepares every fallible GPU component and bounded upload state before spawning
+the upload worker; only move assembly follows successful spawn. Retirement
+disconnects both upload admission and the bounded result receiver, retains the
+actual JoinHandle and GPU envelope, and joins only an already finished worker.
+Late map callbacks may retain return-channel senders and cannot hold worker exit
+hostage. Repeated polls preserve the same typed terminal receipt.
+
+The receipt closes Renderer-owned native copy fences and the upload worker only.
+Window/Headless still own submission lifecycle and the independent whole-queue
+barrier. Joined upload panic is safe release but unhealthy qualification; typed
+native device removal is also preserved as a fault. An ordinary progress-channel
+disconnect is not a Renderer retirement. Final owner release invalidates its pool
+generation so escaped presentation/encoder leases cannot repopulate a retired
+cache; admission closure itself does not prematurely evict retained resources.
+
+Native encoded input accepts both RGBA16F and RGBA32F without inserting a
+conversion to half precision. Compact-YUV and native materialization currently
+produce the product RGBA32F intermediate and feed the same OCIO input boundary.
+
 ## Working Float Policy
 
 `working_float_policy` is the single Renderer Module deciding the transient

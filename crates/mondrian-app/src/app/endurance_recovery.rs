@@ -390,7 +390,7 @@ impl EnduranceRecoveryOperationReceipt {
         device_generation_before: u64,
         device_generation_after: u64,
     ) -> Result<Self, EnduranceRecoveryReceiptError> {
-        let shutdown_receipt_json = r#"{"schema_version":1,"worker_started":true,"worker_terminated":true,"worker_panicked":false,"timed_out":false,"retirement_requested":true,"retirement_handoff_accepted":true,"retirement_completed":true,"generation_terminal_kind":null}"#.to_owned();
+        let shutdown_receipt_json = r#"{"schema_version":2,"worker_started":true,"worker_terminated":true,"worker_panicked":false,"timed_out":false,"retirement_requested":true,"retirement_handoff_accepted":true,"retirement_completed":true,"renderer_retirement":{"cpu_yuv_upload":"returned","native_device_removed":false},"generation_terminal_kind":null}"#.to_owned();
         let display_contract_sha256 =
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let reopened_picture_json = format!(
@@ -550,6 +550,7 @@ struct SurfaceShutdownReceiptEvidence {
     retirement_requested: bool,
     retirement_handoff_accepted: bool,
     retirement_completed: bool,
+    renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     generation_terminal_kind: Option<String>,
 }
 
@@ -557,7 +558,7 @@ fn valid_surface_shutdown_receipt(canonical_json: &str) -> bool {
     serde_json::from_str::<SurfaceShutdownReceiptEvidence>(canonical_json)
         .ok()
         .is_some_and(|receipt| {
-            receipt.schema_version == 1
+            receipt.schema_version == 2
                 && receipt.worker_started
                 && receipt.worker_terminated
                 && !receipt.worker_panicked
@@ -565,6 +566,7 @@ fn valid_surface_shutdown_receipt(canonical_json: &str) -> bool {
                 && receipt.retirement_requested
                 && receipt.retirement_handoff_accepted
                 && receipt.retirement_completed
+                && receipt.renderer_retirement.is_some_and(|renderer| renderer.is_healthy())
                 && receipt.generation_terminal_kind.is_none()
         })
 }
@@ -859,6 +861,67 @@ mod tests {
                 step: EnduranceRecoveryStep::SurfaceDeviceReopen
             })
         ));
+    }
+
+    #[test]
+    fn surface_receipt_rejects_missing_or_unhealthy_renderer_inventory() {
+        for case in [
+            "missing",
+            "null",
+            "panic",
+            "native_removed",
+            "unknown_exit",
+            "legacy",
+        ] {
+            let receipt = EnduranceRecoveryOperationReceipt::surface_device_reopen(
+                0,
+                "reopen-0".to_owned(),
+                SHA.to_owned(),
+                1,
+                2,
+                3,
+                4,
+            )
+            .expect("valid receipt");
+            let mut evidence: EnduranceRecoveryOperationEvidence =
+                serde_json::from_str(receipt.canonical_json()).expect("receipt evidence");
+            let EnduranceRecoveryOperationEvidence::SurfaceDeviceReopen {
+                shutdown_receipt_json,
+                shutdown_receipt_sha256,
+                ..
+            } = &mut evidence
+            else {
+                panic!("surface evidence");
+            };
+            let mut shutdown: serde_json::Value =
+                serde_json::from_str(shutdown_receipt_json).expect("shutdown evidence");
+            match case {
+                "missing" => {
+                    shutdown.as_object_mut().expect("object").remove("renderer_retirement");
+                }
+                "null" => shutdown["renderer_retirement"] = serde_json::Value::Null,
+                "panic" => shutdown["renderer_retirement"]["cpu_yuv_upload"] = "panicked".into(),
+                "native_removed" => {
+                    shutdown["renderer_retirement"]["native_device_removed"] = true.into()
+                }
+                "unknown_exit" => {
+                    shutdown["renderer_retirement"]["cpu_yuv_upload"] = "assumed_idle".into()
+                }
+                "legacy" => shutdown["schema_version"] = 1.into(),
+                _ => unreachable!(),
+            }
+            *shutdown_receipt_json = serde_json::to_string(&shutdown).expect("nested JSON");
+            *shutdown_receipt_sha256 = lower_sha256(shutdown_receipt_json.as_bytes());
+            let tampered = serde_json::to_string(&evidence).expect("receipt JSON");
+            assert!(
+                EnduranceRecoveryOperationReceipt::parse_and_validate(
+                    &tampered,
+                    &lower_sha256(tampered.as_bytes())
+                )
+                .is_err(),
+                "accepted {case}"
+            );
+        }
     }
 
     #[test]

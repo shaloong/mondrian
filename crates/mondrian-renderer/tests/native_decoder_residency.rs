@@ -3,6 +3,9 @@
 use mondrian_media::HwDeviceContextPool;
 use mondrian_renderer::{GpuContext, GpuNativeDecodedFrameImportMode, ViewerGpuExecutionRuntime};
 
+#[path = "support/viewer_retirement.rs"]
+mod retirement_support;
+
 #[test]
 fn dx12_renderer_publishes_one_installable_zero_copy_decoder_generation() {
     let context = pollster::block_on(GpuContext::new()).expect("real GPU context");
@@ -22,6 +25,8 @@ fn dx12_renderer_publishes_one_installable_zero_copy_decoder_generation() {
             "skipped: adapter lacks the required native NV12/P010 feature contract: {:?}",
             support.unavailable_reason
         );
+        retirement_support::retire_runtime(&context.device, runtime)
+            .expect("retire skipped runtime");
         return;
     }
 
@@ -65,4 +70,7 @@ fn dx12_renderer_publishes_one_installable_zero_copy_decoder_generation() {
     assert!(pool.retire_renderer_device_context(selector));
     assert!(!pool.retire_renderer_device_context(selector));
     assert_eq!(pool.diagnostics().entries, 0);
+    retirement_support::retire_runtime(&context.device, runtime).expect("retire original runtime");
+    retirement_support::retire_runtime(&context.device, replacement_runtime)
+        .expect("retire replacement runtime");
 }

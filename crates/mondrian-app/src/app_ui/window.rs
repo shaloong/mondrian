@@ -438,6 +438,7 @@ struct AppUiViewerGpuShutdownContract {
     retirement_requested: bool,
     retirement_handoff_accepted: bool,
     retirement_completed: bool,
+    renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     generation_terminal_kind: Option<&'static str>,
 }
 
@@ -535,12 +536,13 @@ fn seal_clean_viewer_gpu_shutdown(
         || !evidence.retirement_requested
         || !evidence.retirement_handoff_accepted
         || !evidence.retirement_completed
+        || !evidence.renderer_retirement.is_some_and(|receipt| receipt.is_healthy())
         || evidence.generation_terminal_kind.is_some()
     {
         return Err("Viewer GPU device generation did not retire cleanly".into());
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
-        schema_version: 1,
+        schema_version: 2,
         worker_started: evidence.worker_started,
         worker_terminated: evidence.worker_terminated,
         worker_panicked: evidence.worker_panicked,
@@ -548,6 +550,7 @@ fn seal_clean_viewer_gpu_shutdown(
         retirement_requested: evidence.retirement_requested,
         retirement_handoff_accepted: evidence.retirement_handoff_accepted,
         retirement_completed: evidence.retirement_completed,
+        renderer_retirement: evidence.renderer_retirement,
         generation_terminal_kind: evidence.generation_terminal_kind.map(|kind| match kind {
             ViewerGpuDeviceGenerationTerminalKind::DeviceLost => "device_lost",
             ViewerGpuDeviceGenerationTerminalKind::DeviceDestroyed => "device_destroyed",
@@ -1787,7 +1790,7 @@ impl WindowViewerGpuPresentationState {
 }
 
 struct WindowViewerGpuGenerationRetirement {
-    runtime: ViewerGpuExecutionRuntime,
+    runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
     lifecycle: ViewerGpuSubmissionLifecycle<
         WindowViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
@@ -1804,7 +1807,6 @@ struct WindowViewerGpuGenerationRetirement {
     >,
     _lost_submission_owners: Vec<WindowViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
-    native_device_removed_logged: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1820,19 +1822,13 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
         "Window Viewer GPU device generation"
     }
 
-    fn poll_retirement(&mut self, terminal: Option<&ViewerGpuDeviceGenerationTerminal>) -> bool {
-        let native_progress_proved = match self.runtime.retire_completed_native_import_sources() {
-            Ok(_) => true,
-            Err(error) if error.is_native_device_removed() => {
-                if !self.native_device_removed_logged {
-                    tracing::warn!(
-                        %error,
-                        "Window Viewer GPU retirement accepted typed native device-removal proof"
-                    );
-                    self.native_device_removed_logged = true;
-                }
-                true
-            }
+    fn poll_retirement(
+        &mut self,
+        terminal: Option<&ViewerGpuDeviceGenerationTerminal>,
+    ) -> Option<crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt>
+    {
+        let renderer = match self.runtime.poll() {
+            Ok(receipt) => receipt,
             Err(error) => {
                 if !self.native_retirement_error_logged {
                     tracing::error!(
@@ -1841,11 +1837,9 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                     );
                     self.native_retirement_error_logged = true;
                 }
-                false
+                None
             }
         };
-        let native_copy_ready =
-            native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
         match self.lifecycle.poll(Instant::now()) {
             ViewerGpuSubmissionPoll::Completed(completed) => {
@@ -1867,7 +1861,7 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
         // Actual wgpu loss is safe terminal evidence for wgpu work only. The
         // independent D3D decoder-copy fence above must still be ready before
         // the media/lifecycle owner can move out of the callback slot.
-        if native_copy_ready
+        if renderer.is_some()
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
@@ -1875,7 +1869,14 @@ impl ViewerGpuDeviceGenerationRetirement for WindowViewerGpuGenerationRetirement
                 .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
-        native_copy_ready && !self.lifecycle.is_occupied()
+        if self.lifecycle.is_occupied() {
+            return None;
+        }
+        renderer.map(|renderer| {
+            crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt {
+                renderer: Some(renderer),
+            }
+        })
     }
 }
 
@@ -1883,7 +1884,7 @@ impl Drop for AppUiWindowSession {
     fn drop(&mut self) {
         if self.viewer_gpu_device_progress.generation_id().is_none() {
             // A replacement shell has not yet received the shared generation;
-            // its freshly-created, idle runtime may drop normally.
+            // it has no execution runtime or upload worker to retire.
             return;
         }
         match self.take_viewer_gpu_generation_retirement() {
@@ -6813,7 +6814,7 @@ impl AppUiWindowSession {
         Ok((
             progress,
             WindowViewerGpuGenerationRetirement {
-                runtime,
+                runtime: runtime.into_retirement(),
                 lifecycle,
                 _presentation: std::mem::take(&mut self.viewer_gpu_presentation),
                 _renderer_device: self.renderer_device.clone(),
@@ -6822,7 +6823,6 @@ impl AppUiWindowSession {
                 _completed_submissions: Vec::new(),
                 _lost_submission_owners: Vec::new(),
                 native_retirement_error_logged: false,
-                native_device_removed_logged: false,
             },
         ))
     }
@@ -6896,18 +6896,24 @@ impl AppUiWindowSession {
 
         let frame_renderer =
             AppUiFrameRenderer::new_for_surface(device, config.format, config.color_space)?;
-        let viewer_gpu_execution = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
-        viewer_gpu_execution
-            .install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
+        let viewer_gpu_execution = if viewer_gpu_device_progress.is_some() {
+            let runtime = ViewerGpuExecutionRuntime::new(adapter, device, queue)?;
+            runtime.install_cpu_yuv_upload_waker(host.preview_work_watch().completion_waker());
+            host.set_native_decoded_frame_import_support(
+                runtime.native_import_support(),
+                runtime.native_decode_device_root(),
+            );
+            ViewerGpuDeviceGenerationMember::new(runtime)
+        } else {
+            // Native-window replacement receives the existing generation below;
+            // do not create a worker or overwrite that generation's capabilities.
+            ViewerGpuDeviceGenerationMember::empty()
+        };
         let viewer_gpu_device_progress = match viewer_gpu_device_progress {
             Some(progress) => ViewerGpuDeviceGenerationMember::new(progress),
             None => ViewerGpuDeviceGenerationMember::empty(),
         };
         let viewer_gpu_submissions = ViewerGpuSubmissionLifecycle::new();
-        host.set_native_decoded_frame_import_support(
-            viewer_gpu_execution.native_import_support(),
-            viewer_gpu_execution.native_decode_device_root(),
-        );
         host.clear_viewer_cpu_fallback();
 
         Ok(Self {
@@ -6926,7 +6932,7 @@ impl AppUiWindowSession {
             frame_renderer,
             renderer_device: device.clone(),
             renderer_queue: queue.clone(),
-            viewer_gpu_execution: ViewerGpuDeviceGenerationMember::new(viewer_gpu_execution),
+            viewer_gpu_execution,
             viewer_gpu_presentation: WindowViewerGpuPresentationState::default(),
             viewer_gpu_submissions,
             staged_viewer_gpu_successors: PreviewGpuFrameStaging::default(),

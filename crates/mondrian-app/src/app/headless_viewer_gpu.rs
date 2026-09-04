@@ -484,7 +484,7 @@ type HeadlessViewerGpuOutputSlots = ViewerGpuPublicationSlots<
 >;
 
 struct HeadlessViewerGpuGenerationRetirement {
-    runtime: ViewerGpuExecutionRuntime,
+    runtime: mondrian_renderer::ViewerGpuExecutionRetirement,
     lifecycle: ViewerGpuSubmissionLifecycle<
         HeadlessViewerGpuSubmissionOwner,
         ViewerHeterogeneousGpuCompletedBatch,
@@ -501,7 +501,6 @@ struct HeadlessViewerGpuGenerationRetirement {
     >,
     _lost_submission_owners: Vec<HeadlessViewerGpuSubmissionOwner>,
     native_retirement_error_logged: bool,
-    native_device_removed_logged: bool,
 }
 
 impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetirement {
@@ -509,19 +508,13 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
         "Headless Viewer GPU device generation"
     }
 
-    fn poll_retirement(&mut self, terminal: Option<&ViewerGpuDeviceGenerationTerminal>) -> bool {
-        let native_progress_proved = match self.runtime.retire_completed_native_import_sources() {
-            Ok(_) => true,
-            Err(error) if error.is_native_device_removed() => {
-                if !self.native_device_removed_logged {
-                    tracing::warn!(
-                        %error,
-                        "Headless Viewer GPU retirement accepted typed native device-removal proof"
-                    );
-                    self.native_device_removed_logged = true;
-                }
-                true
-            }
+    fn poll_retirement(
+        &mut self,
+        terminal: Option<&ViewerGpuDeviceGenerationTerminal>,
+    ) -> Option<crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt>
+    {
+        let renderer = match self.runtime.poll() {
+            Ok(receipt) => receipt,
             Err(error) => {
                 if !self.native_retirement_error_logged {
                     tracing::error!(
@@ -530,11 +523,9 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
                     );
                     self.native_retirement_error_logged = true;
                 }
-                false
+                None
             }
         };
-        let native_copy_ready =
-            native_progress_proved && self.runtime.native_import_retained_source_count() == 0;
 
         match self.lifecycle.poll(Instant::now()) {
             ViewerGpuSubmissionPoll::Completed(completed) => {
@@ -553,7 +544,7 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
             | ViewerGpuSubmissionPoll::QuarantineStarted(_) => {}
         }
 
-        if native_copy_ready
+        if renderer.is_some()
             && terminal.is_some_and(ViewerGpuDeviceGenerationTerminal::wgpu_work_is_terminal)
             && self.lifecycle.is_occupied()
         {
@@ -561,7 +552,14 @@ impl ViewerGpuDeviceGenerationRetirement for HeadlessViewerGpuGenerationRetireme
                 .extend(self.lifecycle.retire_owners_after_wgpu_device_loss());
         }
 
-        native_copy_ready && !self.lifecycle.is_occupied()
+        if self.lifecycle.is_occupied() {
+            return None;
+        }
+        renderer.map(|renderer| {
+            crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationRetirementReceipt {
+                renderer: Some(renderer),
+            }
+        })
     }
 }
 
@@ -589,6 +587,7 @@ impl HeadlessViewerGpuAdapter {
                 retirement_requested: true,
                 retirement_handoff_accepted: false,
                 retirement_completed: false,
+                renderer_retirement: None,
                 generation_terminal_kind: None,
             };
         };
@@ -612,7 +611,7 @@ impl HeadlessViewerGpuAdapter {
         Some((
             progress,
             HeadlessViewerGpuGenerationRetirement {
-                runtime,
+                runtime: runtime.into_retirement(),
                 lifecycle: std::mem::replace(
                     &mut self.submission_lifecycle,
                     ViewerGpuSubmissionLifecycle::new(),
@@ -624,7 +623,6 @@ impl HeadlessViewerGpuAdapter {
                 _completed_submissions: Vec::new(),
                 _lost_submission_owners: Vec::new(),
                 native_retirement_error_logged: false,
-                native_device_removed_logged: false,
             },
         ))
     }
@@ -2065,6 +2063,28 @@ fn duration_us(started: Instant, completed: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires a real local GPU"]
+    fn real_gpu_retirement_carries_joined_renderer_receipt() {
+        let adapter = super::HeadlessViewerGpuAdapter::new().expect("real GPU adapter");
+        let evidence =
+            adapter.shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        assert!(evidence.worker_started);
+        assert!(evidence.worker_terminated);
+        assert!(!evidence.worker_panicked);
+        assert!(!evidence.timed_out);
+        assert!(evidence.retirement_requested);
+        assert!(evidence.retirement_handoff_accepted);
+        assert!(evidence.retirement_completed);
+        assert!(evidence.generation_terminal_kind.is_none());
+        let renderer = evidence.renderer_retirement.expect("actual created Renderer receipt");
+        assert_eq!(
+            renderer.cpu_yuv_upload,
+            mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned
+        );
+        assert!(renderer.is_healthy());
+    }
+
     use super::*;
     use std::cell::Cell;
     use std::sync::atomic::{AtomicUsize, Ordering};

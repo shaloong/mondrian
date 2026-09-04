@@ -269,6 +269,24 @@ transferring the complete GPU device-generation retirement envelope to the
 existing progress worker. GPU closure is bounded by the same terminal budget
 and records worker start/return, panic, timeout, retirement-handoff acceptance,
 and exact resource retirement.
+The GPU receipt also retains the Renderer-owned joined CPU-YUV upload outcome
+and native device-removal evidence. Complete normal-runtime qualification
+requires an actual healthy Renderer receipt; `retirement_completed=false` with
+no Renderer receipt means unknown, while completed retirement with no Renderer
+runtime is reserved for an explicitly unconstructed partial-start inventory.
+Progress exits distinguish plain command drain, retired resources, retained
+failure, and caught worker panic. A ready Adapter receipt is cached while its
+whole-queue barrier is pending. The command receiver remains outside the outer
+panic boundary so an accepted but unread retirement envelope is quarantined,
+not destructed during unwind.
+
+Window replacement creates an empty execution member and transfers the existing
+generation instead of spawning a disposable idle upload worker. Window shutdown
+JSON is schema 2; recovery validation rejects legacy/missing/unhealthy Renderer
+inventory even when the enclosing SHA is recomputed. Performance owner-closure
+validation independently checks the nested upload outcome, not only its summary
+boolean. Direct Renderer performance probes consume retirement on normal,
+error, and caught-panic exits before returning a qualifying report.
 A device-loss or progress-failure terminal observed through the final bounded
 join is merged into the terminal counters rather than being frozen only before
 teardown. A timeout detaches the still-authoritative progress worker so that it can

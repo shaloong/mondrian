@@ -62,6 +62,8 @@ pub struct EnduranceGpuShutdownEvidence {
     pub retirement_handoff_accepted: bool,
     /// Whether every accepted GPU/native resource became safe to release.
     pub retirement_completed: bool,
+    /// Actual created Renderer runtime retirement, including the joined upload worker.
+    pub renderer_retirement: Option<mondrian_renderer::ViewerGpuRetirementReceipt>,
     /// Unexpected device losses observed through final retirement.
     pub device_loss_count: u64,
     /// Progress-domain failures observed through final retirement.
@@ -77,6 +79,7 @@ impl EnduranceGpuShutdownEvidence {
             && !self.timed_out
             && self.retirement_handoff_accepted
             && self.retirement_completed
+            && matches!(self.renderer_retirement, Some(receipt) if receipt.is_healthy())
     }
 }
 
@@ -436,6 +439,7 @@ impl EnduranceExecutionOwners {
                 timed_out: false,
                 retirement_handoff_accepted: false,
                 retirement_completed: false,
+                renderer_retirement: None,
                 device_loss_count: 0,
                 fatal_error_count: 1,
             };
@@ -497,6 +501,7 @@ impl EnduranceExecutionOwners {
             timed_out: gpu.timed_out,
             retirement_handoff_accepted: gpu.retirement_handoff_accepted,
             retirement_completed: gpu.retirement_completed,
+            renderer_retirement: gpu.renderer_retirement,
             device_loss_count,
             fatal_error_count,
         };

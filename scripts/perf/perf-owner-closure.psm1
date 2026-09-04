@@ -171,7 +171,7 @@ function Assert-CleanGpu {
     Assert-Fields $Gpu @(
         "worker_started", "worker_terminated", "worker_panicked", "timed_out",
         "retirement_requested", "retirement_handoff_accepted", "retirement_completed",
-        "generation_terminal_kind", "all_resources_released"
+        "generation_terminal_kind", "renderer_retirement", "all_resources_released"
     ) $Context
     foreach ($leaf in @(
         "worker_started", "worker_terminated", "retirement_requested",
@@ -183,6 +183,11 @@ function Assert-CleanGpu {
         Assert-Bool $Gpu.$leaf $false "$Context.$leaf"
     }
     Assert-Null $Gpu.generation_terminal_kind "$Context.generation_terminal_kind"
+    Assert-Fields $Gpu.renderer_retirement @("cpu_yuv_upload", "native_device_removed") "$Context.renderer_retirement"
+    if ($Gpu.renderer_retirement.cpu_yuv_upload -cne "returned") {
+        throw "$Context did not observe a normally returned and joined YUV upload worker"
+    }
+    Assert-Bool $Gpu.renderer_retirement.native_device_removed $false "$Context.renderer_retirement.native_device_removed"
 }
 
 function Assert-CleanProject {

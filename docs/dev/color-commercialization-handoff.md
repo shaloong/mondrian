@@ -5,11 +5,18 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
-New lifecycle audit caveat: the existing clean receipts cover their declared
-owner inventory, not every renderer thread. `CpuYuvUploadRuntime::new` currently
-discards its upload worker's JoinHandle, so GPU progress retirement alone does
-not prove that upload worker has exited. Closing this missing owner/evidence
-boundary is required before complete COL-047 lifetime qualification.
+Lifecycle audit caveat: historical clean receipts cover their declared owner
+inventory, not every renderer thread. The upload JoinHandle was previously
+discarded. The active implementation now retains it behind consuming Renderer
+retirement and propagates the actual join receipt through App GPU closure.
+Five Renderer protocol/pool regressions and an actual compact-YUV GPU
+record/submit/retirement test have passed, followed by 25 App progress tests,
+five recovery-receipt tests and one real Headless GPU retirement test. The
+strengthened worker-before-submit/map ordering, real DX12 decoder-generation
+retirement, Window transfer regression, and six final Renderer unit regressions
+also passed. The input test exposed and corrected a stale RGBA16F-only
+guard rejecting the product RGBA32F native intermediate. Do not upgrade old
+receipts or call this complete startup/normal lifetime qualification yet.
 
 ## Local Windows work still in progress
 
@@ -98,30 +105,30 @@ verification before deleting build output.
 
 Remaining local COL-047 implementation/validation blocks:
 
-1. Retain and explicitly retire the renderer CPU YUV upload worker, with bounded
-   non-blocking retirement, exact terminal evidence, and full/partial Viewer
-   runtime construction coverage. Current progress-worker receipts cannot
-   stand in for this worker's completion.
-2. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
+1. Preserve the exact Preview/GPU owners on campaign startup/bind failure and
    consume them through the shared shutdown deadline, rather than returning
    only an error and later reporting App-only closure. Preserve typed startup
    failure evidence past the product entrypoint, even when cleanup succeeds.
-3. Extract cohesive performance owner-closure support from the large test
+   Cover partial Window/Headless GPU construction and preserve normal raw
+   terminal receipts as well as the optional campaign snapshot. The now-verified
+   Renderer retirement/progress protocol is the shared prerequisite, not proof
+   that these constructor/public-result paths already close.
+2. Extract cohesive performance owner-closure support from the large test
    module and tighten validation-only module/cfg boundaries without broad
    warning suppression.
-4. Make qualified FFmpeg command rejection a typed error; a command pointing
+3. Make qualified FFmpeg command rejection a typed error; a command pointing
    at an assumed-nonexistent sentinel executable is not fail-closed admission.
-5. Close the capsule lifecycle: sealed namespace, spawn-time admission,
+4. Close the capsule lifecycle: sealed namespace, spawn-time admission,
    retained child leases, explicit Windows access-control evidence, and
    fallible process-owner cleanup. Static owners do not run TempDir cleanup
    at process exit. Never recover orphans by deleting a filename-prefix glob.
-6. Add pre-loader authority and post-load image/object attestation. Current
+5. Add pre-loader authority and post-load image/object attestation. Current
    loaded-module canonical paths do not prove the identity of an image mapped
    before the retained source handle was acquired. Do not substitute a partial
    PE hash for complete image identity.
-7. Run the locally executable real Windows campaign smoke after those
+6. Run the locally executable real Windows campaign smoke after those
    boundaries close. A short smoke cannot certify the physical 72-hour run.
-8. Qualify the CPU-output bottleneck recommendation: the current generic
+7. Qualify the CPU-output bottleneck recommendation: the current generic
    `move_preview_output_boundary_to_gpu` action is not universally applicable.
    Diagnostics must preserve mandatory CPU cache publication, respect route
    requirements, and distinguish processor/memory optimization from legal GPU

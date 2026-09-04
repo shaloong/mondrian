@@ -55,6 +55,41 @@ foreach ($row in $rows) {
 }
 Assert-MondrianIdenticalOwnerClosures -Containers $rows -Context "valid Project fixture"
 
+# Synthetic schema probes, not physical GPU qualification evidence.
+$gpuFixture = Copy-JsonValue $rows[0]
+$gpuFixture.owner_closure.gpu_owner_required = $true
+$gpuFixture.owner_closure.gpu = [pscustomobject]@{
+    worker_started = $true
+    worker_terminated = $true
+    worker_panicked = $false
+    timed_out = $false
+    retirement_requested = $true
+    retirement_handoff_accepted = $true
+    retirement_completed = $true
+    generation_terminal_kind = $null
+    renderer_retirement = [pscustomobject]@{
+        cpu_yuv_upload = "returned"
+        native_device_removed = $false
+    }
+    all_resources_released = $true
+}
+Assert-MondrianCleanOwnerClosure $gpuFixture "valid GPU schema fixture" 0 $true
+foreach ($case in @("missing", "null", "panic", "native_removed", "unknown_exit", "aggregate")) {
+    $tamperedGpu = Copy-JsonValue $gpuFixture
+    $gpu = $tamperedGpu.owner_closure.gpu
+    switch ($case) {
+        "missing" { $gpu.PSObject.Properties.Remove("renderer_retirement") }
+        "null" { $gpu.renderer_retirement = $null }
+        "panic" { $gpu.renderer_retirement.cpu_yuv_upload = "panicked" }
+        "native_removed" { $gpu.renderer_retirement.native_device_removed = $true }
+        "unknown_exit" { $gpu.renderer_retirement.cpu_yuv_upload = "assumed_idle" }
+        "aggregate" { $gpu.all_resources_released = $false }
+    }
+    Assert-Rejected {
+        Assert-MondrianCleanOwnerClosure $tamperedGpu "GPU receipt $case" 0 $true
+    } "GPU receipt $case"
+}
+
 $booleanOnly = [pscustomobject]@{
     owner_closure = [pscustomobject]@{
         schema_version = 1

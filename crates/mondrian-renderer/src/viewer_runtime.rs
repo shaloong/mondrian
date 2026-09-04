@@ -4,6 +4,10 @@
 //! Viewer GPU execution lifetime and must be shared by every production or
 //! headless Adapter that executes the same preview path.
 
+#[cfg(test)]
+#[path = "viewer_runtime/retirement_tests.rs"]
+mod retirement_tests;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -207,33 +211,74 @@ impl ViewerGpuExecutionRuntime {
         let resource_pool = Arc::new(GpuColorFrameWgpuResourcePool::new(
             resource_grant.output_pool,
         ));
+        // Prepare every fallible GPU component before starting an upload worker.
+        // An early construction error then owns no detached upload execution.
+        let native_video_import =
+            ViewerNativeVideoImportRuntime::new_with_resource_pool_and_gpu_timing_policy(
+                adapter,
+                device,
+                queue,
+                Arc::clone(&resource_pool),
+                native_import_gpu_timing_policy,
+            );
+        let color_output =
+            RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(&resource_pool))?;
+        let spatial = GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool));
+        let display_calibration =
+            GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(&resource_pool))?;
+        let program_scopes = GpuProgramScopesRuntime::default();
+        let signal_monitor =
+            GpuSignalMonitorRuntime::with_resource_pool(Arc::clone(&resource_pool))?;
+        let working_compositor = GpuFrameCompositor::new(device)?;
+        let cpu_yuv_upload = crate::cpu_yuv::CpuYuvUploadRuntime::new(device)
+            .map_err(|_| ViewerGpuExecutionRuntimeCreateError::CpuYuvUploadWorker)?;
         Ok(Self {
-            resource_pool: Arc::clone(&resource_pool),
+            resource_pool,
             resource_grant,
             last_active_working_set: None,
-            native_video_import:
-                ViewerNativeVideoImportRuntime::new_with_resource_pool_and_gpu_timing_policy(
-                    adapter,
-                    device,
-                    queue,
-                    Arc::clone(&resource_pool),
-                    native_import_gpu_timing_policy,
-                ),
-            cpu_yuv_upload: crate::cpu_yuv::CpuYuvUploadRuntime::new(device)
-                .map_err(|_| ViewerGpuExecutionRuntimeCreateError::CpuYuvUploadWorker)?,
-            color_output: RenderGpuOutputBoundaryRuntime::with_resource_pool(Arc::clone(
-                &resource_pool,
-            ))?,
-            spatial: GpuViewerSpatialRuntime::with_resource_pool(Arc::clone(&resource_pool)),
-            display_calibration: GpuDisplayCalibrationRuntime::with_resource_pool(Arc::clone(
-                &resource_pool,
-            ))?,
-            program_scopes: GpuProgramScopesRuntime::default(),
-            signal_monitor: GpuSignalMonitorRuntime::with_resource_pool(Arc::clone(
-                &resource_pool,
-            ))?,
-            working_compositor: GpuFrameCompositor::new(device)?,
+            native_video_import,
+            cpu_yuv_upload,
+            color_output,
+            spatial,
+            display_calibration,
+            program_scopes,
+            signal_monitor,
+            working_compositor,
         })
+    }
+
+    /// Close upload admission and transfer all resources to a poll-only owner.
+    ///
+    /// The Adapter must retain the returned owner through both its Renderer
+    /// receipt and the independent submission-lifecycle/whole-queue barriers.
+    /// This transition never joins a running worker on the caller thread.
+    pub fn into_retirement(self) -> crate::ViewerGpuExecutionRetirement {
+        let Self {
+            resource_pool,
+            resource_grant: _,
+            last_active_working_set: _,
+            native_video_import,
+            cpu_yuv_upload,
+            color_output,
+            spatial,
+            display_calibration,
+            program_scopes,
+            signal_monitor,
+            working_compositor,
+        } = self;
+        crate::ViewerGpuExecutionRetirement {
+            native_video_import,
+            cpu_yuv_upload: cpu_yuv_upload.into_retirement(),
+            terminal: None,
+            native_device_removed: false,
+            _resource_pool: resource_pool,
+            _color_output: color_output,
+            _spatial: spatial,
+            _display_calibration: display_calibration,
+            _program_scopes: program_scopes,
+            _signal_monitor: signal_monitor,
+            _working_compositor: working_compositor,
+        }
     }
 
     /// Return the Viewer owner's idle-retention and active-frame grant.
