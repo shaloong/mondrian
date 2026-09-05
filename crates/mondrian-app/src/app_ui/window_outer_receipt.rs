@@ -16,6 +16,9 @@ use crate::app_ui::window::{
 
 const WINDOW_OUTER_RECEIPT_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_WINDOW_OUTER_RECEIPT_JSON_BYTES: usize = 128 * 1024;
+const WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES: usize = 128 * 1024;
+const MAXIMUM_WINDOW_CLOSED_RECEIPT_JSON_BYTES: usize = 2 * 1024 * 1024;
 const ACTIVE_EXIT_OUTCOME: &str = "active_exited";
 
 /// Owner-free, mutually-exclusive closure evidence for one Window execution.
@@ -68,6 +71,323 @@ impl AppUiWindowClosedEvidence {
     pub fn all_owned_authority_released(&self) -> bool {
         self.evidence.all_owned_authority_released()
     }
+
+    /// Seal the exact mutually-exclusive Window closure evidence for persistence.
+    pub fn seal_receipt(&self) -> Result<AppUiWindowClosedReceipt, AppUiWindowClosedReceiptError> {
+        AppUiWindowClosedReceipt::seal(&self.evidence)
+    }
+}
+
+/// Stable variant identity for one returned Window closure outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppUiWindowClosedOutcome {
+    /// Runtime construction failed before Host startup.
+    RuntimeStartupFailed,
+    /// Host construction failed before native Window construction.
+    HostStartupFailed,
+    /// Native/GPU candidate construction failed before Host publication.
+    PreActiveFailed,
+    /// An active Window returned through the normal owner-close transaction.
+    ActiveExited,
+    /// Activated owners returned after Host publication panicked.
+    ActivePublicationFailed,
+}
+
+/// Canonical bounded receipt for exact Window closure evidence on failure paths.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppUiWindowClosedReceipt {
+    outcome: AppUiWindowClosedOutcome,
+    canonical_json: String,
+    sha256: String,
+    all_owned_authority_released: bool,
+}
+
+impl AppUiWindowClosedReceipt {
+    fn seal(
+        evidence: &AppUiWindowOuterShutdownEvidence,
+    ) -> Result<Self, AppUiWindowClosedReceiptError> {
+        let projection = CanonicalWindowClosedReceipt {
+            schema_version: WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION,
+            shutdown: CanonicalWindowClosedEvidence::from_evidence(evidence)?,
+        };
+        let outcome = projection.validate()?;
+        let canonical_json = serde_json::to_string(&projection)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        if canonical_json.len() > MAXIMUM_WINDOW_CLOSED_RECEIPT_JSON_BYTES {
+            return Err(AppUiWindowClosedReceiptError::TooLarge);
+        }
+        let sha256 = lower_sha256(canonical_json.as_bytes());
+        Ok(Self {
+            outcome,
+            canonical_json,
+            sha256,
+            all_owned_authority_released: evidence.all_owned_authority_released(),
+        })
+    }
+
+    /// Exact mutually-exclusive Window closure variant.
+    pub const fn outcome(&self) -> AppUiWindowClosedOutcome {
+        self.outcome
+    }
+
+    /// Whether the original typed evidence proved all represented owners returned.
+    pub const fn all_owned_authority_released(&self) -> bool {
+        self.all_owned_authority_released
+    }
+
+    /// Canonical UTF-8 JSON for durable embedding.
+    pub fn canonical_json(&self) -> &str {
+        &self.canonical_json
+    }
+
+    /// SHA-256 over the exact bytes returned by [`Self::canonical_json`].
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Revalidate canonical shape and embedded byte integrity.
+    ///
+    /// Runtime, Host, and GPU semantic replay remains the responsibility of
+    /// their owning Modules; this method does not promote integrity to physical
+    /// qualification.
+    pub fn verify_integrity(
+        canonical_json: &str,
+        sha256: &str,
+    ) -> Result<AppUiWindowClosedOutcome, AppUiWindowClosedReceiptError> {
+        if canonical_json.len() > MAXIMUM_WINDOW_CLOSED_RECEIPT_JSON_BYTES {
+            return Err(AppUiWindowClosedReceiptError::TooLarge);
+        }
+        if lower_sha256(canonical_json.as_bytes()) != sha256 {
+            return Err(AppUiWindowClosedReceiptError::HashMismatch);
+        }
+        let projection: CanonicalWindowClosedReceipt = serde_json::from_str(canonical_json)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        let outcome = projection.validate()?;
+        let normalized = serde_json::to_string(&projection)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        if normalized != canonical_json {
+            return Err(AppUiWindowClosedReceiptError::NonCanonicalEvidence);
+        }
+        Ok(outcome)
+    }
+
+    /// Physical native termination remains unqualified without OS evidence.
+    pub const fn qualifies_physical_native_termination(&self) -> bool {
+        false
+    }
+}
+
+/// Stable Window-closure receipt sealing or replay rejection.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppUiWindowClosedReceiptError {
+    /// The canonical projection violates its schema or variant invariants.
+    #[error("Window closure receipt evidence is invalid")]
+    InvalidEvidence,
+    /// The outer canonical JSON does not match its supplied digest.
+    #[error("Window closure receipt hash does not match canonical JSON")]
+    HashMismatch,
+    /// An embedded raw receipt does not match its embedded digest.
+    #[error("Window closure embedded receipt hash does not match raw JSON")]
+    EmbeddedHashMismatch,
+    /// Valid JSON was not encoded in the one canonical compact form.
+    #[error("Window closure receipt JSON is not canonical")]
+    NonCanonicalEvidence,
+    /// Canonical encoding or decoding failed.
+    #[error("Window closure receipt serialization failed: {0}")]
+    Serialization(String),
+    /// The bounded receipt or one of its leaves exceeded its schema limit.
+    #[error("Window closure receipt exceeds its maximum canonical size")]
+    TooLarge,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalWindowClosedReceipt {
+    schema_version: u32,
+    shutdown: CanonicalWindowClosedEvidence,
+}
+
+impl CanonicalWindowClosedReceipt {
+    fn validate(&self) -> Result<AppUiWindowClosedOutcome, AppUiWindowClosedReceiptError> {
+        if self.schema_version != WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION {
+            return Err(AppUiWindowClosedReceiptError::InvalidEvidence);
+        }
+        self.shutdown.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+enum CanonicalWindowClosedEvidence {
+    RuntimeStartupFailed {
+        runtime: CanonicalWindowClosedLeaf,
+    },
+    HostStartupFailed {
+        runtime: CanonicalWindowClosedLeaf,
+        host: CanonicalWindowClosedLeaf,
+    },
+    PreActiveFailed {
+        runtime: CanonicalWindowClosedLeaf,
+        host: CanonicalWindowClosedLeaf,
+        native: CanonicalWindowClosedLeaf,
+    },
+    ActiveExited {
+        runtime: CanonicalWindowClosedLeaf,
+        host: CanonicalWindowClosedLeaf,
+        gpu: CanonicalWindowClosedLeaf,
+        native: CanonicalWindowClosedLeaf,
+    },
+    ActivePublicationFailed {
+        runtime: CanonicalWindowClosedLeaf,
+        host: CanonicalWindowClosedLeaf,
+        gpu: CanonicalWindowClosedLeaf,
+        native: CanonicalWindowClosedLeaf,
+    },
+}
+
+impl CanonicalWindowClosedEvidence {
+    fn from_evidence(
+        evidence: &AppUiWindowOuterShutdownEvidence,
+    ) -> Result<Self, AppUiWindowClosedReceiptError> {
+        Ok(match evidence {
+            AppUiWindowOuterShutdownEvidence::RuntimeStartupFailed { runtime } => {
+                Self::RuntimeStartupFailed { runtime: CanonicalWindowClosedLeaf::seal(runtime)? }
+            }
+            AppUiWindowOuterShutdownEvidence::HostStartupFailed { runtime, host } => {
+                Self::HostStartupFailed {
+                    runtime: CanonicalWindowClosedLeaf::seal(runtime)?,
+                    host: CanonicalWindowClosedLeaf::seal(host)?,
+                }
+            }
+            AppUiWindowOuterShutdownEvidence::PreActiveFailed { runtime, host, native } => {
+                Self::PreActiveFailed {
+                    runtime: CanonicalWindowClosedLeaf::seal(runtime)?,
+                    host: CanonicalWindowClosedLeaf::seal(host)?,
+                    native: CanonicalWindowClosedLeaf::seal(native)?,
+                }
+            }
+            AppUiWindowOuterShutdownEvidence::ActiveExited { runtime, host, gpu, native } => {
+                Self::ActiveExited {
+                    runtime: CanonicalWindowClosedLeaf::seal(runtime)?,
+                    host: CanonicalWindowClosedLeaf::seal(host)?,
+                    gpu: CanonicalWindowClosedLeaf::seal(gpu)?,
+                    native: CanonicalWindowClosedLeaf::seal(native)?,
+                }
+            }
+            AppUiWindowOuterShutdownEvidence::ActivePublicationFailed {
+                runtime,
+                host,
+                gpu,
+                native,
+            } => Self::ActivePublicationFailed {
+                runtime: CanonicalWindowClosedLeaf::seal(runtime)?,
+                host: CanonicalWindowClosedLeaf::seal(host)?,
+                gpu: CanonicalWindowClosedLeaf::seal(gpu)?,
+                native: CanonicalWindowClosedLeaf::seal(native)?,
+            },
+        })
+    }
+
+    fn validate(&self) -> Result<AppUiWindowClosedOutcome, AppUiWindowClosedReceiptError> {
+        let (outcome, leaves, active_native) = match self {
+            Self::RuntimeStartupFailed { runtime } => (
+                AppUiWindowClosedOutcome::RuntimeStartupFailed,
+                vec![runtime],
+                None,
+            ),
+            Self::HostStartupFailed { runtime, host } => (
+                AppUiWindowClosedOutcome::HostStartupFailed,
+                vec![runtime, host],
+                None,
+            ),
+            Self::PreActiveFailed { runtime, host, native } => (
+                AppUiWindowClosedOutcome::PreActiveFailed,
+                vec![runtime, host, native],
+                None,
+            ),
+            Self::ActiveExited { runtime, host, gpu, native } => (
+                AppUiWindowClosedOutcome::ActiveExited,
+                vec![runtime, host, gpu, native],
+                Some(native),
+            ),
+            Self::ActivePublicationFailed { runtime, host, gpu, native } => (
+                AppUiWindowClosedOutcome::ActivePublicationFailed,
+                vec![runtime, host, gpu, native],
+                Some(native),
+            ),
+        };
+        for leaf in leaves {
+            leaf.validate()?;
+        }
+        if let Some(native) = active_native {
+            native.validate_active_native_return()?;
+        }
+        Ok(outcome)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalWindowClosedLeaf {
+    json: String,
+    sha256: String,
+}
+
+impl CanonicalWindowClosedLeaf {
+    fn seal(value: &impl Serialize) -> Result<Self, AppUiWindowClosedReceiptError> {
+        let json = canonical_closed_leaf_json(value)?;
+        if json.len() > MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES {
+            return Err(AppUiWindowClosedReceiptError::TooLarge);
+        }
+        let sha256 = lower_sha256(json.as_bytes());
+        Ok(Self { json, sha256 })
+    }
+
+    fn validate(&self) -> Result<(), AppUiWindowClosedReceiptError> {
+        if self.json.len() > MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES {
+            return Err(AppUiWindowClosedReceiptError::TooLarge);
+        }
+        if lower_sha256(self.json.as_bytes()) != self.sha256 {
+            return Err(AppUiWindowClosedReceiptError::EmbeddedHashMismatch);
+        }
+        let value: serde_json::Value = serde_json::from_str(&self.json)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        let normalized = serde_json::to_string(&value)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        if normalized != self.json {
+            return Err(AppUiWindowClosedReceiptError::NonCanonicalEvidence);
+        }
+        Ok(())
+    }
+
+    fn validate_active_native_return(&self) -> Result<(), AppUiWindowClosedReceiptError> {
+        let native: CanonicalActiveNativeReturnEvidence = serde_json::from_str(&self.json)
+            .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+        if !native.event_loop_borrow_returned
+            || !native.window_owner_scope_exited
+            || native.physical_native_termination != PhysicalNativeTermination::Unverified
+        {
+            return Err(AppUiWindowClosedReceiptError::InvalidEvidence);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalActiveNativeReturnEvidence {
+    event_loop_borrow_returned: bool,
+    window_owner_scope_exited: bool,
+    physical_native_termination: PhysicalNativeTermination,
+}
+
+fn canonical_closed_leaf_json(
+    value: &impl Serialize,
+) -> Result<String, AppUiWindowClosedReceiptError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))?;
+    serde_json::to_string(&value)
+        .map_err(|error| AppUiWindowClosedReceiptError::Serialization(error.to_string()))
 }
 
 /// Evidence that can only be minted after the Window function returns.
@@ -248,11 +568,11 @@ impl AppUiWindowRunReceipt {
         canonical_json: &str,
         sha256: &str,
     ) -> Result<(), AppUiWindowRunReceiptError> {
-        if lower_sha256(canonical_json.as_bytes()) != sha256 {
-            return Err(AppUiWindowRunReceiptError::HashMismatch);
-        }
         if canonical_json.len() > MAXIMUM_WINDOW_OUTER_RECEIPT_JSON_BYTES {
             return Err(AppUiWindowRunReceiptError::TooLarge);
+        }
+        if lower_sha256(canonical_json.as_bytes()) != sha256 {
+            return Err(AppUiWindowRunReceiptError::HashMismatch);
         }
         let projection: CanonicalActiveWindowRunEvidence = serde_json::from_str(canonical_json)
             .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
@@ -311,17 +631,26 @@ impl CanonicalActiveWindowRunEvidence {
         {
             return Err(AppUiWindowRunReceiptError::InvalidEvidence);
         }
+        EnduranceRecoveryOperationReceipt::parse_and_validate(
+            &self.recovery_receipt_json,
+            &self.recovery_receipt_sha256,
+        )
+        .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
         for (json, expected_hash) in [
-            (&self.recovery_receipt_json, &self.recovery_receipt_sha256),
             (&self.runtime_shutdown_json, &self.runtime_shutdown_sha256),
             (&self.host_shutdown_json, &self.host_shutdown_sha256),
             (&self.gpu_shutdown_json, &self.gpu_shutdown_sha256),
             (&self.native_return_json, &self.native_return_sha256),
         ] {
-            serde_json::from_str::<serde_json::Value>(json)
+            let value = serde_json::from_str::<serde_json::Value>(json)
                 .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
             if lower_sha256(json.as_bytes()) != *expected_hash {
                 return Err(AppUiWindowRunReceiptError::EmbeddedHashMismatch);
+            }
+            let normalized = serde_json::to_string(&value)
+                .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+            if normalized != *json {
+                return Err(AppUiWindowRunReceiptError::NonCanonicalEvidence);
             }
         }
         Ok(())
@@ -367,7 +696,9 @@ pub enum AppUiWindowRunReceiptError {
 }
 
 fn canonical_leaf_json(value: &impl Serialize) -> Result<String, AppUiWindowRunReceiptError> {
-    serde_json::to_string(value)
+    let value = serde_json::to_value(value)
+        .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+    serde_json::to_string(&value)
         .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))
 }
 
@@ -409,7 +740,16 @@ mod tests {
     const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     fn fixture_projection() -> CanonicalActiveWindowRunEvidence {
-        let recovery = r#"{"step":"surface_device_reopen"}"#.to_owned();
+        let recovery = EnduranceRecoveryOperationReceipt::surface_device_reopen(
+            1,
+            "surface.c1".to_owned(),
+            SHA.to_owned(),
+            1,
+            2,
+            3,
+            4,
+        )
+        .expect("fixture recovery receipt");
         let runtime = r#"{"supervisor":"terminated"}"#.to_owned();
         let host = r#"{"preview":{"worker":"returned"}}"#.to_owned();
         let gpu = r#"{"retirement":"returned"}"#.to_owned();
@@ -417,8 +757,8 @@ mod tests {
         CanonicalActiveWindowRunEvidence {
             schema_version: WINDOW_OUTER_RECEIPT_SCHEMA_VERSION,
             outcome: ACTIVE_EXIT_OUTCOME.to_owned(),
-            recovery_receipt_sha256: lower_sha256(recovery.as_bytes()),
-            recovery_receipt_json: recovery,
+            recovery_receipt_sha256: recovery.sha256().to_owned(),
+            recovery_receipt_json: recovery.canonical_json().to_owned(),
             runtime_shutdown_sha256: lower_sha256(runtime.as_bytes()),
             runtime_shutdown_json: runtime,
             host_shutdown_sha256: lower_sha256(host.as_bytes()),
@@ -428,6 +768,136 @@ mod tests {
             native_return_sha256: lower_sha256(native.as_bytes()),
             native_return_json: native,
         }
+    }
+
+    fn closed_leaf(json: &str) -> CanonicalWindowClosedLeaf {
+        let value: serde_json::Value =
+            serde_json::from_str(json).expect("closed fixture leaf should parse");
+        let json = serde_json::to_string(&value).expect("closed fixture leaf should normalize");
+        CanonicalWindowClosedLeaf {
+            json: json.clone(),
+            sha256: lower_sha256(json.as_bytes()),
+        }
+    }
+
+    fn closed_projection(shutdown: CanonicalWindowClosedEvidence) -> CanonicalWindowClosedReceipt {
+        CanonicalWindowClosedReceipt {
+            schema_version: WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION,
+            shutdown,
+        }
+    }
+
+    fn verify_closed_projection(
+        projection: &CanonicalWindowClosedReceipt,
+    ) -> Result<AppUiWindowClosedOutcome, AppUiWindowClosedReceiptError> {
+        let json = serde_json::to_string(projection).expect("closed fixture should serialize");
+        let hash = lower_sha256(json.as_bytes());
+        AppUiWindowClosedReceipt::verify_integrity(&json, &hash)
+    }
+
+    #[test]
+    fn closed_receipt_preserves_all_mutually_exclusive_outcomes() {
+        let runtime = || closed_leaf(r#"{"supervisor":"terminated"}"#);
+        let host = || closed_leaf(r#"{"preview":"returned"}"#);
+        let gpu = || closed_leaf(r#"{"retirement":"returned"}"#);
+        let pre_active = || closed_leaf(r#"{"last_stage":"surface_created"}"#);
+        let active_native = || {
+            closed_leaf(
+                r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#,
+            )
+        };
+        let cases = [
+            (
+                closed_projection(CanonicalWindowClosedEvidence::RuntimeStartupFailed {
+                    runtime: runtime(),
+                }),
+                AppUiWindowClosedOutcome::RuntimeStartupFailed,
+            ),
+            (
+                closed_projection(CanonicalWindowClosedEvidence::HostStartupFailed {
+                    runtime: runtime(),
+                    host: host(),
+                }),
+                AppUiWindowClosedOutcome::HostStartupFailed,
+            ),
+            (
+                closed_projection(CanonicalWindowClosedEvidence::PreActiveFailed {
+                    runtime: runtime(),
+                    host: host(),
+                    native: pre_active(),
+                }),
+                AppUiWindowClosedOutcome::PreActiveFailed,
+            ),
+            (
+                closed_projection(CanonicalWindowClosedEvidence::ActiveExited {
+                    runtime: runtime(),
+                    host: host(),
+                    gpu: gpu(),
+                    native: active_native(),
+                }),
+                AppUiWindowClosedOutcome::ActiveExited,
+            ),
+            (
+                closed_projection(CanonicalWindowClosedEvidence::ActivePublicationFailed {
+                    runtime: runtime(),
+                    host: host(),
+                    gpu: gpu(),
+                    native: active_native(),
+                }),
+                AppUiWindowClosedOutcome::ActivePublicationFailed,
+            ),
+        ];
+
+        for (projection, expected) in cases {
+            assert_eq!(verify_closed_projection(&projection), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn closed_receipt_rejects_nested_tamper_and_noncanonical_leaf() {
+        let mut projection =
+            closed_projection(CanonicalWindowClosedEvidence::RuntimeStartupFailed {
+                runtime: closed_leaf(r#"{"supervisor":"terminated"}"#),
+            });
+        if let CanonicalWindowClosedEvidence::RuntimeStartupFailed { runtime } =
+            &mut projection.shutdown
+        {
+            runtime.json = r#"{"supervisor":"timed_out"}"#.to_owned();
+        } else {
+            unreachable!("fixture outcome")
+        }
+        assert_eq!(
+            verify_closed_projection(&projection),
+            Err(AppUiWindowClosedReceiptError::EmbeddedHashMismatch)
+        );
+
+        if let CanonicalWindowClosedEvidence::RuntimeStartupFailed { runtime } =
+            &mut projection.shutdown
+        {
+            runtime.json = r#" {"supervisor":"terminated"}"#.to_owned();
+            runtime.sha256 = lower_sha256(runtime.json.as_bytes());
+        } else {
+            unreachable!("fixture outcome")
+        }
+        assert_eq!(
+            verify_closed_projection(&projection),
+            Err(AppUiWindowClosedReceiptError::NonCanonicalEvidence)
+        );
+    }
+
+    #[test]
+    fn closed_receipt_rejects_native_physical_promotion() {
+        let native_json = r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"qualified"}"#;
+        let projection = closed_projection(CanonicalWindowClosedEvidence::ActiveExited {
+            runtime: closed_leaf(r#"{"supervisor":"terminated"}"#),
+            host: closed_leaf(r#"{"preview":"returned"}"#),
+            gpu: closed_leaf(r#"{"retirement":"returned"}"#),
+            native: closed_leaf(native_json),
+        });
+        assert!(matches!(
+            verify_closed_projection(&projection),
+            Err(AppUiWindowClosedReceiptError::Serialization(_))
+        ));
     }
 
     #[test]

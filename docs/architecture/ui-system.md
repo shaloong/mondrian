@@ -2277,3 +2277,15 @@ canonical encoding, reparses complex leaves into their owning crate types, and
 recomputes the complete App clean predicate; dirty evidence remains serializable
 but cannot qualify. This receipt is the App leaf for the next batch-outcome
 schema, not yet a claim that the standalone CLI publishes failure outcomes.
+
+Process-local EventLoop shutdown and Window failure closure now expose additive
+bounded receipt Interfaces. An EventLoop receipt can only be minted after the
+Rust `EventLoop` owner is actually dropped; construction failure therefore has
+no shutdown receipt. A Window failure receipt preserves exactly one of runtime
+startup, host startup, pre-active, active exit, or active-publication failure,
+with fixed Runtime/Host/GPU/native leaf membership and independent leaf hashes.
+Its verifier checks canonical shape and byte integrity, including the active
+native-return marker remaining `unverified`; it deliberately does not claim
+independent Runtime/Host/GPU semantic replay or physical OS/driver termination.
+The existing successful Window receipt now delegates nested recovery replay to
+the Recovery Module instead of imposing a second JSON canonicalization rule.

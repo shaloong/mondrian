@@ -63,7 +63,8 @@ use crate::app_ui::background_runtime::AppUiBackgroundRuntimeOwner;
 #[cfg(feature = "validation")]
 pub use crate::app_ui::event_loop_owner::{
     AppUiEventLoopConstructionFailure, AppUiEventLoopConstructionFailureKind,
-    AppUiEventLoopShutdownEvidence,
+    AppUiEventLoopShutdownEvidence, AppUiEventLoopShutdownReceipt,
+    AppUiEventLoopShutdownReceiptError,
 };
 use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
@@ -90,7 +91,8 @@ use crate::app_ui::window_outer_receipt::AppUiWindowNativeReturnEvidence;
 use crate::app_ui::window_outer_receipt::AppUiWindowOuterShutdownEvidence;
 #[cfg(feature = "validation")]
 pub use crate::app_ui::window_outer_receipt::{
-    AppUiWindowClosedEvidence, AppUiWindowRunReceipt, AppUiWindowRunReceiptError,
+    AppUiWindowClosedEvidence, AppUiWindowClosedOutcome, AppUiWindowClosedReceipt,
+    AppUiWindowClosedReceiptError, AppUiWindowRunReceipt, AppUiWindowRunReceiptError,
 };
 use mondrian_core::types::ColorSpace;
 use mondrian_core::{ProgramScopeScale, ProgramScopesTap, SignalComplianceContract, WaveformMode};
@@ -2724,6 +2726,13 @@ impl AppUiSurfaceDeviceReopenValidationBatch {
         self.event_loop_shutdown
     }
 
+    /// Seal the EventLoop Rust-owner handback for durable batch evidence.
+    pub fn event_loop_shutdown_receipt(
+        &self,
+    ) -> Result<AppUiEventLoopShutdownReceipt, AppUiEventLoopShutdownReceiptError> {
+        AppUiEventLoopShutdownReceipt::seal(self.event_loop_shutdown)
+    }
+
     /// Exact final consuming App shutdown evidence.
     pub const fn app_shutdown(&self) -> &AppEnduranceShutdownEvidence {
         &self.app_shutdown
@@ -2905,6 +2914,20 @@ impl AppUiSurfaceDeviceReopenValidationError {
             AppUiSurfaceDeviceReopenPrimaryFailure::Request { .. }
             | AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction { .. } => None,
         }
+    }
+
+    /// Seal EventLoop handback evidence when construction succeeded.
+    pub fn event_loop_shutdown_receipt(
+        &self,
+    ) -> Result<Option<AppUiEventLoopShutdownReceipt>, AppUiEventLoopShutdownReceiptError> {
+        self.event_loop_shutdown().map(AppUiEventLoopShutdownReceipt::seal).transpose()
+    }
+
+    /// Seal exact outer Window closure evidence when a Window run returned it.
+    pub fn window_shutdown_receipt(
+        &self,
+    ) -> Result<Option<AppUiWindowClosedReceipt>, AppUiWindowClosedReceiptError> {
+        self.window_shutdown().map(AppUiWindowClosedEvidence::seal_receipt).transpose()
     }
 
     /// Exact final consuming App shutdown evidence.
@@ -11553,6 +11576,14 @@ mod tests {
             assert!(error.completed_receipts().is_empty());
             assert!(error.window_shutdown().is_none());
             assert!(error.event_loop_shutdown().is_none());
+            assert!(error
+                .window_shutdown_receipt()
+                .expect("absent Window receipt should be valid")
+                .is_none());
+            assert!(error
+                .event_loop_shutdown_receipt()
+                .expect("absent EventLoop receipt should be valid")
+                .is_none());
             assert!(error.all_returned_authority_released(), "{error:#?}");
         }
     }
@@ -11589,6 +11620,14 @@ mod tests {
         assert_eq!(error.failed_operation_id(), None);
         assert!(error.window_shutdown().is_none());
         assert!(error.event_loop_shutdown().is_none());
+        assert!(error
+            .window_shutdown_receipt()
+            .expect("construction failure has no Window receipt")
+            .is_none());
+        assert!(error
+            .event_loop_shutdown_receipt()
+            .expect("construction failure has no EventLoop shutdown receipt")
+            .is_none());
         assert!(error.all_returned_authority_released(), "{error:#?}");
     }
 }
