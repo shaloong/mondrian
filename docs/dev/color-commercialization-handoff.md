@@ -275,10 +275,10 @@ receipt is clean. Retirement error/panic and publication panic therefore retain
 the candidate in the outer Session for explicit closure. Publication failure is
 terminal; there is no rollback to a partially stale Host. A normal replacement
 error is also promoted to an event-loop failure and cannot become normal exit.
-Remaining Window work is the outer pre-active EventLoop/Tokio/Host/native
-transaction, typed native/background-runtime evidence, and durable
-old/candidate/final receipt history. These slices must not be reported as whole
-Window qualification until complete.
+Remaining Window work includes EventLoop creation ownership, an
+impossible-state-free durable outer Runtime/Host/GPU/native receipt, physical
+native termination evidence, and durable old/candidate/final receipt history.
+These slices must not be reported as whole Window qualification until complete.
 
 The next runtime-owner slice replaces the bare four-thread Tokio Runtime with a
 native supervisor-owned Module. UI execution receives only a Runtime Handle.
@@ -288,9 +288,33 @@ unchanged Window deadline. Only `OwnedWorkerShutdown::Terminated` after Runtime
 destruction qualifies; timeout, panic, or current-thread join is dirty, while a
 fallback detach is unverified and produces no receipt. This removes unbounded
 Runtime Drop from early-return fallback paths without claiming that detached
-fallback produced a receipt. The remaining
-outer pre-active transaction must still aggregate every Window/Surface/Adapter/
-Device failure and the runtime evidence into one exact App handback.
+fallback produced a receipt. The following pre-active construction slice
+aggregates Window/Surface/Adapter/Device/partial-GPU failures and construction
+panics into one exact App handback; durable aggregation remains separate.
+
+The initial pre-active construction follow-on retains the complete raw Host until
+Host publication succeeds. A single caught construction scope records the last
+installed Window/Surface/Adapter/DeviceQueue/GPU-progress/waker/Prepared/Activated
+stage. Error or panic first consumes any partial Viewer GPU owner, then closes the
+complete Host and returns the exact App, then consumes the background Runtime,
+all against the original absolute deadline. The stage evidence states only that
+Rust native authority left the event-loop-thread scope; it does not claim OS or
+driver termination. Production-seam tests prove ordinary-error scope destruction
+precedes evidence construction and panic diagnostics preserve the last stage.
+EventLoop creation and durable typed outer receipt aggregation remain open.
+
+Final gates for this slice passed: default and validation checks, two focused
+construction error/panic regressions, App and full-workspace all-target/all-feature
+Clippy with warnings denied, and full-workspace format. The final-source release
+validator rebuilt in 15m26s and real Win32/winit/DX12 cycles 15-16 both passed
+with distinct Surface/Device generations, terminated old progress workers,
+complete retirement, returned YUV workers, no native device removal, actual
+presentation, and matching original/reopened picture hashes. Binary SHA-256 is
+`84D784A2AE082489416B72AAC5F37B6B983A479A33BD818AC3C9846E9422EB80`;
+report SHA-256 is
+`8D81BBF6CE2ADB0E65D035E8BAFC73344FD538E333753CEF2F5E93AC6A27106C`.
+Observed 166-213ms Preview preparation remains COL-031 failure evidence rather
+than realtime qualification. No capacity failure or `target` cleanup occurred.
 
 Local final-source verification built the release
 `mondrian-surface-reopen` binary in 12m19s and ran two real Win32/winit/DX12
@@ -340,8 +364,10 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    event-loop panic/GPU/UI/App closure are complete. Candidate installation
    before fallible Host publication and post-handoff publication panic ownership
    are complete. The background Runtime now has a bounded supervisor owner and
-   clean join predicate. Pre-active construction, unified/durable runtime and
-   typed native evidence, and durable old/candidate/final receipt history remain.
+   clean join predicate. Initial native/GPU construction errors and panics now
+   have a unified bounded close path. EventLoop creation, impossible-state-free
+   durable Runtime/Host/GPU/native evidence, physical native termination, and
+   durable old/candidate/final receipt history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.

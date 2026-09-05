@@ -2219,9 +2219,17 @@ explicitly closeable. A normal role-replacement error is retained as an
 event-loop failure. Partially mutated Host state is not rolled back and may not
 resume; the Window fails closed and exits.
 
-Pre-active EventLoop/Host/native construction still needs one outer transaction
-and absolute deadline. Normal active closure and explicit Host/publication
-failure paths now consume the background Runtime supervisor under that deadline;
-unified pre-active failure aggregation, typed native authority release, durable
-background-runtime evidence, and durable successful old/candidate/final receipt
-propagation remain unfinished lifecycle work.
+Initial Window native/GPU construction now runs inside one caught, stage-ledger
+scope after Runtime and Host startup. The raw complete Host is retained outside
+that scope and is wrapped as an active `AppUiHostSessionOwner` only after Host
+publication succeeds. Window, Surface, Adapter, Device/Queue, Viewer progress,
+Preview waker, Prepared Window, and Activated Window checkpoints feed one failure
+path. That path first consumes any partial Viewer GPU owner, then hands the exact
+App back through complete Host closure, then consumes the background Runtime
+supervisor, all under the original absolute deadline. A returned or unwound
+construction scope proves that its Rust native authorities were consumed on the
+event-loop thread; it does not prove OS compositor or driver termination.
+EventLoop creation remains outside this borrowed-EventLoop transaction. An
+impossible-state-free durable outer receipt, physical native termination
+evidence, and durable old/candidate/final receipt propagation remain unfinished
+lifecycle work.

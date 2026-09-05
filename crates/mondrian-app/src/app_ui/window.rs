@@ -2013,6 +2013,7 @@ fn request_app_ui_device(
     pollster::block_on(adapter.request_device(&descriptor))
 }
 
+#[cfg(feature = "validation")]
 fn close_failed_viewer_gpu_startup(
     startup: crate::app::viewer_gpu_startup::ViewerGpuStartupOwner,
     deadline: Instant,
@@ -2024,6 +2025,253 @@ fn close_failed_viewer_gpu_startup(
         "{primary}; Viewer GPU startup cleanup_all_created_resources_released={cleanup_released}; cleanup={cleanup:?}"
     )
     .into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiPreActiveWindowStartupStage {
+    HostOwned,
+    WindowCreated,
+    SurfaceCreated,
+    AdapterSelected,
+    DeviceQueueCreated,
+    ViewerGpuProgressStarted,
+    PreviewWakerInstalled,
+    WindowPrepared,
+    WindowActivated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppUiPreActiveViewerGpuShutdownEvidence {
+    NotStarted,
+    Shutdown(Option<crate::app::viewer_gpu_startup::ViewerGpuStartupShutdownEvidence>),
+    ShutdownPanicked(String),
+}
+
+impl AppUiPreActiveViewerGpuShutdownEvidence {
+    fn all_created_resources_released(&self) -> bool {
+        match self {
+            Self::NotStarted => true,
+            Self::Shutdown(Some(evidence)) => evidence.all_created_resources_released(),
+            Self::Shutdown(None) | Self::ShutdownPanicked(_) => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppUiPreActiveWindowShutdownEvidence {
+    last_stage: AppUiPreActiveWindowStartupStage,
+    rust_native_authority_released_on_event_loop_thread: bool,
+    viewer_gpu: AppUiPreActiveViewerGpuShutdownEvidence,
+}
+
+impl AppUiPreActiveWindowShutdownEvidence {
+    fn all_created_resources_released(&self) -> bool {
+        self.rust_native_authority_released_on_event_loop_thread
+            && self.viewer_gpu.all_created_resources_released()
+    }
+}
+
+struct AppUiPreActiveWindowStartupFailure {
+    primary: String,
+    shutdown: AppUiPreActiveWindowShutdownEvidence,
+}
+
+struct AppUiInitialWindowCandidate {
+    preview_work_event_proxy: winit::event_loop::EventLoopProxy<AppUiUserEvent>,
+    preview_work_watch: PreviewWorkWatch,
+    preview_work_event_pending: Arc<AtomicBool>,
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    session: AppUiWindowSession,
+    session_bounds: Rect,
+}
+
+fn prepare_initial_window_candidate(
+    event_loop: &winit::event_loop::EventLoop<AppUiUserEvent>,
+    host: &AppUiHost,
+    deadline: Instant,
+) -> Result<AppUiInitialWindowCandidate, AppUiPreActiveWindowStartupFailure> {
+    catch_pre_active_window_construction(deadline, |last_stage, viewer_gpu_startup| {
+        let preview_work_event_proxy = event_loop.create_proxy();
+        let startup_window = Arc::new(
+            event_loop
+                .create_window(window_attributes_for_role(AppUiWindowRole::Startup))
+                .map_err(|error| format!("could not create startup Window: {error}"))?,
+        );
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowCreated;
+
+        let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        let instance = wgpu::Instance::new(instance_desc);
+        let startup_surface = instance
+            .create_surface(startup_window.clone())
+            .map_err(|error| format!("could not create startup Surface: {error}"))?;
+        *last_stage = AppUiPreActiveWindowStartupStage::SurfaceCreated;
+
+        let adapter = pollster::block_on(request_adapter_with_native_video_preference(
+            &instance,
+            &wgpu::RequestAdapterOptions {
+                compatible_surface: Some(&startup_surface),
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                ..Default::default()
+            },
+        ))
+        .map_err(|_| "No suitable GPU adapter".to_owned())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::AdapterSelected;
+
+        let adapter_info = adapter.get_info();
+        crate::app_ui::about_dialog::SYSTEM_INFO
+            .set(crate::app_ui::about_dialog::AboutSystemInfo {
+                pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
+                rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
+                os: if cfg!(windows) {
+                    "Windows"
+                } else {
+                    std::env::consts::OS
+                }
+                .to_owned(),
+                arch: std::env::consts::ARCH.to_owned(),
+                os_version: String::new(),
+                wgpu_backend: format!("{:?}", adapter_info.backend),
+                gpu_name: adapter_info.name,
+            })
+            .ok();
+
+        let (device, queue) = request_app_ui_device(&adapter)
+            .map_err(|error| format!("could not create startup Device/Queue: {error}"))?;
+        *last_stage = AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+
+        let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
+        let viewer_gpu_progress_wake = ViewerGpuDeviceProgressWake::new(move || {
+            let _ = viewer_gpu_completion_event_proxy
+                .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
+        });
+        *viewer_gpu_startup = Some(
+            crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
+                &device,
+                &queue,
+                viewer_gpu_progress_wake,
+            )
+            .map_err(|error| format!("could not start Viewer GPU progress: {error}"))?,
+        );
+        *last_stage = AppUiPreActiveWindowStartupStage::ViewerGpuProgressStarted;
+
+        let preview_work_watch = host.preview_work_watch();
+        let preview_work_event_pending = Arc::new(AtomicBool::new(false));
+        let worker_event_pending = Arc::clone(&preview_work_event_pending);
+        let worker_event_proxy = preview_work_event_proxy.clone();
+        if let Err(failure) = preview_work_watch.install_waker(move || {
+            queue_preview_work_event(&worker_event_pending, || {
+                worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
+            });
+        }) {
+            let (reason, callback) = failure.into_parts();
+            drop(callback);
+            return Err(reason.to_string());
+        }
+        *last_stage = AppUiPreActiveWindowStartupStage::PreviewWakerInstalled;
+
+        let startup = viewer_gpu_startup
+            .as_mut()
+            .ok_or_else(|| "Viewer GPU startup owner was lost before preparation".to_owned())?;
+        let prepared_session = AppUiPreparedWindowSession::prepare(
+            AppUiWindowRole::Startup,
+            startup_window,
+            startup_surface,
+            &adapter,
+            &device,
+            &queue,
+            host,
+            Some(startup),
+        )
+        .map_err(|error| error.to_string())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowPrepared;
+        let activated_session =
+            prepared_session.activate(Some(startup)).map_err(|error| error.to_string())?;
+        *last_stage = AppUiPreActiveWindowStartupStage::WindowActivated;
+        let (session, session_bounds) = activated_session.into_parts();
+
+        Ok::<_, String>(AppUiInitialWindowCandidate {
+            preview_work_event_proxy,
+            preview_work_watch,
+            preview_work_event_pending,
+            instance,
+            adapter,
+            device,
+            queue,
+            session,
+            session_bounds,
+        })
+    })
+}
+
+fn catch_pre_active_window_construction<T>(
+    deadline: Instant,
+    build: impl FnOnce(
+        &mut AppUiPreActiveWindowStartupStage,
+        &mut Option<crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    ) -> Result<T, String>,
+) -> Result<T, AppUiPreActiveWindowStartupFailure> {
+    let mut last_stage = AppUiPreActiveWindowStartupStage::HostOwned;
+    let mut viewer_gpu_startup = None;
+    let build = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        build(&mut last_stage, &mut viewer_gpu_startup)
+    }));
+    match build {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(primary)) => Err(close_pre_active_native_construction(
+            primary,
+            last_stage,
+            viewer_gpu_startup,
+            deadline,
+        )),
+        Err(payload) => Err(close_pre_active_native_construction(
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "pre-active Window construction",
+            )
+            .to_string(),
+            last_stage,
+            viewer_gpu_startup,
+            deadline,
+        )),
+    }
+}
+
+fn close_pre_active_native_construction(
+    primary: String,
+    last_stage: AppUiPreActiveWindowStartupStage,
+    viewer_gpu_startup: Option<crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
+    deadline: Instant,
+) -> AppUiPreActiveWindowStartupFailure {
+    let viewer_gpu = match viewer_gpu_startup {
+        None => AppUiPreActiveViewerGpuShutdownEvidence::NotStarted,
+        Some(startup) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            startup.shutdown_until(deadline)
+        })) {
+            Ok(evidence) => AppUiPreActiveViewerGpuShutdownEvidence::Shutdown(evidence),
+            Err(payload) => AppUiPreActiveViewerGpuShutdownEvidence::ShutdownPanicked(
+                crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                    payload,
+                    "pre-active Viewer GPU shutdown",
+                )
+                .to_string(),
+            ),
+        },
+    };
+    AppUiPreActiveWindowStartupFailure {
+        primary,
+        shutdown: AppUiPreActiveWindowShutdownEvidence {
+            last_stage,
+            // The construction closure has returned or unwound before this
+            // evidence is built, so its Window/Surface/Adapter/Device owners
+            // have been consumed on the event-loop thread. This is not a claim
+            // that the OS compositor or native driver reported termination.
+            rust_native_authority_released_on_event_loop_thread: true,
+            viewer_gpu,
+        },
+    }
 }
 
 #[cfg(feature = "validation")]
@@ -2836,120 +3084,61 @@ fn run_app_ui_with_initial_state_on_event_loop(
             .into());
         }
     };
-    let mut host = AppUiHostSessionOwner::new(
-        host,
-        #[cfg(feature = "validation")]
-        validation_return,
-        #[cfg(feature = "validation")]
-        validation_shutdown_deadline,
-    );
+    let mut host = host;
 
     tracing::info!("Mondrian app UI starting");
 
-    let preview_work_event_proxy = event_loop.create_proxy();
-    let startup_window =
-        Arc::new(event_loop.create_window(window_attributes_for_role(AppUiWindowRole::Startup))?);
-
-    let instance_desc = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
-    let instance = wgpu::Instance::new(instance_desc);
-    let startup_surface = instance.create_surface(startup_window.clone())?;
-
-    let adapter = pollster::block_on(request_adapter_with_native_video_preference(
-        &instance,
-        &wgpu::RequestAdapterOptions {
-            compatible_surface: Some(&startup_surface),
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        },
-    ))
-    .map_err(|_| "No suitable GPU adapter")?;
-
-    // Populate system info for the About dialog.
-    let adapter_info = adapter.get_info();
-    crate::app_ui::about_dialog::SYSTEM_INFO
-        .set(crate::app_ui::about_dialog::AboutSystemInfo {
-            pkg_version: env!("CARGO_PKG_VERSION").to_owned(),
-            rust_version: env!("CARGO_PKG_RUST_VERSION").to_owned(),
-            os: if cfg!(windows) {
-                "Windows"
-            } else {
-                std::env::consts::OS
+    let initial_candidate = match prepare_initial_window_candidate(
+        event_loop,
+        &host,
+        host_startup_deadline,
+    ) {
+        Ok(candidate) => candidate,
+        Err(failure) => {
+            let native_cleanup_released = failure.shutdown.all_created_resources_released();
+            let native_cleanup = failure.shutdown;
+            let primary = failure.primary;
+            let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
+            let ui_failure = (!ui_shutdown.all_resources_released())
+                .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
+            drop(background_runtime_guard);
+            let runtime_failure =
+                background_runtime.shutdown_until(host_startup_deadline).qualification_failure();
+            #[cfg(feature = "validation")]
+            if let Some(return_slot) = validation_return.as_ref() {
+                *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                    app_state,
+                    ui_shutdown: Some(ui_shutdown),
+                    gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
+                });
             }
-            .to_owned(),
-            arch: std::env::consts::ARCH.to_owned(),
-            os_version: String::new(),
-            wgpu_backend: format!("{:?}", adapter_info.backend),
-            gpu_name: adapter_info.name,
-        })
-        .ok();
-
-    let (initial_device, initial_queue) = request_app_ui_device(&adapter)?;
+            #[cfg(not(feature = "validation"))]
+            drop(app_state);
+            let cleanup_failure = merge_window_cleanup_failures(ui_failure, runtime_failure);
+            let native_context = format!(
+                "pre-active Window cleanup_all_created_resources_released={native_cleanup_released}; cleanup={native_cleanup:?}"
+            );
+            return match cleanup_failure {
+                Some(cleanup) => Err(format!("{primary}; {native_context}; {cleanup}").into()),
+                None => Err(format!("{primary}; {native_context}").into()),
+            };
+        }
+    };
+    let AppUiInitialWindowCandidate {
+        preview_work_event_proxy,
+        preview_work_watch,
+        preview_work_event_pending,
+        instance,
+        adapter,
+        device: initial_device,
+        queue: initial_queue,
+        mut session,
+        session_bounds,
+    } = initial_candidate;
     #[cfg(feature = "validation")]
     let (mut device, mut queue) = (initial_device, initial_queue);
     #[cfg(not(feature = "validation"))]
     let (device, queue) = (initial_device, initial_queue);
-    // Install the sole lost callback immediately after device creation, before
-    // any runtime, renderer, or queue consumer can expose this generation.
-    let viewer_gpu_completion_event_proxy = preview_work_event_proxy.clone();
-    let viewer_gpu_progress_wake = ViewerGpuDeviceProgressWake::new(move || {
-        let _ = viewer_gpu_completion_event_proxy
-            .send_event(AppUiUserEvent::ViewerGpuCompletionAvailable);
-    });
-    let mut viewer_gpu_startup = crate::app::viewer_gpu_startup::ViewerGpuStartupOwner::new(
-        &device,
-        &queue,
-        viewer_gpu_progress_wake,
-    )?;
-
-    let preview_work_watch = host.preview_work_watch();
-    let preview_work_event_pending = Arc::new(AtomicBool::new(false));
-    let worker_event_pending = Arc::clone(&preview_work_event_pending);
-    let worker_event_proxy = preview_work_event_proxy.clone();
-    if let Err(failure) = preview_work_watch.install_waker(move || {
-        queue_preview_work_event(&worker_event_pending, || {
-            worker_event_proxy.send_event(AppUiUserEvent::PreviewWorkAvailable).is_ok()
-        });
-    }) {
-        let (reason, callback) = failure.into_parts();
-        // The native Adapter retains ownership on rejection. These captures
-        // were never accepted by the Preview retirement owner.
-        drop(callback);
-        return Err(close_failed_viewer_gpu_startup(
-            viewer_gpu_startup,
-            host_startup_deadline,
-            reason,
-        ));
-    }
-    let prepared_session = match AppUiPreparedWindowSession::prepare(
-        AppUiWindowRole::Startup,
-        startup_window,
-        startup_surface,
-        &adapter,
-        &device,
-        &queue,
-        &host,
-        Some(&mut viewer_gpu_startup),
-    ) {
-        Ok(prepared) => prepared,
-        Err(primary) => {
-            return Err(close_failed_viewer_gpu_startup(
-                viewer_gpu_startup,
-                host_startup_deadline,
-                primary,
-            ));
-        }
-    };
-    let activated_session = match prepared_session.activate(Some(&mut viewer_gpu_startup)) {
-        Ok(session) => session,
-        Err(primary) => {
-            return Err(close_failed_viewer_gpu_startup(
-                viewer_gpu_startup,
-                host_startup_deadline,
-                primary,
-            ));
-        }
-    };
-    let (mut session, session_bounds) = activated_session.into_parts();
     let pending_actions = PendingUiActions::default();
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         publish_active_window_session(&mut host, &session, session_bounds);
@@ -2975,16 +3164,25 @@ fn run_app_ui_with_initial_state_on_event_loop(
         let gpu_shutdown =
             catch_window_viewer_gpu_shutdown(&mut session, &host, host_startup_deadline);
         let gpu_failure = gpu_shutdown.qualification_failure();
-        let ui_failure = match host.shutdown_until(host_startup_deadline, gpu_shutdown) {
-            Ok(evidence) if evidence.all_resources_released() => None,
-            Ok(evidence) => Some(format!(
-                "Window UI services did not close cleanly: {evidence:?}"
-            )),
-            Err(error) => Some(error),
-        };
+        let (app_state, ui_shutdown) = host.into_app_state_until(host_startup_deadline);
+        let ui_failure = (!ui_shutdown.all_resources_released())
+            .then(|| format!("Window UI services did not close cleanly: {ui_shutdown:?}"));
         drop(background_runtime_guard);
         let runtime_failure =
             background_runtime.shutdown_until(host_startup_deadline).qualification_failure();
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = validation_return.as_ref() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                ui_shutdown: Some(ui_shutdown),
+                gpu_shutdown,
+            });
+        }
+        #[cfg(not(feature = "validation"))]
+        {
+            drop(app_state);
+            drop(gpu_shutdown);
+        }
         let cleanup_failure = merge_window_cleanup_failures(
             merge_window_cleanup_failures(gpu_failure, ui_failure),
             runtime_failure,
@@ -2997,6 +3195,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
             None => Err(primary.into()),
         };
     }
+
+    let mut host = AppUiHostSessionOwner::new(
+        host,
+        #[cfg(feature = "validation")]
+        validation_return,
+        #[cfg(feature = "validation")]
+        validation_shutdown_deadline,
+    );
 
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let event_loop_result = catch_app_ui_event_loop(|| {
@@ -7852,6 +8058,61 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pre_active_construction_error_releases_scope_before_building_evidence() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&dropped);
+        let failure = super::catch_pre_active_window_construction(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |stage, _viewer_gpu_startup| {
+                *stage = super::AppUiPreActiveWindowStartupStage::SurfaceCreated;
+                let _probe = DropProbe(observed);
+                Err::<(), _>("injected native construction error".to_owned())
+            },
+        )
+        .expect_err("injected error should fail construction");
+
+        assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(failure.primary, "injected native construction error");
+        assert_eq!(
+            failure.shutdown.last_stage,
+            super::AppUiPreActiveWindowStartupStage::SurfaceCreated
+        );
+        assert!(failure.shutdown.rust_native_authority_released_on_event_loop_thread);
+        assert!(matches!(
+            failure.shutdown.viewer_gpu,
+            super::AppUiPreActiveViewerGpuShutdownEvidence::NotStarted
+        ));
+        assert!(failure.shutdown.all_created_resources_released());
+    }
+
+    #[test]
+    fn pre_active_construction_panic_preserves_stage_and_primary_diagnostic() {
+        let failure = super::catch_pre_active_window_construction(
+            std::time::Instant::now() + std::time::Duration::from_secs(1),
+            |stage, _viewer_gpu_startup| -> Result<(), String> {
+                *stage = super::AppUiPreActiveWindowStartupStage::DeviceQueueCreated;
+                panic!("injected native construction panic")
+            },
+        )
+        .expect_err("injected panic should fail construction");
+
+        assert!(failure.primary.contains("injected native construction panic"));
+        assert_eq!(
+            failure.shutdown.last_stage,
+            super::AppUiPreActiveWindowStartupStage::DeviceQueueCreated
+        );
+        assert!(failure.shutdown.all_created_resources_released());
+    }
+
     #[test]
     fn caught_event_loop_panic_returns_borrowed_owner_to_the_outer_transaction() {
         let mut owner_marker = 0_u8;
