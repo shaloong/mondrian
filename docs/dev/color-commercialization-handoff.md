@@ -397,7 +397,8 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    successful outer Runtime/Host/GPU/native receipt aggregation and propagation
    are complete. The standalone validation batch now owns typed EventLoop
    construction/drop and exact final App handback, with mutually exclusive
-   in-memory success/failure outcomes. Durable batch/failure history, campaign
+   in-memory success/failure outcomes. App/EventLoop/Window/batch receipts and
+   standalone schema-3 success/failure publication are complete. Campaign
    EventLoop consuming shutdown, physical native termination, and durable
    old/candidate/final generation history remain.
 3. Golden whole-operation closure.

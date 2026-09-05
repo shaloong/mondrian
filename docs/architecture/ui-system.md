@@ -2245,10 +2245,11 @@ Host `Drop` is an explicit incomplete state and cannot be upgraded to clean.
 
 Successful Surface-reopen validation seals one bounded canonical Window-run
 receipt from the existing recovery receipt plus the exact Runtime, Host, final
-GPU, and native-return JSON/hash pairs. The batch report uses schema 2 and the
-endurance campaign retains both the compatibility recovery receipt and the
-outer Window receipt, so the Adapter no longer reconstructs leaf qualification
-or discards final closure evidence. The public verifier validates schema and
+GPU, and native-return JSON/hash pairs. The endurance campaign's raw producer
+event retains both the compatibility recovery receipt and the outer Window
+receipt; the standalone validator now wraps the complete batch outcome in its
+separate schema-3 report. Neither Adapter reconstructs leaf qualification or
+discards final closure evidence. The public verifier validates schema and
 byte integrity; it does not claim semantic re-qualification after an adversary
 rewrites a leaf and every enclosing hash. Physical native termination is always
 serialized as unverified. The batch API returns a move-only typed success or
@@ -2263,10 +2264,10 @@ operation then freezes its own absolute deadline exactly once immediately
 before Window entry and passes it unchanged. A theoretically later overflow is
 a distinct operation-admission outcome with EventLoop handback and no invented
 Window evidence. Both batch and one-operation entrypoints return this complete
-outcome; neither projects away batch-level evidence. Durable batch/failure
-serialization, old/candidate/final-generation
-history, OS/driver terminal evidence, and independent semantic replay remain
-unfinished lifecycle work.
+outcome; neither projects away batch-level evidence. Durable standalone
+batch/failure serialization is complete. Old/candidate/final-generation
+history, campaign EventLoop closure, OS/driver terminal evidence, and
+independent semantic replay remain unfinished lifecycle work.
 
 The final `AppEnduranceShutdownEvidence` now has one bounded schema-1 receipt
 Module. It projects Project and the seven named App worker domains into fixed
