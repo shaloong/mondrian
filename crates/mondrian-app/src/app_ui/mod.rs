@@ -17,6 +17,8 @@ mod background_runtime;
 mod color_management_controls;
 pub mod commands;
 pub(crate) mod display_probe_impl;
+#[cfg(feature = "validation")]
+mod event_loop_owner;
 pub mod host;
 pub mod icons;
 mod inspector_source_timing;

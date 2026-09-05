@@ -688,8 +688,9 @@ same non-`Send` event loop for all 24 cycles. Windows, macOS, X11, and Wayland
 support this desktop on-demand lifecycle; macOS still requires construction and
 execution on the process main thread, while a Linux host without a display
 server must report the Surface capability as `NotRun` without blocking the
-headless Continuous Export phase. The compatibility single-operation wrapper
-is process-one-shot and is not the campaign driver.
+headless Continuous Export phase. The one-operation convenience wrapper is
+process-one-shot, returns the same complete typed batch outcome without
+projecting away EventLoop/App evidence, and is not the campaign driver.
 
 The Window recovery operation is nested inside a second sealed Window-run
 receipt only after the borrowed event loop and the complete Window-owner scope
@@ -707,7 +708,15 @@ unverified.
 authors a Basic Title through the ordinary ProductAction path and exercises
 this real window seam. `--self-test-batch` runs two or more orthogonal Window
 sessions through the same process-local event loop and returns one sealed
-Window-run receipt per cycle. Report schema 2 publishes the outer and nested
+Window-run receipt per cycle. The in-process batch result additionally retains
+the consuming EventLoop Rust-owner evidence and the complete App shutdown
+evidence. Its typed failure retains all prior receipts, exact failed Window
+identity and optional outer closure, and never substitutes an App cleanup error
+for the primary. A pre-Window operation-admission failure retains identity and
+EventLoop handback without inventing Window evidence. Request rejection and
+injected EventLoop construction failures
+are tested without constructing a second process-local winit EventLoop. Report
+schema 2 currently publishes the outer and nested
 operation canonical JSON/hash pairs plus a false physical-native qualification
 field; it is the regression gate for winit's event-loop recreation
 guard and for returning the same App/Sequence owner between cycles. CPU-upload
@@ -722,7 +731,9 @@ same `AppState` after bounded Window Preview and Waveform closure. The narrow
 runner consumes that state through the full App endurance shutdown and rejects
 the otherwise valid Surface receipt if any UI or App owner remains detached;
 the concrete campaign runtime can instead resume the same settled Timeline
-owner after the Window operation.
+owner after the Window operation. Durable publication of the new batch/App and
+failure evidence is a subsequent schema boundary, not implied by report schema
+2.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

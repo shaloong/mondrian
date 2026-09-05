@@ -134,6 +134,8 @@ pub mod endurance_reference_output;
 pub mod endurance_run_request;
 #[cfg(any(test, feature = "validation"))]
 mod endurance_shutdown;
+#[cfg(feature = "validation")]
+pub use endurance_shutdown::AppEnduranceShutdownEvidence;
 #[cfg(any(test, feature = "validation"))]
 pub mod endurance_source_inventory;
 #[cfg(any(test, feature = "validation"))]

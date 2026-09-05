@@ -503,7 +503,7 @@ pub struct WindowEnduranceSurfaceReopenDriver {
 
 impl WindowEnduranceSurfaceReopenDriver {
     /// Create the process-local event loop before campaign admission.
-    pub fn new() -> Result<Self, winit::error::EventLoopError> {
+    pub fn new() -> Result<Self, crate::app_ui::window::AppUiEventLoopConstructionFailure> {
         Ok(Self {
             event_loop: crate::app_ui::window::AppUiReusableEventLoop::new()?,
             _main_thread: PhantomData,

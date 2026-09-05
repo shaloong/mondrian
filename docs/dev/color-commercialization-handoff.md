@@ -377,9 +377,11 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    clean join predicate. Initial native/GPU construction errors and panics now
    have a unified bounded close path. EventLoop creation, impossible-state-free
    successful outer Runtime/Host/GPU/native receipt aggregation and propagation
-   are complete. EventLoop construction ownership, typed/durable failure
-   history, physical native termination, and durable old/candidate/final
-   generation history remain.
+   are complete. The standalone validation batch now owns typed EventLoop
+   construction/drop and exact final App handback, with mutually exclusive
+   in-memory success/failure outcomes. Durable batch/failure history, campaign
+   EventLoop consuming shutdown, physical native termination, and durable
+   old/candidate/final generation history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.
@@ -565,8 +567,10 @@ borrow/scope return, and matching pictures. Binary SHA-256 is
 report SHA-256 is
 `5C0E1DDEAE0604557B0779119F40758E46BAAFA3BE804DBD499FA53B62F6D74B`.
 Observed 143-216ms Preview preparation remains COL-031 failure evidence.
-EventLoop construction ownership, durable failure/App and old/candidate/final
-history, semantic leaf replay, and physical native termination remain COL-047.
+The standalone validation batch now owns typed EventLoop construction/drop and
+final App handback in memory. Durable failure/App and old/candidate/final
+history, campaign/ordinary EventLoop closure, semantic leaf replay, and physical
+native termination remain COL-047.
 No capacity error occurred and `target` was not cleaned.
 
 ## Transfer to macOS and Linux

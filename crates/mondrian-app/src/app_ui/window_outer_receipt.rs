@@ -55,7 +55,7 @@ pub(super) enum AppUiWindowOuterShutdownEvidence {
 
 /// Opaque handback that keeps failure shutdown evidence typed across Modules.
 #[derive(Debug, Clone)]
-pub(crate) struct AppUiWindowClosedEvidence {
+pub struct AppUiWindowClosedEvidence {
     evidence: AppUiWindowOuterShutdownEvidence,
 }
 
@@ -64,7 +64,8 @@ impl AppUiWindowClosedEvidence {
         Self { evidence }
     }
 
-    pub(crate) fn all_owned_authority_released(&self) -> bool {
+    /// Whether every Window-owned authority represented by this outcome returned.
+    pub fn all_owned_authority_released(&self) -> bool {
         self.evidence.all_owned_authority_released()
     }
 }

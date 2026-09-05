@@ -136,11 +136,12 @@ fn main() -> anyhow::Result<()> {
             )
             .context("failed to author Surface/device reopen fixture picture")?;
     }
-    let receipts = mondrian_app::app_ui::window::run_app_ui_surface_device_reopen_validation_batch(
+    let batch = mondrian_app::app_ui::window::run_app_ui_surface_device_reopen_validation_batch(
         state, requests,
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let reports = receipts
+    let reports = batch
+        .receipts()
         .iter()
         .map(|receipt| SurfaceReopenReport {
             schema_version: 2,

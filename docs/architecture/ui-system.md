@@ -2228,8 +2228,13 @@ path. That path first consumes any partial Viewer GPU owner, then hands the exac
 App back through complete Host closure, then consumes the background Runtime
 supervisor, all under the original absolute deadline. A returned or unwound
 construction scope proves that its Rust native authorities were consumed on the
-event-loop thread; it does not prove OS compositor or driver termination.
-EventLoop creation remains outside this borrowed-EventLoop transaction. An
+event-loop thread; it does not prove OS compositor or driver termination. The
+validation batch wraps EventLoop creation and consuming drop in a separate
+`event_loop_owner` Module. Construction failures retain a stable failure class
+and original diagnostic without fabricating a Window/native-return receipt;
+successful construction yields Rust-owner handback evidence only after the
+EventLoop destructor returns, while physical native termination remains
+explicitly unqualified. An
 `app_ui::window_outer_receipt` Module now owns the mutually exclusive Runtime
 startup failure, Host startup failure, pre-active failure, active publication
 failure, and normal active-exit outcomes. Host close first leaves a pending
@@ -2246,6 +2251,19 @@ outer Window receipt, so the Adapter no longer reconstructs leaf qualification
 or discards final closure evidence. The public verifier validates schema and
 byte integrity; it does not claim semantic re-qualification after an adversary
 rewrites a leaf and every enclosing hash. Physical native termination is always
-serialized as unverified. EventLoop construction ownership, durable failure and
-old/candidate/final-generation history, OS/driver terminal evidence, and
-independent semantic replay remain unfinished lifecycle work.
+serialized as unverified. The batch API returns a move-only typed success or
+failure: success retains all Window receipts plus exact EventLoop and final App
+shutdown evidence; failure preserves completed receipts, the primary
+class/identity/diagnostic, optional exact Window closure, EventLoop handback
+when it existed, and App shutdown. Cleanup can annotate but never replace the
+primary. Mutually exclusive primary variants make request, construction,
+Window-operation, and final-App failure evidence impossible to cross-combine.
+Timeout representation is preflighted before EventLoop construction; each
+operation then freezes its own absolute deadline exactly once immediately
+before Window entry and passes it unchanged. A theoretically later overflow is
+a distinct operation-admission outcome with EventLoop handback and no invented
+Window evidence. Both batch and one-operation entrypoints return this complete
+outcome; neither projects away batch-level evidence. Durable batch/failure
+serialization, old/candidate/final-generation
+history, OS/driver terminal evidence, and independent semantic replay remain
+unfinished lifecycle work.
