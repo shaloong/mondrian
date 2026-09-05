@@ -45,6 +45,8 @@ pub mod shortcuts;
 pub mod startup;
 #[cfg(feature = "validation")]
 pub mod surface_reopen_batch_receipt;
+#[cfg(feature = "validation")]
+pub mod surface_reopen_report;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod title_bar;

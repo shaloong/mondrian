@@ -2301,5 +2301,9 @@ replay verifies zero/preflight, partial, and complete execution without
 inference. The 24 MiB outer bound accounts for JSON escaping of up to 24 bounded
 Window receipts plus the bounded App leaf. Replay invokes every owning Module's
 verifier, rejects duplicate cycle/operation identities and nested tamper, and
-derives `qualifying=true` only for a clean success. CLI publication remains a
-separate Adapter change; schema 2 output is unchanged by this Module.
+derives `qualifying=true` only for a clean success. The CLI remains a separate
+Adapter: schema 3 embeds exactly the batch JSON/hash for both single and batch
+commands. It uses create-new, writes all bytes, synchronizes the file handle,
+then prints the path; a typed validation failure returns nonzero only after
+that publication. It never overwrites an existing report and makes no
+parent-directory crash-durability claim.

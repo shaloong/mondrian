@@ -714,12 +714,17 @@ evidence. Its typed failure retains all prior receipts, exact failed Window
 identity and optional outer closure, and never substitutes an App cleanup error
 for the primary. A pre-Window operation-admission failure retains identity and
 EventLoop handback without inventing Window evidence. Request rejection and
-injected EventLoop construction failures
-are tested without constructing a second process-local winit EventLoop. Report
-schema 2 currently publishes the outer and nested
-operation canonical JSON/hash pairs plus a false physical-native qualification
-field; it is the regression gate for winit's event-loop recreation
-guard and for returning the same App/Sequence owner between cycles. CPU-upload
+injected EventLoop construction failures are tested without constructing a
+second process-local winit EventLoop. Report schema 3 now has one shape for both
+single and batch commands: it publishes the canonical batch-outcome JSON/hash
+plus the qualification value recomputed by that receipt. A typed validation
+failure is sealed and create-new published, the report file handle is
+synchronized, and its path is printed before the CLI returns nonzero. Existing
+targets are never overwritten. File-handle `sync_all` does not prove
+parent-directory crash durability, and setup/argument/I/O errors outside the
+typed batch outcome do not fabricate a report. This is the regression gate for
+winit's event-loop recreation guard and for returning the same App/Sequence
+owner between cycles. CPU-upload
 or procedural content may carry overall
 Viewer health `Degraded` while still proving Surface recovery; the operation
 therefore accepts `Ready` or `Degraded` only when GPU working composition was
@@ -731,9 +736,9 @@ same `AppState` after bounded Window Preview and Waveform closure. The narrow
 runner consumes that state through the full App endurance shutdown and rejects
 the otherwise valid Surface receipt if any UI or App owner remains detached;
 the concrete campaign runtime can instead resume the same settled Timeline
-owner after the Window operation. Durable publication of the new batch/App and
-failure evidence is a subsequent schema boundary, not implied by report schema
-2.
+owner after the Window operation. The durable schema-3 envelope now retains
+batch/App success and failure evidence; generation history, physical native
+termination, and complete cross-Module semantic replay remain separate work.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

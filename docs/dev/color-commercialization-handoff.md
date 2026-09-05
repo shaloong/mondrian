@@ -366,6 +366,24 @@ report SHA-256 is
 The observed 156-229ms Preview preparation warnings remain COL-031 evidence,
 not a realtime pass. No capacity failure or `target` cleanup occurred.
 
+The latest receipt-publication follow-on adds one canonical batch outcome above
+the App/EventLoop/Window leaves and migrates the standalone Surface reopen CLI
+to schema 3. Single and batch commands now publish the same create-new envelope.
+A typed validation failure is sealed, written, file-handle synchronized, and
+announced before the process returns nonzero; existing files are not overwritten
+and file sync is not described as parent-directory crash durability. Durable
+old/candidate/final generation history, physical native termination, and full
+Runtime/Host/GPU semantic replay remain open.
+The final-source release validator built in 15m31s and real Win32/winit/DX12
+cycles 19-20 passed under schema 3. The report replayed `success`, submitted=2,
+completed=2, no cleanup diagnostic, and active exits with Surface 2->3 / 5->6
+and Device 1->2 / 3->4. Binary SHA-256 is
+`11A89EE89092A59C79794B9B246943C52EEB781C09F8F9F33CD7DB4FC4DBCA3B`;
+report SHA-256 is
+`6EFAC7DA297C02CD2969FAEC303C4BBB8005C40D811EE8AA5D4528BFF91FC160`.
+Observed 180-234ms Preview preparation remains COL-031 failure evidence. No
+capacity failure occurred and `target` was retained.
+
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.

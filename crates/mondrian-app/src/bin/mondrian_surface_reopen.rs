@@ -2,31 +2,14 @@
 
 use anyhow::{bail, Context};
 use mondrian_app::app::product_action::{ProductAction, TimelineProductAction};
+use mondrian_app::app_ui::surface_reopen_batch_receipt::AppUiSurfaceDeviceReopenValidationReceipt;
+use mondrian_app::app_ui::surface_reopen_report::publish_surface_reopen_validation_report;
 use mondrian_core::Rational;
-use serde::Serialize;
 use std::ffi::OsStr;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
 const MAXIMUM_BATCH_CYCLES: u32 = 24;
-
-#[derive(Serialize)]
-struct SurfaceReopenReport<'a> {
-    schema_version: u32,
-    window_run_receipt_json: &'a str,
-    window_run_receipt_sha256: &'a str,
-    recovery_receipt_json: &'a str,
-    recovery_receipt_sha256: &'a str,
-    physical_native_termination_qualified: bool,
-}
-
-#[derive(Serialize)]
-struct SurfaceReopenBatchReport<'a> {
-    schema_version: u32,
-    receipts: Vec<SurfaceReopenReport<'a>>,
-}
 
 fn parse_u32(argument: &OsStr, label: &str) -> anyhow::Result<u32> {
     argument
@@ -42,7 +25,7 @@ fn strict_utf8<'a>(argument: &'a OsStr, label: &str) -> anyhow::Result<&'a str> 
 
 fn main() -> anyhow::Result<()> {
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let (project_path, self_test_root, output_path, requests, batch_report) =
+    let (project_path, self_test_root, output_path, requests) =
         match arguments.as_slice() {
             [mode, root, output, cycle, operation] if mode == "--self-test" => (
                 None,
@@ -55,7 +38,6 @@ fn main() -> anyhow::Result<()> {
                         timeout: Duration::from_secs(60),
                     },
                 ],
-                false,
             ),
             [mode, root, output, first_cycle, count, operation_prefix]
                 if mode == "--self-test-batch" =>
@@ -87,7 +69,6 @@ fn main() -> anyhow::Result<()> {
                     Some(PathBuf::from(root)),
                     PathBuf::from(output),
                     requests,
-                    true,
                 )
             }
             [project, output, cycle, operation] => (
@@ -101,7 +82,6 @@ fn main() -> anyhow::Result<()> {
                         timeout: Duration::from_secs(60),
                     },
                 ],
-                false,
             ),
             _ => bail!(
                 "expected <project.mdp> <output.json> <cycle-index> <operation-id>, --self-test <work-root> <output.json> <cycle-index> <operation-id>, or --self-test-batch <work-root> <output.json> <first-cycle> <count> <operation-prefix>"
@@ -136,37 +116,26 @@ fn main() -> anyhow::Result<()> {
             )
             .context("failed to author Surface/device reopen fixture picture")?;
     }
-    let batch = mondrian_app::app_ui::window::run_app_ui_surface_device_reopen_validation_batch(
+    let outcome = mondrian_app::app_ui::window::run_app_ui_surface_device_reopen_validation_batch(
         state, requests,
-    )
-    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let reports = batch
-        .receipts()
-        .iter()
-        .map(|receipt| SurfaceReopenReport {
-            schema_version: 2,
-            window_run_receipt_json: receipt.canonical_json(),
-            window_run_receipt_sha256: receipt.sha256(),
-            recovery_receipt_json: receipt.recovery_receipt().canonical_json(),
-            recovery_receipt_sha256: receipt.recovery_receipt().sha256(),
-            physical_native_termination_qualified: receipt.qualifies_physical_native_termination(),
-        })
-        .collect::<Vec<_>>();
-    let report = if batch_report {
-        serde_json::to_vec(&SurfaceReopenBatchReport { schema_version: 2, receipts: reports })?
-    } else {
-        let report = reports
-            .first()
-            .context("single Surface/device validation returned no receipt")?;
-        serde_json::to_vec(report)?
+    );
+    let (receipt, validation_failure) = match outcome {
+        Ok(batch) => (
+            AppUiSurfaceDeviceReopenValidationReceipt::seal_success(&batch)
+                .context("failed to seal successful Surface/device validation")?,
+            None,
+        ),
+        Err(error) => {
+            let receipt = AppUiSurfaceDeviceReopenValidationReceipt::seal_failure(&error)
+                .context("failed to seal failed Surface/device validation")?;
+            (receipt, Some(error.to_string()))
+        }
     };
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&output_path)
-        .with_context(|| format!("failed to create {}", output_path.display()))?;
-    output.write_all(&report)?;
-    output.sync_all()?;
+    publish_surface_reopen_validation_report(&output_path, &receipt)
+        .context("failed to publish Surface/device validation report")?;
     println!("MONDRIAN_SURFACE_REOPEN_REPORT={}", output_path.display());
+    if let Some(failure) = validation_failure {
+        bail!(failure);
+    }
     Ok(())
 }
