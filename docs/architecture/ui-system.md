@@ -1766,13 +1766,15 @@ transfer the complete old runtime/lifecycle/native-owner envelope to its
 existing progress worker and wait within the original explicit bound. A clean
 return requires both Adapter-specific retirement and a successful whole-queue
 wgpu wait; concrete device loss/destroy may replace the queue fence for release
-but is not accepted as a clean qualification receipt. Candidate preparation or
-publication failure consumes its real partial GPU owner under that same
-deadline and reports the raw receipt alongside the primary error; it never
-relies on ordinary asynchronous Drop as qualification. Only after clean old
-retirement does the owner publish the candidate's display snapshot and native
-decode authority and hide the old Window. The operation seals success only
-after that new Surface presents
+but is not accepted as a clean qualification receipt. Candidate preparation
+failure consumes its real partial GPU owner under that same deadline. After
+activation, the candidate is installed in the outer Session before old
+publication is revoked and the old Window is hidden. The now-local old Session
+is then retired; only a clean old receipt permits Host publication and display
+of the candidate. Any retirement or post-install publication error/panic leaves
+the candidate in the outer Session for bounded explicit closure, so ordinary
+asynchronous `Drop` is never qualification evidence. The operation seals
+success only after that new Surface presents
 the same active Sequence/frame/color/display contract. A Headless surface, a
 successful `configure`, a reused Device generation, or a CPU-only raster is not
 Surface reopen evidence.
@@ -2192,10 +2194,28 @@ example compiles actual Thumbnail/catalog source and existing access/activity
 Modules. It does not replace actual Host, native Window, GPU or campaign tests.
 
 Window error merging preserves a published operation error, event-loop
-failure/panic, final GPU failure, and UI cleanup failure without allowing a
-cleanup result to replace the primary. The final active generation's raw
-receipt and exact App handback are retained by the Window run and rechecked by
-the endurance Adapter. Pre-active construction and post-handoff publication
-panic ownership, typed native/background-runtime evidence, and durable
-successful old/candidate/final receipt propagation remain unfinished lifecycle
-work.
+failure/panic, callback replacement failure, final GPU failure, and UI cleanup
+failure without allowing a cleanup result to replace the primary. The final
+active generation's raw receipt and exact App handback are retained by the
+Window run and rechecked by the endurance Adapter.
+
+Window candidate publication is a four-state ownership transition:
+`Prepared -> Activated -> Outer Installed -> Host Published`. Initial startup
+installs its activated Session before its guarded Host publication; same-Device
+role replacement transfers the complete device-generation authority and swaps
+the candidate into the caller's Session before Host mutation. A panic during
+layout/display/native-import publication, theme query, visibility, or initial
+redraw cannot strand the active GPU generation in a temporary candidate
+`Drop`: the outer Session remains the owner and enters explicit bounded closure.
+New-Device reopen also installs the activated candidate in that outer Session
+first, then retires the now-local old Session and publishes the Host only after
+its clean receipt; retirement error or panic therefore leaves the candidate
+explicitly closeable. A normal role-replacement error is retained as an
+event-loop failure. Partially mutated Host state is not rolled back and may not
+resume; the Window fails closed and exits.
+
+Pre-active EventLoop/Tokio/Host/native construction still needs one outer
+transaction and absolute deadline. Typed native/background-runtime termination
+evidence and durable successful old/candidate/final receipt propagation also
+remain unfinished lifecycle work. In particular, Tokio's current
+`shutdown_timeout` return value is not a clean termination receipt.

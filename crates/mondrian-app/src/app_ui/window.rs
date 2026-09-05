@@ -1718,6 +1718,7 @@ struct AppUiWindowSession {
     current_bounds: std::cell::Cell<Rect>,
     modifiers_state: Modifiers,
     pending_initial_redraw: bool,
+    event_loop_failure: Option<String>,
     event_loop_telemetry: AppUiEventLoopTelemetry,
     playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling,
 }
@@ -2045,9 +2046,10 @@ fn reopen_window_surface_and_device(
         .ok_or("Window Viewer GPU device generation is missing")?
         .get();
 
-    // Prepare fresh platform/GPU admission before revoking the old window,
-    // but do not expose the new generation to the product until the old owner
-    // has been consumed and proved retired.
+    // Prepare fresh platform/GPU admission before revoking the old window.
+    // The activated candidate becomes the outer Session owner before any old
+    // generation operation can fail, but remains Host-unpublished until the
+    // old owner has been consumed and proved retired.
     let next_window = Arc::new(elwt.create_window(window_attributes_for_role(session.role))?);
     let next_surface = instance.create_surface(next_window.clone())?;
     let (next_device, next_queue) = request_app_ui_device(adapter)?;
@@ -2091,12 +2093,8 @@ fn reopen_window_surface_and_device(
         ));
     }
 
-    // Only a complete, identity-checked candidate may revoke the active
-    // generation. Until this point the original Window stays visible and its
-    // Viewer publication authority is unchanged.
-    clear_viewer_spatial_presentation(session, host);
-    let (retiring_progress, retirement) = match session.take_viewer_gpu_generation_retirement() {
-        Ok(retirement) => retirement,
+    let activated = match prepared.activate(Some(&mut next_startup)) {
+        Ok(session) => session,
         Err(primary) => {
             return Err(close_failed_viewer_gpu_startup(
                 next_startup,
@@ -2105,38 +2103,27 @@ fn reopen_window_surface_and_device(
             ));
         }
     };
-    let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
-    let (shutdown_receipt_json, shutdown_receipt_sha256) =
-        match seal_clean_viewer_gpu_shutdown(shutdown) {
-            Ok(sealed) => sealed,
-            Err(primary) => {
-                return Err(close_failed_viewer_gpu_startup(
-                    next_startup,
-                    deadline,
-                    primary,
-                ));
-            }
-        };
-    session.window.set_visible(false);
-
-    let next_session = match prepared.publish(host, Some(&mut next_startup)) {
-        Ok(session) => session,
-        Err(primary) => {
-            return Err(close_failed_viewer_gpu_startup(
-                next_startup,
-                deadline,
-                format!(
-                    "{primary}; retired old Viewer GPU receipt sha256={shutdown_receipt_sha256}"
-                ),
-            ));
-        }
-    };
-
-    next_session.window.set_visible(true);
-    next_session.window.request_redraw();
+    let (mut retired_session, bounds) = activated.into_parts();
+    let (shutdown_receipt_json, shutdown_receipt_sha256) = with_window_candidate_installed(
+        session,
+        &mut retired_session,
+        |active_session, retired_session| {
+            clear_viewer_spatial_presentation(retired_session, host);
+            retired_session.window.set_visible(false);
+            let (retiring_progress, retirement) = retired_session
+                .take_viewer_gpu_generation_retirement()
+                .map_err(|error| -> Box<dyn std::error::Error> { error.to_string().into() })?;
+            let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
+            let sealed = seal_clean_viewer_gpu_shutdown(shutdown)?;
+            publish_active_window_session(host, active_session, bounds);
+            Ok::<_, Box<dyn std::error::Error>>(sealed)
+        },
+    )?;
+    session.window.set_visible(true);
+    session.window.request_redraw();
     *device = next_device;
     *queue = next_queue;
-    *session = next_session;
+    drop(retired_session);
     Ok(AppUiSurfaceDeviceReopenTransition {
         surface_generation_before,
         surface_generation_after,
@@ -2675,12 +2662,26 @@ fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) 
     }
 }
 
+fn with_window_candidate_installed<T, R>(
+    active: &mut T,
+    candidate: &mut T,
+    operation: impl FnOnce(&T, &mut T) -> R,
+) -> R {
+    std::mem::swap(active, candidate);
+    operation(active, candidate)
+}
+
 #[derive(Debug, thiserror::Error)]
 enum AppUiEventLoopFailure {
     #[error("App UI event loop failed: {0}")]
     Execution(String),
     #[error("{0}")]
     Panicked(String),
+    #[error("{primary}; Window callback also failed: {callback}")]
+    Multiple {
+        primary: Box<AppUiEventLoopFailure>,
+        callback: String,
+    },
 }
 
 fn catch_app_ui_event_loop(
@@ -2696,6 +2697,43 @@ fn catch_app_ui_event_loop(
             )
             .to_string(),
         )),
+    }
+}
+
+fn merge_app_ui_event_loop_failure(
+    event_loop_result: Result<(), AppUiEventLoopFailure>,
+    callback_failure: Option<String>,
+) -> Result<(), AppUiEventLoopFailure> {
+    match (event_loop_result, callback_failure) {
+        (Ok(()), Some(callback)) => Err(AppUiEventLoopFailure::Execution(callback)),
+        (Err(primary), Some(callback)) => {
+            Err(AppUiEventLoopFailure::Multiple { primary: Box::new(primary), callback })
+        }
+        (result, None) => result,
+    }
+}
+
+fn catch_window_viewer_gpu_shutdown(
+    session: &mut AppUiWindowSession,
+    host: &AppUiHost,
+    deadline: Instant,
+) -> AppUiWindowGpuShutdownEvidence {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.shutdown_viewer_gpu_until(host, deadline)
+    })) {
+        Ok(evidence) => evidence,
+        Err(payload) => {
+            let diagnostic = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "Window Viewer GPU shutdown",
+            );
+            AppUiWindowGpuShutdownEvidence::Active(AppUiActiveWindowGpuShutdownEvidence {
+                publication_cleanup: Ok(()),
+                retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
+                    diagnostic.to_string(),
+                ),
+            })
+        }
     }
 }
 
@@ -2878,7 +2916,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
             ));
         }
     };
-    let mut session = match prepared_session.publish(&mut host, Some(&mut viewer_gpu_startup)) {
+    let activated_session = match prepared_session.activate(Some(&mut viewer_gpu_startup)) {
         Ok(session) => session,
         Err(primary) => {
             return Err(close_failed_viewer_gpu_startup(
@@ -2888,20 +2926,50 @@ fn run_app_ui_with_initial_state_on_event_loop(
             ));
         }
     };
-    let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+    let (mut session, session_bounds) = activated_session.into_parts();
     let pending_actions = PendingUiActions::default();
-    tracing::info!(
-        surface_generation = session.surface_generation_id.get(),
-        device_generation = session
-            .viewer_gpu_device_progress
-            .generation_id()
-            .map(ViewerGpuDeviceGenerationId::get),
-        "UI initialized — {}x{}",
-        session.config.width,
-        session.config.height
-    );
-    session.window.set_visible(true);
-    session.window.request_redraw();
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        publish_active_window_session(&mut host, &session, session_bounds);
+        let _ = host.set_system_theme_preset(winit_theme_to_theme_preset(session.window.theme()));
+        tracing::info!(
+            surface_generation = session.surface_generation_id.get(),
+            device_generation = session
+                .viewer_gpu_device_progress
+                .generation_id()
+                .map(ViewerGpuDeviceGenerationId::get),
+            "UI initialized — {}x{}",
+            session.config.width,
+            session.config.height
+        );
+        session.window.set_visible(true);
+        session.window.request_redraw();
+    })) {
+        let primary = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+            payload,
+            "initial Window Host publication",
+        )
+        .to_string();
+        let gpu_shutdown =
+            catch_window_viewer_gpu_shutdown(&mut session, &host, host_startup_deadline);
+        let gpu_failure = gpu_shutdown.qualification_failure();
+        let ui_failure = match host.shutdown_until(host_startup_deadline, gpu_shutdown) {
+            Ok(evidence) if evidence.all_resources_released() => None,
+            Ok(evidence) => Some(format!(
+                "Window UI services did not close cleanly: {evidence:?}"
+            )),
+            Err(error) => Some(error),
+        };
+        drop(background_runtime_guard);
+        background_runtime
+            .shutdown_timeout(host_startup_deadline.saturating_duration_since(Instant::now()));
+        return match merge_window_cleanup_failures(gpu_failure, ui_failure) {
+            Some(cleanup) => Err(format!(
+                "{primary}; initial Window publication cleanup also failed: {cleanup}"
+            )
+            .into()),
+            None => Err(primary.into()),
+        };
+    }
 
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
     let event_loop_result = catch_app_ui_event_loop(|| {
@@ -3596,28 +3664,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
         })
     });
+    let event_loop_result =
+        merge_app_ui_event_loop_failure(event_loop_result, session.event_loop_failure.take());
     let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(|| {
         Instant::now()
             .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
             .unwrap_or_else(Instant::now)
     });
-    let gpu_shutdown = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        session.shutdown_viewer_gpu_until(&host, shutdown_deadline)
-    })) {
-        Ok(evidence) => evidence,
-        Err(payload) => {
-            let diagnostic = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
-                payload,
-                "Window Viewer GPU shutdown",
-            );
-            AppUiWindowGpuShutdownEvidence::Active(AppUiActiveWindowGpuShutdownEvidence {
-                publication_cleanup: Ok(()),
-                retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
-                    diagnostic.to_string(),
-                ),
-            })
-        }
-    };
+    let gpu_shutdown = catch_window_viewer_gpu_shutdown(&mut session, &host, shutdown_deadline);
     let gpu_failure = gpu_shutdown.qualification_failure();
     let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
         Ok(evidence) if evidence.all_resources_released() => None,
@@ -7108,6 +7162,11 @@ struct AppUiPreparedWindowSession {
     bounds: Rect,
 }
 
+struct AppUiActivatedWindowSession {
+    session: AppUiWindowSession,
+    bounds: Rect,
+}
+
 impl AppUiPreparedWindowSession {
     #[cfg(feature = "validation")]
     fn surface_generation_id(&self) -> AppUiSurfaceGenerationId {
@@ -7223,17 +7282,17 @@ impl AppUiPreparedWindowSession {
             current_bounds: std::cell::Cell::new(bounds),
             modifiers_state: Modifiers::none(),
             pending_initial_redraw: true,
+            event_loop_failure: None,
             event_loop_telemetry: AppUiEventLoopTelemetry::default(),
             playback_thread_scheduling: mondrian_platform::PlaybackThreadScheduling::default(),
         };
         Ok(Self { session, bounds })
     }
 
-    fn publish(
+    fn activate(
         mut self,
-        host: &mut AppUiHost,
         viewer_gpu_startup: Option<&mut crate::app::viewer_gpu_startup::ViewerGpuStartupOwner>,
-    ) -> Result<AppUiWindowSession, Box<dyn std::error::Error>> {
+    ) -> Result<AppUiActivatedWindowSession, Box<dyn std::error::Error>> {
         if let Some(startup) = viewer_gpu_startup {
             let (progress, runtime) = startup
                 .activate()
@@ -7242,20 +7301,28 @@ impl AppUiPreparedWindowSession {
                 ViewerGpuDeviceGenerationMember::new(progress);
             self.session.viewer_gpu_execution = ViewerGpuDeviceGenerationMember::new(runtime);
         }
+        Ok(AppUiActivatedWindowSession { session: self.session, bounds: self.bounds })
+    }
+}
 
-        // These are the only Host-visible candidate mutations. They occur after
-        // every fallible native/GPU preparation step and after activation has
-        // proved a complete generation.
-        TreeWalker::layout(host.active_root_mut(), self.bounds);
-        host.set_display_output_snapshot(self.session.display_snapshot.as_ref());
-        host.clear_viewer_cpu_fallback();
-        if self.session.viewer_gpu_device_progress.generation_id().is_some() {
-            host.set_native_decoded_frame_import_support(
-                self.session.viewer_gpu_execution.native_import_support(),
-                self.session.viewer_gpu_execution.native_decode_device_root(),
-            );
-        }
-        Ok(self.session)
+impl AppUiActivatedWindowSession {
+    fn into_parts(self) -> (AppUiWindowSession, Rect) {
+        (self.session, self.bounds)
+    }
+}
+
+fn publish_active_window_session(host: &mut AppUiHost, session: &AppUiWindowSession, bounds: Rect) {
+    // These are the only Host-visible candidate mutations. Callers first place
+    // an activated GPU generation in an outer active-session owner so a panic
+    // here cannot strand it in a temporary candidate Drop.
+    TreeWalker::layout(host.active_root_mut(), bounds);
+    host.set_display_output_snapshot(session.display_snapshot.as_ref());
+    host.clear_viewer_cpu_fallback();
+    if session.viewer_gpu_device_progress.generation_id().is_some() {
+        host.set_native_decoded_frame_import_support(
+            session.viewer_gpu_execution.native_import_support(),
+            session.viewer_gpu_execution.native_decode_device_root(),
+        );
     }
 }
 
@@ -7432,7 +7499,11 @@ fn sync_window_session_role(
     if let Err(err) =
         replace_window_session(target_role, elwt, instance, adapter, device, host, session)
     {
-        tracing::error!("failed to replace app UI native window: {err}");
+        let failure = format!("failed to replace app UI native window: {err}");
+        tracing::error!("{failure}");
+        if session.event_loop_failure.is_none() {
+            session.event_loop_failure = Some(failure);
+        }
         elwt.exit();
     }
 }
@@ -7451,9 +7522,11 @@ fn replace_window_session(
     let window = Arc::new(elwt.create_window(window_attributes_for_role(role))?);
     let surface = instance.create_surface(window.clone())?;
     let queue = session.renderer_queue.clone();
-    let mut prepared = AppUiPreparedWindowSession::prepare(
+    let prepared = AppUiPreparedWindowSession::prepare(
         role, window, surface, adapter, device, &queue, host, None,
     )?;
+    let activated = prepared.activate(None)?;
+    let (mut next_session, bounds) = activated.into_parts();
     // Native-window replacement does not replace the wgpu device generation.
     // The complete candidate is prepared before the active Window is hidden or
     // its publication authority is revoked.
@@ -7461,29 +7534,35 @@ fn replace_window_session(
     session.window.set_visible(false);
     handoff_window_viewer_gpu_device_generation(
         &mut session.viewer_gpu_device_progress,
-        &mut prepared.session.viewer_gpu_device_progress,
+        &mut next_session.viewer_gpu_device_progress,
         &mut session.viewer_gpu_execution,
-        &mut prepared.session.viewer_gpu_execution,
+        &mut next_session.viewer_gpu_execution,
         &mut session.viewer_gpu_submissions,
-        &mut prepared.session.viewer_gpu_submissions,
+        &mut next_session.viewer_gpu_submissions,
         &mut session.viewer_gpu_deferred_cleanup,
-        &mut prepared.session.viewer_gpu_deferred_cleanup,
+        &mut next_session.viewer_gpu_deferred_cleanup,
     );
-    let next_session = prepared.publish(host, None)?;
+    with_window_candidate_installed(
+        session,
+        &mut next_session,
+        |active_session, _retired_session| {
+            publish_active_window_session(host, active_session, bounds);
+        },
+    );
     tracing::info!(
         ?old_role,
         ?role,
         surface_generation_before = old_surface_generation.get(),
-        surface_generation_after = next_session.surface_generation_id.get(),
-        device_generation = next_session
+        surface_generation_after = session.surface_generation_id.get(),
+        device_generation = session
             .viewer_gpu_device_progress
             .generation_id()
             .map(ViewerGpuDeviceGenerationId::get),
         "app UI native window replaced"
     );
-    next_session.window.set_visible(true);
-    next_session.window.request_redraw();
-    *session = next_session;
+    session.window.set_visible(true);
+    session.window.request_redraw();
+    drop(next_session);
     Ok(())
 }
 
@@ -7765,6 +7844,73 @@ mod tests {
         assert!(matches!(result, Err(AppUiEventLoopFailure::Panicked(_))));
         owner_marker = 2;
         assert_eq!(owner_marker, 2);
+    }
+
+    #[test]
+    fn callback_failure_cannot_become_a_normal_event_loop_exit() {
+        let result = merge_app_ui_event_loop_failure(
+            Ok(()),
+            Some("injected role replacement failure".to_owned()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppUiEventLoopFailure::Execution(failure))
+                if failure == "injected role replacement failure"
+        ));
+    }
+
+    #[test]
+    fn event_loop_and_callback_failures_are_both_retained() {
+        let result = merge_app_ui_event_loop_failure(
+            Err(AppUiEventLoopFailure::Panicked(
+                "event-loop panic".to_owned(),
+            )),
+            Some("role replacement failure".to_owned()),
+        );
+
+        assert!(matches!(
+            result,
+            Err(AppUiEventLoopFailure::Multiple { primary, callback })
+                if matches!(*primary, AppUiEventLoopFailure::Panicked(ref panic)
+                    if panic == "event-loop panic")
+                    && callback == "role replacement failure"
+        ));
+    }
+
+    #[test]
+    fn candidate_owner_is_installed_before_fallible_host_publication() {
+        let mut active = "old-generation";
+        let mut candidate = "candidate-generation";
+
+        let publication = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_window_candidate_installed(&mut active, &mut candidate, |installed, retired| {
+                assert_eq!(*installed, "candidate-generation");
+                assert_eq!(*retired, "old-generation");
+                panic!("injected Host publication panic");
+            });
+        }));
+
+        assert!(publication.is_err());
+        assert_eq!(active, "candidate-generation");
+        assert_eq!(candidate, "old-generation");
+    }
+
+    #[test]
+    fn candidate_owner_remains_installed_when_retirement_fails() {
+        let mut active = "old-generation";
+        let mut candidate = "candidate-generation";
+
+        let transition =
+            with_window_candidate_installed(&mut active, &mut candidate, |installed, retired| {
+                assert_eq!(*installed, "candidate-generation");
+                assert_eq!(*retired, "old-generation");
+                Err::<(), _>("injected retirement failure")
+            });
+
+        assert_eq!(transition, Err("injected retirement failure"));
+        assert_eq!(active, "candidate-generation");
+        assert_eq!(candidate, "old-generation");
     }
 
     #[cfg(feature = "validation")]

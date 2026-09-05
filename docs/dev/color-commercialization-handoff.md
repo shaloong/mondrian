@@ -252,22 +252,33 @@ Window transaction across old/candidate GPU generation, native event-loop state,
 Host success/failure handback, and one final unique App receipt. Durable successful
 raw-receipt history remains separate work.
 
-The following Window candidate-publication slice now prepares the complete
+The Window candidate-publication slices now prepare the complete
 Window/Surface/frame-renderer/Viewer-runtime candidate before changing Host or
 old-Window state. Initial Window startup consumes owning Host failures and
 bounded partial-GPU cleanup under its existing deadline. Device reopen validates
 candidate identities before retiring the old generation, bounds every candidate
 cleanup path, and publishes Host display/native-import state only after clean old
 retirement. Same-Device role replacement also prepares its shell before hiding
-the old one. The next active-session slice makes `run_on_demand` borrow rather
-than own Host/session, catches callback panic, and always performs explicit final
-GPU then Host/UI closure against one deadline. Validation retains and checks the
-raw final progress/Renderer receipt and exact returned App; ordinary Quit only
-begins shutdown so it cannot create a nested deadline. Remaining Window work is
-pre-active construction and post-handoff publication panic ownership, typed
-native/background-runtime evidence, and durable old/candidate/final receipt
-history; these slices must not be reported as whole Window qualification until
-complete.
+the old one. The active-session slice makes `run_on_demand` borrow rather than
+own Host/session, catches callback panic, and always performs explicit final GPU
+then Host/UI closure against one deadline. Validation retains and checks the raw
+final progress/Renderer receipt and exact returned App; ordinary Quit only begins
+shutdown so it cannot create a nested deadline.
+
+The follow-on publication slice enforces `Prepared -> Activated -> Outer
+Installed -> Host Published`. Initial theme/visibility/redraw joins the guarded
+publication region; role replacement transfers the complete Device-generation
+authority and installs the candidate in the caller-owned Session before any Host
+mutation. New-Device reopen also installs its activated candidate first, then
+retires the now-local old Session and publishes Host state only after the old
+receipt is clean. Retirement error/panic and publication panic therefore retain
+the candidate in the outer Session for explicit closure. Publication failure is
+terminal; there is no rollback to a partially stale Host. A normal replacement
+error is also promoted to an event-loop failure and cannot become normal exit.
+Remaining Window work is the outer pre-active EventLoop/Tokio/Host/native
+transaction, typed native/background-runtime evidence, and durable
+old/candidate/final receipt history. These slices must not be reported as whole
+Window qualification until complete.
 
 Local final-source verification built the release
 `mondrian-surface-reopen` binary in 12m19s and ran two real Win32/winit/DX12
@@ -280,13 +291,26 @@ still COL-047 item 4. Three focused Window regressions, default/validation
 checks, full workspace/all-target/all-feature Clippy with warnings denied, and
 format/diff gates passed. No capacity failure or `target` cleanup occurred.
 
+The candidate-before-publication follow-on rebuilt that release binary from
+final source in 15m04s and passed real Win32/winit/DX12 cycles 9-10. Both old
+generations again recorded a terminated progress worker, accepted and completed
+retirement, a returned Renderer YUV worker, and no native-device removal. Six
+focused ownership/error regressions passed, including an injected retirement
+failure that leaves the candidate in the outer Session. Default and validation
+checks, final-source focused test, workspace/all-target/all-feature Clippy with
+warnings denied, and full-workspace format check passed. The observed
+188-227ms `prepare_viewer_gpu_preview` responsiveness warnings are not accepted
+as realtime qualification and remain COL-031 evidence. No capacity failure or
+`target` cleanup occurred.
+
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.
 2. Window initial/reopen: Host handback, candidate-before-revoke ordering,
    bounded partial candidate cleanup, and explicit final active-session
-   event-loop panic/GPU/UI/App closure are complete. Pre-active construction and
-   post-handoff publication panic ownership, typed native/background-runtime
+   event-loop panic/GPU/UI/App closure are complete. Candidate installation
+   before fallible Host publication and post-handoff publication panic ownership
+   are complete. Pre-active construction, typed native/background-runtime
    evidence, and durable old/candidate/final receipt history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
