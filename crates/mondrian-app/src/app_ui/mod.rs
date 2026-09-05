@@ -43,6 +43,8 @@ pub mod sequence_settings_dialog;
 pub mod shell;
 pub mod shortcuts;
 pub mod startup;
+#[cfg(feature = "validation")]
+pub mod surface_reopen_batch_receipt;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub mod title_bar;

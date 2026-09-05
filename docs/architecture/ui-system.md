@@ -2289,3 +2289,17 @@ native-return marker remaining `unverified`; it deliberately does not claim
 independent Runtime/Host/GPU semantic replay or physical OS/driver termination.
 The existing successful Window receipt now delegates nested recovery replay to
 the Recovery Module instead of imposing a second JSON canonicalization rule.
+
+Surface/Device batch outcomes now compose those leaves through one schema-1
+`surface_reopen_batch_receipt` Module. Success and each failure class have
+mutually-exclusive fixed fields: request rejection and EventLoop construction
+cannot carry EventLoop shutdown; admission failure carries EventLoop but no
+Window closure; Window failure carries an explicit `missing` or `returned`
+closure state; App-shutdown failure follows all submitted Window receipts.
+`submitted_request_count` is retained independently of completed receipts, so
+replay verifies zero/preflight, partial, and complete execution without
+inference. The 24 MiB outer bound accounts for JSON escaping of up to 24 bounded
+Window receipts plus the bounded App leaf. Replay invokes every owning Module's
+verifier, rejects duplicate cycle/operation identities and nested tamper, and
+derives `qualifying=true` only for a clean success. CLI publication remains a
+separate Adapter change; schema 2 output is unchanged by this Module.

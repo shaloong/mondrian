@@ -601,6 +601,26 @@ impl AppUiWindowRunReceipt {
         Ok(())
     }
 
+    pub(crate) fn verify_surface_identity(
+        canonical_json: &str,
+        sha256: &str,
+    ) -> Result<(u32, String), AppUiWindowRunReceiptError> {
+        Self::verify_integrity(canonical_json, sha256)?;
+        let projection: CanonicalActiveWindowRunEvidence = serde_json::from_str(canonical_json)
+            .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+        let recovery = EnduranceRecoveryOperationReceipt::parse_and_validate(
+            &projection.recovery_receipt_json,
+            &projection.recovery_receipt_sha256,
+        )
+        .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+        if recovery.step()
+            != crate::app::endurance_qualification::EnduranceRecoveryStep::SurfaceDeviceReopen
+        {
+            return Err(AppUiWindowRunReceiptError::InvalidEvidence);
+        }
+        Ok((recovery.cycle_index(), recovery.operation_id().to_owned()))
+    }
+
     /// Physical native termination remains unqualified without an OS/driver receipt.
     pub const fn qualifies_physical_native_termination(&self) -> bool {
         false
@@ -710,10 +730,16 @@ fn lower_sha256(bytes: &[u8]) -> String {
 pub(crate) fn test_integrity_receipt_for_recovery(
     recovery: &EnduranceRecoveryOperationReceipt,
 ) -> (String, String) {
-    let runtime = r#"{"supervisor":"terminated"}"#.to_owned();
-    let host = r#"{"services":"returned"}"#.to_owned();
-    let gpu = r#"{"retirement":"returned"}"#.to_owned();
-    let native = r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#.to_owned();
+    let normalize = |json: &str| {
+        let value: serde_json::Value = serde_json::from_str(json).expect("test leaf should parse");
+        serde_json::to_string(&value).expect("test leaf should normalize")
+    };
+    let runtime = normalize(r#"{"supervisor":"terminated"}"#);
+    let host = normalize(r#"{"services":"returned"}"#);
+    let gpu = normalize(r#"{"retirement":"returned"}"#);
+    let native = normalize(
+        r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#,
+    );
     let projection = CanonicalActiveWindowRunEvidence {
         schema_version: WINDOW_OUTER_RECEIPT_SCHEMA_VERSION,
         outcome: ACTIVE_EXIT_OUTCOME.to_owned(),

@@ -2709,6 +2709,7 @@ pub enum AppUiSurfaceDeviceReopenValidationFailureKind {
 #[cfg(feature = "validation")]
 #[derive(Debug)]
 pub struct AppUiSurfaceDeviceReopenValidationBatch {
+    submitted_request_count: usize,
     receipts: Vec<AppUiWindowRunReceipt>,
     event_loop_shutdown: AppUiEventLoopShutdownEvidence,
     app_shutdown: AppEnduranceShutdownEvidence,
@@ -2716,6 +2717,11 @@ pub struct AppUiSurfaceDeviceReopenValidationBatch {
 
 #[cfg(feature = "validation")]
 impl AppUiSurfaceDeviceReopenValidationBatch {
+    /// Number of operations admitted to this batch request.
+    pub const fn submitted_request_count(&self) -> usize {
+        self.submitted_request_count
+    }
+
     /// Successful per-Window receipts in request order.
     pub fn receipts(&self) -> &[AppUiWindowRunReceipt] {
         &self.receipts
@@ -2798,6 +2804,7 @@ impl AppUiSurfaceDeviceReopenPrimaryFailure {
 #[derive(Debug)]
 pub struct AppUiSurfaceDeviceReopenValidationError {
     primary: Box<AppUiSurfaceDeviceReopenPrimaryFailure>,
+    submitted_request_count: usize,
     completed_receipts: Vec<AppUiWindowRunReceipt>,
     app_shutdown: Box<AppEnduranceShutdownEvidence>,
     cleanup_diagnostic: Option<String>,
@@ -2805,6 +2812,11 @@ pub struct AppUiSurfaceDeviceReopenValidationError {
 
 #[cfg(feature = "validation")]
 impl AppUiSurfaceDeviceReopenValidationError {
+    /// Number of operations supplied before request preflight.
+    pub const fn submitted_request_count(&self) -> usize {
+        self.submitted_request_count
+    }
+
     /// Stable primary failure class; App cleanup never replaces it.
     pub fn kind(&self) -> AppUiSurfaceDeviceReopenValidationFailureKind {
         match self.primary.as_ref() {
@@ -3013,10 +3025,12 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         -> Result<AppUiReusableEventLoop, AppUiEventLoopConstructionFailure>,
 ) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
     let mut state = initial_state;
+    let submitted_request_count = requests.len();
     if requests.is_empty() {
         return finish_surface_device_validation(
             state,
             Vec::new(),
+            submitted_request_count,
             Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
                 AppUiSurfaceDeviceReopenRequestFailureKind::EmptyBatch,
                 "Surface/device validation batch must not be empty",
@@ -3027,6 +3041,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         return finish_surface_device_validation(
             state,
             Vec::new(),
+            submitted_request_count,
             Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
                 AppUiSurfaceDeviceReopenRequestFailureKind::TooManyOperations,
                 format!(
@@ -3053,6 +3068,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         return finish_surface_device_validation(
             state,
             Vec::new(),
+            submitted_request_count,
             Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
                 AppUiSurfaceDeviceReopenRequestFailureKind::InvalidOrReplayedIdentity,
                 "Surface/device validation batch identities are invalid or replayed",
@@ -3063,6 +3079,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         return finish_surface_device_validation(
             state,
             Vec::new(),
+            submitted_request_count,
             Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
                 AppUiSurfaceDeviceReopenRequestFailureKind::ZeroTimeout,
                 "Surface/device reopen validation timeout must be nonzero",
@@ -3077,6 +3094,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         return finish_surface_device_validation(
             state,
             Vec::new(),
+            submitted_request_count,
             Err(AppUiSurfaceDeviceReopenPrimaryFailure::request(
                 AppUiSurfaceDeviceReopenRequestFailureKind::DeadlineOverflow,
                 "Surface/device reopen validation deadline overflow",
@@ -3097,6 +3115,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
             return finish_surface_device_validation(
                 state,
                 Vec::new(),
+                submitted_request_count,
                 Err(
                     AppUiSurfaceDeviceReopenPrimaryFailure::EventLoopConstruction {
                         failure: error,
@@ -3114,6 +3133,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
             return finish_surface_device_validation(
                 state,
                 receipts,
+                submitted_request_count,
                 Err(AppUiSurfaceDeviceReopenPrimaryFailure::OperationAdmission {
                     cycle_index: failed_cycle_index,
                     operation_id: failed_operation_id,
@@ -3138,6 +3158,7 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
                 return finish_surface_device_validation(
                     state,
                     receipts,
+                    submitted_request_count,
                     Err(AppUiSurfaceDeviceReopenPrimaryFailure::WindowOperation {
                         cycle_index: failed_cycle_index,
                         operation_id: failed_operation_id,
@@ -3150,7 +3171,12 @@ fn run_app_ui_surface_device_reopen_validation_batch_with_factory(
         }
     }
     let event_loop_shutdown = event_loop.shutdown();
-    finish_surface_device_validation(state, receipts, Ok(event_loop_shutdown))
+    finish_surface_device_validation(
+        state,
+        receipts,
+        submitted_request_count,
+        Ok(event_loop_shutdown),
+    )
 }
 
 #[cfg(feature = "validation")]
@@ -3166,6 +3192,7 @@ fn valid_surface_validation_operation_id(value: &str) -> bool {
 fn finish_surface_device_validation(
     app_state: AppState,
     completed_receipts: Vec<AppUiWindowRunReceipt>,
+    submitted_request_count: usize,
     result: Result<AppUiEventLoopShutdownEvidence, AppUiSurfaceDeviceReopenPrimaryFailure>,
 ) -> Result<AppUiSurfaceDeviceReopenValidationBatch, AppUiSurfaceDeviceReopenValidationError> {
     let (shutdown_deadline, deadline_failure) =
@@ -3184,6 +3211,7 @@ fn finish_surface_device_validation(
     match result {
         Ok(event_loop_shutdown) if cleanup_failure.is_none() => {
             Ok(AppUiSurfaceDeviceReopenValidationBatch {
+                submitted_request_count,
                 receipts: completed_receipts,
                 event_loop_shutdown,
                 app_shutdown: shutdown,
@@ -3198,12 +3226,14 @@ fn finish_surface_device_validation(
                     event_loop_shutdown,
                 },
             ),
+            submitted_request_count,
             completed_receipts,
             app_shutdown: Box::new(shutdown),
             cleanup_diagnostic: None,
         }),
         Err(primary) => Err(AppUiSurfaceDeviceReopenValidationError {
             primary: Box::new(primary),
+            submitted_request_count,
             completed_receipts,
             app_shutdown: Box::new(shutdown),
             cleanup_diagnostic: cleanup_failure,
@@ -11512,6 +11542,10 @@ mod tests {
             AppUiSurfaceDeviceReopenValidationFailureKind::TooManyOperations
         );
         assert!(error.to_string().contains("exceeds 24 operations"));
+        assert_eq!(
+            error.submitted_request_count(),
+            MAXIMUM_SURFACE_REOPEN_VALIDATION_BATCH_CYCLES + 1
+        );
         assert!(error.completed_receipts().is_empty());
         assert!(error.window_shutdown().is_none());
         assert!(error.event_loop_shutdown().is_none());
@@ -11560,6 +11594,7 @@ mod tests {
         ];
 
         for (requests, expected_kind) in cases {
+            let submitted_request_count = requests.len();
             let factory_called = std::cell::Cell::new(false);
             let error = run_app_ui_surface_device_reopen_validation_batch_with_factory(
                 AppState::new(),
@@ -11572,6 +11607,7 @@ mod tests {
             .expect_err("invalid request must fail");
 
             assert_eq!(error.kind(), expected_kind);
+            assert_eq!(error.submitted_request_count(), submitted_request_count);
             assert!(!factory_called.get());
             assert!(error.completed_receipts().is_empty());
             assert!(error.window_shutdown().is_none());
@@ -11615,6 +11651,7 @@ mod tests {
             )
         );
         assert!(error.to_string().contains("injected EventLoop construction failure"));
+        assert_eq!(error.submitted_request_count(), 1);
         assert!(error.completed_receipts().is_empty());
         assert_eq!(error.failed_cycle_index(), None);
         assert_eq!(error.failed_operation_id(), None);
