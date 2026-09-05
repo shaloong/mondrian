@@ -126,6 +126,48 @@ function Assert-ExactJsonProperties([object]$Object, [string[]]$Expected, [strin
     }
 }
 
+function Assert-CanonicalJson([string]$Json, [object]$Parsed, [string]$Description) {
+    $normalized = ConvertTo-Json -InputObject $Parsed -Depth 100 -Compress
+    if ($normalized -cne $Json) {
+        throw "$Description is not the canonical compact JSON encoding."
+    }
+}
+
+function Assert-JsonBoolean([object]$Value, [string]$Description) {
+    if ($Value -isnot [bool]) {
+        throw "$Description must be a JSON boolean."
+    }
+}
+
+function Assert-JsonString([object]$Value, [string]$Description) {
+    if ($Value -isnot [string]) {
+        throw "$Description must be a JSON string."
+    }
+}
+
+function Assert-JsonObject([object]$Value, [string]$Description) {
+    if ($Value -isnot [pscustomobject]) {
+        throw "$Description must be a JSON object."
+    }
+}
+
+function Assert-JsonUnsignedInteger([object]$Value, [string]$Description) {
+    $isInteger = $Value -is [byte] -or $Value -is [sbyte] -or
+        $Value -is [int16] -or $Value -is [uint16] -or
+        $Value -is [int32] -or $Value -is [uint32] -or
+        $Value -is [int64] -or $Value -is [uint64]
+    if (-not $isInteger -or [decimal]$Value -lt 0) {
+        throw "$Description must be a nonnegative JSON integer."
+    }
+}
+
+function Assert-JsonUnsignedU32([object]$Value, [string]$Description) {
+    Assert-JsonUnsignedInteger $Value $Description
+    if ([decimal]$Value -gt [uint32]::MaxValue) {
+        throw "$Description must fit in an unsigned 32-bit integer."
+    }
+}
+
 function Get-ClosureSnapshot([string[]]$Paths) {
     $rows = [System.Collections.Generic.List[object]]::new()
     foreach ($path in $Paths) {
@@ -413,7 +455,13 @@ foreach ($phase in @($manifest.phases)) {
                     throw "Endurance recovery receipt bytes do not match their bounded digest."
                 }
                 $receipt = $receiptJson | ConvertFrom-Json
-                if ([int]$receipt.schema_version -ne 3 -or
+                Assert-CanonicalJson $receiptJson $receipt "Endurance recovery receipt"
+                Assert-JsonUnsignedInteger $receipt.schema_version "Recovery receipt schema"
+                Assert-JsonUnsignedInteger $receipt.cycle_index "Recovery receipt cycle"
+                Assert-JsonString $receipt.step "Recovery receipt step"
+                Assert-JsonString $receipt.operation_id "Recovery receipt operation identity"
+                $expectedReceiptSchema = if ($expectedStep -ceq "surface_device_reopen") { 4 } else { 3 }
+                if ([int]$receipt.schema_version -ne $expectedReceiptSchema -or
                     [int64]$receipt.cycle_index -ne $expectedCycle -or
                     [string]$receipt.step -cne $expectedStep -or
                     [string]$receipt.operation_id -cnotmatch '^[A-Za-z0-9._-]{1,128}$' -or
@@ -452,6 +500,11 @@ foreach ($phase in @($manifest.phases)) {
                                 throw "Window-run receipt bytes do not match their bounded digest."
                             }
                             $windowRun = $windowRunJson | ConvertFrom-Json
+                            Assert-CanonicalJson $windowRunJson $windowRun "Window-run receipt"
+                            Assert-JsonUnsignedInteger $windowRun.schema_version "Window-run schema"
+                            Assert-JsonString $windowRun.outcome "Window-run outcome"
+                            Assert-JsonString $windowRun.recovery_receipt_json "Window-run recovery JSON"
+                            Assert-JsonString $windowRun.recovery_receipt_sha256 "Window-run recovery digest"
                             Assert-ExactJsonProperties $windowRun @(
                                 "schema_version", "outcome", "recovery_receipt_json",
                                 "recovery_receipt_sha256", "runtime_shutdown_json",
@@ -460,7 +513,7 @@ foreach ($phase in @($manifest.phases)) {
                                 "gpu_shutdown_sha256", "native_return_json",
                                 "native_return_sha256"
                             ) "Window-run receipt"
-                            if ([int]$windowRun.schema_version -ne 1 -or
+                            if ([int]$windowRun.schema_version -ne 2 -or
                                 [string]$windowRun.outcome -cne "active_exited" -or
                                 [string]$windowRun.recovery_receipt_json -cne $receiptJson -or
                                 [string]$windowRun.recovery_receipt_sha256 -cne [string]$event.operation_receipt_sha256) {
@@ -477,17 +530,62 @@ foreach ($phase in @($manifest.phases)) {
                                     (Get-LowerUtf8Sha256 $leaf.Json) -cne $leaf.Sha256) {
                                     throw "Window-run embedded receipt bytes do not match their digest."
                                 }
-                                $null = $leaf.Json | ConvertFrom-Json
+                                $leafValue = $leaf.Json | ConvertFrom-Json
+                                Assert-CanonicalJson $leaf.Json $leafValue "Window-run embedded receipt"
                             }
                             $nativeReturn = ([string]$windowRun.native_return_json) | ConvertFrom-Json
                             Assert-ExactJsonProperties $nativeReturn @(
                                 "event_loop_borrow_returned", "window_owner_scope_exited",
                                 "physical_native_termination"
                             ) "Window native-return evidence"
+                            Assert-JsonBoolean $nativeReturn.event_loop_borrow_returned "Window event-loop handback"
+                            Assert-JsonBoolean $nativeReturn.window_owner_scope_exited "Window owner-scope return"
+                            Assert-JsonString $nativeReturn.physical_native_termination "Window physical native termination"
                             if (-not [bool]$nativeReturn.event_loop_borrow_returned -or
                                 -not [bool]$nativeReturn.window_owner_scope_exited -or
                                 [string]$nativeReturn.physical_native_termination -cne "unverified") {
                                 throw "Window native-return evidence overclaims or omits authority release."
+                            }
+                            $finalGpu = ([string]$windowRun.gpu_shutdown_json) | ConvertFrom-Json
+                            Assert-ExactJsonProperties $finalGpu @(
+                                "surface_generation", "device_generation",
+                                "publication_cleanup", "retirement"
+                            ) "Window final GPU shutdown evidence"
+                            Assert-JsonUnsignedInteger $finalGpu.surface_generation "Window final Surface generation"
+                            Assert-JsonUnsignedInteger $finalGpu.device_generation "Window final Device generation"
+                            Assert-ExactJsonProperties $finalGpu.publication_cleanup @("Ok") "Window GPU publication cleanup"
+                            Assert-ExactJsonProperties $finalGpu.retirement @("retired") "Window GPU retirement outcome"
+                            $finalRetirement = $finalGpu.retirement.retired
+                            Assert-ExactJsonProperties $finalRetirement @(
+                                "worker_started", "worker_terminated", "worker_panicked",
+                                "timed_out", "retirement_requested", "retirement_handoff_accepted",
+                                "retirement_completed", "renderer_retirement",
+                                "generation_terminal_kind"
+                            ) "Window final GPU retirement receipt"
+                            foreach ($field in @(
+                                "worker_started", "worker_terminated", "worker_panicked", "timed_out",
+                                "retirement_requested", "retirement_handoff_accepted", "retirement_completed"
+                            )) {
+                                Assert-JsonBoolean $finalRetirement.$field "Window final GPU $field"
+                            }
+                            Assert-ExactJsonProperties $finalRetirement.renderer_retirement @(
+                                "cpu_yuv_upload", "native_device_removed"
+                            ) "Window final Renderer retirement receipt"
+                            Assert-JsonString $finalRetirement.renderer_retirement.cpu_yuv_upload "Window final GPU upload-worker exit"
+                            Assert-JsonBoolean $finalRetirement.renderer_retirement.native_device_removed "Window final native-device removal"
+                            if ([uint64]$finalGpu.surface_generation -ne [uint64]$receipt.surface_generation_after -or
+                                [uint64]$finalGpu.device_generation -ne [uint64]$receipt.device_generation_after -or
+                                $null -ne $finalGpu.publication_cleanup.Ok -or
+                                -not [bool]$finalRetirement.worker_started -or
+                                -not [bool]$finalRetirement.worker_terminated -or
+                                [bool]$finalRetirement.worker_panicked -or [bool]$finalRetirement.timed_out -or
+                                -not [bool]$finalRetirement.retirement_requested -or
+                                -not [bool]$finalRetirement.retirement_handoff_accepted -or
+                                -not [bool]$finalRetirement.retirement_completed -or
+                                [string]$finalRetirement.renderer_retirement.cpu_yuv_upload -cne "returned" -or
+                                [bool]$finalRetirement.renderer_retirement.native_device_removed -or
+                                $null -ne $finalRetirement.generation_terminal_kind) {
+                                throw "Window final GPU retirement is not bound to the recovered generation."
                             }
                         }
                         Assert-ExactJsonProperties $receipt @(
@@ -498,6 +596,15 @@ foreach ($phase in @($manifest.phases)) {
                             "shutdown_receipt_sha256", "reopened_contract_json",
                             "reopened_contract_sha256"
                         ) "Surface/device recovery receipt"
+                        Assert-JsonString $receipt.sequence_binding_sha256 "Reopen Sequence binding"
+                        Assert-JsonUnsignedInteger $receipt.surface_generation_before "Recovery old Surface generation"
+                        Assert-JsonUnsignedInteger $receipt.surface_generation_after "Recovery new Surface generation"
+                        Assert-JsonUnsignedInteger $receipt.device_generation_before "Recovery old Device generation"
+                        Assert-JsonUnsignedInteger $receipt.device_generation_after "Recovery new Device generation"
+                        Assert-JsonString $receipt.shutdown_receipt_json "Recovery old shutdown JSON"
+                        Assert-JsonString $receipt.shutdown_receipt_sha256 "Recovery old shutdown digest"
+                        Assert-JsonString $receipt.reopened_contract_json "Recovery reopened contract JSON"
+                        Assert-JsonString $receipt.reopened_contract_sha256 "Recovery reopened contract digest"
                         Assert-LowerSha256 ([string]$receipt.sequence_binding_sha256) "Reopen Sequence binding"
                         Assert-LowerSha256 ([string]$receipt.shutdown_receipt_sha256) "Reopen shutdown receipt"
                         Assert-LowerSha256 ([string]$receipt.reopened_contract_sha256) "Reopened contract"
@@ -513,17 +620,41 @@ foreach ($phase in @($manifest.phases)) {
                         }
                         $shutdown = $shutdownJson | ConvertFrom-Json
                         $reopened = $reopenedJson | ConvertFrom-Json
+                        Assert-CanonicalJson $shutdownJson $shutdown "Surface/device shutdown evidence"
+                        Assert-CanonicalJson $reopenedJson $reopened "Reopened Surface contract"
                         Assert-ExactJsonProperties $shutdown @(
-                            "schema_version", "worker_started", "worker_terminated",
+                            "schema_version", "surface_generation", "device_generation",
+                            "worker_started", "worker_terminated",
                             "worker_panicked", "timed_out", "retirement_requested",
                             "retirement_handoff_accepted", "retirement_completed",
-                            "generation_terminal_kind"
+                            "renderer_retirement", "generation_terminal_kind"
                         ) "Surface/device shutdown evidence"
+                        Assert-JsonUnsignedInteger $shutdown.schema_version "Surface shutdown schema"
+                        Assert-JsonUnsignedInteger $shutdown.surface_generation "Old Surface generation"
+                        Assert-JsonUnsignedInteger $shutdown.device_generation "Old Device generation"
+                        foreach ($field in @(
+                            "worker_started", "worker_terminated", "worker_panicked", "timed_out",
+                            "retirement_requested", "retirement_handoff_accepted", "retirement_completed"
+                        )) {
+                            Assert-JsonBoolean $shutdown.$field "Old GPU $field"
+                        }
+                        Assert-ExactJsonProperties $shutdown.renderer_retirement @(
+                            "cpu_yuv_upload", "native_device_removed"
+                        ) "Surface/device Renderer retirement receipt"
+                        Assert-JsonString $shutdown.renderer_retirement.cpu_yuv_upload "Old GPU upload-worker exit"
+                        Assert-JsonBoolean $shutdown.renderer_retirement.native_device_removed "Old native-device removal"
                         Assert-ExactJsonProperties $reopened @(
                             "schema_version", "surface_generation", "device_generation",
                             "actual_surface_presented", "original_picture_sha256",
                             "reopened_picture_json", "reopened_picture_sha256"
                         ) "Reopened Surface contract"
+                        Assert-JsonUnsignedInteger $reopened.schema_version "Reopened Surface schema"
+                        Assert-JsonUnsignedInteger $reopened.surface_generation "Reopened Surface generation"
+                        Assert-JsonUnsignedInteger $reopened.device_generation "Reopened Device generation"
+                        Assert-JsonBoolean $reopened.actual_surface_presented "Reopened actual Surface presentation"
+                        Assert-JsonString $reopened.original_picture_sha256 "Original Surface picture digest"
+                        Assert-JsonString $reopened.reopened_picture_json "Reopened Surface picture JSON"
+                        Assert-JsonString $reopened.reopened_picture_sha256 "Reopened Surface picture digest"
                         Assert-LowerSha256 ([string]$reopened.original_picture_sha256) "Original Surface picture"
                         Assert-LowerSha256 ([string]$reopened.reopened_picture_sha256) "Reopened Surface picture"
                         $pictureJson = [string]$reopened.reopened_picture_json
@@ -534,11 +665,78 @@ foreach ($phase in @($manifest.phases)) {
                             throw "Reopened Surface picture does not match the original presented picture digest."
                         }
                         $picture = $pictureJson | ConvertFrom-Json
+                        Assert-CanonicalJson $pictureJson $picture "Reopened Surface picture contract"
                         Assert-ExactJsonProperties $picture @(
                             "sequence_id", "frame", "width", "height", "output_target",
                             "output_color_space", "monitor_color_space", "tone_map",
                             "display_view", "frame_residency", "display_contract_sha256"
                         ) "Reopened Surface picture contract"
+                        Assert-JsonString $picture.sequence_id "Reopened picture Sequence identity"
+                        Assert-JsonUnsignedInteger $picture.frame "Reopened picture frame"
+                        Assert-JsonUnsignedU32 $picture.width "Reopened picture width"
+                        Assert-JsonUnsignedU32 $picture.height "Reopened picture height"
+                        Assert-JsonString $picture.output_target "Reopened picture output target"
+                        Assert-JsonString $picture.output_color_space "Reopened picture output color space"
+                        Assert-JsonString $picture.monitor_color_space "Reopened picture monitor color space"
+                        Assert-JsonBoolean $picture.tone_map "Reopened picture tone-map flag"
+                        Assert-JsonBoolean $picture.frame_residency.execution_observed "Reopened picture execution observation"
+                        Assert-JsonString $picture.frame_residency.working_residency "Reopened picture working residency"
+                        if ($null -ne $picture.display_view) {
+                            Assert-JsonObject $picture.display_view "Reopened picture display/view"
+                            Assert-ExactJsonProperties $picture.display_view @("display", "view") "Reopened picture display/view"
+                            Assert-JsonString $picture.display_view.display "Reopened picture display"
+                            Assert-JsonString $picture.display_view.view "Reopened picture view"
+                        }
+                        Assert-JsonObject $picture.frame_residency "Reopened picture frame residency"
+                        $residencyProperties = @(
+                            "decode_residency", "working_residency", "input_transform_path",
+                            "execution_observed", "zero_copy", "low_copy", "upload_count",
+                            "native_bridge_copy_count", "readback_count", "reason"
+                        )
+                        if (@($picture.frame_residency.PSObject.Properties.Name) -ccontains "native_video_import") {
+                            $residencyProperties += "native_video_import"
+                        }
+                        Assert-ExactJsonProperties $picture.frame_residency $residencyProperties "Reopened picture frame residency"
+                        Assert-JsonString $picture.frame_residency.decode_residency "Reopened picture decode residency"
+                        Assert-JsonString $picture.frame_residency.input_transform_path "Reopened picture input-transform path"
+                        Assert-JsonBoolean $picture.frame_residency.zero_copy "Reopened picture zero-copy flag"
+                        Assert-JsonBoolean $picture.frame_residency.low_copy "Reopened picture low-copy flag"
+                        Assert-JsonUnsignedU32 $picture.frame_residency.upload_count "Reopened picture upload count"
+                        Assert-JsonUnsignedU32 $picture.frame_residency.native_bridge_copy_count "Reopened picture native bridge-copy count"
+                        Assert-JsonUnsignedU32 $picture.frame_residency.readback_count "Reopened picture readback count"
+                        Assert-JsonString $picture.frame_residency.reason "Reopened picture residency reason"
+                        if (@($picture.frame_residency.PSObject.Properties.Name) -ccontains "native_video_import") {
+                            $nativeImport = $picture.frame_residency.native_video_import
+                            Assert-JsonObject $nativeImport "Reopened picture native-import evidence"
+                            $nativeImportProperties = @(
+                                "status", "zero_copy_ready", "low_copy_ready",
+                                "decoder_gpu_resident", "decoder_handle_kind",
+                                "renderer_backend_ready", "renderer_supports_handle_kind",
+                                "renderer_supports_source_texture_format", "reason"
+                            )
+                            foreach ($optionalField in @(
+                                "renderer_backend_label", "renderer_unavailable_reason",
+                                "renderer_import_mode"
+                            )) {
+                                if (@($nativeImport.PSObject.Properties.Name) -ccontains $optionalField) {
+                                    $nativeImportProperties += $optionalField
+                                    Assert-JsonString $nativeImport.$optionalField "Native-import $optionalField"
+                                }
+                            }
+                            Assert-ExactJsonProperties $nativeImport $nativeImportProperties "Reopened picture native-import evidence"
+                            Assert-JsonString $nativeImport.status "Native-import status"
+                            Assert-JsonBoolean $nativeImport.zero_copy_ready "Native-import zero-copy readiness"
+                            Assert-JsonBoolean $nativeImport.low_copy_ready "Native-import low-copy readiness"
+                            Assert-JsonBoolean $nativeImport.decoder_gpu_resident "Native-import decoder residency"
+                            if ($null -ne $nativeImport.decoder_handle_kind) {
+                                Assert-JsonString $nativeImport.decoder_handle_kind "Native-import decoder handle"
+                            }
+                            Assert-JsonBoolean $nativeImport.renderer_backend_ready "Native-import Renderer readiness"
+                            Assert-JsonBoolean $nativeImport.renderer_supports_handle_kind "Native-import handle support"
+                            Assert-JsonBoolean $nativeImport.renderer_supports_source_texture_format "Native-import texture-format support"
+                            Assert-JsonString $nativeImport.reason "Native-import reason"
+                        }
+                        Assert-JsonString $picture.display_contract_sha256 "Reopened display contract digest"
                         Assert-LowerSha256 ([string]$picture.display_contract_sha256) "Reopened display contract"
                         if ([uint64]$receipt.surface_generation_before -eq 0 -or
                             [uint64]$receipt.surface_generation_after -eq 0 -or
@@ -546,11 +744,17 @@ foreach ($phase in @($manifest.phases)) {
                             [uint64]$receipt.device_generation_before -eq 0 -or
                             [uint64]$receipt.device_generation_after -eq 0 -or
                             [uint64]$receipt.device_generation_before -eq [uint64]$receipt.device_generation_after -or
-                            [int]$shutdown.schema_version -ne 1 -or -not [bool]$shutdown.worker_started -or
+                            [int]$shutdown.schema_version -ne 3 -or
+                            [uint64]$shutdown.surface_generation -ne [uint64]$receipt.surface_generation_before -or
+                            [uint64]$shutdown.device_generation -ne [uint64]$receipt.device_generation_before -or
+                            -not [bool]$shutdown.worker_started -or
                             -not [bool]$shutdown.worker_terminated -or [bool]$shutdown.worker_panicked -or
                             [bool]$shutdown.timed_out -or -not [bool]$shutdown.retirement_requested -or
                             -not [bool]$shutdown.retirement_handoff_accepted -or
-                            -not [bool]$shutdown.retirement_completed -or $null -ne $shutdown.generation_terminal_kind -or
+                            -not [bool]$shutdown.retirement_completed -or
+                            [string]$shutdown.renderer_retirement.cpu_yuv_upload -cne "returned" -or
+                            [bool]$shutdown.renderer_retirement.native_device_removed -or
+                            $null -ne $shutdown.generation_terminal_kind -or
                             [int]$reopened.schema_version -ne 2 -or
                             [uint64]$reopened.surface_generation -ne [uint64]$receipt.surface_generation_after -or
                             [uint64]$reopened.device_generation -ne [uint64]$receipt.device_generation_after -or

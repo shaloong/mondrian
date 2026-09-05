@@ -2249,10 +2249,14 @@ GPU, and native-return JSON/hash pairs. The endurance campaign's raw producer
 event retains both the compatibility recovery receipt and the outer Window
 receipt; the standalone validator now wraps the complete batch outcome in its
 separate schema-3 report. Neither Adapter reconstructs leaf qualification or
-discards final closure evidence. The public verifier validates schema and
-byte integrity; it does not claim semantic re-qualification after an adversary
-rewrites a leaf and every enclosing hash. Physical native termination is always
-serialized as unverified. The batch API returns a move-only typed success or
+discards final closure evidence. Window-run schema 2 reparses the final GPU
+leaf, reruns the owning clean-retirement predicate, and binds its Surface and
+Device identities to the nested Surface-recovery schema-4 `after` pair. The
+old shutdown schema-3 leaf is separately bound to the `before` pair; every
+nested shutdown, contract, and picture byte string must be canonical even when
+all hashes are recomputed. Runtime, Host, and native leaves do not yet have the
+same full semantic replay, and physical native termination is always serialized
+as unverified. The batch API returns a move-only typed success or
 failure: success retains all Window receipts plus exact EventLoop and final App
 shutdown evidence; failure preserves completed receipts, the primary
 class/identity/diagnostic, optional exact Window closure, EventLoop handback
@@ -2265,9 +2269,10 @@ before Window entry and passes it unchanged. A theoretically later overflow is
 a distinct operation-admission outcome with EventLoop handback and no invented
 Window evidence. Both batch and one-operation entrypoints return this complete
 outcome; neither projects away batch-level evidence. Durable standalone
-batch/failure serialization is complete. Old/candidate/final-generation
-history, OS/driver terminal evidence, and independent semantic replay remain
-unfinished lifecycle work. The campaign now consumes its selected Surface
+batch/failure serialization is complete. Successful old/candidate/final
+identity binding is complete; ordered candidate-failure and dirty-retirement
+history, OS/driver terminal evidence, and full cross-Module semantic replay
+remain unfinished lifecycle work. The campaign now consumes its selected Surface
 driver exactly once after all phase/App owners, embeds the shared EventLoop
 Rust-owner closure in run-manifest schema 3, and retains that closure across
 publication failure. The current endurance CLI selects the explicit

@@ -202,7 +202,8 @@ raw checked-in workload contract bytes. Submit each owner observation through
 `EndurancePhaseCapture::capture_and_push`; direct sample insertion is not a
 public producer seam. The campaign coordinator routes sealed Export events into
 the crate-private artifact recorder. The recovery recorder accepts only a
-sealed canonical schema-3 receipt and checks its embedded JSON, SHA-256, exact
+sealed canonical receipt (schema 4 for Surface/device reopen, schema 3 for the
+other variants) and checks its embedded JSON, SHA-256, exact
 cycle/step, and unique operation ID. The seek receipt can only be returned by
 `PersistentTimelinePlaybackPhase::recover_seek`, after the real typed product
 seek closes one exact Ready target under Audio Device Clock and the frozen
@@ -215,7 +216,10 @@ and unchanged GPU/Preview/Audio/background/Export failure ledgers. Nominal is
 attempted even when Critical application fails. Surface/device reopen is
 sealed only by the real winit Window generation owner, and Export cancel/retry
 only by the frozen repeated-Export recovery substate; the concrete runtime
-forwards those owner receipts unchanged.
+forwards those owner receipts unchanged. Surface success additionally requires
+the old shutdown identity to equal the receipt's `before` pair and the final
+typed Window GPU retirement to be clean and equal its `after` pair; the
+independent verifier repeats these checks.
 The supervisor
 automatically seals and publishes full
 chunks and generates the raw producer JSON plus normalized report. Finish

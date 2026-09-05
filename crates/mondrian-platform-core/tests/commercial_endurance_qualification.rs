@@ -703,7 +703,9 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }),
                     "surface_device_reopen" => {
                         let shutdown_receipt_json = serde_json::to_string(&serde_json::json!({
-                            "schema_version": 1,
+                            "schema_version": 3,
+                            "surface_generation": cycle + 1,
+                            "device_generation": cycle + 3,
                             "worker_started": true,
                             "worker_terminated": true,
                             "worker_panicked": false,
@@ -711,6 +713,10 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                             "retirement_requested": true,
                             "retirement_handoff_accepted": true,
                             "retirement_completed": true,
+                            "renderer_retirement": {
+                                "cpu_yuv_upload": "returned",
+                                "native_device_removed": false,
+                            },
                             "generation_terminal_kind": null,
                         }))
                         .expect("serialize Surface shutdown receipt");
@@ -727,8 +733,16 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                             "tone_map": false,
                             "display_view": null,
                             "frame_residency": {
-                                "execution_observed": true,
+                                "decode_residency": "ProceduralGpuNative",
                                 "working_residency": "GpuWorkingCompositeExecuted",
+                                "input_transform_path": "GpuNativeProcedural",
+                                "execution_observed": true,
+                                "zero_copy": true,
+                                "low_copy": false,
+                                "upload_count": 0,
+                                "native_bridge_copy_count": 0,
+                                "readback_count": 0,
+                                "reason": "test fixture",
                             },
                             "display_contract_sha256": SHA,
                         }))
@@ -749,7 +763,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                             format!("{:x}", Sha256::digest(reopened_contract_json.as_bytes()));
                         serde_json::json!({
                             "step": step,
-                            "schema_version": 3,
+                            "schema_version": 4,
                             "cycle_index": cycle,
                             "operation_id": operation_id,
                             "sequence_binding_sha256": SHA,
@@ -808,10 +822,31 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                 let window_run_receipt = (step == "surface_device_reopen").then(|| {
                     let runtime = r#"{"supervisor":"terminated"}"#;
                     let host = r#"{"services":"returned"}"#;
-                    let gpu = r#"{"retirement":"returned"}"#;
+                    let gpu = serde_json::to_string(&serde_json::json!({
+                        "surface_generation": cycle + 2,
+                        "device_generation": cycle + 4,
+                        "publication_cleanup": { "Ok": null },
+                        "retirement": {
+                            "retired": {
+                                "worker_started": true,
+                                "worker_terminated": true,
+                                "worker_panicked": false,
+                                "timed_out": false,
+                                "retirement_requested": true,
+                                "retirement_handoff_accepted": true,
+                                "retirement_completed": true,
+                                "renderer_retirement": {
+                                    "cpu_yuv_upload": "returned",
+                                    "native_device_removed": false,
+                                },
+                                "generation_terminal_kind": null,
+                            }
+                        }
+                    }))
+                    .expect("serialize final GPU shutdown");
                     let native = r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#;
                     let outer = serde_json::json!({
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "outcome": "active_exited",
                         "recovery_receipt_json": operation_receipt_json.clone(),
                         "recovery_receipt_sha256": operation_receipt_sha256.clone(),
@@ -819,7 +854,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                         "runtime_shutdown_sha256": format!("{:x}", Sha256::digest(runtime.as_bytes())),
                         "host_shutdown_json": host,
                         "host_shutdown_sha256": format!("{:x}", Sha256::digest(host.as_bytes())),
-                        "gpu_shutdown_json": gpu,
+                        "gpu_shutdown_json": gpu.clone(),
                         "gpu_shutdown_sha256": format!("{:x}", Sha256::digest(gpu.as_bytes())),
                         "native_return_json": native,
                         "native_return_sha256": format!("{:x}", Sha256::digest(native.as_bytes())),
@@ -1088,6 +1123,33 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
             serde_json::json!(format!("{:x}", Sha256::digest(receipt_json.as_bytes())));
         event["operation_receipt_json"] = serde_json::json!(receipt_json);
     };
+    let reseal_reopened_picture = |receipt: &mut serde_json::Value, picture_json: String| {
+        let picture_sha256 = format!("{:x}", Sha256::digest(picture_json.as_bytes()));
+        let mut reopened: serde_json::Value = serde_json::from_str(
+            receipt["reopened_contract_json"].as_str().expect("reopened contract"),
+        )
+        .expect("parse reopened contract");
+        reopened["reopened_picture_json"] = serde_json::json!(picture_json);
+        reopened["reopened_picture_sha256"] = serde_json::json!(picture_sha256.clone());
+        reopened["original_picture_sha256"] = serde_json::json!(picture_sha256);
+        let reopened_json = serde_json::to_string(&reopened).expect("serialize reopened contract");
+        receipt["reopened_contract_json"] = serde_json::json!(reopened_json.clone());
+        receipt["reopened_contract_sha256"] =
+            serde_json::json!(format!("{:x}", Sha256::digest(reopened_json.as_bytes())));
+    };
+    let reseal_window_recovery_binding = |event: &mut serde_json::Value| {
+        let mut window_run: serde_json::Value = serde_json::from_str(
+            event["window_run_receipt_json"].as_str().expect("Window-run receipt"),
+        )
+        .expect("parse Window-run receipt");
+        window_run["recovery_receipt_json"] = event["operation_receipt_json"].clone();
+        window_run["recovery_receipt_sha256"] = event["operation_receipt_sha256"].clone();
+        let window_run_json =
+            serde_json::to_string(&window_run).expect("serialize Window-run receipt");
+        event["window_run_receipt_sha256"] =
+            serde_json::json!(format!("{:x}", Sha256::digest(window_run_json.as_bytes())));
+        event["window_run_receipt_json"] = serde_json::json!(window_run_json);
+    };
 
     let mut raw = baseline_raw.clone();
     let event = raw["events"]
@@ -1169,6 +1231,224 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     reseal_receipt(event, &receipt);
     assert_rehashed_tamper_rejected(
         "rehash-consistent nested Surface picture substitution must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let mut old_shutdown: serde_json::Value = serde_json::from_str(
+        receipt["shutdown_receipt_json"].as_str().expect("old shutdown receipt"),
+    )
+    .expect("parse old shutdown receipt");
+    old_shutdown["surface_generation"] = serde_json::json!(99);
+    let old_shutdown_json =
+        serde_json::to_string(&old_shutdown).expect("serialize old shutdown receipt");
+    receipt["shutdown_receipt_json"] = serde_json::json!(old_shutdown_json.clone());
+    receipt["shutdown_receipt_sha256"] = serde_json::json!(format!(
+        "{:x}",
+        Sha256::digest(old_shutdown_json.as_bytes())
+    ));
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent old Surface generation substitution must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let mut old_shutdown: serde_json::Value = serde_json::from_str(
+        receipt["shutdown_receipt_json"].as_str().expect("old shutdown receipt"),
+    )
+    .expect("parse old shutdown receipt");
+    old_shutdown["surface_generation"] = serde_json::json!(receipt["surface_generation_before"]
+        .as_u64()
+        .expect("old Surface generation")
+        .to_string());
+    old_shutdown["worker_terminated"] = serde_json::json!("false");
+    let old_shutdown_json =
+        serde_json::to_string(&old_shutdown).expect("serialize typed old shutdown attack");
+    receipt["shutdown_receipt_json"] = serde_json::json!(old_shutdown_json.clone());
+    receipt["shutdown_receipt_sha256"] = serde_json::json!(format!(
+        "{:x}",
+        Sha256::digest(old_shutdown_json.as_bytes())
+    ));
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent string boolean/integer substitution must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    receipt["surface_generation_before"] = serde_json::json!(receipt["surface_generation_before"]
+        .as_u64()
+        .expect("old Surface generation")
+        .to_string());
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent recovery generation string substitution must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let reopened: serde_json::Value = serde_json::from_str(
+        receipt["reopened_contract_json"].as_str().expect("reopened contract"),
+    )
+    .expect("parse reopened contract");
+    let mut picture: serde_json::Value =
+        serde_json::from_str(reopened["reopened_picture_json"].as_str().expect("reopened picture"))
+            .expect("parse reopened picture");
+    picture["frame_residency"]
+        .as_object_mut()
+        .expect("frame residency")
+        .remove("decode_residency");
+    let picture_json = serde_json::to_string(&picture).expect("serialize incomplete picture");
+    reseal_reopened_picture(&mut receipt, picture_json);
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent incomplete frame-residency shape must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let reopened: serde_json::Value = serde_json::from_str(
+        receipt["reopened_contract_json"].as_str().expect("reopened contract"),
+    )
+    .expect("parse reopened contract");
+    let picture_json =
+        reopened["reopened_picture_json"].as_str().expect("reopened picture").replace(
+            &format!("\"display_contract_sha256\":\"{SHA}\""),
+            &format!("\"display_contract_sha256\":{}", "1".repeat(64)),
+        );
+    reseal_reopened_picture(&mut receipt, picture_json);
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent numeric display-contract digest must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let reopened: serde_json::Value = serde_json::from_str(
+        receipt["reopened_contract_json"].as_str().expect("reopened contract"),
+    )
+    .expect("parse reopened contract");
+    let mut picture: serde_json::Value =
+        serde_json::from_str(reopened["reopened_picture_json"].as_str().expect("reopened picture"))
+            .expect("parse reopened picture");
+    picture["width"] = serde_json::json!(u64::from(u32::MAX) + 1);
+    let picture_json = serde_json::to_string(&picture).expect("serialize oversized picture");
+    reseal_reopened_picture(&mut receipt, picture_json);
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected("rehash-consistent picture u32 overflow must fail", &raw);
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut receipt: serde_json::Value =
+        serde_json::from_str(event["operation_receipt_json"].as_str().expect("receipt"))
+            .expect("parse Surface receipt");
+    let old_shutdown_json = format!(
+        " {}",
+        receipt["shutdown_receipt_json"].as_str().expect("old shutdown receipt")
+    );
+    receipt["shutdown_receipt_json"] = serde_json::json!(old_shutdown_json.clone());
+    receipt["shutdown_receipt_sha256"] = serde_json::json!(format!(
+        "{:x}",
+        Sha256::digest(old_shutdown_json.as_bytes())
+    ));
+    reseal_receipt(event, &receipt);
+    reseal_window_recovery_binding(event);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent noncanonical old shutdown JSON must fail",
+        &raw,
+    );
+
+    let mut raw = baseline_raw.clone();
+    let event = raw["events"]
+        .as_array_mut()
+        .expect("producer events array")
+        .iter_mut()
+        .find(|event| event["step"] == "surface_device_reopen")
+        .expect("Surface recovery event");
+    let mut window_run: serde_json::Value = serde_json::from_str(
+        event["window_run_receipt_json"].as_str().expect("Window-run receipt"),
+    )
+    .expect("parse Window-run receipt");
+    let mut final_gpu: serde_json::Value =
+        serde_json::from_str(window_run["gpu_shutdown_json"].as_str().expect("final GPU receipt"))
+            .expect("parse final GPU receipt");
+    final_gpu["device_generation"] = serde_json::json!(99);
+    let final_gpu_json = serde_json::to_string(&final_gpu).expect("serialize final GPU receipt");
+    window_run["gpu_shutdown_json"] = serde_json::json!(final_gpu_json.clone());
+    window_run["gpu_shutdown_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(final_gpu_json.as_bytes())));
+    let window_run_json = serde_json::to_string(&window_run).expect("serialize Window-run receipt");
+    event["window_run_receipt_sha256"] =
+        serde_json::json!(format!("{:x}", Sha256::digest(window_run_json.as_bytes())));
+    event["window_run_receipt_json"] = serde_json::json!(window_run_json);
+    assert_rehashed_tamper_rejected(
+        "rehash-consistent final Device generation substitution must fail",
         &raw,
     );
 

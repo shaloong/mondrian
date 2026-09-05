@@ -14,7 +14,7 @@ use crate::app_ui::window::{
     AppUiActiveWindowGpuShutdownEvidence, AppUiPreActiveWindowShutdownEvidence,
 };
 
-const WINDOW_OUTER_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const WINDOW_OUTER_RECEIPT_SCHEMA_VERSION: u32 = 2;
 const MAXIMUM_WINDOW_OUTER_RECEIPT_JSON_BYTES: usize = 128 * 1024;
 const WINDOW_CLOSED_RECEIPT_SCHEMA_VERSION: u32 = 1;
 const MAXIMUM_WINDOW_CLOSED_LEAF_JSON_BYTES: usize = 128 * 1024;
@@ -651,7 +651,7 @@ impl CanonicalActiveWindowRunEvidence {
         {
             return Err(AppUiWindowRunReceiptError::InvalidEvidence);
         }
-        EnduranceRecoveryOperationReceipt::parse_and_validate(
+        let recovery = EnduranceRecoveryOperationReceipt::parse_and_validate(
             &self.recovery_receipt_json,
             &self.recovery_receipt_sha256,
         )
@@ -672,6 +672,20 @@ impl CanonicalActiveWindowRunEvidence {
             if normalized != *json {
                 return Err(AppUiWindowRunReceiptError::NonCanonicalEvidence);
             }
+        }
+        let gpu: AppUiActiveWindowGpuShutdownEvidence =
+            serde_json::from_str(&self.gpu_shutdown_json)
+                .map_err(|error| AppUiWindowRunReceiptError::Serialization(error.to_string()))?;
+        let Some((_, surface_generation_after, _, device_generation_after)) =
+            recovery.surface_device_generations()
+        else {
+            return Err(AppUiWindowRunReceiptError::InvalidEvidence);
+        };
+        if !gpu.qualifies_normal_runtime()
+            || gpu.generation_identity()
+                != Some((surface_generation_after, device_generation_after))
+        {
+            return Err(AppUiWindowRunReceiptError::GenerationBindingMismatch);
         }
         Ok(())
     }
@@ -704,6 +718,9 @@ pub enum AppUiWindowRunReceiptError {
     /// The nested recovery receipt is not the operation being recorded.
     #[error("Window run receipt is bound to a different recovery operation")]
     RecoveryBindingMismatch,
+    /// Final GPU retirement did not close the generation installed by recovery.
+    #[error("Window run final GPU generation does not match the recovered generation")]
+    GenerationBindingMismatch,
     /// Outer JSON is valid but not its canonical compact encoding.
     #[error("Window run receipt JSON is not canonical")]
     NonCanonicalEvidence,
@@ -727,6 +744,32 @@ fn lower_sha256(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+fn test_clean_gpu_shutdown_json(surface_generation: u64, device_generation: u64) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "surface_generation": surface_generation,
+        "device_generation": device_generation,
+        "publication_cleanup": { "Ok": null },
+        "retirement": {
+            "retired": {
+                "worker_started": true,
+                "worker_terminated": true,
+                "worker_panicked": false,
+                "timed_out": false,
+                "retirement_requested": true,
+                "retirement_handoff_accepted": true,
+                "retirement_completed": true,
+                "renderer_retirement": {
+                    "cpu_yuv_upload": "returned",
+                    "native_device_removed": false
+                },
+                "generation_terminal_kind": null
+            }
+        }
+    }))
+    .expect("GPU shutdown fixture should serialize")
+}
+
+#[cfg(test)]
 pub(crate) fn test_integrity_receipt_for_recovery(
     recovery: &EnduranceRecoveryOperationReceipt,
 ) -> (String, String) {
@@ -736,7 +779,10 @@ pub(crate) fn test_integrity_receipt_for_recovery(
     };
     let runtime = normalize(r#"{"supervisor":"terminated"}"#);
     let host = normalize(r#"{"services":"returned"}"#);
-    let gpu = normalize(r#"{"retirement":"returned"}"#);
+    let (_, surface_generation_after, _, device_generation_after) = recovery
+        .surface_device_generations()
+        .expect("Window-run fixture requires Surface/device recovery");
+    let gpu = test_clean_gpu_shutdown_json(surface_generation_after, device_generation_after);
     let native = normalize(
         r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#,
     );
@@ -778,7 +824,7 @@ mod tests {
         .expect("fixture recovery receipt");
         let runtime = r#"{"supervisor":"terminated"}"#.to_owned();
         let host = r#"{"preview":{"worker":"returned"}}"#.to_owned();
-        let gpu = r#"{"retirement":"returned"}"#.to_owned();
+        let gpu = test_clean_gpu_shutdown_json(2, 4);
         let native = r#"{"physical_native_termination":"unverified"}"#.to_owned();
         CanonicalActiveWindowRunEvidence {
             schema_version: WINDOW_OUTER_RECEIPT_SCHEMA_VERSION,
@@ -954,6 +1000,27 @@ mod tests {
             AppUiWindowRunReceipt::verify_integrity(&json, &hash),
             Err(AppUiWindowRunReceiptError::EmbeddedHashMismatch)
         );
+    }
+
+    #[test]
+    fn final_gpu_retirement_must_match_recovered_generation() {
+        for field in ["surface_generation", "device_generation"] {
+            let mut projection = fixture_projection();
+            let mut gpu: serde_json::Value =
+                serde_json::from_str(&projection.gpu_shutdown_json).expect("GPU shutdown leaf");
+            gpu[field] = 99.into();
+            projection.gpu_shutdown_json =
+                serde_json::to_string(&gpu).expect("tampered GPU shutdown leaf");
+            projection.gpu_shutdown_sha256 = lower_sha256(projection.gpu_shutdown_json.as_bytes());
+            let json = serde_json::to_string(&projection).expect("fixture should serialize");
+            let hash = lower_sha256(json.as_bytes());
+
+            assert_eq!(
+                AppUiWindowRunReceipt::verify_integrity(&json, &hash),
+                Err(AppUiWindowRunReceiptError::GenerationBindingMismatch),
+                "accepted mismatched {field}"
+            );
+        }
     }
 
     #[test]

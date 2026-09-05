@@ -545,6 +545,8 @@ struct AppUiSurfaceDeviceReopenAwaitingPicture {
 #[derive(Debug, serde::Serialize)]
 struct AppUiViewerGpuShutdownContract {
     schema_version: u32,
+    surface_generation: u64,
+    device_generation: u64,
     worker_started: bool,
     worker_terminated: bool,
     worker_panicked: bool,
@@ -642,14 +644,18 @@ fn exact_presented_surface_picture(
 #[cfg(feature = "validation")]
 fn seal_clean_viewer_gpu_shutdown(
     evidence: ViewerGpuDeviceProgressShutdownEvidence,
+    surface_generation: u64,
+    device_generation: u64,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    if !evidence.qualifies_normal_runtime() {
+    if surface_generation == 0 || device_generation == 0 || !evidence.qualifies_normal_runtime() {
         return Err(
             format!("Viewer GPU device generation did not retire cleanly: {evidence:?}").into(),
         );
     }
     canonical_json_and_sha256(&AppUiViewerGpuShutdownContract {
-        schema_version: 2,
+        schema_version: 3,
+        surface_generation,
+        device_generation,
         worker_started: evidence.worker_started,
         worker_terminated: evidence.worker_terminated,
         worker_panicked: evidence.worker_panicked,
@@ -2006,15 +2012,20 @@ impl Drop for AppUiWindowSession {
 /// Independent publication and device-generation closure facts for an active
 /// Window session. Publication cleanup failure never suppresses the raw GPU
 /// worker/Renderer receipt.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct AppUiActiveWindowGpuShutdownEvidence {
+    surface_generation: u64,
+    device_generation: Option<u64>,
     publication_cleanup: Result<(), String>,
     retirement: AppUiWindowGpuRetirementEvidence,
 }
 
 impl AppUiActiveWindowGpuShutdownEvidence {
     pub(super) fn qualifies_normal_runtime(&self) -> bool {
-        self.publication_cleanup.is_ok()
+        self.surface_generation != 0
+            && self.device_generation.is_some_and(|generation| generation != 0)
+            && self.publication_cleanup.is_ok()
             && matches!(
                 &self.retirement,
                 AppUiWindowGpuRetirementEvidence::Retired(evidence)
@@ -2026,9 +2037,18 @@ impl AppUiActiveWindowGpuShutdownEvidence {
         (!self.qualifies_normal_runtime())
             .then(|| format!("Window Viewer GPU generation did not close cleanly: {self:?}"))
     }
+
+    pub(super) const fn generation_identity(&self) -> Option<(u64, u64)> {
+        match self.device_generation {
+            Some(device_generation) if self.surface_generation != 0 && device_generation != 0 => {
+                Some((self.surface_generation, device_generation))
+            }
+            Some(_) | None => None,
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AppUiWindowGpuRetirementEvidence {
     Retired(ViewerGpuDeviceProgressShutdownEvidence),
@@ -2036,7 +2056,7 @@ enum AppUiWindowGpuRetirementEvidence {
     ShutdownPanicked(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AppUiWindowGpuOwnershipFault {
     MissingProgressOwner,
@@ -2415,7 +2435,11 @@ fn reopen_window_surface_and_device(
                 .take_viewer_gpu_generation_retirement()
                 .map_err(|error| -> Box<dyn std::error::Error> { error.to_string().into() })?;
             let shutdown = retiring_progress.retire_device_generation_until(retirement, deadline);
-            let sealed = seal_clean_viewer_gpu_shutdown(shutdown)?;
+            let sealed = seal_clean_viewer_gpu_shutdown(
+                shutdown,
+                surface_generation_before,
+                device_generation_before,
+            )?;
             publish_active_window_session(host, active_session, bounds);
             Ok::<_, Box<dyn std::error::Error>>(sealed)
         },
@@ -3508,6 +3532,11 @@ fn catch_window_viewer_gpu_shutdown(
     host: &AppUiHost,
     deadline: Instant,
 ) -> AppUiActiveWindowGpuShutdownEvidence {
+    let surface_generation = session.surface_generation_id.get();
+    let device_generation = session
+        .viewer_gpu_device_progress
+        .generation_id()
+        .map(ViewerGpuDeviceGenerationId::get);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         session.shutdown_viewer_gpu_until(host, deadline)
     })) {
@@ -3518,6 +3547,8 @@ fn catch_window_viewer_gpu_shutdown(
                 "Window Viewer GPU shutdown",
             );
             AppUiActiveWindowGpuShutdownEvidence {
+                surface_generation,
+                device_generation,
                 publication_cleanup: Ok(()),
                 retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
                     diagnostic.to_string(),
@@ -8127,6 +8158,11 @@ impl AppUiWindowSession {
         host: &AppUiHost,
         deadline: Instant,
     ) -> AppUiActiveWindowGpuShutdownEvidence {
+        let surface_generation = self.surface_generation_id.get();
+        let device_generation = self
+            .viewer_gpu_device_progress
+            .generation_id()
+            .map(ViewerGpuDeviceGenerationId::get);
         let publication_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             clear_viewer_spatial_presentation(self, host);
         }))
@@ -8152,7 +8188,12 @@ impl AppUiWindowSession {
                 )
             }
         };
-        AppUiActiveWindowGpuShutdownEvidence { publication_cleanup, retirement }
+        AppUiActiveWindowGpuShutdownEvidence {
+            surface_generation,
+            device_generation,
+            publication_cleanup,
+            retirement,
+        }
     }
 
     fn take_viewer_gpu_generation_retirement(
@@ -8763,6 +8804,8 @@ mod tests {
     #[cfg(feature = "validation")]
     fn clean_final_window_gpu_shutdown() -> AppUiActiveWindowGpuShutdownEvidence {
         AppUiActiveWindowGpuShutdownEvidence {
+            surface_generation: 2,
+            device_generation: Some(4),
             publication_cleanup: Ok(()),
             retirement: AppUiWindowGpuRetirementEvidence::Retired(
                 ViewerGpuDeviceProgressShutdownEvidence {

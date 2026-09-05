@@ -162,7 +162,7 @@ pub(crate) enum ViewerGpuDeviceProgressObservation {
 }
 
 /// Why one complete Viewer device generation became terminal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewerGpuDeviceGenerationTerminalKind {
     /// wgpu reported an unexpected concrete device loss.
@@ -317,7 +317,8 @@ pub(crate) enum ViewerGpuDeviceProgressShutdownError {
 }
 
 /// Bounded synchronous closure evidence for one Viewer GPU progress domain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ViewerGpuDeviceProgressShutdownEvidence {
     /// Whether this exact progress worker started.
     pub worker_started: bool,

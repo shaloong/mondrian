@@ -669,7 +669,10 @@ All four now have production constructors that accept only opaque facts
 returned by their real operation owners. Surface/device reopen can only enter
 through the winit Window event loop. Process-local Surface and Device
 generation identities are nonzero and monotonic; same-generation reuse is
-rejected. The old-generation receipt embeds canonical JSON proving the progress
+rejected. Surface/device recovery uses operation schema 4 while the other
+three recovery variants remain schema 3. The old-generation receipt uses its
+own schema 3 and binds its exact Surface/Device identities to the recovery
+receipt's `before` pair. It embeds canonical JSON proving the progress
 worker started and returned without panic/timeout, accepted the consuming
 retirement handoff, completed Adapter retirement, and had no loss/failure
 terminal. Clean retirement additionally requires one successful whole-queue
@@ -704,12 +707,17 @@ The Window recovery operation is nested inside a second sealed Window-run
 receipt only after the borrowed event loop and the complete Window-owner scope
 return. That outer receipt binds the operation JSON/hash to exact background
 Runtime, Host service, final active GPU, and native-return JSON/hash leaves.
+Window-run schema 2 reparses the final GPU leaf through the owning typed
+contract, reruns its clean-retirement predicate, and requires its Surface and
+Device identities to equal the recovery receipt's `after` pair. Thus a
+rehash-consistent old or final generation substitution cannot qualify the
+successful `old -> candidate/final` chain.
 Runtime/Host/pre-active/publication-failure/active-exit outcomes are mutually
 exclusive, and only a clean normal active exit can seal success. The campaign
 producer event retains both receipts and revalidates their binding; it no
-longer reconstructs shutdown meaning from separate UI/GPU fields. Integrity
-verification does not substitute for typed semantic replay of rewritten
-leaves, and the native leaf explicitly records physical native termination as
+longer reconstructs shutdown meaning from separate UI/GPU fields. Runtime,
+Host, and native leaves still have only bounded canonical integrity at this
+outer seam; the native leaf explicitly records physical native termination as
 unverified.
 
 `mondrian-surface-reopen --self-test` provides a narrow local executable that
@@ -745,8 +753,10 @@ runner consumes that state through the full App endurance shutdown and rejects
 the otherwise valid Surface receipt if any UI or App owner remains detached;
 the concrete campaign runtime can instead resume the same settled Timeline
 owner after the Window operation. The durable schema-3 envelope now retains
-batch/App success and failure evidence; generation history, physical native
-termination, and complete cross-Module semantic replay remain separate work.
+batch/App success and failure evidence. The successful recovery chain has exact
+old/candidate/final identity binding, but failed candidate/dirty-retirement
+ordered history, physical native termination, and complete cross-Module
+semantic replay remain separate work.
 
 Continuous Export now has a validation-only product owner instead of a loop in
 the campaign harness. Start requires a fresh empty Queue, a supported

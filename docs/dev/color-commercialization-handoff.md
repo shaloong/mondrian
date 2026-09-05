@@ -374,6 +374,16 @@ announced before the process returns nonzero; existing files are not overwritten
 and file sync is not described as parent-directory crash durability. Durable
 old/candidate/final generation history, physical native termination, and full
 Runtime/Host/GPU semantic replay remain open.
+
+The successful Surface generation chain now has durable identity binding.
+Surface recovery schema 4 binds the canonical schema-3 old GPU shutdown leaf
+to the exact `before` Surface/Device pair; Window-run schema 2 typed-replays the
+clean final GPU retirement and requires it to equal the exact `after` pair
+already used by the reopened picture. Rust and the independent PowerShell
+verifier reject rehash-consistent old/final substitutions, unknown fields, and
+noncanonical nested shutdown/contract/picture bytes. Candidate-construction
+failures and dirty old-retirement history still require a separate bounded
+generation-history Module.
 The final-source release validator built in 15m31s and real Win32/winit/DX12
 cycles 19-20 passed under schema 3. The report replayed `success`, submitted=2,
 completed=2, no cleanup diagnostic, and active exits with Surface 2->3 / 5->6
