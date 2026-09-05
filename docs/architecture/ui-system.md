@@ -2230,6 +2230,22 @@ supervisor, all under the original absolute deadline. A returned or unwound
 construction scope proves that its Rust native authorities were consumed on the
 event-loop thread; it does not prove OS compositor or driver termination.
 EventLoop creation remains outside this borrowed-EventLoop transaction. An
-impossible-state-free durable outer receipt, physical native termination
-evidence, and durable old/candidate/final receipt propagation remain unfinished
-lifecycle work.
+`app_ui::window_outer_receipt` Module now owns the mutually exclusive Runtime
+startup failure, Host startup failure, pre-active failure, active publication
+failure, and normal active-exit outcomes. Host close first leaves a pending
+Host/GPU handback; Runtime close completes the inner facts, and only the caller
+of the complete Window function may add the native-return marker after the
+`run_on_demand` borrow and Window-owner scope have actually ended. A fallback
+Host `Drop` is an explicit incomplete state and cannot be upgraded to clean.
+
+Successful Surface-reopen validation seals one bounded canonical Window-run
+receipt from the existing recovery receipt plus the exact Runtime, Host, final
+GPU, and native-return JSON/hash pairs. The batch report uses schema 2 and the
+endurance campaign retains both the compatibility recovery receipt and the
+outer Window receipt, so the Adapter no longer reconstructs leaf qualification
+or discards final closure evidence. The public verifier validates schema and
+byte integrity; it does not claim semantic re-qualification after an adversary
+rewrites a leaf and every enclosing hash. Physical native termination is always
+serialized as unverified. EventLoop construction ownership, durable failure and
+old/candidate/final-generation history, OS/driver terminal evidence, and
+independent semantic replay remain unfinished lifecycle work.

@@ -15,8 +15,11 @@ const MAXIMUM_BATCH_CYCLES: u32 = 24;
 #[derive(Serialize)]
 struct SurfaceReopenReport<'a> {
     schema_version: u32,
-    receipt_json: &'a str,
-    receipt_sha256: &'a str,
+    window_run_receipt_json: &'a str,
+    window_run_receipt_sha256: &'a str,
+    recovery_receipt_json: &'a str,
+    recovery_receipt_sha256: &'a str,
+    physical_native_termination_qualified: bool,
 }
 
 #[derive(Serialize)]
@@ -140,13 +143,16 @@ fn main() -> anyhow::Result<()> {
     let reports = receipts
         .iter()
         .map(|receipt| SurfaceReopenReport {
-            schema_version: 1,
-            receipt_json: receipt.canonical_json(),
-            receipt_sha256: receipt.sha256(),
+            schema_version: 2,
+            window_run_receipt_json: receipt.canonical_json(),
+            window_run_receipt_sha256: receipt.sha256(),
+            recovery_receipt_json: receipt.recovery_receipt().canonical_json(),
+            recovery_receipt_sha256: receipt.recovery_receipt().sha256(),
+            physical_native_termination_qualified: receipt.qualifies_physical_native_termination(),
         })
         .collect::<Vec<_>>();
     let report = if batch_report {
-        serde_json::to_vec(&SurfaceReopenBatchReport { schema_version: 1, receipts: reports })?
+        serde_json::to_vec(&SurfaceReopenBatchReport { schema_version: 2, receipts: reports })?
     } else {
         let report = reports
             .first()

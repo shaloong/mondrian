@@ -275,10 +275,18 @@ receipt is clean. Retirement error/panic and publication panic therefore retain
 the candidate in the outer Session for explicit closure. Publication failure is
 terminal; there is no rollback to a partially stale Host. A normal replacement
 error is also promoted to an event-loop failure and cannot become normal exit.
-Remaining Window work includes EventLoop creation ownership, an
-impossible-state-free durable outer Runtime/Host/GPU/native receipt, physical
-native termination evidence, and durable old/candidate/final receipt history.
-These slices must not be reported as whole Window qualification until complete.
+The follow-on outer-receipt Module gives Runtime-startup, Host-startup,
+pre-active, active-publication-failure, and normal-active exit mutually
+exclusive types. Normal Host/GPU closure remains pending until Runtime closes;
+only the caller observing the complete Window function return may mint the
+native-return marker. Successful Window validation now seals bounded canonical
+recovery/Runtime/Host/final-GPU/native JSON and per-leaf hashes. Batch report
+schema 2 and the endurance event both retain the outer receipt. Its verifier is
+an integrity check, not independent semantic replay, and physical native
+termination remains explicitly unverified. Remaining Window work includes
+EventLoop creation ownership, durable failure and old/candidate/final receipt
+history, physical native termination evidence, and semantic replay. These
+slices must not be reported as whole Window qualification until complete.
 
 The next runtime-owner slice replaces the bare four-thread Tokio Runtime with a
 native supervisor-owned Module. UI execution receives only a Runtime Handle.
@@ -301,7 +309,9 @@ all against the original absolute deadline. The stage evidence states only that
 Rust native authority left the event-loop-thread scope; it does not claim OS or
 driver termination. Production-seam tests prove ordinary-error scope destruction
 precedes evidence construction and panic diagnostics preserve the last stage.
-EventLoop creation and durable typed outer receipt aggregation remain open.
+EventLoop creation, durable failure/generation-chain history, and physical
+native termination remain open; successful typed outer aggregation is now
+implemented by the Window-run receipt Module described above.
 
 Final gates for this slice passed: default and validation checks, two focused
 construction error/panic regressions, App and full-workspace all-target/all-feature
@@ -366,8 +376,10 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    are complete. The background Runtime now has a bounded supervisor owner and
    clean join predicate. Initial native/GPU construction errors and panics now
    have a unified bounded close path. EventLoop creation, impossible-state-free
-   durable Runtime/Host/GPU/native evidence, physical native termination, and
-   durable old/candidate/final receipt history remain.
+   successful outer Runtime/Host/GPU/native receipt aggregation and propagation
+   are complete. EventLoop construction ownership, typed/durable failure
+   history, physical native termination, and durable old/candidate/final
+   generation history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.
@@ -532,6 +544,30 @@ denied; format and diff checks passed as well.
 A same-user filesystem race and an attacker able to inject into the process
 are distinct threat models. Any solution requiring a new privileged broker or
 independent security principal needs an explicit deployment decision.
+
+The 2026-09-05 Window outer-receipt slice is complete in source. The deep
+`app_ui::window_outer_receipt` Module owns five mutually exclusive shutdown
+outcomes and permits success sealing only from a clean normal active exit.
+Host/GPU handback remains pending until Runtime closure; native-return evidence
+is minted only after the complete Window function returns. Batch report schema
+2 and producer raw-evidence schema 2 retain and bind recovery, Runtime, Host,
+final GPU, and native-return JSON/hash evidence; Surface recovery requires the
+outer receipt and other recovery steps reject it. Public replay is explicitly
+named integrity verification and physical native termination remains
+`unverified`. Five outer-receipt tests, four other focused App regressions,
+15 platform/PowerShell commercial-endurance tests, default/validation checks,
+workspace all-target/all-feature Clippy, format, and diff gates passed. The
+final-source release runner built in 13m46s. Real Win32/winit/DX12 cycles 17-18
+passed with distinct Surface/Device generations, terminated Runtime supervisor
+and GPU progress workers, completed retirement, returned YUV workers, native
+borrow/scope return, and matching pictures. Binary SHA-256 is
+`EF1E24302598D5D96302B1C11238D8FD518BCAB253CF0C27606F2B890DDB12A4`;
+report SHA-256 is
+`5C0E1DDEAE0604557B0779119F40758E46BAAFA3BE804DBD499FA53B62F6D74B`.
+Observed 143-216ms Preview preparation remains COL-031 failure evidence.
+EventLoop construction ownership, durable failure/App and old/candidate/final
+history, semantic leaf replay, and physical native termination remain COL-047.
+No capacity error occurred and `target` was not cleaned.
 
 ## Transfer to macOS and Linux
 

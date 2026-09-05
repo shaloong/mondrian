@@ -313,7 +313,7 @@ foreach ($phase in @($manifest.phases)) {
         }
     }
     foreach ($binding in @(
-        @([string]$rawEvidence.schema_version, "1", "raw evidence schema"),
+        @([string]$rawEvidence.schema_version, "2", "raw evidence schema"),
         @([string]$rawEvidence.phase_id, [string]$phase.phase_id, "raw evidence phase"),
         @([string]$rawEvidence.run_id, [string]$manifest.run_id, "raw evidence run"),
         @([string]$rawEvidence.authority_challenge, [string]$captureAuthority.single_use_challenge, "raw evidence challenge"),
@@ -382,6 +382,10 @@ foreach ($phase in @($manifest.phases)) {
                 }
                 switch ($expectedStep) {
                     "seek" {
+                        if ([string]$event.window_run_receipt_json -ne "" -or
+                            [string]$event.window_run_receipt_sha256 -ne "") {
+                            throw "Window-run evidence appeared on a non-Window recovery step."
+                        }
                         Assert-ExactJsonProperties $receipt @(
                             "step", "schema_version", "cycle_index", "operation_id",
                             "sequence_binding_sha256", "from_frame", "target_frame",
@@ -396,6 +400,56 @@ foreach ($phase in @($manifest.phases)) {
                         }
                     }
                     "surface_device_reopen" {
+                        $windowRunJson = [string]$event.window_run_receipt_json
+                        $windowRunSha256 = [string]$event.window_run_receipt_sha256
+                        if ($windowRunJson -eq "" -or $windowRunSha256 -eq "") {
+                            throw "Surface recovery requires one Window-run receipt JSON/hash pair."
+                        }
+                        if ($windowRunJson -ne "") {
+                            Assert-LowerSha256 $windowRunSha256 "Window-run receipt digest"
+                            if ([Text.Encoding]::UTF8.GetByteCount($windowRunJson) -gt 131072 -or
+                                (Get-LowerUtf8Sha256 $windowRunJson) -cne $windowRunSha256) {
+                                throw "Window-run receipt bytes do not match their bounded digest."
+                            }
+                            $windowRun = $windowRunJson | ConvertFrom-Json
+                            Assert-ExactJsonProperties $windowRun @(
+                                "schema_version", "outcome", "recovery_receipt_json",
+                                "recovery_receipt_sha256", "runtime_shutdown_json",
+                                "runtime_shutdown_sha256", "host_shutdown_json",
+                                "host_shutdown_sha256", "gpu_shutdown_json",
+                                "gpu_shutdown_sha256", "native_return_json",
+                                "native_return_sha256"
+                            ) "Window-run receipt"
+                            if ([int]$windowRun.schema_version -ne 1 -or
+                                [string]$windowRun.outcome -cne "active_exited" -or
+                                [string]$windowRun.recovery_receipt_json -cne $receiptJson -or
+                                [string]$windowRun.recovery_receipt_sha256 -cne [string]$event.operation_receipt_sha256) {
+                                throw "Window-run receipt is not bound to the Surface recovery operation."
+                            }
+                            foreach ($leaf in @(
+                                [pscustomobject]@{ Json = [string]$windowRun.runtime_shutdown_json; Sha256 = [string]$windowRun.runtime_shutdown_sha256 },
+                                [pscustomobject]@{ Json = [string]$windowRun.host_shutdown_json; Sha256 = [string]$windowRun.host_shutdown_sha256 },
+                                [pscustomobject]@{ Json = [string]$windowRun.gpu_shutdown_json; Sha256 = [string]$windowRun.gpu_shutdown_sha256 },
+                                [pscustomobject]@{ Json = [string]$windowRun.native_return_json; Sha256 = [string]$windowRun.native_return_sha256 }
+                            )) {
+                                Assert-LowerSha256 $leaf.Sha256 "Window-run embedded receipt digest"
+                                if ([Text.Encoding]::UTF8.GetByteCount($leaf.Json) -le 0 -or
+                                    (Get-LowerUtf8Sha256 $leaf.Json) -cne $leaf.Sha256) {
+                                    throw "Window-run embedded receipt bytes do not match their digest."
+                                }
+                                $null = $leaf.Json | ConvertFrom-Json
+                            }
+                            $nativeReturn = ([string]$windowRun.native_return_json) | ConvertFrom-Json
+                            Assert-ExactJsonProperties $nativeReturn @(
+                                "event_loop_borrow_returned", "window_owner_scope_exited",
+                                "physical_native_termination"
+                            ) "Window native-return evidence"
+                            if (-not [bool]$nativeReturn.event_loop_borrow_returned -or
+                                -not [bool]$nativeReturn.window_owner_scope_exited -or
+                                [string]$nativeReturn.physical_native_termination -cne "unverified") {
+                                throw "Window native-return evidence overclaims or omits authority release."
+                            }
+                        }
                         Assert-ExactJsonProperties $receipt @(
                             "step", "schema_version", "cycle_index", "operation_id",
                             "sequence_binding_sha256", "surface_generation_before",
@@ -471,6 +525,10 @@ foreach ($phase in @($manifest.phases)) {
                         }
                     }
                     "export_cancel_retry" {
+                        if ([string]$event.window_run_receipt_json -ne "" -or
+                            [string]$event.window_run_receipt_sha256 -ne "") {
+                            throw "Window-run evidence appeared on a non-Window recovery step."
+                        }
                         Assert-ExactJsonProperties $receipt @(
                             "step", "schema_version", "cycle_index", "operation_id",
                             "cancelled_job_id", "retry_job_id", "cancellation_count_before",
@@ -494,6 +552,10 @@ foreach ($phase in @($manifest.phases)) {
                         }
                     }
                     "cache_pressure" {
+                        if ([string]$event.window_run_receipt_json -ne "" -or
+                            [string]$event.window_run_receipt_sha256 -ne "") {
+                            throw "Window-run evidence appeared on a non-Window recovery step."
+                        }
                         Assert-ExactJsonProperties $receipt @(
                             "step", "schema_version", "cycle_index", "operation_id",
                             "decision_generation_before", "pressure_decision_generation",

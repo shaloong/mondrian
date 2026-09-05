@@ -749,6 +749,8 @@ pub struct VerifiedRecoveryStepEvent {
     step: EnduranceRecoveryStep,
     operation_receipt_json: String,
     operation_receipt_sha256: String,
+    window_run_receipt_json: Option<String>,
+    window_run_receipt_sha256: Option<String>,
 }
 
 impl EnduranceCampaignEvent {
@@ -777,6 +779,26 @@ impl EnduranceCampaignEvent {
             step: receipt.step(),
             operation_receipt_json: receipt.canonical_json().to_owned(),
             operation_receipt_sha256: receipt.sha256().to_owned(),
+            window_run_receipt_json: None,
+            window_run_receipt_sha256: None,
+        })
+    }
+
+    /// Construct a Window recovery event without discarding its outer closure receipt.
+    pub fn window_recovery_step_completed(
+        completed_at_us: u64,
+        receipt: &EnduranceRecoveryOperationReceipt,
+        window_run_receipt_json: String,
+        window_run_receipt_sha256: String,
+    ) -> Self {
+        Self::RecoveryStepCompleted(VerifiedRecoveryStepEvent {
+            completed_at_us,
+            cycle_index: receipt.cycle_index(),
+            step: receipt.step(),
+            operation_receipt_json: receipt.canonical_json().to_owned(),
+            operation_receipt_sha256: receipt.sha256().to_owned(),
+            window_run_receipt_json: Some(window_run_receipt_json),
+            window_run_receipt_sha256: Some(window_run_receipt_sha256),
         })
     }
 
@@ -1213,6 +1235,8 @@ fn record_events(
                     event.step,
                     &event.operation_receipt_json,
                     &event.operation_receipt_sha256,
+                    event.window_run_receipt_json.as_deref(),
+                    event.window_run_receipt_sha256.as_deref(),
                 )?,
         }
     }

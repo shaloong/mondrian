@@ -537,6 +537,9 @@ wall-clock soak.
 Each profile phase binds one raw checked-in contract under
 `tests/validation/endurance-workloads/`, the `mondrian-app` owner, the
 `mondrian-app-endurance-capture-v1` supervisor, and producer report schema 1.
+Producer raw-evidence schema 2 makes the outer Window-run receipt mandatory on
+Surface/device recovery events and forbidden on the other three recovery steps;
+the summary report schema remains 1.
 The reference-asset validator recomputes every workload file digest, so an
 opaque or missing workload cannot be admitted by editing only the profile.
 The campaign coordinator independently prepares those exact bytes before
@@ -688,11 +691,25 @@ server must report the Surface capability as `NotRun` without blocking the
 headless Continuous Export phase. The compatibility single-operation wrapper
 is process-one-shot and is not the campaign driver.
 
+The Window recovery operation is nested inside a second sealed Window-run
+receipt only after the borrowed event loop and the complete Window-owner scope
+return. That outer receipt binds the operation JSON/hash to exact background
+Runtime, Host service, final active GPU, and native-return JSON/hash leaves.
+Runtime/Host/pre-active/publication-failure/active-exit outcomes are mutually
+exclusive, and only a clean normal active exit can seal success. The campaign
+producer event retains both receipts and revalidates their binding; it no
+longer reconstructs shutdown meaning from separate UI/GPU fields. Integrity
+verification does not substitute for typed semantic replay of rewritten
+leaves, and the native leaf explicitly records physical native termination as
+unverified.
+
 `mondrian-surface-reopen --self-test` provides a narrow local executable that
 authors a Basic Title through the ordinary ProductAction path and exercises
 this real window seam. `--self-test-batch` runs two or more orthogonal Window
 sessions through the same process-local event loop and returns one sealed
-receipt per cycle; it is the regression gate for winit's event-loop recreation
+Window-run receipt per cycle. Report schema 2 publishes the outer and nested
+operation canonical JSON/hash pairs plus a false physical-native qualification
+field; it is the regression gate for winit's event-loop recreation
 guard and for returning the same App/Sequence owner between cycles. CPU-upload
 or procedural content may carry overall
 Viewer health `Degraded` while still proving Surface recovery; the operation

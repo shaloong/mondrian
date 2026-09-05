@@ -1985,7 +1985,7 @@ impl AppUiHost {
 }
 
 /// Typed consuming closure for the execution services owned by one Window Host.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct AppUiServiceShutdownEvidence {
     pub(crate) preview: PreviewRuntimeShutdownEvidence,
     pub(crate) auxiliary: AppUiAuxiliaryShutdownEvidence,
@@ -1998,7 +1998,7 @@ impl AppUiServiceShutdownEvidence {
 }
 
 /// Exact auxiliary owner receipts shared by ordinary quit and validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct AppUiAuxiliaryShutdownEvidence {
     waveform: AudioWaveformShutdownEvidence,
     thumbnails: Result<

@@ -10,7 +10,7 @@ use crate::app::owned_worker_lifecycle::OwnedWorkerShutdown;
 
 pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(super) struct AppUiBackgroundRuntimeShutdownEvidence {
     runtime_handoff_completed: bool,
     configured_worker_threads: Option<usize>,

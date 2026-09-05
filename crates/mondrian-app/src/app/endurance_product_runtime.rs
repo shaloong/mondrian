@@ -387,6 +387,8 @@ pub struct EnduranceSurfaceReopenRun {
     pub app_state: AppState,
     /// Sealed product receipt or operation failure.
     pub result: Result<EnduranceRecoveryOperationReceipt, String>,
+    /// Canonical outer Window-run receipt retained alongside the compatibility receipt.
+    pub window_receipt: Option<(String, String)>,
     /// Reference/Export owners returned after Window-scoped concurrent pumping.
     pub recovery_pump: EnduranceSurfaceRecoveryPump,
 }
@@ -525,28 +527,42 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
             operation_id,
             timeout,
         );
-        // Window already validates its exact UI receipt and merges cleanup with
-        // the original operation error. Do not replace that cause here.
-        let result = match (run.result, run.ui_shutdown, run.gpu_shutdown) {
-            (Ok(receipt), Some(ui), gpu)
-                if ui.all_resources_released() && gpu.qualifies_active_normal_runtime() =>
-            {
-                Ok(receipt)
+        // The Window receipt Module is the sole qualification and sealing authority.
+        let outer_evidence_returned = run.shutdown.is_some();
+        let outer_authority_released = run
+            .shutdown
+            .as_ref()
+            .is_some_and(|evidence| evidence.all_owned_authority_released());
+        let (result, window_receipt) = match run.result {
+            Ok(receipt) if receipt.all_owned_authority_released() => {
+                let outer = Some((
+                    receipt.canonical_json().to_owned(),
+                    receipt.sha256().to_owned(),
+                ));
+                (Ok(receipt.into_recovery_receipt()), outer)
             }
-            (Ok(_), Some(evidence), _) if !evidence.all_resources_released() => Err(format!(
-                "Window Surface recovery returned incomplete UI shutdown evidence: {evidence:?}"
-            )),
-            (Ok(_), None, _) => {
-                Err("Window Surface recovery returned no typed UI shutdown evidence".to_owned())
-            }
-            (Ok(_), Some(_), gpu) => Err(format!(
-                "Window Surface recovery returned incomplete final GPU shutdown evidence: {gpu:?}"
-            )),
-            (Err(primary), _, _) => Err(primary),
+            Ok(_) => (
+                Err("Window Surface recovery receipt lost owned authority".to_owned()),
+                None,
+            ),
+            Err(primary) if outer_authority_released => (Err(primary), None),
+            Err(primary) if outer_evidence_returned => (
+                Err(format!(
+                    "{primary}; Window Surface recovery outer shutdown was incomplete"
+                )),
+                None,
+            ),
+            Err(primary) => (
+                Err(format!(
+                    "{primary}; Window Surface recovery returned no typed outer shutdown evidence"
+                )),
+                None,
+            ),
         };
         EnduranceSurfaceReopenRun {
             app_state: run.app_state,
             result,
+            window_receipt,
             recovery_pump: run.recovery_pump.expect("Window driver supplied a recovery pump"),
         }
     }
@@ -946,9 +962,13 @@ impl PhaseOwners {
             return Err(detail);
         }
         let surface_receipt = run.result?;
-        events.push(EnduranceCampaignEvent::recovery_step_completed(
+        let (window_receipt_json, window_receipt_sha256) =
+            run.window_receipt.ok_or("Window Surface recovery lost its outer run receipt")?;
+        events.push(EnduranceCampaignEvent::window_recovery_step_completed(
             self.phase_elapsed_us(clock)?,
             &surface_receipt,
+            window_receipt_json,
+            window_receipt_sha256,
         ));
         self.resume_if_settled(deadline)?;
 

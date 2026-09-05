@@ -770,6 +770,29 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     serde_json::to_string(&receipt).expect("serialize recovery receipt");
                 let operation_receipt_sha256 =
                     format!("{:x}", Sha256::digest(operation_receipt_json.as_bytes()));
+                let window_run_receipt = (step == "surface_device_reopen").then(|| {
+                    let runtime = r#"{"supervisor":"terminated"}"#;
+                    let host = r#"{"services":"returned"}"#;
+                    let gpu = r#"{"retirement":"returned"}"#;
+                    let native = r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#;
+                    let outer = serde_json::json!({
+                        "schema_version": 1,
+                        "outcome": "active_exited",
+                        "recovery_receipt_json": operation_receipt_json.clone(),
+                        "recovery_receipt_sha256": operation_receipt_sha256.clone(),
+                        "runtime_shutdown_json": runtime,
+                        "runtime_shutdown_sha256": format!("{:x}", Sha256::digest(runtime.as_bytes())),
+                        "host_shutdown_json": host,
+                        "host_shutdown_sha256": format!("{:x}", Sha256::digest(host.as_bytes())),
+                        "gpu_shutdown_json": gpu,
+                        "gpu_shutdown_sha256": format!("{:x}", Sha256::digest(gpu.as_bytes())),
+                        "native_return_json": native,
+                        "native_return_sha256": format!("{:x}", Sha256::digest(native.as_bytes())),
+                    });
+                    let json = serde_json::to_string(&outer).expect("serialize Window-run receipt");
+                    let sha256 = format!("{:x}", Sha256::digest(json.as_bytes()));
+                    (json, sha256)
+                });
                 events.push(serde_json::json!({
                     "kind": "recovery_step_completed",
                     "sequence": events.len(),
@@ -778,11 +801,13 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     "step": step,
                     "operation_receipt_json": operation_receipt_json,
                     "operation_receipt_sha256": operation_receipt_sha256,
+                    "window_run_receipt_json": window_run_receipt.as_ref().map(|receipt| &receipt.0),
+                    "window_run_receipt_sha256": window_run_receipt.as_ref().map(|receipt| &receipt.1),
                 }));
             }
         }
         let raw_evidence = serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "phase_id": phase.phase_id,
             "run_id": run_id,
             "authority_challenge": authority_challenge,
