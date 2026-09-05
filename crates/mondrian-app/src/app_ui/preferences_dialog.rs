@@ -36,13 +36,13 @@ use crate::app::ui_actions::{
 };
 use crate::app::AppState;
 use crate::app_ui::audio_device_catalog::AudioOutputDeviceCatalogState;
+use crate::app_ui::background_runtime::APP_UI_BACKGROUND_WORKERS;
 use crate::app_ui::commands::{command_by_id, AppUiCommandCategory};
 use crate::app_ui::product_logging::DEFAULT_APP_UI_LOG_FILTER;
 use crate::app_ui::shortcuts::{
     active_shortcuts, default_shortcuts, AppUiShortcutBinding, AppUiShortcutKey,
     AppUiShortcutOverride,
 };
-use crate::app_ui::window::APP_UI_BACKGROUND_WORKERS;
 
 const CARD_MIN_WIDTH: f32 = 680.0;
 const CARD_WIDTH: f32 = 860.0;

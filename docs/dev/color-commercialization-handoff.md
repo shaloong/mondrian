@@ -280,6 +280,18 @@ transaction, typed native/background-runtime evidence, and durable
 old/candidate/final receipt history. These slices must not be reported as whole
 Window qualification until complete.
 
+The next runtime-owner slice replaces the bare four-thread Tokio Runtime with a
+native supervisor-owned Module. UI execution receives only a Runtime Handle.
+Normal active closure, Host-startup failure, and guarded initial-publication
+failure signal the supervisor and consume its real thread handle under the
+unchanged Window deadline. Only `OwnedWorkerShutdown::Terminated` after Runtime
+destruction qualifies; timeout, panic, or current-thread join is dirty, while a
+fallback detach is unverified and produces no receipt. This removes unbounded
+Runtime Drop from early-return fallback paths without claiming that detached
+fallback produced a receipt. The remaining
+outer pre-active transaction must still aggregate every Window/Surface/Adapter/
+Device failure and the runtime evidence into one exact App handback.
+
 Local final-source verification built the release
 `mondrian-surface-reopen` binary in 12m19s and ran two real Win32/winit/DX12
 cycles (7-8). Both old generations recorded terminated progress workers,
@@ -303,6 +315,23 @@ warnings denied, and full-workspace format check passed. The observed
 as realtime qualification and remain COL-031 evidence. No capacity failure or
 `target` cleanup occurred.
 
+The extracted background-runtime Module passed four focused tests: exact worker
+configuration and clean supervisor return, fail-closed timeout evidence, a real
+blocking task that returns `TimedOutDetached` within the 25ms deadline, and
+expired-deadline rejection before supervisor spawn. Default/validation checks,
+workspace/all-target/all-feature Clippy with warnings denied, and full format
+passed. The final-source release validator rebuilt in 13m21s; real
+Win32/winit/DX12 cycles 13-14 both completed with distinct Surface/Device
+generations, terminated old progress workers, complete retirement, returned YUV
+workers, and no native device removal. The in-memory Window return gate also
+required a clean background supervisor return, but schema-1 does not yet
+serialize that receipt. The binary SHA-256 is
+`4932E667324418F61DF443E6AC2CC54026D6265AE29C6DC9DAF3D2D18032DBEE` and the
+report SHA-256 is
+`E263CC32ED0D27DDAB7059F53564CA7333A564D0D30B58CFC642498223F2C535`.
+The observed 156-229ms Preview preparation warnings remain COL-031 evidence,
+not a realtime pass. No capacity failure or `target` cleanup occurred.
+
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.
@@ -310,8 +339,9 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    bounded partial candidate cleanup, and explicit final active-session
    event-loop panic/GPU/UI/App closure are complete. Candidate installation
    before fallible Host publication and post-handoff publication panic ownership
-   are complete. Pre-active construction, typed native/background-runtime
-   evidence, and durable old/candidate/final receipt history remain.
+   are complete. The background Runtime now has a bounded supervisor owner and
+   clean join predicate. Pre-active construction, unified/durable runtime and
+   typed native evidence, and durable old/candidate/final receipt history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.

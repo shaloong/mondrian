@@ -2081,15 +2081,20 @@ of showing a generic empty viewer. The status should remain warning-toned and
 the empty message should include the rejected media path, missing-metadata
 policy, input-resolution branch, and media diagnostic summary. This keeps
 fail-closed color behavior visible without scraping tracing logs.
-The native app entrypoint owns a four-thread Tokio runtime for background UI
-work. After active GPU and Host/UI closure, the runtime is always shut down with
-only the time remaining in the same Window deadline rather than dropped
-normally: Tokio's default runtime drop can wait indefinitely for blocking tasks
-and leave a headless Mondrian process after the window has closed. Tokio's
-current `shutdown_timeout` API provides no worker-terminal receipt, so this is
-bounded cleanup but not yet clean qualification. Background operations must
-therefore treat cancellation as cooperative and may not rely on an unbounded
-runtime drain during process exit.
+The native app entrypoint owns background UI execution through the
+`app_ui::background_runtime::AppUiBackgroundRuntimeOwner` Module, not a bare
+Tokio Runtime. One native supervisor thread constructs and exclusively retains
+the configured four-thread Runtime;
+the Window receives only a clone of its Handle and enters that context. Shutdown
+drops the UI Handle, signals the supervisor, and consumes its real thread handle
+with the existing bounded owned-worker join protocol. Only a returned supervisor
+after Runtime destruction qualifies clean. A timeout, panic, current-thread
+join is typed dirty evidence. Fallback Drop signals shutdown and detaches the
+supervisor without producing a receipt, so it remains unverified and cannot
+qualify. This prevents Tokio's default Runtime Drop from waiting indefinitely on
+the Window thread and does not pretend that `shutdown_timeout`'s unit return is
+a worker-terminal receipt. Background operations must still treat cancellation
+as cooperative.
 The same entrypoint owns the process-lifetime Product Logging Module. It always
 installs a stderr formatting layer and, when the Platform User State Directory
 Adapter is available, a non-blocking daily JSONL writer under
@@ -2214,8 +2219,9 @@ explicitly closeable. A normal role-replacement error is retained as an
 event-loop failure. Partially mutated Host state is not rolled back and may not
 resume; the Window fails closed and exits.
 
-Pre-active EventLoop/Tokio/Host/native construction still needs one outer
-transaction and absolute deadline. Typed native/background-runtime termination
-evidence and durable successful old/candidate/final receipt propagation also
-remain unfinished lifecycle work. In particular, Tokio's current
-`shutdown_timeout` return value is not a clean termination receipt.
+Pre-active EventLoop/Host/native construction still needs one outer transaction
+and absolute deadline. Normal active closure and explicit Host/publication
+failure paths now consume the background Runtime supervisor under that deadline;
+unified pre-active failure aggregation, typed native authority release, durable
+background-runtime evidence, and durable successful old/candidate/final receipt
+propagation remain unfinished lifecycle work.

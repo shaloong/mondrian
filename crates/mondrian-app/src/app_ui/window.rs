@@ -57,6 +57,7 @@ use crate::app::viewer_gpu_submission::{
 };
 use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
+use crate::app_ui::background_runtime::AppUiBackgroundRuntimeOwner;
 use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
     AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
@@ -184,7 +185,6 @@ enum ViewerHeterogeneousCompletionPoll {
 // Main
 // ═══════════════════════════════════════════════════════════════════════════
 
-pub(crate) const APP_UI_BACKGROUND_WORKERS: usize = 4;
 const VIEWER_GPU_OUTPUT_DIAGNOSTICS_OUTPUT_ENV: &str = "MONDRIAN_VIEWER_GPU_OUTPUT_OUTPUT";
 const VIEWER_QUALIFICATION_RUN_ID_ENV: &str = "MONDRIAN_VIEWER_QUALIFICATION_RUN_ID";
 const WORKSPACE_WINDOW_WIDTH: f32 = 1600.0;
@@ -2771,10 +2771,14 @@ fn run_app_ui_with_initial_state_on_event_loop(
         surface_reopen_validation.as_ref().map(|validation| validation.deadline);
     #[cfg(not(feature = "validation"))]
     let validation_shutdown_deadline: Option<Instant> = None;
+    let host_startup_deadline = validation_shutdown_deadline.unwrap_or_else(|| {
+        Instant::now().checked_add(Duration::from_secs(5)).unwrap_or_else(Instant::now)
+    });
     #[cfg(feature = "validation")]
-    let background_runtime = match build_app_ui_background_runtime() {
-        Ok(runtime) => runtime,
-        Err(error) => {
+    let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            let closed = failure.shutdown_until(host_startup_deadline);
             if let Some(return_slot) = validation_return.as_ref() {
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: initial_state,
@@ -2782,14 +2786,30 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
                 });
             }
-            return Err(error.into());
+            return Err(format!(
+                "{}; Window background runtime startup cleanup_all_created_resources_released={}; cleanup={:?}",
+                closed.diagnostic,
+                closed.shutdown.all_created_resources_released(),
+                closed.shutdown
+            )
+            .into());
         }
     };
     #[cfg(not(feature = "validation"))]
-    let background_runtime = build_app_ui_background_runtime()?;
+    let background_runtime = match AppUiBackgroundRuntimeOwner::start(host_startup_deadline) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            let closed = failure.shutdown_until(host_startup_deadline);
+            return Err(format!(
+                "{}; Window background runtime startup cleanup_all_created_resources_released={}; cleanup={:?}",
+                closed.diagnostic,
+                closed.shutdown.all_created_resources_released(),
+                closed.shutdown
+            )
+            .into());
+        }
+    };
     let background_runtime_guard = background_runtime.enter();
-    let host_startup_deadline =
-        validation_shutdown_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(5));
     let host = match AppUiHost::try_new(initial_state) {
         Ok(host) => host,
         Err(failure) => {
@@ -2806,9 +2826,12 @@ fn run_app_ui_with_initial_state_on_event_loop(
             }
             #[cfg(not(feature = "validation"))]
             drop(closed.app_state);
+            drop(background_runtime_guard);
+            let runtime_shutdown = background_runtime.shutdown_until(host_startup_deadline);
+            let runtime_cleanup_released = runtime_shutdown.all_created_resources_released();
             return Err(format!(
-                "{primary}; Window Host startup cleanup_all_created_resources_released={cleanup_released}; cleanup={:?}",
-                closed.shutdown
+                "{primary}; Window Host startup cleanup_all_created_resources_released={cleanup_released}; cleanup={:?}; Window background runtime cleanup_all_created_resources_released={runtime_cleanup_released}; cleanup={runtime_shutdown:?}",
+                closed.shutdown,
             )
             .into());
         }
@@ -2960,9 +2983,13 @@ fn run_app_ui_with_initial_state_on_event_loop(
             Err(error) => Some(error),
         };
         drop(background_runtime_guard);
-        background_runtime
-            .shutdown_timeout(host_startup_deadline.saturating_duration_since(Instant::now()));
-        return match merge_window_cleanup_failures(gpu_failure, ui_failure) {
+        let runtime_failure =
+            background_runtime.shutdown_until(host_startup_deadline).qualification_failure();
+        let cleanup_failure = merge_window_cleanup_failures(
+            merge_window_cleanup_failures(gpu_failure, ui_failure),
+            runtime_failure,
+        );
+        return match cleanup_failure {
             Some(cleanup) => Err(format!(
                 "{primary}; initial Window publication cleanup also failed: {cleanup}"
             )
@@ -3681,16 +3708,16 @@ fn run_app_ui_with_initial_state_on_event_loop(
         Err(error) => Some(error),
     };
 
-    // Dropping a Tokio runtime waits indefinitely for blocking tasks. Once the
-    // native event loop has exited there is no UI left to observe those tasks,
-    // so bound shutdown instead of leaving a headless Mondrian process behind.
     drop(background_runtime_guard);
-    background_runtime
-        .shutdown_timeout(shutdown_deadline.saturating_duration_since(Instant::now()));
+    let runtime_failure =
+        background_runtime.shutdown_until(shutdown_deadline).qualification_failure();
     tracing::info!("Mondrian app UI stopped");
     drop(tracing_guard);
 
-    let cleanup_failure = merge_window_cleanup_failures(gpu_failure, ui_failure);
+    let cleanup_failure = merge_window_cleanup_failures(
+        merge_window_cleanup_failures(gpu_failure, ui_failure),
+        runtime_failure,
+    );
     match (event_loop_result, cleanup_failure) {
         (Err(primary), Some(cleanup)) => {
             Err(format!("{primary}; Window cleanup also failed: {cleanup}").into())
@@ -3745,14 +3772,6 @@ fn terminate_process_without_cleanup() -> ! {
 #[cfg(all(not(test), not(any(target_os = "windows", unix))))]
 fn terminate_process_without_cleanup() -> ! {
     std::process::abort()
-}
-
-fn build_app_ui_background_runtime() -> std::io::Result<tokio::runtime::Runtime> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(APP_UI_BACKGROUND_WORKERS)
-        .thread_name("mondrian-bg")
-        .enable_all()
-        .build()
 }
 
 fn app_ui_display_output_contract(
@@ -10319,13 +10338,6 @@ mod tests {
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("wgpu_core=warn"));
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("wgpu_hal=warn"));
         assert!(DEFAULT_APP_UI_LOG_FILTER.contains("naga=warn"));
-    }
-
-    #[test]
-    fn background_runtime_uses_product_worker_count() {
-        assert_eq!(APP_UI_BACKGROUND_WORKERS, 4);
-        let runtime = build_app_ui_background_runtime().expect("runtime should build");
-        runtime.block_on(async {});
     }
 
     #[test]
