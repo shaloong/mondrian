@@ -259,17 +259,35 @@ bounded partial-GPU cleanup under its existing deadline. Device reopen validates
 candidate identities before retiring the old generation, bounds every candidate
 cleanup path, and publishes Host display/native-import state only after clean old
 retirement. Same-Device role replacement also prepares its shell before hiding
-the old one. Remaining Window work is the outer event-loop panic/return-slot
-transaction and durable typed old/candidate/UI receipts; this slice must not be
-reported as whole Window qualification until those are complete.
+the old one. The next active-session slice makes `run_on_demand` borrow rather
+than own Host/session, catches callback panic, and always performs explicit final
+GPU then Host/UI closure against one deadline. Validation retains and checks the
+raw final progress/Renderer receipt and exact returned App; ordinary Quit only
+begins shutdown so it cannot create a nested deadline. Remaining Window work is
+pre-active construction and post-handoff publication panic ownership, typed
+native/background-runtime evidence, and durable old/candidate/final receipt
+history; these slices must not be reported as whole Window qualification until
+complete.
+
+Local final-source verification built the release
+`mondrian-surface-reopen` binary in 12m19s and ran two real Win32/winit/DX12
+cycles (7-8). Both old generations recorded terminated progress workers,
+completed retirement, and returned Renderer YUV workers; the endurance Adapter
+also required each final active generation's raw receipt to qualify before the
+run could succeed. The report remains schema 1 and serializes only the reopen
+operation's old-generation receipt, so durable final-generation history is
+still COL-047 item 4. Three focused Window regressions, default/validation
+checks, full workspace/all-target/all-feature Clippy with warnings denied, and
+format/diff gates passed. No capacity failure or `target` cleanup occurred.
 
 Remaining COL-047 checklist (ten subitems; retain every item in block reports):
 
 1. Other callbacks/GPU closure and native wake health.
-2. Window initial/reopen: Host handback, candidate-before-revoke ordering, and
-   bounded partial candidate cleanup are complete; outer event-loop/UI panic
-   ownership, durable typed old/candidate receipts, original failure merging,
-   and the final unique returned App receipt remain.
+2. Window initial/reopen: Host handback, candidate-before-revoke ordering,
+   bounded partial candidate cleanup, and explicit final active-session
+   event-loop panic/GPU/UI/App closure are complete. Pre-active construction and
+   post-handoff publication panic ownership, typed native/background-runtime
+   evidence, and durable old/candidate/final receipt history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.

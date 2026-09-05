@@ -28,15 +28,14 @@ use crate::app::preview_gpu_output_blocker::{
 use crate::app::preview_runtime::{PreviewColorRejection, PreviewVisualGpuCompletionDisposition};
 use crate::app::preview_work_notification::{PreviewWorkRevision, PreviewWorkWatch};
 use crate::app::ui_actions::app_shell_quit_action;
+#[cfg(feature = "validation")]
+use crate::app::viewer_gpu_device_progress::ViewerGpuDeviceGenerationTerminalKind;
 use crate::app::viewer_gpu_device_progress::{
     ViewerGpuDeviceGenerationId, ViewerGpuDeviceGenerationMember,
     ViewerGpuDeviceGenerationRetirement, ViewerGpuDeviceGenerationTerminal,
     ViewerGpuDeviceProgressObservation, ViewerGpuDeviceProgressOwner,
-    ViewerGpuDeviceProgressReserveError, ViewerGpuDeviceProgressWake,
-};
-#[cfg(feature = "validation")]
-use crate::app::viewer_gpu_device_progress::{
-    ViewerGpuDeviceGenerationTerminalKind, ViewerGpuDeviceProgressShutdownEvidence,
+    ViewerGpuDeviceProgressReserveError, ViewerGpuDeviceProgressShutdownEvidence,
+    ViewerGpuDeviceProgressWake,
 };
 use crate::app::viewer_gpu_output_health::{
     classify_viewer_gpu_output_health,
@@ -58,7 +57,6 @@ use crate::app::viewer_gpu_submission::{
 };
 use crate::app::{AppState, FramePresentationDisposition};
 use crate::app_ui::action_queue::PendingUiActions;
-#[cfg(feature = "validation")]
 use crate::app_ui::host::AppUiServiceShutdownEvidence;
 use crate::app_ui::host::{
     AppUiBackgroundTaskPollOutcome, AppUiHost, AppUiMode, AppUiShellCommands,
@@ -105,6 +103,8 @@ use mondrian_ui_theme::ThemePreset;
 use mondrian_ui_tooltip::TooltipManagerImpl;
 use mondrian_ui_widgets::{VideoScopesSettings, ViewerExternalTexturePresentation};
 use sha2::{Digest, Sha256};
+
+const APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(750);
 
 fn control_flow_wake_no_later_than(
     current: winit::event_loop::ControlFlow,
@@ -318,6 +318,7 @@ impl Drop for AppUiSurfaceDeviceReopenValidation {
 struct AppUiValidationReturnedState {
     app_state: AppState,
     ui_shutdown: Option<AppUiServiceShutdownEvidence>,
+    gpu_shutdown: AppUiWindowGpuShutdownEvidence,
 }
 
 #[cfg(feature = "validation")]
@@ -344,6 +345,39 @@ impl AppUiHostSessionOwner {
             #[cfg(feature = "validation")]
             validation_shutdown_deadline,
         }
+    }
+
+    fn shutdown_until(
+        &mut self,
+        deadline: Instant,
+        gpu_shutdown: AppUiWindowGpuShutdownEvidence,
+    ) -> Result<AppUiServiceShutdownEvidence, String> {
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = self.validation_return.as_ref()
+            && return_slot.borrow().is_some()
+        {
+            return Err(
+                "validation Window return slot was already occupied before Host shutdown"
+                    .to_owned(),
+            );
+        }
+        let host = self
+            .host
+            .take()
+            .ok_or_else(|| "Window Host was already consumed before shutdown".to_owned())?;
+        let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
+        #[cfg(feature = "validation")]
+        if let Some(return_slot) = self.validation_return.take() {
+            *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
+                app_state,
+                ui_shutdown: Some(ui_shutdown),
+                gpu_shutdown,
+            });
+            return Ok(ui_shutdown);
+        }
+        let _ = gpu_shutdown;
+        drop(app_state);
+        Ok(ui_shutdown)
     }
 }
 
@@ -375,16 +409,27 @@ impl Drop for AppUiHostSessionOwner {
                 tracing::error!("validation Window lost its App UI host before state return");
                 return;
             };
-            let deadline = self.validation_shutdown_deadline.take().unwrap_or_else(Instant::now);
-            let (app_state, ui_shutdown) = host.into_validation_app_state_until(deadline);
+            let Some(deadline) = self.validation_shutdown_deadline.take() else {
+                tracing::error!(
+                    "validation Window Host fallback had no caller-owned shutdown deadline; retaining Host authority"
+                );
+                std::mem::forget(host);
+                return;
+            };
+            let (app_state, ui_shutdown) = host.into_app_state_until(deadline);
             let mut returned = return_slot.borrow_mut();
             if returned.is_some() {
-                tracing::error!("validation Window attempted to return AppState more than once");
-                drop(app_state);
+                tracing::error!(
+                    "validation Window attempted to return AppState more than once; retaining duplicate authority"
+                );
+                std::mem::forget(app_state);
                 return;
             }
-            *returned =
-                Some(AppUiValidationReturnedState { app_state, ui_shutdown: Some(ui_shutdown) });
+            *returned = Some(AppUiValidationReturnedState {
+                app_state,
+                ui_shutdown: Some(ui_shutdown),
+                gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
+            });
         }
     }
 }
@@ -1633,7 +1678,8 @@ impl AppUiEventLoopTelemetry {
 
 struct AppUiWindowSession {
     // Move-only generation members are transferred to the non-UI progress
-    // domain by `Drop`; the Window thread never joins or cancels GPU work.
+    // domain by explicit shutdown. `Drop` is fallback-only; the Window thread
+    // never directly joins or cancels GPU work.
     viewer_gpu_device_progress: ViewerGpuDeviceGenerationMember<ViewerGpuDeviceProgressOwner>,
     surface_generation_id: AppUiSurfaceGenerationId,
     role: AppUiWindowRole,
@@ -1885,6 +1931,64 @@ impl Drop for AppUiWindowSession {
             Err(error) => tracing::error!(%error),
         }
     }
+}
+
+/// Owner-free evidence for the final Viewer GPU generation of one Window run.
+///
+/// `NotStarted` is valid only when Window construction failed before an active
+/// session existed. A completed validation run must carry `Active` evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AppUiWindowGpuShutdownEvidence {
+    #[cfg(feature = "validation")]
+    NotStarted,
+    Active(AppUiActiveWindowGpuShutdownEvidence),
+}
+
+impl AppUiWindowGpuShutdownEvidence {
+    pub(crate) fn qualifies_active_normal_runtime(&self) -> bool {
+        matches!(
+            self,
+            Self::Active(evidence) if evidence.qualifies_normal_runtime()
+        )
+    }
+
+    fn qualification_failure(&self) -> Option<String> {
+        (!self.qualifies_active_normal_runtime())
+            .then(|| format!("Window Viewer GPU generation did not close cleanly: {self:?}"))
+    }
+}
+
+/// Independent publication and device-generation closure facts for an active
+/// Window session. Publication cleanup failure never suppresses the raw GPU
+/// worker/Renderer receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AppUiActiveWindowGpuShutdownEvidence {
+    publication_cleanup: Result<(), String>,
+    retirement: AppUiWindowGpuRetirementEvidence,
+}
+
+impl AppUiActiveWindowGpuShutdownEvidence {
+    fn qualifies_normal_runtime(&self) -> bool {
+        self.publication_cleanup.is_ok()
+            && matches!(
+                &self.retirement,
+                AppUiWindowGpuRetirementEvidence::Retired(evidence)
+                    if evidence.qualifies_created_inventory(true)
+            )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AppUiWindowGpuRetirementEvidence {
+    Retired(ViewerGpuDeviceProgressShutdownEvidence),
+    OwnershipFault(AppUiWindowGpuOwnershipFault),
+    ShutdownPanicked(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppUiWindowGpuOwnershipFault {
+    MissingProgressOwner,
+    MissingExecutionRuntime,
 }
 
 #[cfg(feature = "validation")]
@@ -2407,6 +2511,7 @@ pub(crate) struct AppUiSurfaceDeviceReopenRun {
     pub(crate) app_state: AppState,
     pub(crate) result: Result<EnduranceRecoveryOperationReceipt, String>,
     pub(crate) ui_shutdown: Option<AppUiServiceShutdownEvidence>,
+    pub(crate) gpu_shutdown: AppUiWindowGpuShutdownEvidence,
     pub(crate) recovery_pump:
         Option<crate::app::endurance_product_runtime::EnduranceSurfaceRecoveryPump>,
 }
@@ -2423,6 +2528,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
             app_state: initial_state,
             result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
             ui_shutdown: None,
+            gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
             recovery_pump: None,
         };
     }
@@ -2431,6 +2537,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
             app_state: initial_state,
             result: Err("Surface/device reopen validation deadline overflow".to_owned()),
             ui_shutdown: None,
+            gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
             recovery_pump: None,
         };
     }
@@ -2443,6 +2550,7 @@ pub(crate) fn run_app_ui_surface_device_reopen_validation_returning_state(
                     "could not create the Surface validation event loop: {error}"
                 )),
                 ui_shutdown: None,
+                gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
                 recovery_pump: None,
             };
         }
@@ -2471,6 +2579,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
             app_state: initial_state,
             result: Err("Surface/device reopen validation timeout must be nonzero".to_owned()),
             ui_shutdown: None,
+            gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
             recovery_pump,
         };
     }
@@ -2479,6 +2588,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
             app_state: initial_state,
             result: Err("Surface/device reopen validation deadline overflow".to_owned()),
             ui_shutdown: None,
+            gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
             recovery_pump,
         };
     };
@@ -2502,7 +2612,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
     );
     let returned = returned_state.borrow_mut().take();
     let recovery_pump = recovery_pump_return.borrow_mut().take();
-    let AppUiValidationReturnedState { app_state, ui_shutdown } = returned
+    let AppUiValidationReturnedState { app_state, ui_shutdown, gpu_shutdown } = returned
         .unwrap_or_else(|| panic!("validation Window exited without returning its AppState owner"));
     let ui_service_failure = match ui_shutdown {
         Some(evidence) if evidence.all_resources_released() => None,
@@ -2526,6 +2636,7 @@ fn run_app_ui_surface_device_reopen_validation_returning_state_inner(
         app_state,
         result: operation_result,
         ui_shutdown,
+        gpu_shutdown,
         recovery_pump,
     }
 }
@@ -2553,6 +2664,38 @@ fn merge_window_operation_result<T>(
         )),
         (Ok(_), Some(cleanup)) => Err(cleanup),
         (result, None) => result,
+    }
+}
+
+fn merge_window_cleanup_failures(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first}; {second}")),
+        (Some(failure), None) | (None, Some(failure)) => Some(failure),
+        (None, None) => None,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AppUiEventLoopFailure {
+    #[error("App UI event loop failed: {0}")]
+    Execution(String),
+    #[error("{0}")]
+    Panicked(String),
+}
+
+fn catch_app_ui_event_loop(
+    run: impl FnOnce() -> Result<(), winit::error::EventLoopError>,
+) -> Result<(), AppUiEventLoopFailure> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(AppUiEventLoopFailure::Execution(error.to_string())),
+        Err(payload) => Err(AppUiEventLoopFailure::Panicked(
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "App UI event loop",
+            )
+            .to_string(),
+        )),
     }
 }
 
@@ -2598,6 +2741,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: initial_state,
                     ui_shutdown: None,
+                    gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
                 });
             }
             return Err(error.into());
@@ -2619,6 +2763,7 @@ fn run_app_ui_with_initial_state_on_event_loop(
                 *return_slot.borrow_mut() = Some(AppUiValidationReturnedState {
                     app_state: closed.app_state,
                     ui_shutdown: None,
+                    gpu_shutdown: AppUiWindowGpuShutdownEvidence::NotStarted,
                 });
             }
             #[cfg(not(feature = "validation"))]
@@ -2759,8 +2904,9 @@ fn run_app_ui_with_initial_state_on_event_loop(
     session.window.request_redraw();
 
     use winit::platform::run_on_demand::EventLoopExtRunOnDemand;
-    #[allow(deprecated)]
-    event_loop.run_on_demand(move |event, elwt| {
+    let event_loop_result = catch_app_ui_event_loop(|| {
+        #[allow(deprecated)]
+        event_loop.run_on_demand(|event, elwt| {
         use winit::event::ElementState;
         use winit::event::{Event, WindowEvent};
         use winit::event_loop::ControlFlow;
@@ -3446,19 +3592,59 @@ fn run_app_ui_with_initial_state_on_event_loop(
                     ));
                 }
             }
-            _ => {}
+                _ => {}
+            }
+        })
+    });
+    let shutdown_deadline = validation_shutdown_deadline.unwrap_or_else(|| {
+        Instant::now()
+            .checked_add(APP_UI_WINDOW_PRODUCT_SHUTDOWN_TIMEOUT)
+            .unwrap_or_else(Instant::now)
+    });
+    let gpu_shutdown = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        session.shutdown_viewer_gpu_until(&host, shutdown_deadline)
+    })) {
+        Ok(evidence) => evidence,
+        Err(payload) => {
+            let diagnostic = crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "Window Viewer GPU shutdown",
+            );
+            AppUiWindowGpuShutdownEvidence::Active(AppUiActiveWindowGpuShutdownEvidence {
+                publication_cleanup: Ok(()),
+                retirement: AppUiWindowGpuRetirementEvidence::ShutdownPanicked(
+                    diagnostic.to_string(),
+                ),
+            })
         }
-    })?;
+    };
+    let gpu_failure = gpu_shutdown.qualification_failure();
+    let ui_failure = match host.shutdown_until(shutdown_deadline, gpu_shutdown) {
+        Ok(evidence) if evidence.all_resources_released() => None,
+        Ok(evidence) => Some(format!(
+            "Window UI services did not close cleanly: {evidence:?}"
+        )),
+        Err(error) => Some(error),
+    };
 
     // Dropping a Tokio runtime waits indefinitely for blocking tasks. Once the
     // native event loop has exited there is no UI left to observe those tasks,
     // so bound shutdown instead of leaving a headless Mondrian process behind.
     drop(background_runtime_guard);
-    background_runtime.shutdown_timeout(Duration::from_millis(250));
+    background_runtime
+        .shutdown_timeout(shutdown_deadline.saturating_duration_since(Instant::now()));
     tracing::info!("Mondrian app UI stopped");
     drop(tracing_guard);
 
-    Ok(())
+    let cleanup_failure = merge_window_cleanup_failures(gpu_failure, ui_failure);
+    match (event_loop_result, cleanup_failure) {
+        (Err(primary), Some(cleanup)) => {
+            Err(format!("{primary}; Window cleanup also failed: {cleanup}").into())
+        }
+        (Err(primary), None) => Err(primary.into()),
+        (Ok(()), Some(cleanup)) => Err(cleanup.into()),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 #[cfg(not(test))]
@@ -7074,6 +7260,42 @@ impl AppUiPreparedWindowSession {
 }
 
 impl AppUiWindowSession {
+    fn shutdown_viewer_gpu_until(
+        &mut self,
+        host: &AppUiHost,
+        deadline: Instant,
+    ) -> AppUiWindowGpuShutdownEvidence {
+        let publication_cleanup = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            clear_viewer_spatial_presentation(self, host);
+        }))
+        .map_err(|payload| {
+            crate::app::execution_panic_diagnostic::execution_panic_diagnostic(
+                payload,
+                "Window Viewer GPU publication cleanup",
+            )
+            .to_string()
+        });
+        let retirement = match self.take_viewer_gpu_generation_retirement() {
+            Ok((progress, retirement)) => AppUiWindowGpuRetirementEvidence::Retired(
+                progress.retire_device_generation_until(retirement, deadline),
+            ),
+            Err(WindowViewerGpuGenerationRetirementTakeError::MissingProgressOwner) => {
+                AppUiWindowGpuRetirementEvidence::OwnershipFault(
+                    AppUiWindowGpuOwnershipFault::MissingProgressOwner,
+                )
+            }
+            Err(WindowViewerGpuGenerationRetirementTakeError::MissingExecutionRuntime) => {
+                AppUiWindowGpuRetirementEvidence::OwnershipFault(
+                    AppUiWindowGpuOwnershipFault::MissingExecutionRuntime,
+                )
+            }
+        };
+        AppUiWindowGpuShutdownEvidence::Active(AppUiActiveWindowGpuShutdownEvidence {
+            publication_cleanup,
+            retirement,
+        })
+    }
+
     fn take_viewer_gpu_generation_retirement(
         &mut self,
     ) -> Result<
@@ -7088,10 +7310,10 @@ impl AppUiWindowSession {
             .take()
             .ok_or(WindowViewerGpuGenerationRetirementTakeError::MissingProgressOwner)?;
         let Some(runtime) = self.viewer_gpu_execution.take() else {
-            // Without the runtime the Adapter cannot prove native-import
-            // retirement. Preserve the progress authority indefinitely rather
-            // than releasing an incompletely owned generation.
-            std::mem::forget(progress);
+            // Keep the progress authority in the session so the typed owning
+            // fault remains observable. The final fallback Drop may detach it,
+            // but this extraction seam never silently leaks or loses it.
+            self.viewer_gpu_device_progress = ViewerGpuDeviceGenerationMember::new(progress);
             return Err(WindowViewerGpuGenerationRetirementTakeError::MissingExecutionRuntime);
         };
         let lifecycle = std::mem::replace(
@@ -7532,6 +7754,61 @@ mod platform_window_chrome {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn caught_event_loop_panic_returns_borrowed_owner_to_the_outer_transaction() {
+        let mut owner_marker = 0_u8;
+        let result = catch_app_ui_event_loop(|| {
+            owner_marker = 1;
+            panic!("injected event-loop callback panic")
+        });
+
+        assert!(matches!(result, Err(AppUiEventLoopFailure::Panicked(_))));
+        owner_marker = 2;
+        assert_eq!(owner_marker, 2);
+    }
+
+    #[cfg(feature = "validation")]
+    fn clean_final_window_gpu_shutdown() -> AppUiWindowGpuShutdownEvidence {
+        AppUiWindowGpuShutdownEvidence::Active(AppUiActiveWindowGpuShutdownEvidence {
+            publication_cleanup: Ok(()),
+            retirement: AppUiWindowGpuRetirementEvidence::Retired(
+                ViewerGpuDeviceProgressShutdownEvidence {
+                    worker_started: true,
+                    worker_terminated: true,
+                    worker_panicked: false,
+                    timed_out: false,
+                    retirement_requested: true,
+                    retirement_handoff_accepted: true,
+                    retirement_completed: true,
+                    renderer_retirement: Some(mondrian_renderer::ViewerGpuRetirementReceipt {
+                        cpu_yuv_upload: mondrian_renderer::ViewerCpuYuvUploadWorkerExit::Returned,
+                        native_device_removed: false,
+                    }),
+                    generation_terminal_kind: None,
+                },
+            ),
+        })
+    }
+
+    #[cfg(feature = "validation")]
+    #[test]
+    fn final_window_gpu_qualification_requires_active_publication_and_raw_retirement() {
+        let clean = clean_final_window_gpu_shutdown();
+        assert!(clean.qualifies_active_normal_runtime());
+        assert!(clean.qualification_failure().is_none());
+        assert!(!AppUiWindowGpuShutdownEvidence::NotStarted.qualifies_active_normal_runtime());
+
+        let mut dirty_publication = clean;
+        let AppUiWindowGpuShutdownEvidence::Active(evidence) = &mut dirty_publication else {
+            unreachable!("clean fixture is active")
+        };
+        evidence.publication_cleanup = Err("publication panic".to_owned());
+        assert!(!dirty_publication.qualifies_active_normal_runtime());
+        assert!(dirty_publication
+            .qualification_failure()
+            .is_some_and(|failure| failure.contains("publication panic")));
+    }
+
     #[cfg(feature = "validation")]
     #[test]
     fn window_result_preserves_operation_loop_and_cleanup_failures() {
@@ -7563,6 +7840,13 @@ mod tests {
             Some("missing receipt".to_owned())
         )
         .is_err());
+        assert_eq!(
+            super::merge_window_cleanup_failures(
+                Some("GPU timeout".to_owned()),
+                Some("UI timeout".to_owned())
+            ),
+            Some("GPU timeout; UI timeout".to_owned())
+        );
     }
     use super::*;
     use crate::app::preview_work_notification::preview_work_notification_channel;

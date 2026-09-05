@@ -906,7 +906,7 @@ pub fn qualify_app_ui_host_startup_ownership(
         ) {
             Ok(host) => {
                 let (_app_state, receipt) =
-                    host.into_validation_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
+                    host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
                 return Err(AppUiHostStartupQualificationError {
                     detail: format!(
                         "{fault_label} unexpectedly published a Host; cleanup_clean={}",
@@ -950,7 +950,7 @@ pub fn qualify_app_ui_host_startup_ownership(
     ) {
         Ok(host) => {
             let (_app_state, receipt) =
-                host.into_validation_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
+                host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
             return Err(AppUiHostStartupQualificationError {
                 detail: format!(
                     "opaque Host fault unexpectedly published a Host; cleanup_clean={}",
@@ -1003,8 +1003,7 @@ pub fn qualify_app_ui_host_startup_ownership(
                 });
             }
         };
-        let (_app_state, receipt) =
-            host.into_validation_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
+        let (_app_state, receipt) = host.into_app_state_until(Instant::now() + SHUTDOWN_TIMEOUT);
         if !receipt.all_resources_released() {
             return Err(AppUiHostStartupQualificationError {
                 detail: format!(

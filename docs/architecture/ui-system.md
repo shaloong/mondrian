@@ -1786,16 +1786,26 @@ retains its concrete progress/renderer receipt. Native role replacement prepares
 the new Window/Surface/UI shell before hiding the old shell, then transfers the
 unchanged four-part Device-generation authority exactly once.
 
-The validation event loop retains a consuming host-return guard around
-`AppUiHost`. Every exit path first closes the Window-owned production Preview
-with one bounded synchronous receipt and closes Waveform against the same UI
-deadline, then returns the exact `AppState` that entered the Window. A rejected
-or failed reopen therefore cannot silently drop the campaign's Project,
-Preview, Audio, Export, or cache owners. The narrow standalone runner consumes
-that returned state through `shutdown_for_endurance`; a higher-level campaign
-runtime may instead resume its settled persistent Timeline owner. Returning a
-receipt while a Window Preview worker, Basic Title task, visual/CPU fallback,
-render-cache worker, or Waveform owner detached is forbidden.
+Once an active Window session is published, the event-loop callback borrows its
+`AppUiHost` and `AppUiWindowSession`; it does not own either one. Normal return,
+an event-loop error, and caught callback panic therefore converge on the same
+outer close path. That path first revokes Viewer publication and consumes the
+final complete GPU generation through the existing progress Module, retaining
+the raw worker/Renderer receipt. It then consumes Host Preview and auxiliary UI
+services and returns the exact validation `AppState`, with every wait spending
+from the operation's unchanged absolute deadline. A rejected or failed reopen
+therefore cannot turn a successfully published final generation into an
+asynchronous-Drop success claim. Ordinary product Quit only begins service
+shutdown; this outer Window transaction performs the sole bounded wait.
+
+The narrow standalone runner consumes the returned state through
+`shutdown_for_endurance`; a higher-level campaign runtime may instead resume
+its settled persistent Timeline owner. Returning a successful receipt while
+the final GPU generation, Window Preview worker, Basic Title task,
+visual/CPU-fallback, render-cache worker, or Waveform owner detached is
+forbidden. The Host guard's Drop path remains fallback coverage for failures
+before an active Window session exists and is not qualification for a setup or
+publication panic.
 
 Winit's event-loop creation authority is process-local, so endurance validation
 owns one non-`Send` event loop on the binary main thread and uses the desktop
@@ -2070,11 +2080,14 @@ the empty message should include the rejected media path, missing-metadata
 policy, input-resolution branch, and media diagnostic summary. This keeps
 fail-closed color behavior visible without scraping tracing logs.
 The native app entrypoint owns a four-thread Tokio runtime for background UI
-work. After the event loop exits, the runtime is shut down with a bounded
-timeout rather than dropped normally: Tokio's default runtime drop can wait
-indefinitely for blocking tasks and leave a headless Mondrian process after the
-window has closed. Background operations must therefore treat cancellation as
-cooperative and may not rely on an unbounded runtime drain during process exit.
+work. After active GPU and Host/UI closure, the runtime is always shut down with
+only the time remaining in the same Window deadline rather than dropped
+normally: Tokio's default runtime drop can wait indefinitely for blocking tasks
+and leave a headless Mondrian process after the window has closed. Tokio's
+current `shutdown_timeout` API provides no worker-terminal receipt, so this is
+bounded cleanup but not yet clean qualification. Background operations must
+therefore treat cancellation as cooperative and may not rely on an unbounded
+runtime drain during process exit.
 The same entrypoint owns the process-lifetime Product Logging Module. It always
 installs a stderr formatting layer and, when the Platform User State Directory
 Adapter is available, a non-blocking daily JSONL writer under
@@ -2178,7 +2191,11 @@ remains a compatibility alias. The bounded `window_service_protocol` Cargo
 example compiles actual Thumbnail/catalog source and existing access/activity
 Modules. It does not replace actual Host, native Window, GPU or campaign tests.
 
-Window error merging preserves a published operation error, event-loop failure
-and UI cleanup failure independently. Old/new GPU-generation replacement,
-whole-Window unique App handback and durable successful raw receipt propagation
-remain separate unfinished lifecycle work.
+Window error merging preserves a published operation error, event-loop
+failure/panic, final GPU failure, and UI cleanup failure without allowing a
+cleanup result to replace the primary. The final active generation's raw
+receipt and exact App handback are retained by the Window run and rechecked by
+the endurance Adapter. Pre-active construction and post-handoff publication
+panic ownership, typed native/background-runtime evidence, and durable
+successful old/candidate/final receipt propagation remain unfinished lifecycle
+work.

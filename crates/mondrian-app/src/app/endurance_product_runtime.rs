@@ -527,15 +527,22 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
         );
         // Window already validates its exact UI receipt and merges cleanup with
         // the original operation error. Do not replace that cause here.
-        let result = match (run.result, run.ui_shutdown) {
-            (Ok(receipt), Some(evidence)) if evidence.all_resources_released() => Ok(receipt),
-            (Ok(_), Some(evidence)) => Err(format!(
+        let result = match (run.result, run.ui_shutdown, run.gpu_shutdown) {
+            (Ok(receipt), Some(ui), gpu)
+                if ui.all_resources_released() && gpu.qualifies_active_normal_runtime() =>
+            {
+                Ok(receipt)
+            }
+            (Ok(_), Some(evidence), _) if !evidence.all_resources_released() => Err(format!(
                 "Window Surface recovery returned incomplete UI shutdown evidence: {evidence:?}"
             )),
-            (Ok(_), None) => {
+            (Ok(_), None, _) => {
                 Err("Window Surface recovery returned no typed UI shutdown evidence".to_owned())
             }
-            (Err(primary), _) => Err(primary),
+            (Ok(_), Some(_), gpu) => Err(format!(
+                "Window Surface recovery returned incomplete final GPU shutdown evidence: {gpu:?}"
+            )),
+            (Err(primary), _, _) => Err(primary),
         };
         EnduranceSurfaceReopenRun {
             app_state: run.app_state,

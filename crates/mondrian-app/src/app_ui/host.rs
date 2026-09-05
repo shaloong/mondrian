@@ -305,12 +305,11 @@ impl AppUiHost {
     }
 
     /// Close UI-only execution services and return the exact App owner used by
-    /// a validation Window session.
+    /// one Window session.
     ///
-    /// The returned state remains live so a higher-level endurance owner can
-    /// resume the same Timeline generation or consume its full App shutdown.
-    #[cfg(feature = "validation")]
-    pub(crate) fn into_validation_app_state_until(
+    /// A validation Adapter may resume the returned state while the product
+    /// entrypoint consumes it after the typed UI shutdown receipt is recorded.
+    pub(crate) fn into_app_state_until(
         mut self,
         deadline: Instant,
     ) -> (AppState, AppUiServiceShutdownEvidence) {
@@ -1977,33 +1976,21 @@ impl AppUiHost {
     fn shutdown_product_services_for_quit(&mut self) {
         #[cfg(not(test))]
         super::window::arm_process_exit_watchdog();
-        let deadline = Instant::now() + WAVEFORM_PRODUCT_SHUTDOWN_TIMEOUT;
+        self.preview_service.begin_endurance_shutdown();
         self.begin_auxiliary_services_shutdown();
-        self.preview_service.shutdown();
-        let evidence = close_auxiliary_services_until(
-            &self.waveform_service,
-            &self.asset_thumbnails,
-            &mut self.audio_device_catalog,
-            deadline,
-        );
-        if !evidence.all_resources_released() {
-            tracing::error!(
-                ?evidence,
-                "UI auxiliary services did not close cleanly before product exit"
-            );
-        }
+        // The Window transaction performs the sole bounded wait after native
+        // event-loop admission stops. Keeping this hook begin-only prevents a
+        // nested deadline from consuming or hiding the final typed receipt.
     }
 }
 
-/// Typed consuming closure for the execution services owned by one validation Window host.
-#[cfg(feature = "validation")]
+/// Typed consuming closure for the execution services owned by one Window Host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AppUiServiceShutdownEvidence {
     pub(crate) preview: PreviewRuntimeShutdownEvidence,
     pub(crate) auxiliary: AppUiAuxiliaryShutdownEvidence,
 }
 
-#[cfg(feature = "validation")]
 impl AppUiServiceShutdownEvidence {
     pub(crate) fn all_resources_released(self) -> bool {
         self.preview.all_workers_terminated() && self.auxiliary.all_resources_released()
@@ -4250,7 +4237,7 @@ mod tests {
         let deadline = Instant::now()
             .checked_add(VALIDATION_UI_SERVICE_SHUTDOWN_TIMEOUT)
             .expect("test UI shutdown deadline");
-        let (state, ui_shutdown) = host.into_validation_app_state_until(deadline);
+        let (state, ui_shutdown) = host.into_app_state_until(deadline);
 
         assert!(ui_shutdown.all_resources_released(), "{ui_shutdown:#?}");
         let shutdown = state.shutdown_for_endurance(deadline);
@@ -4277,7 +4264,7 @@ mod tests {
         let mut host = AppUiHost::new(state);
         assert!(host.audio_device_catalog.request_refresh());
         let deadline = Instant::now() + Duration::from_secs(15);
-        let (state, ui) = host.into_validation_app_state_until(deadline);
+        let (state, ui) = host.into_app_state_until(deadline);
         let hint = state.status_hint.clone();
         let app = state.shutdown_for_endurance(deadline);
         assert!(ui.all_resources_released(), "{ui:?}");
@@ -4307,7 +4294,7 @@ mod tests {
             .checked_add(Duration::from_millis(10))
             .expect("test UI shutdown deadline");
 
-        let (state, ui_shutdown) = host.into_validation_app_state_until(deadline);
+        let (state, ui_shutdown) = host.into_app_state_until(deadline);
 
         assert_eq!(ui_shutdown.preview.worker_timeouts, 1);
         assert_eq!(ui_shutdown.preview.worker_deadline_detachments, 1);
