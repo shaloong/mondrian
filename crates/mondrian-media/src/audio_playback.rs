@@ -145,7 +145,7 @@ pub enum AudioPlaybackShutdownError {
 }
 
 /// Synchronous lifetime closure evidence for Audio Playback workers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioPlaybackShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,

@@ -1,7 +1,7 @@
 //! Raw lifetime evidence for the Media-owned native decoder startup lane.
 
 /// Exact startup worker and move-only request inventory at consuming shutdown.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioDecoderStartupShutdownEvidence {
     /// Whether this decoder requires the product native startup lane.
     pub required: bool,

@@ -2267,3 +2267,13 @@ outcome; neither projects away batch-level evidence. Durable batch/failure
 serialization, old/candidate/final-generation
 history, OS/driver terminal evidence, and independent semantic replay remain
 unfinished lifecycle work.
+
+The final `AppEnduranceShutdownEvidence` now has one bounded schema-1 receipt
+Module. It projects Project and the seven named App worker domains into fixed
+primitive shapes, while preserving Reference Output, Export shutdown and
+terminal snapshot, Audio Playback, and Audio Source Cache as independently
+hashed canonical typed leaves. Replay verifies every outer/leaf hash and
+canonical encoding, reparses complex leaves into their owning crate types, and
+recomputes the complete App clean predicate; dirty evidence remains serializable
+but cannot qualify. This receipt is the App leaf for the next batch-outcome
+schema, not yet a claim that the standalone CLI publishes failure outcomes.

@@ -75,7 +75,7 @@ pub enum RealtimeAudioOutputLossReason {
 pub struct RealtimeAudioOutputWorkerStartError(#[source] io::Error);
 
 /// Lifetime closure evidence for concrete audio-device lifecycle workers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RealtimeAudioOutputShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,

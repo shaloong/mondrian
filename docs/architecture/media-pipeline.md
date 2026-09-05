@@ -128,6 +128,14 @@ Ordinary `AudioPlayback` and output-manager `Drop` signal shutdown, join only an
 already-finished handle, and otherwise detach immediately. That best-effort path
 keeps the UI bounded but is never accepted as terminal evidence.
 
+Audio Playback, concrete realtime-output, decoder-startup, and Audio Source
+Cache shutdown evidence additionally support strict one-way receipt replay.
+Their serde shape is raw owner evidence, not a second cleanup predicate: the
+App shutdown receipt embeds canonical JSON plus SHA-256 and reparses these exact
+types before invoking `all_workers_terminated` or `all_resources_released`.
+Unknown/malformed values, changed hashes, and dirty terminal facts therefore
+cannot be promoted by an enclosing App report.
+
 Output selection uses CPAL's cross-process stable `DeviceId`, not display name
 or enumeration index. `SystemDefault` and `Specific(DeviceId)` are distinct
 runtime intents. A specific identity that is absent fails closed and remains

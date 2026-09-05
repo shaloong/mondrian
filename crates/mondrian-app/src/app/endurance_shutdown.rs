@@ -12,6 +12,11 @@ use std::time::{Duration, Instant};
 use std::sync::Arc;
 
 #[cfg(any(test, feature = "validation"))]
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+#[cfg(any(test, feature = "validation"))]
+use sha2::{Digest, Sha256};
+
+#[cfg(any(test, feature = "validation"))]
 use mondrian_export::ExportQueueShutdownEvidence;
 #[cfg(any(test, feature = "validation"))]
 use mondrian_media::{
@@ -368,6 +373,376 @@ impl AppEnduranceShutdownEvidence {
             )?)?,
         })
     }
+}
+
+#[cfg(any(test, feature = "validation"))]
+const APP_SHUTDOWN_RECEIPT_SCHEMA_VERSION: u32 = 1;
+#[cfg(any(test, feature = "validation"))]
+const MAXIMUM_APP_SHUTDOWN_LEAF_JSON_BYTES: usize = 512 * 1024;
+#[cfg(any(test, feature = "validation"))]
+const MAXIMUM_APP_SHUTDOWN_RECEIPT_JSON_BYTES: usize = 4 * 1024 * 1024;
+
+/// Canonical, bounded receipt for one complete consuming App shutdown.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppEnduranceShutdownReceipt {
+    canonical_json: String,
+    sha256: String,
+    all_resources_released: bool,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl AppEnduranceShutdownReceipt {
+    /// Seal the exact typed shutdown evidence without weakening dirty outcomes.
+    pub fn seal(
+        evidence: &AppEnduranceShutdownEvidence,
+    ) -> Result<Self, AppEnduranceShutdownReceiptError> {
+        let projection = CanonicalAppEnduranceShutdownEvidence::from_evidence(evidence)?;
+        let all_resources_released = projection.validate()?;
+        let canonical_json = serde_json::to_string(&projection)
+            .map_err(|error| AppEnduranceShutdownReceiptError::Serialization(error.to_string()))?;
+        if canonical_json.len() > MAXIMUM_APP_SHUTDOWN_RECEIPT_JSON_BYTES {
+            return Err(AppEnduranceShutdownReceiptError::TooLarge);
+        }
+        let sha256 = app_shutdown_lower_sha256(canonical_json.as_bytes());
+        Ok(Self { canonical_json, sha256, all_resources_released })
+    }
+
+    /// Canonical UTF-8 JSON for durable embedding.
+    pub fn canonical_json(&self) -> &str {
+        &self.canonical_json
+    }
+
+    /// SHA-256 over the exact bytes returned by [`Self::canonical_json`].
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    /// Whether the typed source evidence proved every App resource released.
+    pub const fn all_resources_released(&self) -> bool {
+        self.all_resources_released
+    }
+
+    /// Verify canonical bytes, all nested hashes, and the App clean predicate.
+    pub fn verify_integrity(
+        canonical_json: &str,
+        sha256: &str,
+    ) -> Result<bool, AppEnduranceShutdownReceiptError> {
+        if canonical_json.len() > MAXIMUM_APP_SHUTDOWN_RECEIPT_JSON_BYTES {
+            return Err(AppEnduranceShutdownReceiptError::TooLarge);
+        }
+        if app_shutdown_lower_sha256(canonical_json.as_bytes()) != sha256 {
+            return Err(AppEnduranceShutdownReceiptError::HashMismatch);
+        }
+        let projection: CanonicalAppEnduranceShutdownEvidence =
+            serde_json::from_str(canonical_json).map_err(|error| {
+                AppEnduranceShutdownReceiptError::Serialization(error.to_string())
+            })?;
+        let all_resources_released = projection.validate()?;
+        let normalized = serde_json::to_string(&projection)
+            .map_err(|error| AppEnduranceShutdownReceiptError::Serialization(error.to_string()))?;
+        if normalized != canonical_json {
+            return Err(AppEnduranceShutdownReceiptError::NonCanonicalEvidence);
+        }
+        Ok(all_resources_released)
+    }
+}
+
+/// Stable App-shutdown receipt sealing or replay rejection.
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AppEnduranceShutdownReceiptError {
+    /// The outer canonical bytes do not match their supplied digest.
+    #[error("App shutdown receipt hash does not match canonical JSON")]
+    HashMismatch,
+    /// An embedded raw leaf does not match its supplied digest.
+    #[error("App shutdown embedded receipt hash does not match raw JSON")]
+    EmbeddedHashMismatch,
+    /// The receipt schema or fixed-shape evidence is invalid.
+    #[error("App shutdown receipt evidence is invalid")]
+    InvalidEvidence,
+    /// Valid JSON was not encoded in the one canonical compact form.
+    #[error("App shutdown receipt JSON is not canonical")]
+    NonCanonicalEvidence,
+    /// Canonical encoding or typed leaf replay failed.
+    #[error("App shutdown receipt serialization failed: {0}")]
+    Serialization(String),
+    /// The bounded receipt or one of its leaves exceeded its schema limit.
+    #[error("App shutdown receipt exceeds its maximum canonical size")]
+    TooLarge,
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalAppEnduranceShutdownEvidence {
+    schema_version: u32,
+    app_owner_consumed: bool,
+    project: CanonicalAppProjectShutdownEvidence,
+    reference_output: CanonicalAppShutdownLeaf,
+    export: CanonicalAppShutdownLeaf,
+    export_terminal_snapshot: CanonicalAppShutdownLeaf,
+    audio: CanonicalAppShutdownLeaf,
+    audio_source_cache: CanonicalAppAudioSourceCacheShutdownEvidence,
+    workers: CanonicalAppWorkerShutdownEvidence,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalAppEnduranceShutdownEvidence {
+    fn from_evidence(
+        evidence: &AppEnduranceShutdownEvidence,
+    ) -> Result<Self, AppEnduranceShutdownReceiptError> {
+        Ok(Self {
+            schema_version: APP_SHUTDOWN_RECEIPT_SCHEMA_VERSION,
+            app_owner_consumed: evidence.app_owner_consumed,
+            project: CanonicalAppProjectShutdownEvidence::from(&evidence.project),
+            reference_output: CanonicalAppShutdownLeaf::seal(&evidence.reference_output)?,
+            export: CanonicalAppShutdownLeaf::seal(&evidence.export)?,
+            export_terminal_snapshot: CanonicalAppShutdownLeaf::seal(
+                &evidence.export_terminal_snapshot,
+            )?,
+            audio: CanonicalAppShutdownLeaf::seal(&evidence.audio)?,
+            audio_source_cache: CanonicalAppAudioSourceCacheShutdownEvidence {
+                strong_references_before_consumption: evidence
+                    .audio_source_cache
+                    .strong_references_before_consumption,
+                strong_references_remaining: evidence
+                    .audio_source_cache
+                    .strong_references_remaining,
+                cache: evidence
+                    .audio_source_cache
+                    .cache
+                    .as_ref()
+                    .map(CanonicalAppShutdownLeaf::seal)
+                    .transpose()?,
+            },
+            workers: CanonicalAppWorkerShutdownEvidence::from_evidence(evidence),
+        })
+    }
+
+    fn validate(&self) -> Result<bool, AppEnduranceShutdownReceiptError> {
+        if self.schema_version != APP_SHUTDOWN_RECEIPT_SCHEMA_VERSION {
+            return Err(AppEnduranceShutdownReceiptError::InvalidEvidence);
+        }
+        let reference_output =
+            self.reference_output.decode::<ReferenceOutputModuleShutdownReceipt>()?;
+        let export = self.export.decode::<ExportQueueShutdownEvidence>()?;
+        let _: mondrian_export::ExportEnduranceSnapshot = self.export_terminal_snapshot.decode()?;
+        let audio = self.audio.decode::<AudioPlaybackShutdownEvidence>()?;
+        let audio_source_cache = self.audio_source_cache.validate()?;
+        Ok(self.app_owner_consumed
+            && self.project.all_resources_released()
+            && reference_output.all_resources_released()
+            && export.all_resources_released()
+            && audio.all_workers_terminated()
+            && audio_source_cache
+            && self.workers.all_lifecycles_closed())
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalAppProjectShutdownEvidence {
+    session_was_open: bool,
+    pending_close_was_active: bool,
+    authoring_session_released: bool,
+    pending_close_released: bool,
+    runtime_lease_released: bool,
+    retired_library_generations_remaining: u32,
+    lifecycle_failure: Option<String>,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl From<&AppProjectShutdownEvidence> for CanonicalAppProjectShutdownEvidence {
+    fn from(evidence: &AppProjectShutdownEvidence) -> Self {
+        Self {
+            session_was_open: evidence.session_was_open,
+            pending_close_was_active: evidence.pending_close_was_active,
+            authoring_session_released: evidence.authoring_session_released,
+            pending_close_released: evidence.pending_close_released,
+            runtime_lease_released: evidence.runtime_lease_released,
+            retired_library_generations_remaining: evidence.retired_library_generations_remaining,
+            lifecycle_failure: evidence.lifecycle_failure.clone(),
+        }
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalAppProjectShutdownEvidence {
+    fn all_resources_released(&self) -> bool {
+        self.authoring_session_released
+            && self.pending_close_released
+            && self.runtime_lease_released
+            && self.retired_library_generations_remaining == 0
+            && self.lifecycle_failure.is_none()
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalAppAudioSourceCacheShutdownEvidence {
+    strong_references_before_consumption: u32,
+    strong_references_remaining: u32,
+    cache: Option<CanonicalAppShutdownLeaf>,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalAppAudioSourceCacheShutdownEvidence {
+    fn validate(&self) -> Result<bool, AppEnduranceShutdownReceiptError> {
+        let cache_closed = self
+            .cache
+            .as_ref()
+            .map(CanonicalAppShutdownLeaf::decode::<AudioSourceCacheShutdownEvidence>)
+            .transpose()?
+            .is_some_and(AudioSourceCacheShutdownEvidence::all_resources_released);
+        Ok(self.strong_references_remaining == 0 && cache_closed)
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalAppShutdownLeaf {
+    json: String,
+    sha256: String,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalAppShutdownLeaf {
+    fn seal(value: &impl Serialize) -> Result<Self, AppEnduranceShutdownReceiptError> {
+        let json = canonical_app_shutdown_leaf_json(value)?;
+        if json.len() > MAXIMUM_APP_SHUTDOWN_LEAF_JSON_BYTES {
+            return Err(AppEnduranceShutdownReceiptError::TooLarge);
+        }
+        let sha256 = app_shutdown_lower_sha256(json.as_bytes());
+        Ok(Self { json, sha256 })
+    }
+
+    fn decode<T>(&self) -> Result<T, AppEnduranceShutdownReceiptError>
+    where
+        T: DeserializeOwned + Serialize,
+    {
+        if self.json.len() > MAXIMUM_APP_SHUTDOWN_LEAF_JSON_BYTES {
+            return Err(AppEnduranceShutdownReceiptError::TooLarge);
+        }
+        if app_shutdown_lower_sha256(self.json.as_bytes()) != self.sha256 {
+            return Err(AppEnduranceShutdownReceiptError::EmbeddedHashMismatch);
+        }
+        let value: T = serde_json::from_str(&self.json)
+            .map_err(|error| AppEnduranceShutdownReceiptError::Serialization(error.to_string()))?;
+        if canonical_app_shutdown_leaf_json(&value)? != self.json {
+            return Err(AppEnduranceShutdownReceiptError::NonCanonicalEvidence);
+        }
+        Ok(value)
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalWorkerShutdownEvidence {
+    requested_workers: u32,
+    startup_attempted: bool,
+    started_workers: u32,
+    terminated_workers: u32,
+    panicked_workers: u32,
+    timed_out_workers: u32,
+    detached_workers: u32,
+    unexpected_worker_exits: u32,
+    queued_work_remaining: u64,
+    running_work_remaining: u64,
+    owned_resources_remaining: u64,
+    cumulative_failures: u64,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl From<EnduranceWorkerShutdownEvidence> for CanonicalWorkerShutdownEvidence {
+    fn from(evidence: EnduranceWorkerShutdownEvidence) -> Self {
+        Self {
+            requested_workers: evidence.requested_workers,
+            startup_attempted: evidence.startup_attempted,
+            started_workers: evidence.started_workers,
+            terminated_workers: evidence.terminated_workers,
+            panicked_workers: evidence.panicked_workers,
+            timed_out_workers: evidence.timed_out_workers,
+            detached_workers: evidence.detached_workers,
+            unexpected_worker_exits: evidence.unexpected_worker_exits,
+            queued_work_remaining: evidence.queued_work_remaining,
+            running_work_remaining: evidence.running_work_remaining,
+            owned_resources_remaining: evidence.owned_resources_remaining,
+            cumulative_failures: evidence.cumulative_failures,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalWorkerShutdownEvidence {
+    fn lifecycle_closed(self) -> bool {
+        (!self.startup_attempted || self.requested_workers == self.started_workers)
+            && self.started_workers == self.terminated_workers
+            && self.panicked_workers == 0
+            && self.timed_out_workers == 0
+            && self.detached_workers == 0
+            && self.unexpected_worker_exits == 0
+            && self.queued_work_remaining == 0
+            && self.running_work_remaining == 0
+            && self.owned_resources_remaining == 0
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CanonicalAppWorkerShutdownEvidence {
+    execution_memory_observer: CanonicalWorkerShutdownEvidence,
+    project_persistence: CanonicalWorkerShutdownEvidence,
+    audio_idle_warmup: CanonicalWorkerShutdownEvidence,
+    media_import: CanonicalWorkerShutdownEvidence,
+    media_asset_mutation: CanonicalWorkerShutdownEvidence,
+    visual_tracking: CanonicalWorkerShutdownEvidence,
+    proxy_generation: CanonicalWorkerShutdownEvidence,
+}
+
+#[cfg(any(test, feature = "validation"))]
+impl CanonicalAppWorkerShutdownEvidence {
+    fn from_evidence(evidence: &AppEnduranceShutdownEvidence) -> Self {
+        Self {
+            execution_memory_observer: evidence.execution_memory_observer.into(),
+            project_persistence: evidence.project_persistence.into(),
+            audio_idle_warmup: evidence.audio_idle_warmup.into(),
+            media_import: evidence.media_import.into(),
+            media_asset_mutation: evidence.media_asset_mutation.into(),
+            visual_tracking: evidence.visual_tracking.into(),
+            proxy_generation: evidence.proxy_generation.into(),
+        }
+    }
+
+    fn all_lifecycles_closed(&self) -> bool {
+        self.execution_memory_observer.lifecycle_closed()
+            && self.project_persistence.lifecycle_closed()
+            && self.audio_idle_warmup.lifecycle_closed()
+            && self.media_import.lifecycle_closed()
+            && self.media_asset_mutation.lifecycle_closed()
+            && self.visual_tracking.lifecycle_closed()
+            && self.proxy_generation.lifecycle_closed()
+    }
+}
+
+#[cfg(any(test, feature = "validation"))]
+fn canonical_app_shutdown_leaf_json(
+    value: &impl Serialize,
+) -> Result<String, AppEnduranceShutdownReceiptError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| AppEnduranceShutdownReceiptError::Serialization(error.to_string()))?;
+    serde_json::to_string(&value)
+        .map_err(|error| AppEnduranceShutdownReceiptError::Serialization(error.to_string()))
+}
+
+#[cfg(any(test, feature = "validation"))]
+fn app_shutdown_lower_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -773,6 +1148,14 @@ fn checked_usize_to_u64(value: usize, field: &str) -> Result<u64, String> {
 mod tests {
     use super::*;
 
+    fn fresh_app_shutdown_evidence() -> AppEnduranceShutdownEvidence {
+        AppState::new().shutdown_for_endurance(
+            Instant::now()
+                .checked_add(Duration::from_secs(10))
+                .expect("fresh App shutdown deadline"),
+        )
+    }
+
     #[test]
     fn shared_deadline_reports_normal_panic_and_detach_exactly() {
         let release = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -799,12 +1182,7 @@ mod tests {
 
     #[test]
     fn fresh_app_consuming_shutdown_closes_every_eager_owner() {
-        let state = AppState::new();
-        let evidence = state.shutdown_for_endurance(
-            Instant::now()
-                .checked_add(Duration::from_secs(10))
-                .expect("fresh App shutdown deadline"),
-        );
+        let evidence = fresh_app_shutdown_evidence();
 
         assert!(evidence.app_owner_consumed);
         assert!(evidence.project.all_resources_released());
@@ -854,6 +1232,57 @@ mod tests {
                 .background_terminal_snapshot()
                 .expect("fresh App terminal background snapshot"),
             AppBackgroundEnduranceSnapshot::default()
+        );
+    }
+
+    #[test]
+    fn app_shutdown_receipt_replays_clean_and_dirty_predicates() {
+        let clean = fresh_app_shutdown_evidence();
+        let clean_receipt =
+            AppEnduranceShutdownReceipt::seal(&clean).expect("clean App receipt should seal");
+        assert!(clean_receipt.all_resources_released());
+        assert_eq!(
+            AppEnduranceShutdownReceipt::verify_integrity(
+                clean_receipt.canonical_json(),
+                clean_receipt.sha256(),
+            ),
+            Ok(true)
+        );
+
+        let mut dirty = clean;
+        dirty.media_import.timed_out_workers = 1;
+        let dirty_receipt =
+            AppEnduranceShutdownReceipt::seal(&dirty).expect("dirty App receipt should still seal");
+        assert!(!dirty_receipt.all_resources_released());
+        assert_eq!(
+            AppEnduranceShutdownReceipt::verify_integrity(
+                dirty_receipt.canonical_json(),
+                dirty_receipt.sha256(),
+            ),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn app_shutdown_receipt_rejects_nested_hash_and_noncanonical_bytes() {
+        let evidence = fresh_app_shutdown_evidence();
+        let receipt =
+            AppEnduranceShutdownReceipt::seal(&evidence).expect("App receipt should seal");
+        let mut projection: CanonicalAppEnduranceShutdownEvidence =
+            serde_json::from_str(receipt.canonical_json()).expect("receipt projection");
+        projection.export.sha256 = "0".repeat(64);
+        let altered = serde_json::to_string(&projection).expect("altered projection");
+        let altered_hash = app_shutdown_lower_sha256(altered.as_bytes());
+        assert_eq!(
+            AppEnduranceShutdownReceipt::verify_integrity(&altered, &altered_hash),
+            Err(AppEnduranceShutdownReceiptError::EmbeddedHashMismatch)
+        );
+
+        let noncanonical = format!(" {}", receipt.canonical_json());
+        let noncanonical_hash = app_shutdown_lower_sha256(noncanonical.as_bytes());
+        assert_eq!(
+            AppEnduranceShutdownReceipt::verify_integrity(&noncanonical, &noncanonical_hash,),
+            Err(AppEnduranceShutdownReceiptError::NonCanonicalEvidence)
         );
     }
 }

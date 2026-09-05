@@ -521,7 +521,7 @@ pub struct AudioSourceCacheDiagnostics {
 /// persistent decoder child was reaped, and both pipe-pump threads were joined.
 /// Any externally retained decoder/session or PCM `Arc` is reported and makes
 /// [`Self::all_resources_released`] fail closed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AudioSourceCacheShutdownEvidence {
     /// Evidence schema version.
     pub schema_version: u32,
