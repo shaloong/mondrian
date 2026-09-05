@@ -203,9 +203,9 @@ $profileObject = Read-BoundedJson $profile "Endurance profile"
 $manifest = Read-BoundedJson $manifestPath "Endurance run manifest"
 $captureAuthority = Read-BoundedJson $captureAuthorityPath "Endurance capture authority"
 $machinePlan = Read-BoundedJson $machinePlanPath "Commercial endurance machine plan" 262144
-if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 2 -or
-    [int]$captureAuthority.schema_version -ne 2 -or [int]$machinePlan.schema_version -ne 1) {
-    throw "Endurance profile/machine plan must use schema 1 and run/authority must use schema 2."
+if ([int]$profileObject.schema_version -ne 1 -or [int]$manifest.schema_version -ne 3 -or
+    [int]$captureAuthority.schema_version -ne 2 -or [int]$machinePlan.schema_version -ne 2) {
+    throw "Endurance profile must use schema 1; run schema 3; authority and machine plan schema 2."
 }
 $bindings = @(
     @([string]$manifest.source_revision, $ExpectedSourceRevision, "source revision"),
@@ -252,6 +252,46 @@ if (@($captureAuthority.phases).Count -ne @($profileObject.phases).Count -or
 }
 if ([string]$manifest.environment_before_sha256 -cne [string]$manifest.environment_after_sha256) {
     throw "Endurance environment changed during the serial run."
+}
+$closure = $manifest.owner_closure
+$closureProperties = @($closure.PSObject.Properties.Name)
+if ([string]$closure.kind -ceq "event_loop") {
+    if ($closureProperties.Count -ne 2 -or "kind" -notin $closureProperties -or
+        "closure" -notin $closureProperties) {
+        throw "Endurance EventLoop owner closure has unexpected fields."
+    }
+    $eventLoopClosure = $closure.closure
+    $eventLoopProperties = @($eventLoopClosure.PSObject.Properties.Name)
+    if ($eventLoopProperties.Count -ne 3 -or
+        "schema_version" -notin $eventLoopProperties -or
+        "rust_owner_released" -notin $eventLoopProperties -or
+        "physical_native_termination_verified" -notin $eventLoopProperties -or
+        [int]$eventLoopClosure.schema_version -ne 1 -or
+        $eventLoopClosure.rust_owner_released -ne $true -or
+        $eventLoopClosure.physical_native_termination_verified -ne $false) {
+        throw "Endurance EventLoop owner closure is invalid."
+    }
+} elseif ([string]$closure.kind -ceq "not_applicable") {
+    if ($closureProperties.Count -ne 1 -or "kind" -notin $closureProperties) {
+        throw "Endurance NotApplicable owner closure has unexpected fields."
+    }
+    $startedConcurrentRecovery = $false
+    foreach ($profilePhase in @($profileObject.phases | Where-Object {
+        [string]$_.kind -ceq "concurrent_recovery"
+    })) {
+        $matchingRunPhases = @($manifest.phases | Where-Object {
+            [string]$_.phase_id -ceq [string]$profilePhase.phase_id
+        })
+        if ($matchingRunPhases.Count -eq 1 -and
+            [string]$matchingRunPhases[0].terminal.status -cne "not_run") {
+            $startedConcurrentRecovery = $true
+        }
+    }
+    if ($startedConcurrentRecovery) {
+        throw "A started Concurrent Recovery phase requires EventLoop owner closure evidence."
+    }
+} else {
+    throw "Endurance run owner closure kind is unsupported."
 }
 
 $declaredNames = [System.Collections.Generic.List[string]]::new()
@@ -677,9 +717,13 @@ Assert-EvidenceDirectoryClosure $chunkRoot @($declaredNames)
 $resolvedOutput = Resolve-ExistingLeaf $output "Endurance qualification report"
 $outputHashBefore = Get-LowerSha256 $resolvedOutput
 $report = Read-BoundedJson $resolvedOutput "Endurance qualification report"
-if ([int]$report.schema_version -ne 2 -or [string]$report.status -cne "qualified" -or
+if ([int]$report.schema_version -ne 3 -or [string]$report.status -cne "qualified" -or
     @($report.missing_phases).Count -ne 0 -or [string]$report.evidence_sha256 -notmatch '^[0-9a-f]{64}$') {
-    throw "Endurance replay output is not a complete qualified schema-2 report."
+    throw "Endurance replay output is not a complete qualified schema-3 report."
+}
+if (($report.owner_closure | ConvertTo-Json -Depth 4 -Compress) -cne
+    ($manifest.owner_closure | ConvertTo-Json -Depth 4 -Compress)) {
+    throw "Endurance qualification report lost or changed run owner closure evidence."
 }
 foreach ($binding in @(
     @([string]$report.run_id, [string]$manifest.run_id, "report run id"),

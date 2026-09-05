@@ -8,7 +8,8 @@ use mondrian_platform_core::{
     EndurancePhaseProducerEvidence, EndurancePhaseRequirement, EndurancePhaseTerminalEvidence,
     EndurancePhaseTerminalStatus, EnduranceProcessMemorySample, EnduranceQualificationError,
     EnduranceQualificationProfile, EnduranceQualificationStatus, EnduranceRunManifest,
-    EnduranceSample, EnduranceSampleChunk, PreparedEnduranceQualification,
+    EnduranceRunOwnerClosureEvidence, EnduranceSample, EnduranceSampleChunk,
+    PreparedEnduranceQualification, ProcessEventLoopOwnerClosureEvidence,
     ProcessMemoryProbeBackend, ProcessMemoryScope, ProcessPrivateMemoryMetric,
 };
 use sha2::{Digest, Sha256};
@@ -274,7 +275,7 @@ fn qualified_fixture() -> (
         manifests.push(manifest);
     }
     let run = EnduranceRunManifest {
-        schema_version: 2,
+        schema_version: 3,
         run_id: "commercial-run-001".to_owned(),
         profile_sha256: prepared.profile_sha256().to_owned(),
         source_revision: SOURCE.to_owned(),
@@ -288,6 +289,9 @@ fn qualified_fixture() -> (
         capture_authority_sha256: SHA.to_owned(),
         environment_before_sha256: SHA.to_owned(),
         environment_after_sha256: SHA.to_owned(),
+        owner_closure: EnduranceRunOwnerClosureEvidence::event_loop(
+            ProcessEventLoopOwnerClosureEvidence::after_rust_owner_drop(),
+        ),
         phases: manifests,
     };
     (prepared, run, chunks)
@@ -312,7 +316,7 @@ fn complete_serial_campaign_qualifies_and_self_verifies() {
 }
 
 #[test]
-fn schema_two_machine_plan_identity_is_required_and_hashed_into_report() {
+fn schema_three_owner_closure_and_machine_plan_are_hashed_into_report() {
     let (prepared, mut run, chunks) = qualified_fixture();
     let expected_machine_plan = run.machine_plan_sha256.clone();
     let mut report = prepared
@@ -322,8 +326,9 @@ fn schema_two_machine_plan_identity_is_required_and_hashed_into_report() {
                 .cloned()
                 .ok_or(EnduranceQualificationError::EmptyChunk)
         })
-        .expect("evaluate schema-two run");
-    assert_eq!(report.schema_version, 2);
+        .expect("evaluate schema-three run");
+    assert_eq!(report.schema_version, 3);
+    assert!(report.owner_closure.all_owned_authority_released());
     assert_eq!(report.machine_plan_sha256, expected_machine_plan);
     report.machine_plan_sha256 = "b".repeat(64);
     assert!(!report.verify_evidence());
@@ -332,6 +337,36 @@ fn schema_two_machine_plan_identity_is_required_and_hashed_into_report() {
     assert!(matches!(
         prepared.evaluate(run, |_| Err(EnduranceQualificationError::EmptyChunk)),
         Err(EnduranceQualificationError::UnsupportedRunSchema { actual: 1 })
+    ));
+}
+
+#[test]
+fn started_concurrent_recovery_rejects_not_applicable_run_owner_closure() {
+    let (prepared, mut run, chunks) = qualified_fixture();
+    run.owner_closure = EnduranceRunOwnerClosureEvidence::not_applicable();
+
+    assert!(matches!(
+        prepared.evaluate(run, |receipt| {
+            chunks
+                .get(&receipt.file_name)
+                .cloned()
+                .ok_or(EnduranceQualificationError::EmptyChunk)
+        }),
+        Err(EnduranceQualificationError::InvalidRunOwnerClosure)
+    ));
+}
+
+#[test]
+fn malformed_event_loop_owner_closure_fails_before_phase_replay() {
+    let (prepared, run, _) = qualified_fixture();
+    let mut value = serde_json::to_value(run).expect("serialize run");
+    value["owner_closure"]["closure"]["physical_native_termination_verified"] =
+        serde_json::json!(true);
+    let run = serde_json::from_value(value).expect("deserialize malformed closure");
+
+    assert!(matches!(
+        prepared.evaluate(run, |_| Err(EnduranceQualificationError::EmptyChunk)),
+        Err(EnduranceQualificationError::InvalidRunOwnerClosure)
     ));
 }
 
@@ -859,7 +894,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     let machine_plan_path = temporary.path().join("machine-plan.json");
     std::fs::write(
         &machine_plan_path,
-        br#"{"schema_version":1,"plan_id":"test-machine-plan"}"#,
+        br#"{"schema_version":2,"plan_id":"test-machine-plan"}"#,
     )
     .expect("write machine plan");
     run.machine_plan_sha256 = file_sha256(&machine_plan_path);
@@ -963,6 +998,38 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         "rejected plan drift must not publish a report"
     );
     std::fs::write(&machine_plan_path, machine_plan_bytes).expect("restore machine plan");
+
+    let baseline_manifest_bytes =
+        serde_json::to_vec_pretty(&run).expect("serialize baseline manifest");
+    let mut promoted_closure = serde_json::to_value(&run).expect("serialize closure tamper");
+    promoted_closure["owner_closure"]["closure"]["physical_native_termination_verified"] =
+        serde_json::json!(true);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&promoted_closure).expect("serialize promoted closure"),
+    )
+    .expect("write promoted closure");
+    let status = verifier.status().expect("rerun verifier with promoted closure");
+    assert!(
+        !status.success(),
+        "invented physical native closure must fail"
+    );
+    assert!(!output_path.exists());
+
+    let mut absent_closure = serde_json::to_value(&run).expect("serialize closure substitution");
+    absent_closure["owner_closure"] = serde_json::json!({ "kind": "not_applicable" });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&absent_closure).expect("serialize absent closure"),
+    )
+    .expect("write absent closure");
+    let status = verifier.status().expect("rerun verifier with absent closure");
+    assert!(
+        !status.success(),
+        "started Concurrent Recovery cannot use NotApplicable closure"
+    );
+    assert!(!output_path.exists());
+    std::fs::write(&manifest_path, baseline_manifest_bytes).expect("restore run manifest");
 
     let recovery_phase = run
         .phases

@@ -4,10 +4,10 @@
 //! authority. It deliberately does not claim that the OS compositor or native
 //! display server has reached a physically terminal state.
 
-use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const EVENT_LOOP_SHUTDOWN_RECEIPT_SCHEMA_VERSION: u32 = 1;
+use mondrian_platform::ProcessEventLoopOwnerClosureEvidence;
+
 const MAXIMUM_EVENT_LOOP_SHUTDOWN_RECEIPT_JSON_BYTES: usize = 1024;
 
 /// Stable classification of a winit event-loop construction failure.
@@ -104,6 +104,7 @@ impl AppUiEventLoopShutdownEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppUiEventLoopShutdownReceipt {
     evidence: AppUiEventLoopShutdownEvidence,
+    owner_closure: ProcessEventLoopOwnerClosureEvidence,
     canonical_json: String,
     sha256: String,
 }
@@ -112,8 +113,7 @@ impl AppUiEventLoopShutdownReceipt {
     pub(crate) fn seal(
         evidence: AppUiEventLoopShutdownEvidence,
     ) -> Result<Self, AppUiEventLoopShutdownReceiptError> {
-        let projection = CanonicalEventLoopShutdownEvidence::from(evidence);
-        projection.validate()?;
+        let projection = ProcessEventLoopOwnerClosureEvidence::after_rust_owner_drop();
         let canonical_json = serde_json::to_string(&projection).map_err(|error| {
             AppUiEventLoopShutdownReceiptError::Serialization(error.to_string())
         })?;
@@ -121,12 +121,22 @@ impl AppUiEventLoopShutdownReceipt {
             return Err(AppUiEventLoopShutdownReceiptError::TooLarge);
         }
         let sha256 = event_loop_lower_sha256(canonical_json.as_bytes());
-        Ok(Self { evidence, canonical_json, sha256 })
+        Ok(Self {
+            evidence,
+            owner_closure: projection,
+            canonical_json,
+            sha256,
+        })
     }
 
     /// Exact process-local Rust owner evidence represented by this receipt.
     pub const fn evidence(&self) -> AppUiEventLoopShutdownEvidence {
         self.evidence
+    }
+
+    /// Shared platform contract embedded into endurance run evidence.
+    pub const fn owner_closure(&self) -> ProcessEventLoopOwnerClosureEvidence {
+        self.owner_closure
     }
 
     /// Canonical UTF-8 JSON for durable embedding.
@@ -150,11 +160,13 @@ impl AppUiEventLoopShutdownReceipt {
         if event_loop_lower_sha256(canonical_json.as_bytes()) != sha256 {
             return Err(AppUiEventLoopShutdownReceiptError::HashMismatch);
         }
-        let projection: CanonicalEventLoopShutdownEvidence = serde_json::from_str(canonical_json)
+        let projection: ProcessEventLoopOwnerClosureEvidence = serde_json::from_str(canonical_json)
             .map_err(|error| {
-            AppUiEventLoopShutdownReceiptError::Serialization(error.to_string())
-        })?;
-        projection.validate()?;
+                AppUiEventLoopShutdownReceiptError::Serialization(error.to_string())
+            })?;
+        if !projection.is_valid() {
+            return Err(AppUiEventLoopShutdownReceiptError::InvalidEvidence);
+        }
         let normalized = serde_json::to_string(&projection).map_err(|error| {
             AppUiEventLoopShutdownReceiptError::Serialization(error.to_string())
         })?;
@@ -188,42 +200,6 @@ pub enum AppUiEventLoopShutdownReceiptError {
     /// The bounded receipt exceeded its schema limit.
     #[error("EventLoop shutdown receipt exceeds its maximum canonical size")]
     TooLarge,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CanonicalEventLoopShutdownEvidence {
-    schema_version: u32,
-    rust_owner_released: bool,
-    physical_native_termination: EventLoopPhysicalNativeTermination,
-}
-
-impl From<AppUiEventLoopShutdownEvidence> for CanonicalEventLoopShutdownEvidence {
-    fn from(evidence: AppUiEventLoopShutdownEvidence) -> Self {
-        Self {
-            schema_version: EVENT_LOOP_SHUTDOWN_RECEIPT_SCHEMA_VERSION,
-            rust_owner_released: evidence.rust_owner_released(),
-            physical_native_termination: EventLoopPhysicalNativeTermination::Unverified,
-        }
-    }
-}
-
-impl CanonicalEventLoopShutdownEvidence {
-    fn validate(self) -> Result<(), AppUiEventLoopShutdownReceiptError> {
-        if self.schema_version != EVENT_LOOP_SHUTDOWN_RECEIPT_SCHEMA_VERSION
-            || !self.rust_owner_released
-            || self.physical_native_termination != EventLoopPhysicalNativeTermination::Unverified
-        {
-            return Err(AppUiEventLoopShutdownReceiptError::InvalidEvidence);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum EventLoopPhysicalNativeTermination {
-    Unverified,
 }
 
 fn event_loop_lower_sha256(bytes: &[u8]) -> String {
@@ -269,11 +245,14 @@ mod tests {
             Err(AppUiEventLoopShutdownReceiptError::NonCanonicalEvidence)
         );
 
-        let promoted = receipt.canonical_json().replace("unverified", "qualified");
+        let promoted = receipt.canonical_json().replace(
+            "\"physical_native_termination_verified\":false",
+            "\"physical_native_termination_verified\":true",
+        );
         let promoted_hash = event_loop_lower_sha256(promoted.as_bytes());
-        assert!(matches!(
+        assert_eq!(
             AppUiEventLoopShutdownReceipt::verify_integrity(&promoted, &promoted_hash),
-            Err(AppUiEventLoopShutdownReceiptError::Serialization(_))
-        ));
+            Err(AppUiEventLoopShutdownReceiptError::InvalidEvidence)
+        );
     }
 }

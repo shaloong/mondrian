@@ -8,11 +8,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context};
+use mondrian_app::app::endurance_campaign::EnduranceRunOwnerShutdownFailure;
 use mondrian_app::app::endurance_campaign::SystemEnduranceCampaignClock;
 use mondrian_app::app::endurance_machine_factory::ContinuousExportEnduranceMachineFactory;
 use mondrian_app::app::endurance_product_runtime::{
-    run_product_endurance_campaign, EnduranceSurfaceRecoveryPump, EnduranceSurfaceReopenDriver,
-    EnduranceSurfaceReopenRun, PreparedEnduranceMachinePhaseFactory,
+    run_product_endurance_campaign, EnduranceSurfaceDriverShutdownEvidence,
+    EnduranceSurfaceRecoveryPump, EnduranceSurfaceReopenDriver, EnduranceSurfaceReopenRun,
+    PreparedEnduranceMachinePhaseFactory,
 };
 use mondrian_app::app::endurance_run_request::PreparedEnduranceRunRequest;
 use mondrian_app::app::AppState;
@@ -45,6 +47,12 @@ impl EnduranceSurfaceReopenDriver for NoPhysicalSurfaceDriver {
         _timeout: Duration,
     ) -> EnduranceSurfaceReopenRun {
         panic!("Continuous Export-only factory cannot admit Surface recovery")
+    }
+
+    fn shutdown(
+        self,
+    ) -> Result<EnduranceSurfaceDriverShutdownEvidence, EnduranceRunOwnerShutdownFailure> {
+        Ok(EnduranceSurfaceDriverShutdownEvidence::NotApplicable)
     }
 }
 

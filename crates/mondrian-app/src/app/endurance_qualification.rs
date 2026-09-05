@@ -15,8 +15,9 @@ use mondrian_platform::{
     EnduranceCounters, EnduranceGauges, EndurancePhaseChunkReceipt, EndurancePhaseKind,
     EndurancePhaseManifest, EndurancePhaseProducerEvidence, EndurancePhaseRequirement,
     EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
-    EnduranceQualificationProfile, EnduranceRunManifest, EnduranceSample, EnduranceSampleChunk,
-    PreparedEnduranceQualification, ProcessMemoryProbeResult, ProcessMemoryScope,
+    EnduranceQualificationProfile, EnduranceRunManifest, EnduranceRunOwnerClosureEvidence,
+    EnduranceSample, EnduranceSampleChunk, PreparedEnduranceQualification,
+    ProcessMemoryProbeResult, ProcessMemoryScope,
 };
 use mondrian_playback::PlaybackEvidenceReport;
 use mondrian_reference_output::{ReferenceOutputDiagnostics, ReferenceOutputState};
@@ -1159,12 +1160,13 @@ impl EnduranceRunCapture {
     pub fn seal_manifest(
         self,
         output_path: &Path,
+        owner_closure: EnduranceRunOwnerClosureEvidence,
     ) -> Result<EnduranceRunManifest, EnduranceCaptureError> {
         if self.next_phase_index != self.profile.phases.len() {
             return Err(EnduranceCaptureError::PhaseOrder);
         }
         let manifest = EnduranceRunManifest {
-            schema_version: 2,
+            schema_version: 3,
             run_id: self.identity.run_id,
             profile_sha256: self.profile_sha256,
             source_revision: self.identity.source_revision,
@@ -1178,6 +1180,7 @@ impl EnduranceRunCapture {
             capture_authority_sha256: self.capture_authority_sha256,
             environment_before_sha256: self.identity.environment_before_sha256,
             environment_after_sha256: self.identity.environment_after_sha256,
+            owner_closure,
             phases: self.phases,
         };
         write_json_create_new(output_path, &manifest)?;
@@ -1892,8 +1895,13 @@ mod tests {
         }
 
         let manifest_path = temporary.path().join("run-manifest.json");
-        let manifest = capture.seal_manifest(&manifest_path).expect("seal manifest");
-        assert_eq!(manifest.schema_version, 2);
+        let manifest = capture
+            .seal_manifest(
+                &manifest_path,
+                EnduranceRunOwnerClosureEvidence::not_applicable(),
+            )
+            .expect("seal manifest");
+        assert_eq!(manifest.schema_version, 3);
         assert_eq!(
             manifest.machine_plan_sha256,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

@@ -22,13 +22,13 @@ pub use mondrian_platform_core::{
     EndurancePhaseRequirement, EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus,
     EnduranceProcessMemorySample, EnduranceQualificationError, EnduranceQualificationProfile,
     EnduranceQualificationReport, EnduranceQualificationStatus, EnduranceRunManifest,
-    EnduranceSample, EnduranceSampleChunk, ExecutionMemoryProbe, FileDialogError,
-    FileDialogOutcome, FileFilter, FileRevealError, NoopPlatformService,
+    EnduranceRunOwnerClosureEvidence, EnduranceSample, EnduranceSampleChunk, ExecutionMemoryProbe,
+    FileDialogError, FileDialogOutcome, FileFilter, FileRevealError, NoopPlatformService,
     PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,
     PhysicalMemoryCapacityProbeResult, PlatformService, PreparedEnduranceQualification,
-    ProcessMemoryProbe, ProcessMemoryProbeBackend, ProcessMemoryProbeResult, ProcessMemoryScope,
-    ProcessPrivateMemoryMetric, SystemMemoryProbe, SystemMemoryProbeBackend,
-    SystemMemoryProbeResult, UserStateDirectory, UserStateDirectoryError,
+    ProcessEventLoopOwnerClosureEvidence, ProcessMemoryProbe, ProcessMemoryProbeBackend,
+    ProcessMemoryProbeResult, ProcessMemoryScope, ProcessPrivateMemoryMetric, SystemMemoryProbe,
+    SystemMemoryProbeBackend, SystemMemoryProbeResult, UserStateDirectory, UserStateDirectoryError,
 };
 
 /// Default desktop platform implementation.

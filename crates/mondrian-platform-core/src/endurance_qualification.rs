@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const PROFILE_SCHEMA_VERSION: u32 = 1;
-const RUN_SCHEMA_VERSION: u32 = 2;
+const RUN_SCHEMA_VERSION: u32 = 3;
 const CHUNK_SCHEMA_VERSION: u32 = 1;
-const REPORT_SCHEMA_VERSION: u32 = 2;
+const REPORT_SCHEMA_VERSION: u32 = 3;
 const HARD_MAX_PHASES: usize = 8;
 const HARD_MAX_CHUNKS_PER_PHASE: usize = 2_048;
 const HARD_MAX_SAMPLES_PER_CHUNK: usize = 256;
@@ -286,6 +286,20 @@ impl PreparedEnduranceQualification {
         } else {
             EnduranceQualificationStatus::Qualified
         };
+        let started_concurrent_recovery = self.profile.phases.iter().any(|requirement| {
+            requirement.kind == EndurancePhaseKind::ConcurrentRecovery
+                && observed.get(&requirement.phase_id).is_some_and(|phase| {
+                    phase.terminal.status != EndurancePhaseTerminalStatus::NotRun
+                })
+        });
+        if started_concurrent_recovery
+            && matches!(
+                run.owner_closure,
+                EnduranceRunOwnerClosureEvidence::NotApplicable
+            )
+        {
+            return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
+        }
         let mut report = EnduranceQualificationReport {
             schema_version: REPORT_SCHEMA_VERSION,
             qualification_id: self.profile.qualification_id.clone(),
@@ -301,6 +315,7 @@ impl PreparedEnduranceQualification {
             platform_cell_sha256: run.platform_cell_sha256,
             machine_plan_sha256: run.machine_plan_sha256,
             capture_authority_sha256: run.capture_authority_sha256,
+            owner_closure: run.owner_closure,
             status,
             missing_phases,
             phases: reports,
@@ -678,11 +693,94 @@ pub struct EndurancePhaseManifest {
     pub terminal: EndurancePhaseTerminalEvidence,
 }
 
+/// Final process-local owner closure for the complete serial run.
+///
+/// This contract is deliberately narrower than physical display-server
+/// termination. The EventLoop variant proves only that the product returned
+/// its process-local Rust owner; native termination remains a separate
+/// platform qualification cell.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EnduranceRunOwnerClosureEvidence {
+    /// The admitted workload never created or required a physical Surface owner.
+    NotApplicable,
+    /// A process-local EventLoop owner was consumed after every phase owner.
+    EventLoop {
+        /// Shared canonical owner-return contract used by the App receipt.
+        closure: ProcessEventLoopOwnerClosureEvidence,
+    },
+}
+
+/// Canonical process-local EventLoop owner-return contract.
+///
+/// The platform contract is shared by App receipt sealing, run manifests, and
+/// independent replay so those Modules cannot reinterpret the same shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessEventLoopOwnerClosureEvidence {
+    schema_version: u32,
+    rust_owner_released: bool,
+    physical_native_termination_verified: bool,
+}
+
+impl ProcessEventLoopOwnerClosureEvidence {
+    /// Mint evidence only after the process-local Rust owner drop has returned.
+    pub const fn after_rust_owner_drop() -> Self {
+        Self {
+            schema_version: 1,
+            rust_owner_released: true,
+            physical_native_termination_verified: false,
+        }
+    }
+
+    /// Whether the Rust EventLoop owner was released.
+    pub const fn rust_owner_released(self) -> bool {
+        self.rust_owner_released
+    }
+
+    /// Physical native termination is not represented by this contract.
+    pub const fn qualifies_physical_native_termination(self) -> bool {
+        false
+    }
+
+    /// Whether the evidence satisfies the exact schema and conservative scope.
+    pub const fn is_valid(self) -> bool {
+        self.schema_version == 1
+            && self.rust_owner_released
+            && !self.physical_native_termination_verified
+    }
+}
+
+impl EnduranceRunOwnerClosureEvidence {
+    /// Construct the only valid outer closure for a headless run.
+    pub const fn not_applicable() -> Self {
+        Self::NotApplicable
+    }
+
+    /// Construct closure after a process-local Rust EventLoop owner has returned.
+    pub const fn event_loop(closure: ProcessEventLoopOwnerClosureEvidence) -> Self {
+        Self::EventLoop { closure }
+    }
+
+    /// Whether every owner represented by this contract was returned.
+    pub const fn all_owned_authority_released(&self) -> bool {
+        match self {
+            Self::NotApplicable => true,
+            Self::EventLoop { closure } => closure.is_valid(),
+        }
+    }
+
+    /// Physical native termination is outside this Rust ownership proof.
+    pub const fn qualifies_physical_native_termination(&self) -> bool {
+        false
+    }
+}
+
 /// Exact-source, exact-runtime manifest for one serial qualification run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnduranceRunManifest {
-    /// Run schema. Version 2 is required.
+    /// Run schema. Version 3 is required.
     pub schema_version: u32,
     /// Unique run identity.
     pub run_id: String,
@@ -710,6 +808,8 @@ pub struct EnduranceRunManifest {
     pub environment_before_sha256: String,
     /// Environment identity after the last phase.
     pub environment_after_sha256: String,
+    /// Exactly-once outer owner closure, minted after all phase owners terminate.
+    pub owner_closure: EnduranceRunOwnerClosureEvidence,
     /// Serial phase manifests.
     pub phases: Vec<EndurancePhaseManifest>,
 }
@@ -812,6 +912,8 @@ pub struct EnduranceQualificationReport {
     pub machine_plan_sha256: String,
     /// Approved single-use capture authority manifest SHA-256.
     pub capture_authority_sha256: String,
+    /// Replayed run-level owner closure retained in the final report digest.
+    pub owner_closure: EnduranceRunOwnerClosureEvidence,
     /// Aggregate status.
     pub status: EnduranceQualificationStatus,
     /// Required phases absent from the manifest.
@@ -825,7 +927,9 @@ pub struct EnduranceQualificationReport {
 impl EnduranceQualificationReport {
     /// Verify the report's deterministic evidence digest.
     pub fn verify_evidence(&self) -> bool {
-        report_digest(self).is_ok_and(|digest| digest == self.evidence_sha256)
+        self.schema_version == REPORT_SCHEMA_VERSION
+            && self.owner_closure.all_owned_authority_released()
+            && report_digest(self).is_ok_and(|digest| digest == self.evidence_sha256)
     }
 }
 
@@ -1570,6 +1674,9 @@ fn validate_run_header(
     if run.environment_before_sha256 != run.environment_after_sha256 {
         return Err(EnduranceQualificationError::EnvironmentDrift);
     }
+    if !run.owner_closure.all_owned_authority_released() {
+        return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
+    }
     Ok(())
 }
 
@@ -1763,8 +1870,11 @@ pub enum EnduranceQualificationError {
     #[error("unsupported endurance profile schema {actual}; expected 1")]
     UnsupportedProfileSchema { actual: u32 },
     /// Unsupported run schema.
-    #[error("unsupported endurance run schema {actual}; expected 2")]
+    #[error("unsupported endurance run schema {actual}; expected 3")]
     UnsupportedRunSchema { actual: u32 },
+    /// Run-level outer owner evidence was absent or internally inconsistent.
+    #[error("endurance run owner closure is invalid")]
+    InvalidRunOwnerClosure,
     /// Empty or placeholder identity.
     #[error("invalid endurance identity field '{field}'")]
     InvalidIdentity { field: &'static str },

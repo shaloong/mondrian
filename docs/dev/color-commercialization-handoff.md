@@ -399,8 +399,11 @@ Remaining COL-047 checklist (ten subitems; retain every item in block reports):
    construction/drop and exact final App handback, with mutually exclusive
    in-memory success/failure outcomes. App/EventLoop/Window/batch receipts and
    standalone schema-3 success/failure publication are complete. Campaign
-   EventLoop consuming shutdown, physical native termination, and durable
-   old/candidate/final generation history remain.
+   Surface/EventLoop consuming shutdown is now exactly once after all phase/App
+   owners and before run-manifest schema-3 publication; replay retains the
+   shared closure contract and rejects a started Concurrent Recovery phase with
+   `NotApplicable`. Physical native termination and durable old/candidate/final
+   generation history remain.
 3. Golden whole-operation closure.
 4. Successful raw receipt retention/history/durable serialization, including Export.
 5. Performance-support deep Module extraction and bounded production-linked tests.

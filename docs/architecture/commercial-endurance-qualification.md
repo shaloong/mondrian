@@ -682,9 +682,17 @@ must match exactly. Those canonical bytes and SHA-256 values are retained, so
 the independent verifier can reject either a changed picture or a semantically
 dirty nested receipt even when every outer digest is recomputed.
 
-The concrete campaign constructs `WindowEnduranceSurfaceReopenDriver` once on
-the binary main thread before phase admission. Its `reopen` calls reuse that
-same non-`Send` event loop for all 24 cycles. Windows, macOS, X11, and Wayland
+When selected, the concrete campaign constructs
+`WindowEnduranceSurfaceReopenDriver` once on the binary main thread before
+phase admission. Its `reopen` calls reuse that same non-`Send` event loop for
+all 24 cycles. After every phase owner reaches terminal state, the runtime
+consumes the driver, drops the process-local EventLoop, seals the shared
+platform owner-closure contract, and only then permits create-new run-manifest
+publication. Every earlier validation, startup, runtime, or publication error
+also performs this exactly-once close and retains both primary and closure
+evidence. The current `mondrian-endurance` composition still selects
+`NoPhysicalSurfaceDriver`, so physical phases remain `NotRun` rather than
+claiming Window execution. Windows, macOS, X11, and Wayland
 support this desktop on-demand lifecycle; macOS still requires construction and
 execution on the process main thread, while a Linux host without a display
 server must report the Surface capability as `NotRun` without blocking the
@@ -836,11 +844,14 @@ One run binds:
 - equal before/after environment identity;
 - exact workload, normalized owner-report, and raw-evidence files for every phase.
 
-Run manifests and qualification reports use schema 2; capture authorities use
+Run manifests and qualification reports use schema 3; capture authorities use
 `external-commercial-endurance-authority-v2`. Older schema-1 evidence remains
 replayable only with its originally pinned replay/verifier binaries and is not
 silently upgraded. `mondrian-endurance-replay` reads bounded regular files,
-replays the exact chunk
+requires the typed outer owner closure, retains it in the final report digest,
+and rejects `NotApplicable` when Concurrent Recovery actually ran. EventLoop
+closure proves only Rust-owner return; physical native termination remains
+unverified. The replay tool then replays the exact chunk
 closure, requires a complete `Qualified` report, and creates a new report file.
 Capture construction strictly parses every authority field and requires its raw
 profile digest, complete release/machine identities, machine-plan digest, and

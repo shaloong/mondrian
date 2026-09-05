@@ -2620,7 +2620,7 @@ impl AppUiReusableEventLoop {
         &mut self.event_loop
     }
 
-    fn shutdown(self) -> AppUiEventLoopShutdownEvidence {
+    pub(crate) fn shutdown(self) -> AppUiEventLoopShutdownEvidence {
         let Self { event_loop } = self;
         drop(event_loop);
         AppUiEventLoopShutdownEvidence::after_owner_drop()

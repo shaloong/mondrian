@@ -344,7 +344,12 @@ and terminal record must agree exactly.
 
 ## Manifest and directory closure
 
-The run manifest and final report use schema 2. Every chunk, normalized
+The run manifest and final report use schema 3. After all phase owners are
+terminal, the campaign consumes its selected Surface driver exactly once and
+embeds the shared process-local EventLoop owner-closure contract before the
+manifest is created. The final report retains the same closure in its evidence
+digest. `NotApplicable` is legal only when Concurrent Recovery did not run;
+EventLoop Rust-owner return never claims physical native termination. Every chunk, normalized
 owner report, and raw evidence receipt names one distinct leaf file. The
 evidence directory must contain exactly those files—no unrelated logs,
 subdirectories, links, partials, or extras. The supervisor derives producer

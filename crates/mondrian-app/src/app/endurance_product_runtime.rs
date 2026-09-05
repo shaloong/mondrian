@@ -12,14 +12,15 @@ use std::time::{Duration, Instant};
 
 use mondrian_platform::{
     EndurancePhaseKind, EndurancePhaseRequirement, EndurancePhaseTerminalStatus,
-    EnduranceRunManifest, ProcessMemoryProbe,
+    EnduranceRunManifest, EnduranceRunOwnerClosureEvidence, ProcessMemoryProbe,
 };
 use mondrian_reference_output::{ReferenceOutputDeviceDescriptor, ReferenceOutputOpenRequest};
 
 use super::endurance_campaign::{
     run_endurance_campaign, EnduranceCampaignClock, EnduranceCampaignError, EnduranceCampaignEvent,
     EnduranceCampaignRuntime, EnduranceExecutionOwners, EndurancePhaseTerminalEvidence,
-    EnduranceRuntimeClosure, EnduranceRuntimeSnapshot, EnduranceTerminalOwners,
+    EnduranceRunOwnerShutdownFailure, EnduranceRuntimeClosure, EnduranceRuntimeSnapshot,
+    EnduranceTerminalOwners,
 };
 use super::endurance_export::{FrozenRepeatedExportPhase, FrozenRepeatedExportRequest};
 use super::endurance_ffmpeg_toolchain::PreparedEnduranceFfmpegToolchain;
@@ -492,6 +493,31 @@ pub trait EnduranceSurfaceReopenDriver {
         operation_id: String,
         timeout: Duration,
     ) -> EnduranceSurfaceReopenRun;
+
+    /// Consume the process-local Surface/EventLoop driver after all phase owners.
+    fn shutdown(
+        self,
+    ) -> Result<EnduranceSurfaceDriverShutdownEvidence, EnduranceRunOwnerShutdownFailure>;
+}
+
+/// Typed final closure returned by one consumed Surface reopen driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnduranceSurfaceDriverShutdownEvidence {
+    /// This driver owned no physical Surface or EventLoop authority.
+    NotApplicable,
+    /// The process-local Rust EventLoop owner was dropped and returned.
+    EventLoop(crate::app_ui::window::AppUiEventLoopShutdownReceipt),
+}
+
+impl EnduranceSurfaceDriverShutdownEvidence {
+    fn into_run_owner_closure(self) -> EnduranceRunOwnerClosureEvidence {
+        match self {
+            Self::NotApplicable => EnduranceRunOwnerClosureEvidence::not_applicable(),
+            Self::EventLoop(receipt) => {
+                EnduranceRunOwnerClosureEvidence::event_loop(receipt.owner_closure())
+            }
+        }
+    }
 }
 
 /// Production winit Window driver. It is intentionally not `Send` and owns
@@ -565,6 +591,15 @@ impl EnduranceSurfaceReopenDriver for WindowEnduranceSurfaceReopenDriver {
             window_receipt,
             recovery_pump: run.recovery_pump.expect("Window driver supplied a recovery pump"),
         }
+    }
+
+    fn shutdown(
+        self,
+    ) -> Result<EnduranceSurfaceDriverShutdownEvidence, EnduranceRunOwnerShutdownFailure> {
+        let evidence = self.event_loop.shutdown();
+        let receipt = crate::app_ui::window::AppUiEventLoopShutdownReceipt::seal(evidence)
+            .map_err(|error| EnduranceRunOwnerShutdownFailure::new(error.to_string()))?;
+        Ok(EnduranceSurfaceDriverShutdownEvidence::EventLoop(receipt))
     }
 }
 
@@ -1073,23 +1108,27 @@ impl PhaseOwners {
 
 /// Concrete runtime over fresh App owners and the production phase drivers.
 pub(crate) struct ProductEnduranceCampaignRuntime<F, S, C> {
+    state: RuntimeState,
+    surface: Option<S>,
+    run_owner_closure: Option<EnduranceRunOwnerClosureEvidence>,
+    run_owner_shutdown_failure: Option<EnduranceRunOwnerShutdownFailure>,
     factory: F,
-    surface: S,
     clock: Arc<C>,
     timeouts: Option<EnduranceProductRuntimeTimeouts>,
     machine_plan: Option<Arc<PreparedCommercialEnduranceMachinePlan>>,
-    state: RuntimeState,
 }
 
 impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
     fn new(factory: F, surface: S, clock: Arc<C>) -> Self {
         Self {
+            state: RuntimeState::Empty,
+            surface: Some(surface),
+            run_owner_closure: None,
+            run_owner_shutdown_failure: None,
             factory,
-            surface,
             clock,
             timeouts: None,
             machine_plan: None,
-            state: RuntimeState::Empty,
         }
     }
 }
@@ -1113,12 +1152,13 @@ where
     C: EnduranceCampaignClock,
     P: ProcessMemoryProbe,
 {
-    factory.validate_machine_plan(prepared_request.machine_plan())?;
-    let request = prepared_request.into_campaign_request();
     let mut runtime = ProductEnduranceCampaignRuntime::new(factory, surface, Arc::clone(&clock));
-    runtime.run_with_terminal_evidence(|runtime| {
+    let result = runtime.run_with_terminal_evidence(|runtime| {
+        runtime.factory.validate_machine_plan(prepared_request.machine_plan())?;
+        let request = prepared_request.into_campaign_request();
         run_endurance_campaign(request, runtime, process_memory, clock.as_ref())
-    })
+    });
+    runtime.finish_run(result)
 }
 
 impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
@@ -1141,6 +1181,111 @@ impl<F, S, C> ProductEnduranceCampaignRuntime<F, S, C> {
             }
         })
     }
+
+    fn shutdown_run_owner(
+        &mut self,
+    ) -> Result<EnduranceRunOwnerClosureEvidence, EnduranceCampaignError>
+    where
+        S: EnduranceSurfaceReopenDriver,
+    {
+        if matches!(self.state, RuntimeState::Owned(_)) {
+            return Err(runtime_error(
+                "cannot close the campaign Surface driver while phase owners remain",
+            ));
+        }
+        if let Some(closure) = &self.run_owner_closure {
+            return Ok(closure.clone());
+        }
+        if let Some(failure) = &self.run_owner_shutdown_failure {
+            return Err(EnduranceCampaignError::RunOwnerShutdown(failure.clone()));
+        }
+        let surface = self.surface.take().ok_or_else(|| {
+            runtime_error("campaign Surface driver was consumed without terminal evidence")
+        })?;
+        match surface.shutdown() {
+            Ok(evidence) => {
+                let closure = evidence.into_run_owner_closure();
+                if !closure.all_owned_authority_released() {
+                    return Err(runtime_error(
+                        "campaign Surface driver returned incomplete owner closure",
+                    ));
+                }
+                self.run_owner_closure = Some(closure.clone());
+                Ok(closure)
+            }
+            Err(failure) => {
+                self.run_owner_shutdown_failure = Some(failure.clone());
+                Err(EnduranceCampaignError::RunOwnerShutdown(failure))
+            }
+        }
+    }
+
+    fn finish_run<T>(
+        &mut self,
+        result: Result<T, EnduranceCampaignError>,
+    ) -> Result<T, EnduranceCampaignError>
+    where
+        S: EnduranceSurfaceReopenDriver,
+    {
+        match result {
+            Ok(value) if self.run_owner_closure.is_some() => Ok(value),
+            Ok(_) => {
+                let primary = runtime_error(
+                    "campaign operation completed before run-owner closure was captured",
+                );
+                match self.shutdown_run_owner() {
+                    Ok(closure) => Err(EnduranceCampaignError::WithRunOwnerClosureEvidence {
+                        primary: Box::new(primary),
+                        closure,
+                    }),
+                    Err(EnduranceCampaignError::RunOwnerShutdown(shutdown)) => {
+                        Err(EnduranceCampaignError::RunOwnerShutdownAfterFailure {
+                            primary: Box::new(primary),
+                            shutdown,
+                        })
+                    }
+                    Err(shutdown) => Err(EnduranceCampaignError::StartedPhaseCleanup {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(shutdown),
+                    }),
+                }
+            }
+            Err(primary) => {
+                if let Some(closure) = &self.run_owner_closure {
+                    return Err(EnduranceCampaignError::WithRunOwnerClosureEvidence {
+                        primary: Box::new(primary),
+                        closure: closure.clone(),
+                    });
+                }
+                if let Some(shutdown) = &self.run_owner_shutdown_failure {
+                    return if retains_run_owner_shutdown(&primary) {
+                        Err(primary)
+                    } else {
+                        Err(EnduranceCampaignError::RunOwnerShutdownAfterFailure {
+                            primary: Box::new(primary),
+                            shutdown: shutdown.clone(),
+                        })
+                    };
+                }
+                match self.shutdown_run_owner() {
+                    Ok(closure) => Err(EnduranceCampaignError::WithRunOwnerClosureEvidence {
+                        primary: Box::new(primary),
+                        closure,
+                    }),
+                    Err(EnduranceCampaignError::RunOwnerShutdown(shutdown)) => {
+                        Err(EnduranceCampaignError::RunOwnerShutdownAfterFailure {
+                            primary: Box::new(primary),
+                            shutdown,
+                        })
+                    }
+                    Err(shutdown) => Err(EnduranceCampaignError::StartedPhaseCleanup {
+                        primary: Box::new(primary),
+                        cleanup: Box::new(shutdown),
+                    }),
+                }
+            }
+        }
+    }
 }
 
 impl<F, S, C> EnduranceCampaignRuntime for ProductEnduranceCampaignRuntime<F, S, C>
@@ -1149,6 +1294,12 @@ where
     S: EnduranceSurfaceReopenDriver,
     C: EnduranceCampaignClock,
 {
+    fn shutdown_run_owner(
+        &mut self,
+    ) -> Result<EnduranceRunOwnerClosureEvidence, EnduranceCampaignError> {
+        ProductEnduranceCampaignRuntime::shutdown_run_owner(self)
+    }
+
     fn begin_phase_preparation(&mut self) {
         if let RuntimeState::Terminal { evidence, .. } = &mut self.state {
             *evidence = None;
@@ -1292,7 +1443,10 @@ where
 
         let mut events = Vec::new();
         while owners.recovery_due(deadline_run_us).map_err(runtime_error)? {
-            match owners.execute_recovery_cycle(&mut self.surface, self.clock.as_ref(), timeouts) {
+            let surface = self.surface.as_mut().ok_or_else(|| {
+                runtime_error("campaign Surface driver closed before recovery completed")
+            })?;
+            match owners.execute_recovery_cycle(surface, self.clock.as_ref(), timeouts) {
                 Ok(recovery_events) => events.extend(recovery_events),
                 Err(detail) => {
                     owners.fault = Some(detail.clone());
@@ -1550,6 +1704,17 @@ fn runtime_error(detail: impl Into<String>) -> EnduranceCampaignError {
     EnduranceCampaignError::Runtime(detail.into())
 }
 
+fn retains_run_owner_shutdown(error: &EnduranceCampaignError) -> bool {
+    match error {
+        EnduranceCampaignError::RunOwnerShutdown(_) => true,
+        EnduranceCampaignError::WithTerminalEvidence { primary, .. }
+        | EnduranceCampaignError::WithRunOwnerClosureEvidence { primary, .. } => {
+            retains_run_owner_shutdown(primary)
+        }
+        _ => false,
+    }
+}
+
 fn supervised_child_processes_remaining(
     shutdown: &super::endurance_shutdown::AppEnduranceShutdownEvidence,
 ) -> u32 {
@@ -1601,6 +1766,52 @@ mod tests {
             _timeout: Duration,
         ) -> EnduranceSurfaceReopenRun {
             panic!("Surface reopen must not run in admission/partial-start tests")
+        }
+
+        fn shutdown(
+            self,
+        ) -> Result<EnduranceSurfaceDriverShutdownEvidence, EnduranceRunOwnerShutdownFailure>
+        {
+            Ok(EnduranceSurfaceDriverShutdownEvidence::NotApplicable)
+        }
+    }
+
+    struct ProbeSurface {
+        shutdown_calls: Rc<Cell<u32>>,
+        phase_terminal: Option<Rc<Cell<bool>>>,
+        fail_shutdown: bool,
+    }
+
+    impl EnduranceSurfaceReopenDriver for ProbeSurface {
+        fn reopen(
+            &mut self,
+            _app_state: AppState,
+            _recovery_pump: EnduranceSurfaceRecoveryPump,
+            _cycle_index: u32,
+            _operation_id: String,
+            _timeout: Duration,
+        ) -> EnduranceSurfaceReopenRun {
+            panic!("Surface reopen is outside run-owner closure tests")
+        }
+
+        fn shutdown(
+            self,
+        ) -> Result<EnduranceSurfaceDriverShutdownEvidence, EnduranceRunOwnerShutdownFailure>
+        {
+            if let Some(phase_terminal) = &self.phase_terminal {
+                assert!(
+                    phase_terminal.get(),
+                    "Surface closed before phase terminalization"
+                );
+            }
+            self.shutdown_calls.set(self.shutdown_calls.get() + 1);
+            if self.fail_shutdown {
+                Err(EnduranceRunOwnerShutdownFailure::new(
+                    "injected Surface close failure",
+                ))
+            } else {
+                Ok(EnduranceSurfaceDriverShutdownEvidence::NotApplicable)
+            }
         }
     }
 
@@ -1849,6 +2060,119 @@ mod tests {
             .run_with_terminal_evidence::<()>(|_| Err(runtime_error("second failure")))
             .unwrap_err();
         assert!(matches!(second, EnduranceCampaignError::Runtime(_)));
+    }
+
+    #[test]
+    fn run_owner_shutdown_is_exactly_once_and_retained_on_primary_failure() {
+        let shutdown_calls = Rc::new(Cell::new(0));
+        let factory = TestFactory {
+            inventory: EndurancePreStartCapabilityInventory::new([]),
+            build_calls: Rc::new(Cell::new(0)),
+            fail_build: false,
+        };
+        let mut runtime = ProductEnduranceCampaignRuntime::new(
+            factory,
+            ProbeSurface {
+                shutdown_calls: Rc::clone(&shutdown_calls),
+                phase_terminal: None,
+                fail_shutdown: false,
+            },
+            Arc::new(TestClock::default()),
+        );
+
+        let error = runtime
+            .finish_run::<()>(Err(runtime_error("injected preflight failure")))
+            .expect_err("primary failure must remain a failure");
+        assert!(matches!(
+            error,
+            EnduranceCampaignError::WithRunOwnerClosureEvidence { primary, closure }
+                if matches!(*primary, EnduranceCampaignError::Runtime(ref detail)
+                    if detail == "injected preflight failure")
+                    && matches!(closure, EnduranceRunOwnerClosureEvidence::NotApplicable)
+        ));
+        assert_eq!(shutdown_calls.get(), 1);
+
+        let second = runtime
+            .finish_run::<()>(Err(runtime_error("later publication failure")))
+            .expect_err("later failure must retain the same closure");
+        assert!(matches!(
+            second,
+            EnduranceCampaignError::WithRunOwnerClosureEvidence { closure, .. }
+                if matches!(closure, EnduranceRunOwnerClosureEvidence::NotApplicable)
+        ));
+        assert_eq!(shutdown_calls.get(), 1);
+    }
+
+    #[test]
+    fn phase_terminal_precedes_run_owner_shutdown_and_success_requires_closure() {
+        let shutdown_calls = Rc::new(Cell::new(0));
+        let phase_terminal = Rc::new(Cell::new(false));
+        let factory = TestFactory {
+            inventory: EndurancePreStartCapabilityInventory::new([]),
+            build_calls: Rc::new(Cell::new(0)),
+            fail_build: false,
+        };
+        let mut runtime = ProductEnduranceCampaignRuntime::new(
+            factory,
+            ProbeSurface {
+                shutdown_calls: Rc::clone(&shutdown_calls),
+                phase_terminal: Some(Rc::clone(&phase_terminal)),
+                fail_shutdown: false,
+            },
+            Arc::new(TestClock::default()),
+        );
+        runtime.state = RuntimeState::Terminal { snapshot: None, evidence: None };
+        phase_terminal.set(true);
+
+        runtime.shutdown_run_owner().expect("close run owner before publication");
+        runtime.finish_run(Ok(())).expect("clean owner closure");
+
+        assert_eq!(shutdown_calls.get(), 1);
+        assert!(matches!(
+            runtime.run_owner_closure,
+            Some(EnduranceRunOwnerClosureEvidence::NotApplicable)
+        ));
+    }
+
+    #[test]
+    fn run_owner_shutdown_failure_does_not_overwrite_primary_failure() {
+        let shutdown_calls = Rc::new(Cell::new(0));
+        let factory = TestFactory {
+            inventory: EndurancePreStartCapabilityInventory::new([]),
+            build_calls: Rc::new(Cell::new(0)),
+            fail_build: false,
+        };
+        let mut runtime = ProductEnduranceCampaignRuntime::new(
+            factory,
+            ProbeSurface {
+                shutdown_calls: Rc::clone(&shutdown_calls),
+                phase_terminal: None,
+                fail_shutdown: true,
+            },
+            Arc::new(TestClock::default()),
+        );
+
+        let error = runtime
+            .finish_run::<()>(Err(runtime_error("injected campaign failure")))
+            .expect_err("both failures must be retained");
+
+        assert!(matches!(
+            error,
+            EnduranceCampaignError::RunOwnerShutdownAfterFailure { primary, shutdown }
+                if matches!(*primary, EnduranceCampaignError::Runtime(ref detail)
+                    if detail == "injected campaign failure")
+                    && shutdown.diagnostic() == "injected Surface close failure"
+        ));
+        assert_eq!(shutdown_calls.get(), 1);
+        let second = runtime
+            .finish_run::<()>(Err(runtime_error("second campaign failure")))
+            .expect_err("stored shutdown failure must remain stable");
+        assert!(matches!(
+            second,
+            EnduranceCampaignError::RunOwnerShutdownAfterFailure { shutdown, .. }
+                if shutdown.diagnostic() == "injected Surface close failure"
+        ));
+        assert_eq!(shutdown_calls.get(), 1);
     }
 
     #[test]

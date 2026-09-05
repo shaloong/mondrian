@@ -2266,8 +2266,12 @@ a distinct operation-admission outcome with EventLoop handback and no invented
 Window evidence. Both batch and one-operation entrypoints return this complete
 outcome; neither projects away batch-level evidence. Durable standalone
 batch/failure serialization is complete. Old/candidate/final-generation
-history, campaign EventLoop closure, OS/driver terminal evidence, and
-independent semantic replay remain unfinished lifecycle work.
+history, OS/driver terminal evidence, and independent semantic replay remain
+unfinished lifecycle work. The campaign now consumes its selected Surface
+driver exactly once after all phase/App owners, embeds the shared EventLoop
+Rust-owner closure in run-manifest schema 3, and retains that closure across
+publication failure. The current endurance CLI selects the explicit
+`NotApplicable` headless driver, so it does not claim physical Window coverage.
 
 The final `AppEnduranceShutdownEvidence` now has one bounded schema-1 receipt
 Module. It projects Project and the seven named App worker domains into fixed

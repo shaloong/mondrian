@@ -26,8 +26,9 @@ pub use endurance_qualification::{
     EndurancePhaseProducerEvidence, EndurancePhaseReport, EndurancePhaseRequirement,
     EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
     EnduranceQualificationError, EnduranceQualificationProfile, EnduranceQualificationReport,
-    EnduranceQualificationStatus, EnduranceRunManifest, EnduranceSample, EnduranceSampleChunk,
-    PreparedEnduranceQualification,
+    EnduranceQualificationStatus, EnduranceRunManifest, EnduranceRunOwnerClosureEvidence,
+    EnduranceSample, EnduranceSampleChunk, PreparedEnduranceQualification,
+    ProcessEventLoopOwnerClosureEvidence,
 };
 pub use memory::{
     ExecutionMemoryProbe, PhysicalMemoryCapacityProbe, PhysicalMemoryCapacityProbeBackend,

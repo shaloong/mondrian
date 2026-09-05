@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use mondrian_export::{ExportEnduranceSnapshot, ExportQueueShutdownEvidence};
 use mondrian_platform::{
     EndurancePhaseKind, EndurancePhaseRequirement, EndurancePhaseTerminalStatus,
-    EnduranceQualificationProfile, EnduranceRunManifest, ProcessMemoryProbe, ProcessMemoryScope,
+    EnduranceQualificationProfile, EnduranceRunManifest, EnduranceRunOwnerClosureEvidence,
+    ProcessMemoryProbe, ProcessMemoryScope,
 };
 use mondrian_playback::PlaybackEvidenceReport;
 use mondrian_reference_output::ReferenceOutputDiagnostics;
@@ -1008,6 +1009,13 @@ pub trait EnduranceCampaignRuntime {
     fn shutdown_phase(
         &mut self,
     ) -> Result<(EnduranceRuntimeClosure, Vec<EnduranceCampaignEvent>), EnduranceCampaignError>;
+
+    /// Consume the run-level Surface/EventLoop owner after every phase owner.
+    fn shutdown_run_owner(
+        &mut self,
+    ) -> Result<EnduranceRunOwnerClosureEvidence, EnduranceCampaignError> {
+        Ok(EnduranceRunOwnerClosureEvidence::not_applicable())
+    }
 }
 
 /// Immutable inputs for one complete serial campaign.
@@ -1093,7 +1101,10 @@ where
             }
         }
     }
-    capture.seal_manifest(&request.output_manifest_path).map_err(Into::into)
+    let owner_closure = runtime.shutdown_run_owner()?;
+    capture
+        .seal_manifest(&request.output_manifest_path, owner_closure)
+        .map_err(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1313,9 +1324,48 @@ fn validate_workload_map(
     Ok(())
 }
 
+/// Stable consuming run-owner shutdown failure retained by campaign errors.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("endurance run owner shutdown failed: {diagnostic}")]
+pub struct EnduranceRunOwnerShutdownFailure {
+    diagnostic: String,
+}
+
+impl EnduranceRunOwnerShutdownFailure {
+    /// Construct a driver-owned typed failure without discarding its diagnostic.
+    pub fn new(diagnostic: impl Into<String>) -> Self {
+        Self { diagnostic: diagnostic.into() }
+    }
+
+    /// Driver-provided failure diagnostic.
+    pub fn diagnostic(&self) -> &str {
+        &self.diagnostic
+    }
+}
+
 /// Stable campaign coordination failure.
 #[derive(Debug, Error)]
 pub enum EnduranceCampaignError {
+    /// A failure still retains the exact run-level owner closure that preceded it.
+    #[error("{primary}; run owner closure evidence retained")]
+    WithRunOwnerClosureEvidence {
+        /// Original campaign or publication failure.
+        #[source]
+        primary: Box<EnduranceCampaignError>,
+        /// Actual outer closure completed before the failure returned.
+        closure: EnduranceRunOwnerClosureEvidence,
+    },
+    /// The consuming run-owner close itself failed.
+    #[error(transparent)]
+    RunOwnerShutdown(EnduranceRunOwnerShutdownFailure),
+    /// Both the original campaign failure and run-owner close failure are retained.
+    #[error("endurance campaign failed ({primary}) and run owner shutdown failed ({shutdown})")]
+    RunOwnerShutdownAfterFailure {
+        /// Original campaign failure.
+        primary: Box<EnduranceCampaignError>,
+        /// Distinct run-owner close failure.
+        shutdown: EnduranceRunOwnerShutdownFailure,
+    },
     /// The public product return retains actual consuming evidence independently
     /// of whether the primary failure occurred before, during, or after cleanup.
     #[error("{primary}; terminal owner evidence retained")]
