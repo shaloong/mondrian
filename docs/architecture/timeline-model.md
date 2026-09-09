@@ -1482,3 +1482,8 @@ IDs while retaining analysis provenance. Product edits enter the normal
 Authoring Session, validate the detached complete state, advance one revision,
 and produce one Undo receipt. Machine-local executable paths, licenses, adopter
 status, and entitlement secrets are never persisted in Timeline author state.
+
+Direct Asset placement treats a coherent still-image picture as timeless: it
+requires an admitted primary picture and valid geometry, not nonzero probed
+media duration. The existing Timeline still-clip duration remains authoritative.
+Timed Video and Audio Assets continue to require a positive media duration.

@@ -122,9 +122,12 @@ fn validate_placement_asset(
     asset: &AssetRecord,
 ) -> mondrian_core::Result<()> {
     let compatible = match (track_kind, asset.kind.clone()) {
-        (PlacementTrackKind::Video, AssetKind::Video | AssetKind::StillImage) => asset
+        (PlacementTrackKind::Video, AssetKind::Video) => asset
             .media_probe()
             .is_some_and(|probe| !probe.duration.is_zero() && probe.primary_video().is_some()),
+        (PlacementTrackKind::Video, AssetKind::StillImage) => {
+            asset.media_probe().is_some_and(|probe| probe.primary_video().is_some())
+        }
         (PlacementTrackKind::Video, AssetKind::AdjustmentLayer | AssetKind::SolidColor) => true,
         (PlacementTrackKind::Audio, AssetKind::Audio) => asset
             .media_probe()
@@ -162,5 +165,35 @@ fn placement_error(reason: impl Into<String>) -> MondrianError {
     MondrianError::WorkflowStepFailed {
         step_id: "timeline_place_asset".to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_duration_png_remains_placeable_without_inventing_video_duration() {
+        let root = tempfile::tempdir().expect("fixture directory");
+        let path = root.path().join("still.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([127, 31, 63, 0]))
+            .save(&path)
+            .expect("write actual PNG");
+        let path = path.canonicalize().expect("canonical fixture");
+        let probe = mondrian_media::probe_media_info(&path).expect("probe actual PNG");
+        assert!(probe.duration.is_zero());
+        assert!(probe.primary_video().is_some());
+        let fingerprint = mondrian_media::MediaFileFingerprint::capture(&path);
+        let candidate = mondrian_assets::AssetMediaProbeCandidate::new(path, fingerprint, probe)
+            .expect("admitted picture probe");
+        let library = mondrian_assets::AssetLibrary::open(root.path().join("library"))
+            .expect("fixture library");
+        let id = library.commit_media_probe(candidate, None).expect("commit actual probe");
+        let mut asset = library.get_asset(id).expect("read asset").expect("committed asset");
+        assert_eq!(asset.kind, AssetKind::StillImage);
+        assert!(validate_placement_asset(PlacementTrackKind::Video, &asset).is_ok());
+        assert!(validate_placement_asset(PlacementTrackKind::Audio, &asset).is_err());
+        asset.kind = AssetKind::Video;
+        assert!(validate_placement_asset(PlacementTrackKind::Video, &asset).is_err());
     }
 }
