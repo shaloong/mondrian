@@ -5,6 +5,215 @@ software contracts, passing developer tests, and physical qualification are
 different evidence. Update this list after each coherent implementation block;
 do not promote an unavailable or failed measurement to a pass.
 
+## Current local closure, 2026-09-09
+
+The current Windows source closes the locally executable COL-047 software loop.
+Validation build 153 produced example SHA-256
+`4101829CA0CFBBFB6837574047F4574A0AB6543D0E5538CB74A6DEE5C2DFED85`.
+The same binary completed both 15-second and 30-second-per-phase native DX12
+runs with the user's six Mondrian Test fixtures, target exit code zero, no
+ProcDump, and reports
+`ACC6983219B78BA7C2E7F235CA5C3EAD675EC3D209B26A371DF90EFF2A63F95D`
+and
+`679ED9433D9070583309DD1DFF8086D6DEB3F8616D9E2004AED110AF8045C9B6`.
+The final run completed 664 playback/seek/cache intervals, 4,743 concurrent
+playback/export intervals, and 5,134 cancel/retry/seek/cache intervals. It
+published and independently full-decoded two repeated artifacts in phase 2 and
+two after the phase-3 cancel/retry chain. Seek, Critical-to-Nominal cache
+pressure, and Headless surface/device reopen receipts all closed with exact
+picture readiness and no owner-shutdown error.
+
+The final fixes remain inside the existing authorities. Yielded Export work is
+projected from queue diagnostics as queued demand so it can reacquire a heavy
+slot after Critical pressure; it is not a second queue. Playback now keeps the
+exact monotonic callback counter separate from the delay-corrected device-point
+estimate. Raw counter or media-anchor regression still hands off fail-closed;
+overlapping adjacent uncertainty intervals clamp only the estimated point and
+retain AudioDevice authority. All 206 Playback unit tests, the accelerated
+30-minute 48 kHz/29.97 continuity test, and strict App/Playback/Export
+all-target/all-feature Clippy pass.
+
+This is local software closure, not commercial or physical qualification. The
+final report deliberately retains `commercial_qualification=false`,
+`duration_72h_qualified=false`, `physical_surface_qualified=false`,
+`hdr_surface_qualified=false`, `physical_reference_output_qualified=false`, and
+`original_native_media_qualified=false`. Missing hardware/provider/fixture
+continues to produce admission-time NotRun. Remaining work is restricted to:
+
+- COL-010: physical HDR/P3/ICC Viewer display and measurement.
+- COL-031: the sealed reference-machine performance matrix, including the
+  deferred 32 GiB physical baseline.
+- COL-042/COL-043: real DeckLink/AJA SDI, Genlock, and reference-monitor chain.
+- COL-044: physical ANC wire readback and receiver qualification for the implemented
+  608/708 and AS-11 ST436 paths, broadcaster-approved PSE/BT.1702 providers/corpus,
+  and final broadcast-artifact rescan.
+- COL-045: a same-run pinned external-application matrix. Local Blender 5.1.1
+  and Premiere 24.0.0.58 captures are retained as failed/capability-mismatch
+  evidence; Resolve is absent.
+- COL-046: macOS/Linux native execution and the remaining physical
+  platform/driver/display rows.
+- COL-047: the actual 72-hour physical campaign and independent replay on an
+  admitted COL-046 machine.
+
+The older progress sections below are chronological evidence and are
+superseded as statements of current local source status.
+
+## Expanded local batch, 2026-09-06 — validation in progress
+
+Latest completed native checks: Media 459, Export 269, Reference Output 52,
+Platform Core 8 and Broadcast 30 library tests passed. The latest App harness
+passed 2,149 tests and failed eight tests sharing a noncanonical Windows preset
+path fixture; that fixture is corrected in source and awaits a fresh harness.
+These counts describe their recorded binaries, before the subsequent Preview
+scheduling corrections, rather than a completed current-source gate.
+
+Shared frozen ANC, repeated AS-11 output, exact 60000/1001 policy inputs,
+sidecar/journal inventories and consuming approved BMX runtime authority are
+implemented. The [independent ANC verifier](endurance-ancillary-evidence.md)
+rejects 28 structural attacks; the phase owner corpus rejects 208 fully rehashed
+mutations. The complete endurance integration suite passes 20 tests, including
+PowerShell replay and shared-preset snapshot deduplication. Actual approved BMX
+execution wrapped and independently rescanned three ANC-only OP1a MXFs, rejected
+cancellation and consumed its runtime cleanly. This does not qualify a complete
+AS-11 video/audio deliverable or physical SDI output.
+
+Native Mondrian capture and independent EXR/PNG/TIFF inspection completed.
+Three actual Window/Surface reopen cycles and independent receipt replay passed.
+The GPU alpha diagnostic preserved every Float32 alpha bit and isolated the
+observed UNORM midpoint difference; it did not change production color semantics.
+
+Real six-source playback remains under validation. Smoke09 proved stopped and
+timed current GPU readiness and the immediate successor decode, after correcting
+precision-aware reservations, full Current dependency admission, static-image
+decoder ownership, speculative priority and completed CPU evaluation residency.
+It then failed an incorrect startup assertion that prohibited natural Audio clock
+frame advancement. The latest source preserves separate initial/resolved exact
+picture proofs and binds the accepted handoff to physical stream generation,
+sample anchor and raw callback evidence. Startup/recovery may follow that clock
+under the original deadline; ordinary interval skip rejection is unchanged.
+The first strict Clippy pass completed; final evidence predicates and fresh
+native smoke remain in progress. The actual video/static/video Media test passed
+with independent decoder residency and complete release. The newer standalone
+Media harness passed 462 tests and failed one pre-cancel adapter assertion; that
+adapter is corrected in source and awaits the combined fresh harness.
+Failed native reports are retained. No 72-hour, HDR, SDI,
+Genlock, PSE or cross-machine physical qualification is claimed.
+
+The current source extends the shared production owners with ordered Window
+generation histories, complete GPU callback/wake closure, whole-operation
+Golden/Perf consuming receipts, durable phase owner history, a native Windows
+pre-loader, retained child/runtime authority, bounded final encoded-picture QC,
+approved regulatory-provider admission, and native three-phase composition.
+These replace the corresponding earlier source gaps described in the dated
+history below. Final combined App/native validation and strict workspace gates
+are still in progress; the new source is not yet a completed batch result.
+
+### Earlier validation history (superseded counts)
+
+The earlier consolidated five-library native batch was green: App 2,147, Media 456,
+Export 269, Broadcast 30 and Reference Output 48 tests passed (2,950 total;
+58 default-ignored cases, three of which were subsequently selected and passed
+on the real GPU). The independent endurance suite passed 17 tests, the external
+comparison contract suite passed 12 with one hardware case ignored, and the
+PowerShell phase corpus rejected 145 fully rehashed attacks across three clean
+baselines. Prior Window/pre-loader corpora rejected 645/12 malformed receipts.
+Official BMX 1.6 final-MXF round trips passed two actual native tests, including
+SCC/708 CDP transport. Strict workspace all-target/all-feature Clippy passed
+before the additional native-entrypoint corrections described below.
+
+A fresh ordinary Windows executable completed three actual Surface/device reopen
+cycles (21–23). Independent replay verified all three ordered generation histories,
+raw recovery/Runtime/Host hashes and consuming App closure. The report explicitly
+retains unverified physical OS termination and does not qualify HDR/P3 or 72 hours.
+Raw results are under `.scratch/endurance-batch/window-native-01.json` and
+`window-native-01-independent.json`.
+
+The first ordinary capture/smoke runs correctly rejected invalid startup state:
+a scene-linear Program delivery target and the post-authoring nonzero playhead.
+Their entrypoints now choose a display Program plus per-export targets and reset
+the transport through ordinary stop/seek actions before phase admission. The
+independent performance protocol also injects cache configuration before worker
+construction, including required-cache startup failure, instead of letting the
+ordinary build's automatic default cache invalidate its negative case. Fresh
+native reruns of these corrections remain in progress; initial failure reports
+are retained rather than overwritten. The second real capture exposed missing
+GBR/GBRA Float32 probe mappings despite an existing float decoder. Four exact
+endian-aware Core formats now retain depth/Alpha proof, and a subsequent complete
+Core/Media run passed 349/457 tests. Follow-up source corrections preserve planar
+Float32 for encoded RGB and DataTexture too, avoiding RGBA64 integer quantization.
+The second real-media smoke also exposed missing initial exact AV priming; shared
+initial/recovery readiness and settled-driver picture continuity are now included
+in the next consolidated build. These newest changes are not yet native-passed.
+
+The AJA SDK 18.1.0 and DeckLink API 12.0 bridges now have compiled native
+lifecycle and raw ANC readback support. The DeckLink bridge uses the 27
+unmodified BMD-licensed interfaces redistributed by official OBS commit
+`671fb57daf4972fcd506689a48a474dd4eda9e66`; its MIDL/MSVC build requires no
+SDK 16 registration. SDK 16 is not claimed. No AJA/DeckLink device or Genlock
+chain was found locally, and the native DeckLink probe reports the actual
+missing Desktop Video COM driver. No physical bridge qualification is implied.
+The regulatory PSE adapter
+requires an approved actual provider, profile and runtime closure, and rejects
+missing prerequisites before a qualified phase starts.
+
+The user permits a local Blender/Premiere scope without Resolve and explicitly
+defers HDR/P3 plus the 32 GiB baseline to another machine. Blender 5.1.1 and
+Premiere 24.0.0.58 have produced real native images; independent decoding found
+contract mismatches, retained in the [capture runbook](cross-application-color-capture.md).
+The source now also provides validation-only ordinary-product capture and a
+bounded real-media recovery smoke using the user's Mondrian Test fixtures.
+Neither an external application launching nor a short smoke establishes the
+requested cross-application or 72-hour qualification.
+
+## Consolidated implementation and validation order (2026-09-05)
+
+The originally requested COL-047 software layers are already present: shared
+Headless coordinator/session, serial three-phase runtime and owner snapshots,
+canonical Timeline Reference pump, frozen repeated Export with independent
+artifact verification, four recovery owners, strict admission and the
+validation-only executable. Their presence does not close the physical
+campaign. The built-in executable factory can currently compose Continuous
+Export; physical phase composition remains unavailable and is admitted NotRun.
+
+Complete the remaining work in dependency groups, with one App build per
+coherent source state and multiple libtest filters, then one workspace Clippy
+gate. The runbook contains the consolidated command. Do not interleave a full
+release link after every receipt or test edit.
+
+1. Owner evidence: complete callback/GPU and Golden whole-operation ownership,
+   retain ordered candidate/dirty-retirement histories and raw successful phase
+   shutdown receipts. This block closes Window success/failure typed semantic
+   replay, complete nested Host owner validation and required-cache inventory.
+   Keep the uncompleted history/ownership items below open.
+2. Executable authority: close capsule/spawn/child leases and pre-loader mapped
+   identity before claiming an exact machine campaign. These are software and
+   native-adapter tasks, not merely hardware tests.
+3. Machine composition: integrate a real physical Audio/Reference/external-lock
+   factory with immutable canonical fixtures and the existing runtime. Absent
+   provider, signal or fixture must remain pre-start NotRun; no synthetic
+   receipt can make this phase Ready. Vendor bridge implementation is COL-042.
+4. Local validation: run deterministic adversarial replay and lifecycle tests
+   as one batch, then eligible real Windows smoke using the final binary and
+   immutable reports. A short smoke cannot replace any 24-hour phase.
+5. Transfer: qualified HDR/P3 Viewer, DeckLink/AJA/Genlock/monitor, broadcast
+   packaging/captions/ANC wire and final-product QC, pinned external applications,
+   native macOS/Linux implementation plus matrix, and the physical 72-hour run.
+   Collect these only after the corresponding software owners are complete.
+
+The new owner replay fixture preserves only non-identifying raw closure facts
+from an earlier local Window capture. Deterministic mutation tests are software
+regressions, not fresh native or hardware qualification evidence.
+
+Local batch evidence for the owner replay change: 114 selected App tests passed
+in 4.52s after one 6m49s App test link; three explicitly selected real Headless
+GPU ownership tests reused that binary and passed in 17.69s. The platform and
+independent campaign suite passed 17 tests, including fully rehashed dirty
+Runtime/Host reports. Fast PowerShell replay rejected 633 adversarial mutations;
+existing performance owner-closure replay also passed. These are developer-run
+software results, not a sealed release-candidate or physical campaign. Final
+ordinary-build cfg cleanup is covered by strict default and full-feature checks;
+no new physical Window/72-hour capture is implied.
+
 ## Remaining scope at a glance
 
 All eight IDs below remain open as complete deliverables. Historical `done`
@@ -17,9 +226,9 @@ completed-block report.
 | --- | --- | --- |
 | P0 COL-010 | Actual HDR/P3/ICC Viewer qualification | Qualified display hardware |
 | P1 COL-031 | Cold-start cancellation latency, eligible local diagnostics, complete sealed performance matrix | Local software work; full baseline needs a qualifying machine with at least 32 GiB RAM |
-| P2 COL-042 | DeckLink/AJA native bridge and SDI output qualification | Vendor implementation plus physical I/O |
+| P2 COL-042 | Physical SDI output qualification and bridge portability | Windows AJA 18.1.0/DeckLink API 12.0 bridges and native no-device validation implemented; hardware and other-OS qualification remain NotRun |
 | P2 COL-043 | Genlock and reference-monitor qualification | Physical reference chain |
-| P2 COL-044 | ANC/VANC, captions/timecode and broadcast QC chain | Physical ancillary-data capture and independent QC |
+| P2 COL-044 | ANC/VANC, captions/timecode transport and broadcast QC qualification | Windows native insertion/independent raw capture implemented; physical wire readback and independent QC still require the actual rig/providers |
 | P2 COL-045 | Matching Blender/Resolve/Premiere reference frames | Exact application versions, matching contracts and independent captures |
 | P2 COL-046 | Native macOS/Linux implementation and platform/driver/display matrix | Implement and execute on each target OS; Windows passes do not transfer |
 | P2 COL-047 | Remaining constructor/callback/Window/Golden ownership, raw receipts, bounded verification support, capsule/loader authority, Windows smoke, route-qualified optimization guidance, 72-hour campaign and replay | Local implementation first; full campaign and independent physical qualification remain separate |
@@ -640,7 +849,11 @@ from the local x86_64 optimization.
   baseline to a qualifying machine. Locally runnable smaller diagnostics are
   still useful but cannot be relabeled as that baseline. GPU timestamp/HDR
   admission remains execution evidence, not inferred from this inventory.
-- P2 COL-042: DeckLink/AJA vendor bridge and physical output qualification.
+- P2 COL-042: physical DeckLink/AJA output qualification and bridge portability.
+  Windows AJA SDK 18.1.0 and DeckLink API 12.0 native bridges, including
+  independent raw ANC capture, are implemented and passed native no-device
+  validation. No local SDI/reference rig is available; hardware and other-OS
+  execution remain NotRun.
 - P2 COL-043: Genlock and reference-monitor qualification.
 - P2 COL-044: physical ANC/VANC, captions/timecode, and broadcast QC chain.
 - P2 COL-045: exact-version Blender, DaVinci Resolve, and Premiere reference

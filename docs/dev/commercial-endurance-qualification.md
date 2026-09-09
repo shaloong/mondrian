@@ -37,7 +37,7 @@ and build provenance outside the evidence bundle. Do not run Cargo during any
 measured phase.
 
 ```powershell
-cargo build -p mondrian-app -p mondrian-platform-core --release --features mondrian-app/validation -j 1
+cargo build -p mondrian-app -p mondrian-platform-core -p mondrian-validation-launcher --release --features mondrian-app/validation -j 1
 $replay = "target/release/mondrian-endurance-replay.exe"
 $replaySha = (Get-FileHash -LiteralPath $replay -Algorithm SHA256).Hash.ToLowerInvariant()
 $profile = "tests/validation/commercial-endurance-qualification.json"
@@ -176,11 +176,14 @@ these low-level crate-private owners directly.
 For Playback/Reference and Concurrent/Recovery, construct
 `app::endurance_playback::PersistentTimelinePlaybackPhase` only after the exact
 prepared workload and complete capability inventory are admitted. The App must
-have one active stopped frame-zero Sequence at exactly 60/1. Its authored extent
+have one active stopped frame-zero Sequence at the prepared workload's exact
+program rate: 60/1 for the original profile, or 60000/1001 for the separately
+approved AS-11 profile. Its authored extent
 must cover `minimum_playback_presented_frames + 1`: one interval proves the
 departed frame before advancing, so the additional terminal guard frame is
 required to finish the exact 24-hour count without looping or reaching natural
-end. Pump only through `pump_interval`; every interval must remain in the same
+end. This full extent must still remain after startup Audio alignment; startup
+progress cannot consume part of the measured 24-hour window. Pump only through `pump_interval`; every interval must remain in the same
 Playback Epoch, advance exactly one frame, prove the departed exact picture, and
 retain Audio Device Clock authority. Before a cadence capture call
 `settle_window`, collect the owner envelope only after native scheduling has
@@ -453,3 +456,114 @@ software backlog is complete:
 Results from macOS and Linux remain independent platform rows. They may be
 aggregated only through the existing cross-machine manifest rules; logs or
 receipts from one operating system cannot fill another row.
+
+
+## Consolidated software regression batch
+
+Prepare related source, receipt-schema and adversarial-test changes before
+building the App test target. Run the cheap independent replay first:
+
+```powershell
+./scripts/validation/test-window-owner-closure.ps1
+cargo test -p mondrian-app --features validation --lib -j 1 -- endurance_ window_outer_receipt surface_reopen_batch_receipt background_runtime preview_render_cache preview_shutdown_evidence --test-threads=1
+cargo test -p mondrian-platform-core --test commercial_endurance_qualification -j 1
+cargo clippy --workspace --all-targets --all-features -j 1 -- -D warnings
+cargo fmt --all -- --check
+```
+
+Libtest accepts multiple OR filters after `--`; all selected suites run from
+one current-source App binary. Keep Cargo feature/profile/target configuration
+fixed, serialize Cargo invocations and retain `target`. A schema-only change
+does not require a separate release link. Changed native/GPU lifecycle code
+still requires real operation validation. The fast PowerShell test performs
+no App or hardware startup.
+
+These gates cover software semantics only. Missing physical phase providers,
+exact fixtures or capture prerequisites remain admission-time `NotRun`.
+COL-010 HDR/P3, COL-042/043 SDI and reference lock, COL-044 broadcast end-to-end
+and wire readback, COL-045 pinned external applications, COL-046 native
+platform adapters/matrix and COL-047 actual 72-hour execution remain separate
+qualification work. macOS/Linux require the documented native implementation
+as well as running tests; copying a Windows report does not qualify them.
+
+## Native pre-loader execution and independent outer closure
+
+Build the FFmpeg-free `mondrian-validation-launcher` package together with the
+validation `mondrian-endurance` executable. The approved machine plan's optional
+`verifier_tools.preloader` is a `{ path, sha256 }` binding to that exact launcher.
+A missing binding or missing authenticated native bootstrap leaves physical phase
+admission `NotRun`; no environment flag grants the capability.
+
+Prepare one launch-plan JSON with schema_version 1, launcher/application/request
+`{ path, sha256 }` bindings, the same complete ordered runtime_files as the machine
+plan, deadline_ms covering the entire campaign and cleanup, and a create-only
+report_path. The application digest must equal the run identity's
+runtime_image_sha256. Invoke it through
+`scripts/validation/invoke-native-endurance-launcher.ps1` with LauncherPath,
+ExpectedLauncherSha256, LaunchPlanPath and ExpectedLaunchPlanSha256. The native
+launcher owns the fresh App and every native descendant until terminal cleanup.
+
+After the run exits, pass PreloaderReportPath and ExpectedPreloaderReportSha256 to
+`verify-commercial-endurance-qualification.ps1` in addition to its existing exact
+approval parameters. The outer report hashes the completed child manifest and
+contains the native bootstrap, object/mapping facts, Job descendant closure, and
+exact namespace cleanup. Its digest must be independently approved as evidence;
+it is not an input environment toggle or a replacement for capture authority.
+See `docs/architecture/native-validation-launcher.md` for the precise trusted
+entrypoint boundary and failure semantics.
+
+
+## One caption/ANC program for physical output and AS-11 exports
+
+Use `tests/validation/commercial-endurance-qualification-as11-5994.json` and its
+three `*-as11-5994-v1.json` workload files for the implemented AS-11 X9
+720p60000/1001 row. These are a distinct, externally approvable profile; they do
+not alter the previously approved 60/1 workload. Their completed-frame floor is
+5,178,821 per playback/reference 24-hour phase. Obtain fresh authority/profile/
+workload hashes before launch; a local software test cannot approve them.
+
+Add one top-level machine-plan binding, with actual canonical absolute path and
+lowercase SHA-256, for example:
+
+```json
+"ancillary_program": {
+  "path": "E:/qualification/endurance/captions.frozen-ancillary.json",
+  "sha256": "<SHA256 of those exact FrozenAncillaryProgram bytes>"
+}
+```
+
+Use the ordinary Export panel's validated SCC/CDP/canonical ANC import to obtain
+the canonical attachment semantics. The plan file is the strict serialized
+`FrozenAncillaryProgram`, not the original SCC text or an alternate cue model.
+Its exact source start, cadence and frame count must match both phase Export
+selections. Bind the same 60000/1001 physical signal and reserve a nonoverlapping
+VANC marker placement; require independent physical ANC readback. Declare and
+approve the real BMX runtime bundle for AS-11 through the machine-plan provider
+contract. Missing program/provider/device/fixture yields pre-start `NotRun`.
+Invalid hashes, unsupported packets or mismatched selections reject admission.
+
+After replacing all approved input bindings, launch through the existing native
+pre-loader; do not run the linked application directly:
+
+```powershell
+$profile = 'tests/validation/commercial-endurance-qualification-as11-5994.json'
+$profileSha = (Get-FileHash -LiteralPath $profile -Algorithm SHA256).Hash.ToLowerInvariant()
+$launcher = 'target/release/mondrian-validation-launcher.exe'
+$launcherSha = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+$launchPlan = 'E:/qualification/endurance/launch-plan.json'
+$launchPlanSha = (Get-FileHash -LiteralPath $launchPlan -Algorithm SHA256).Hash.ToLowerInvariant()
+& scripts/validation/invoke-native-endurance-launcher.ps1 `
+  -LauncherPath $launcher -ExpectedLauncherSha256 $launcherSha `
+  -LaunchPlanPath $launchPlan -ExpectedLaunchPlanSha256 $launchPlanSha
+```
+
+The request inside the launch plan must bind the new profile and authority; the
+variables above do not overwrite request JSON or grant approval. Use the full
+independent verifier invocation above with the actual new profile/authority and
+pre-loader receipt bindings. Preserve all `ancillary_export_artifacts` sidecars
+and `wire_journals` at their actual owner-produced paths. The independent verifier
+checks their hashes, Export event identities, MXF frame counts, phase identity
+and the single program hash across started phases. A frame outside the selected
+attachment is intentionally empty on physical output; no replay/looping of cues
+is inferred. No-device native bridge tests and software parser tests do not
+qualify the physical SDI/Genlock/caption wire or 72-hour campaign.
