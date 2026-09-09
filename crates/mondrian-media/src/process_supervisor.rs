@@ -351,7 +351,6 @@ impl SupervisedChild {
     ) -> Result<Self, SupervisedProcessError> {
         command.configure_supervised_streams(policy.pipe_stdin);
         let child = command.spawn_supervised_until(policy.deadline).map_err(|source| {
-            #[cfg(windows)]
             let cleanup = source
                 .get_ref()
                 .and_then(|error| {
@@ -360,7 +359,6 @@ impl SupervisedChild {
                 .map(|error| error.cleanup.clone());
             let primary =
                 SupervisedProcessError::Io { stage: SupervisedProcessStage::Spawn, source };
-            #[cfg(windows)]
             if let Some(cleanup) = cleanup {
                 return SupervisedProcessError::Cleanup {
                     primary: Box::new(primary),
@@ -369,6 +367,36 @@ impl SupervisedChild {
             }
             primary
         })?;
+        Self::adopt(child, policy, stream_stdout, true)
+    }
+
+    pub(crate) fn capture_native_output(mut child: Child) -> io::Result<std::process::Output> {
+        child.stdin.take();
+        // Preserve Command::output's complete-output contract. Callers requiring
+        // bounded capture or cancellation continue to supply an explicit policy.
+        let capture =
+            SupervisedStreamCapture::Head { limit_bytes: usize::MAX, reject_excess: true };
+        let policy = SupervisedProcessPolicy {
+            stdout: capture,
+            stderr: capture,
+            ..SupervisedProcessPolicy::default()
+        };
+        let output = Self::adopt(child, policy, false, false)
+            .and_then(|owner| owner.finish_while(&|| false))
+            .map_err(io::Error::other)?;
+        Ok(std::process::Output {
+            status: output.status,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        })
+    }
+
+    fn adopt(
+        child: Child,
+        policy: SupervisedProcessPolicy,
+        stream_stdout: bool,
+        require_output_pipes: bool,
+    ) -> Result<Self, SupervisedProcessError> {
         let mut owner = Self {
             child: Some(child),
             stdin_tx: None,
@@ -383,14 +411,11 @@ impl SupervisedChild {
                 .child
                 .as_mut()
                 .ok_or(SupervisedProcessError::MissingPipe { stream: "child" })?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or(SupervisedProcessError::MissingPipe { stream: "stdout" })?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or(SupervisedProcessError::MissingPipe { stream: "stderr" })?;
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            if require_output_pipes && (stdout.is_none() || stderr.is_none()) {
+                return Err(SupervisedProcessError::MissingPipe { stream: "output" });
+            }
             let stdout_sender = if stream_stdout {
                 let (sender, receiver) = mpsc::sync_channel(2);
                 owner.stdout_chunks = Some(receiver);
@@ -398,22 +423,26 @@ impl SupervisedChild {
             } else {
                 None
             };
-            owner.stdout = spawn_pipe_drain_inner(
-                stdout,
-                owner.policy.stdout,
-                SupervisedProcessStream::Stdout,
-                stdout_sender,
-            )
-            .map_err(|source| SupervisedProcessError::Io {
-                stage: SupervisedProcessStage::StdoutDrain,
-                source,
-            })?;
-            owner.stderr =
-                spawn_pipe_drain(stderr, owner.policy.stderr, SupervisedProcessStream::Stderr)
-                    .map_err(|source| SupervisedProcessError::Io {
-                        stage: SupervisedProcessStage::StderrDrain,
-                        source,
-                    })?;
+            if let Some(stdout) = stdout {
+                owner.stdout = spawn_pipe_drain_inner(
+                    stdout,
+                    owner.policy.stdout,
+                    SupervisedProcessStream::Stdout,
+                    stdout_sender,
+                )
+                .map_err(|source| SupervisedProcessError::Io {
+                    stage: SupervisedProcessStage::StdoutDrain,
+                    source,
+                })?;
+            }
+            if let Some(stderr) = stderr {
+                owner.stderr =
+                    spawn_pipe_drain(stderr, owner.policy.stderr, SupervisedProcessStream::Stderr)
+                        .map_err(|source| SupervisedProcessError::Io {
+                            stage: SupervisedProcessStage::StderrDrain,
+                            source,
+                        })?;
+            }
             if owner.policy.pipe_stdin {
                 let stdin = child
                     .stdin

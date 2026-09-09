@@ -1,4 +1,5 @@
 //! Windows descendants join their owner before application code can execute.
+use crate::ffmpeg_command::check_spawn_deadline;
 use std::fs::File;
 use std::io;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
@@ -109,17 +110,6 @@ impl NativeProcessJob {
         if unsafe { TerminateJobObject(self.handle.as_raw_handle(), 0xdead) } == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(())
-    }
-}
-
-pub(crate) fn check_spawn_deadline(deadline: Option<Instant>) -> io::Result<()> {
-    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            "original native spawn deadline exceeded",
-        ))
-    } else {
         Ok(())
     }
 }

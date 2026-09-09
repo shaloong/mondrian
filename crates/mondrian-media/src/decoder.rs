@@ -110,6 +110,7 @@ impl RendererHwAccelDeviceContext {
     /// The returned reference is independently owned and must be released with
     /// `av_buffer_unref`. It remains crate-private so platform clients cannot
     /// manufacture an unqualified FFmpeg device interpretation.
+    #[cfg(all(target_os = "windows", mondrian_ffmpeg_7_1))]
     pub(crate) fn retain_ffmpeg_device_ref(
         &self,
     ) -> Result<NonNull<ffmpeg::ffi::AVBufferRef>, RendererHwAccelDeviceContextCreateError> {

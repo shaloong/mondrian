@@ -248,6 +248,7 @@ pub struct PreparedFfmpegToolchain {
     runtime_files: Vec<PreparedFfmpegRuntimeFile>,
     _snapshot_directory_lease: Mutex<Option<File>>,
     _snapshot_directory: Mutex<Option<TempDir>>,
+    #[cfg(windows)]
     snapshot_path: PathBuf,
     lifecycle: Mutex<CapsuleLifecycle>,
     #[cfg(windows)]
@@ -268,7 +269,7 @@ impl PreparedFfmpegToolchain {
         #[cfg(not(windows))]
         {
             let _ = (ffmpeg, ffprobe, runtime_files);
-            return Err(QualifiedFfmpegToolchainError::UnsupportedPlatform);
+            Err(QualifiedFfmpegToolchainError::UnsupportedPlatform)
         }
 
         #[cfg(windows)]
@@ -371,7 +372,7 @@ impl PreparedFfmpegToolchain {
     fn validate_objects(&self) -> Result<(), QualifiedFfmpegToolchainError> {
         #[cfg(not(windows))]
         {
-            return Err(QualifiedFfmpegToolchainError::UnsupportedPlatform);
+            Err(QualifiedFfmpegToolchainError::UnsupportedPlatform)
         }
         #[cfg(windows)]
         {

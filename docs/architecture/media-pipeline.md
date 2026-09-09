@@ -3816,3 +3816,32 @@ startup-plus-measurement-plus-close horizon. It does not extend a live command
 or verifier deadline. The original single-deadline API supplies the same bound
 to both stages. App admission and version probes also use the startup limit;
 prepared Export references are dropped before the native BMX owner is consumed.
+
+### Linux native process closure
+
+`FfmpegChild` creates each Linux helper in its own process group before exec.
+Cancellation sends SIGKILL to that group, including launcher descendants that
+inherit pipes. Exit observation uses `waitid(WNOWAIT)` and the Linux process-group
+inventory before reaping the leader. Keeping the exited leader unreaped pins its
+numeric group identity; a launcher exit alone cannot release a live descendant
+or an executable lease. Unreadable inventory fails observation closed.
+
+The existing `SupervisedChild` also owns `wait_with_output` pipe capture and
+consuming native wait, so convenience commands do not bypass group closure.
+Its complete-output convenience contract remains distinct from the explicitly
+bounded, cancellable policies used by production streaming and validation.
+The original spawn deadline is checked before and after native creation on all
+platforms; partial-spawn errors preserve their actual cleanup receipt.
+
+An abandoned Linux child is killed and transferred to a last-resort native
+reaper. That reaper cannot issue a success receipt or upgrade an earlier timeout;
+qualified leases retain the existing abandoned-owner failure semantics. Normal
+stop/cancel must still consume the supervisor by its original deadline. Linux
+process groups are ordinary helper lifecycle containment, not an immutable
+provider or a security boundary against helpers that deliberately leave a group.
+They do not qualify the Windows executable capsule on Linux.
+
+Windows WASAPI output helpers, FFmpeg 7.1 D3D12 encoder device retention and
+Windows-only qualification probes are compiled only with their actual consumers.
+Linux continues to use CPAL/ALSA and its linked FFmpeg version; unavailable
+qualification capsule preparation remains `UnsupportedPlatform`.

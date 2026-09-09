@@ -1013,6 +1013,7 @@ fn capture_output_snapshot(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn render_f32_output_block(
     data: &mut [f32],
     channels: usize,

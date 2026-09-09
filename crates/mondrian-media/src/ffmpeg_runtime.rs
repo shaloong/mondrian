@@ -119,7 +119,7 @@ pub(crate) fn verify_required_decoders(path: &Path) -> Result<()> {
     ))
 }
 
-#[cfg(feature = "validation")]
+#[cfg(all(feature = "validation", windows))]
 pub(crate) fn verify_qualified_command_capabilities(
     path: &Path,
     encoders: &str,
