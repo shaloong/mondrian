@@ -12,7 +12,7 @@
     {
       "phase_id": "01-playback-reference-24h",
       "kind": "playback_reference",
-      "workload_sha256": "2e0cd8300e22396bf22279f72c82132e37eb3c5332ec9d21ce9b31be35161321",
+      "workload_sha256": "ce4470fae5c0eca3421e606cd7223fbfedc647e8dc534e6efc4fc0a8e05f3c50",
       "producer_owner": "mondrian-app",
       "producer_verifier_id": "mondrian-app-endurance-capture-v1",
       "producer_report_schema_version": 1,
@@ -58,7 +58,7 @@
     {
       "phase_id": "02-continuous-export-24h",
       "kind": "continuous_export",
-      "workload_sha256": "87bd69447703a3fad0b6bc6b209a5e395866c17f4b3f88419a04737e5e92ebe8",
+      "workload_sha256": "e63975f1148d22ef193ffe3a85b9dfb63660a9141864d3da1d542f676785e0cf",
       "producer_owner": "mondrian-app",
       "producer_verifier_id": "mondrian-app-endurance-capture-v1",
       "producer_report_schema_version": 1,
@@ -104,7 +104,7 @@
     {
       "phase_id": "03-concurrent-recovery-24h",
       "kind": "concurrent_recovery",
-      "workload_sha256": "436a47cb1fd5f15d3c308387dbf5a2df33acffdd3240e7af1c232ae092061f41",
+      "workload_sha256": "0f9da499f624c4959e54c3961c0504f42c2bf54da61c04b0b4aab96fdd2339b6",
       "producer_owner": "mondrian-app",
       "producer_verifier_id": "mondrian-app-endurance-capture-v1",
       "producer_report_schema_version": 1,

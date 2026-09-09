@@ -399,3 +399,7 @@ builder, and rescanned through both canonical word-verification entrypoints.
 artifact directory. Raw native command cleanup, immutable tool hashes and the
 consuming runtime receipt accompany the MXF files. This ANC-only test does not
 claim full AS-11 picture/audio or physical broadcast qualification.
+
+Resident D3D12 queue entry points compile with their Windows consumer. Portable
+Export still lowers through the same visual closure and delivery contracts; the
+unavailable native resident target cannot be admitted as a Linux qualification.

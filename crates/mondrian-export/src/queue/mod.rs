@@ -63,14 +63,15 @@ use mondrian_media::FfmpegCommand as Command;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
 use mondrian_media::{
-    run_supervised_command, D3D12ResidentHevcEncoderSession, DecodedVideoRange,
-    DecodedVideoRangeContract, MediaFileFingerprint, PreviewDecodeAccessMode,
-    PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
+    run_supervised_command, DecodedVideoRange, DecodedVideoRangeContract, MediaFileFingerprint,
+    PreviewDecodeAccessMode, PreviewDecodeDiagnostics, PreviewDecodeOutcome, PreviewDecodeRequest,
     PreviewDecodeSessionContext, PreviewSourceColorContract, ResidentEncodeBitDepth,
-    ResidentEncodeColorimetry, ResidentHevcEncoderConfig, SupervisedChild, SupervisedProcessError,
-    SupervisedProcessPolicy, SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
+    ResidentEncodeColorimetry, SupervisedChild, SupervisedProcessError, SupervisedProcessPolicy,
+    SupervisedStreamCapture, VideoColorDiagnosticIssueAggregate,
 };
 use mondrian_media::{AudioSourceCache, AudioSourceCacheConfig, AudioSourceCacheShutdownEvidence};
+#[cfg(target_os = "windows")]
+use mondrian_media::{D3D12ResidentHevcEncoderSession, ResidentHevcEncoderConfig};
 use mondrian_renderer::{
     color::{
         GpuColorBackendContext, GpuColorExecutionSession, GpuProgramInput, GpuProgramOutputError,
@@ -6738,6 +6739,7 @@ fn render_timeline_sample_into_with_session_cancellable(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "windows")]
 fn render_timeline_frame_resident_with_session_cancellable(
     timeline: &TimelineExportSnapshot,
     timeline_frame: i64,
@@ -6783,6 +6785,13 @@ fn render_timeline_frame_resident_with_session_cancellable(
 enum SequenceRenderTarget<'a> {
     Working(&'a mut Option<CpuColorFrame>),
     Deliverable(&'a mut Vec<u8>),
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            dead_code,
+            reason = "Resident encode admission requires the Windows native adapter."
+        )
+    )]
     Resident(&'a mut Option<GpuResidentEncoderInputLease>),
 }
 
@@ -7628,6 +7637,7 @@ impl TimelineVisualExecutionIntent {
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
 fn render_sequence_frame_into(
     timeline: &TimelineExportSnapshot,
     context: &mut ExportFrameRenderContext<'_>,

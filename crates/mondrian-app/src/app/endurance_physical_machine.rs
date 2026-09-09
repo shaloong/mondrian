@@ -161,6 +161,8 @@ impl PhysicalEnduranceMachineFactory {
         capabilities: &mut Vec<Capability>,
         phase_id: &str,
     ) -> Option<PreparedMachineReference> {
+        #[cfg(not(windows))]
+        let _ = phase_id;
         let planned = &plan.plan().reference_output;
         let result = (|| {
             if planned.open_request.ancillary_policy.requires_readback()

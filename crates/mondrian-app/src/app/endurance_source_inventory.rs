@@ -6,37 +6,63 @@
 //! and filesystem revision evidence.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs;
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Component, Path, PathBuf};
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 use mondrian_assets::AssetKind;
 use mondrian_core::{AssetId, MediaFileFingerprint, ProjectId, SequenceId, SequenceRevision};
+use mondrian_export::ExportPreset;
+#[cfg(windows)]
 use mondrian_export::{
     prepare_timeline_export_dependencies_with_audio_selection, ExportAudioProgramSelection,
-    ExportPreset, TimelineExportRange,
+    TimelineExportRange,
 };
-use mondrian_platform::{EndurancePhaseKind, EndurancePhaseRequirement};
+use mondrian_platform::EndurancePhaseKind;
+#[cfg(windows)]
+use mondrian_platform::EndurancePhaseRequirement;
+#[cfg(any(windows, test))]
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use super::endurance_machine_plan::{
-    EnduranceMachineExportPlan, EnduranceMachineFileBinding, PreparedCommercialEnduranceMachinePlan,
-};
+#[cfg(windows)]
+use super::endurance_machine_plan::EnduranceMachineExportPlan;
+use super::endurance_machine_plan::EnduranceMachineFileBinding;
+use super::endurance_machine_plan::PreparedCommercialEnduranceMachinePlan;
 use super::{AppState, PreparedEnduranceProjectFixture};
 
+#[cfg(windows)]
 const SOURCE_INVENTORY_SCHEMA_VERSION: u32 = 1;
+#[cfg(windows)]
 const SOURCE_INVENTORY_ID: &str = "mondrian-col047/external-source-inventory/v1";
+#[cfg(windows)]
 const MAXIMUM_SOURCE_INVENTORY_BYTES: u64 = 1024 * 1024;
 const MAXIMUM_EXPORT_PRESET_BYTES: u64 = 1024 * 1024;
+#[cfg(windows)]
 const MAXIMUM_BROADCAST_QC_PROFILE_BYTES: u64 = 1024 * 1024;
+#[cfg(windows)]
 const MAXIMUM_PHASE_COUNT: usize = 16;
+#[cfg(windows)]
 const MAXIMUM_SEQUENCE_COUNT_PER_PHASE: usize = 1024;
+#[cfg(windows)]
 const MAXIMUM_SOURCE_COUNT: usize = 4096;
+#[cfg(windows)]
 const MAXIMUM_SOURCE_BYTES: u64 = 1 << 40;
+#[cfg(windows)]
 const MAXIMUM_TOTAL_SOURCE_BYTES: u64 = 8 << 40;
 
+#[cfg(any(windows, test))]
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "Portable schema rejection tests deserialize fields without native admission."
+    )
+)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalSourceInventory {
@@ -51,6 +77,14 @@ struct ExternalSourceInventory {
     sources: Vec<ExternalSourceBinding>,
 }
 
+#[cfg(any(windows, test))]
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "Portable schema rejection tests deserialize fields without native admission."
+    )
+)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalSourcePhaseClosure {
@@ -60,6 +94,14 @@ struct ExternalSourcePhaseClosure {
     media_asset_ids: Vec<AssetId>,
 }
 
+#[cfg(any(windows, test))]
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "Portable schema rejection tests deserialize fields without native admission."
+    )
+)]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ExternalSourceBinding {
@@ -150,6 +192,13 @@ pub struct PreparedEnduranceSourceInventory {
     export_presets: BTreeMap<String, PreparedEnduranceExportPreset>,
     broadcast_qc_profiles: BTreeMap<String, PreparedEnduranceBroadcastQcProfile>,
     sources: BTreeMap<AssetId, PreparedEnduranceSource>,
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "Immutable fixture admission is unavailable on this platform."
+        )
+    )]
     project_fixture: PreparedEnduranceProjectFixture,
     _inventory_lease: File,
 }
@@ -221,7 +270,7 @@ impl PreparedEnduranceSourceInventory {
         #[cfg(not(windows))]
         {
             let _ = (app, machine_plan, project_fixture);
-            return Err(EnduranceSourceInventoryError::UnsupportedPlatform);
+            Err(EnduranceSourceInventoryError::UnsupportedPlatform)
         }
 
         #[cfg(windows)]
@@ -710,7 +759,6 @@ fn export_plan<'a>(
         })
 }
 
-#[cfg(windows)]
 fn load_export_preset(
     phase_id: &str,
     binding: &EnduranceMachineFileBinding,
@@ -762,7 +810,6 @@ fn load_broadcast_qc_profile(
     }))
 }
 
-#[cfg(windows)]
 fn validate_export_preset_fields(bytes: &[u8]) -> Result<(), EnduranceSourceInventoryError> {
     const FIELDS: &[&str] = &[
         "name",
@@ -926,7 +973,6 @@ fn prepare_source(
     })
 }
 
-#[cfg(windows)]
 pub(super) fn read_bound_file(
     binding: &EnduranceMachineFileBinding,
     maximum_bytes: u64,
@@ -977,7 +1023,6 @@ pub(super) fn read_bound_file(
     Ok((file, bytes, sha256))
 }
 
-#[cfg(windows)]
 fn open_exact_read_handle(path: &Path) -> std::io::Result<File> {
     super::project_runtime::open_direct_read_file(path, "endurance input")
         .map_err(std::io::Error::other)
@@ -1023,7 +1068,6 @@ fn require_strictly_sorted<T: Ord>(
     Ok(())
 }
 
-#[cfg(windows)]
 fn validate_canonical_path_shape(path: &Path) -> Result<(), String> {
     if !path.is_absolute()
         || path
@@ -1071,10 +1115,12 @@ fn invalid_binding(
     EnduranceSourceInventoryError::InvalidBinding { field, detail: detail.to_string() }
 }
 
+#[cfg(windows)]
 fn asset_error(asset_id: AssetId, detail: impl Into<String>) -> EnduranceSourceInventoryError {
     EnduranceSourceInventoryError::Asset { asset_id, detail: detail.into() }
 }
 
+#[cfg(windows)]
 fn source_error(asset_id: AssetId, detail: impl Into<String>) -> EnduranceSourceInventoryError {
     EnduranceSourceInventoryError::Source { asset_id, detail: detail.into() }
 }
@@ -1082,13 +1128,18 @@ fn source_error(asset_id: AssetId, detail: impl Into<String>) -> EnduranceSource
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
     use mondrian_assets::{AssetLibrary, AssetMediaProbeCandidate};
+    #[cfg(windows)]
     use mondrian_broadcast::{
         BroadcastQcObservationTap, BroadcastQcProfile, BroadcastQcRule, BroadcastQcSeverity,
         QcActivePicture,
     };
+    #[cfg(windows)]
     use mondrian_core::ColorSpace;
+    #[cfg(windows)]
     use mondrian_project::{save_project_archive, ProjectDocument};
+    #[cfg(windows)]
     use mondrian_timeline::{Clip, Sequence, SequenceCollection, SequenceSettings};
     #[cfg(all(windows, feature = "validation"))]
     use std::{fs::OpenOptions, sync::Arc};
@@ -1105,6 +1156,7 @@ mod tests {
         source_id: AssetId,
     }
 
+    #[cfg(windows)]
     fn profile() -> mondrian_platform::EnduranceQualificationProfile {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1629,6 +1681,13 @@ pub(crate) struct PreparedEndurancePsePrerequisite {
 pub(crate) enum EnduranceBmxAdmission {
     NotRequired,
     NotRun,
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "Native BMX admission returns NotRun on this platform."
+        )
+    )]
     Available(mondrian_media::PreparedBmxRuntime),
 }
 
@@ -1657,9 +1716,16 @@ pub(crate) fn prepare_bmx_prerequisite(
     else {
         return Ok(EnduranceBmxAdmission::NotRequired);
     };
+    // Classify the exact hash-bound production preset before probing a native
+    // provider. Reading an ordinary preset does not qualify an immutable source
+    // inventory or permit a Linux native-provider substitute.
+    let preset = load_export_preset(phase_id, &export.preset).map_err(|error| error.to_string())?;
+    let Some(delivery) = preset.preset.professional_delivery() else {
+        return Ok(EnduranceBmxAdmission::NotRequired);
+    };
     #[cfg(not(windows))]
     {
-        let _ = (export, preparation_deadline, owner_deadline, cancellation);
+        let _ = (delivery, preparation_deadline, owner_deadline, cancellation);
         Ok(EnduranceBmxAdmission::NotRun)
     }
     #[cfg(windows)]
@@ -1667,11 +1733,6 @@ pub(crate) fn prepare_bmx_prerequisite(
         use mondrian_export::preset::ProfessionalDeliveryProfile;
         use mondrian_export::professional_delivery::{
             ProfessionalDeliveryTool, ProfessionalDeliveryToolchain,
-        };
-        let preset =
-            load_export_preset(phase_id, &export.preset).map_err(|error| error.to_string())?;
-        let Some(delivery) = preset.preset.professional_delivery() else {
-            return Ok(EnduranceBmxAdmission::NotRequired);
         };
         // Other professional profiles require additional CineCert/Photon
         // runtime owners, which this BMX authority deliberately cannot forge.

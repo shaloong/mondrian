@@ -54,6 +54,13 @@ enum ProjectArchiveInstallPolicy {
     CanonicalProduct,
     RecoveredProduct,
     #[cfg(any(test, feature = "validation"))]
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "Exact immutable fixture admission requires a native provider."
+        )
+    )]
     ExactEnduranceFixture {
         expected_sequence_id: SequenceId,
     },

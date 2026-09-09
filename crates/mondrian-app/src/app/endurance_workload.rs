@@ -130,6 +130,7 @@ pub struct EndurancePreStartCapabilityInventory {
 }
 
 impl EndurancePreStartCapabilityInventory {
+    #[cfg(windows)]
     pub(crate) fn admit(&mut self, capability: EndurancePreStartCapability) {
         self.capabilities.insert(capability);
     }

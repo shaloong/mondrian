@@ -31,6 +31,13 @@ pub(crate) enum EnduranceAncillaryAdmission {
     #[default]
     NotRequested,
     NotRun,
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "Immutable ancillary file admission is unavailable on this platform."
+        )
+    )]
     Ready(Arc<PreparedEnduranceAncillaryProgram>),
 }
 
@@ -133,6 +140,7 @@ impl PreparedEnduranceAncillaryProgram {
     ) -> Result<Vec<mondrian_reference_output::NativeAncillaryJournalReceipt>, String> {
         self.journals.closed_for_phase(phase_id)
     }
+    #[cfg(windows)]
     pub(crate) fn journal_binding(
         &self,
         phase_id: &str,

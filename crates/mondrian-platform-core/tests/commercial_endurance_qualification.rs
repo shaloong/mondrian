@@ -273,6 +273,7 @@ fn ancillary_inventory_roundtrips_and_rejects_partial_duplicate_or_cross_owner_e
     assert!(!receipt.binds_ancillary(Some(&different)));
 }
 
+#[cfg(windows)]
 fn file_sha256(path: &Path) -> String {
     format!(
         "{:x}",

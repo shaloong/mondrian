@@ -1596,3 +1596,23 @@ and 360-second Export completion grace are recorded explicitly and do not alter
 the original 900/90-second stress profile. Alpha HEVC is excluded from this
 control and `original_native_media_qualified` remains false. Successful control
 evidence proves the three-phase software composition and recovery paths only.
+
+Linux all-target builds retain portable strict-schema rejection tests while
+compiling Windows-only immutable-file preparation and native journal binding
+helpers with their consumers. Unconstructible admission variants remain explicit
+in the shared contracts. Platform gating neither replaces their `NotRun` results
+nor turns Windows file-identity or provider tests into Linux qualification.
+
+BMX prerequisite classification first reads and verifies the machine-plan-bound
+Export preset through the existing bounded reader and production `ExportPreset`
+parser on every platform. Ordinary H.264 delivery is `NotRequired`; a declared
+professional delivery without its native provider remains `NotRun`. A changed
+preset digest is an admission error. On Unix this read retains a direct file
+object and verifies captured bytes; it does not grant immutable source-inventory
+qualification, which remains unavailable without its native provider. The read
+cannot turn ordinary Export into a fabricated BMX capability.
+
+The checked-in 59.94 profile binds the exact bytes of its three 60000/1001
+workload descriptors. Updating a stale descriptor digest does not alter phase
+duration, counters or quality requirements, and old profile-bound machine plans
+must be regenerated rather than reusing earlier qualification receipts.

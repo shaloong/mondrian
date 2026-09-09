@@ -859,7 +859,6 @@ mod tests {
         .expect("parse profile")
     }
 
-    #[cfg(windows)]
     #[test]
     fn bmx_prerequisites_are_rejected_before_any_phase_native_owner() {
         use crate::app::endurance_source_inventory::{
@@ -885,6 +884,10 @@ mod tests {
         let bytes = serde_json::to_vec(&mondrian_export::ExportPreset::as11_x9_naba_hd_720p5994())
             .expect("AS11 preset");
         fs::write(&plan.exports[0].preset.path, &bytes).expect("replace test preset");
+        assert!(
+            prepare_bmx_prerequisite(&prepared, &phase_id, deadline, deadline, &cancel).is_err(),
+            "changed preset bytes must not reuse the ordinary admission"
+        );
         plan.exports[0].preset.sha256 = format!("{:x}", Sha256::digest(bytes));
         let missing = EnduranceMachineFileBinding {
             path: temporary.path().join("missing-bmx.exe"),
