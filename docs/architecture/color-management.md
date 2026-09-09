@@ -1942,3 +1942,15 @@ oracle. Original failed capture and both independent diagnostics are retained.
 Primary native behavior sources: Blender 5.1 local RNA `CompositorNodeImage` and
 `ImageFormatSettings`, [image alpha conventions](https://docs.blender.org/manual/en/5.1/editors/image/image_settings.html),
 and [supported output formats](https://docs.blender.org/manual/en/5.1/files/media/image_formats.html).
+
+The D3D12 resident encoder's texture borrow and native frame imports compile only
+with the Windows adapter. Its private conversion contract remains present on
+other platforms, where construction rejects the backend. This does not add a
+Linux resident encoder, change the working precision, or bypass Program Output.
+
+Compositor source geometry starts from the fragment's destination pixel center,
+then applies the compiled inverse affine transform. Reconstructing that center
+from interpolated UVs can place an identity edge below 0.5 on Vulkan and can
+select a preceding integer grain coordinate. The exact fragment position keeps
+source admission and procedural effects on the same pixel grid as the CPU
+contract, without edge epsilons or relaxed color tolerances.

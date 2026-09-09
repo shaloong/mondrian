@@ -501,7 +501,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let matte = select(sampled, 1.0 - sampled, uniforms.mask_invert != 0u);
         return vec4<f32>(matte, matte, matte, 1.0);
     }
-    let source_position = source_coordinate(in.uv);
+    let source_position = source_coordinate(in.position.xy);
     var layer_px: vec4<f32>;
     if (uniforms.source_kind == 1u) {
         layer_px = select(vec4<f32>(0.0), uniforms.solid_color, source_inside(source_position));
@@ -528,11 +528,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     );
 }
 
-fn source_coordinate(dst_uv: vec2<f32>) -> vec2<f32> {
-    let dst_center = vec2<f32>(
-        dst_uv.x * uniforms.geometry.x,
-        dst_uv.y * uniforms.geometry.y,
-    );
+fn source_coordinate(dst_center: vec2<f32>) -> vec2<f32> {
+    // Fragment position is the exact destination pixel center. Interpolated UV
+    // reconstruction can fall below 0.5 at an identity edge on Vulkan, causing
+    // a false outside-source result or selecting the previous grain coordinate.
     return vec2<f32>(
         uniforms.inv_transform0.x * dst_center.x +
             uniforms.inv_transform0.y * dst_center.y +

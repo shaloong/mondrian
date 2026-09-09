@@ -4,12 +4,15 @@
 //! cross-queue transition. Export and Media never reinterpret wgpu resources;
 //! they exchange only move-only typed leases.
 
+#[cfg(target_os = "windows")]
+use mondrian_media::{D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame};
 use mondrian_media::{
-    D3D12ResidentEncodeInputFrame, D3D12ResidentEncodeReadyFrame, RendererHwAccelDeviceContext,
-    ResidentEncodeBitDepth, ResidentEncodeColorimetry,
+    RendererHwAccelDeviceContext, ResidentEncodeBitDepth, ResidentEncodeColorimetry,
 };
 
-use crate::{GpuColorFrameTextureFormat, GpuResidentEncoderInputLease};
+use crate::GpuColorFrameTextureFormat;
+#[cfg(target_os = "windows")]
+use crate::GpuResidentEncoderInputLease;
 
 /// Exact resident RGB-to-encoder-surface conversion contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,6 +144,13 @@ pub struct D3D12ResidentEncodeAdapterDiagnostics {
 
 /// Same-device D3D12 Video Processor that writes FFmpeg-owned NV12/P010 surfaces.
 pub struct D3D12ResidentEncodeAdapter {
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            dead_code,
+            reason = "Creation fails on non-D3D12 platforms; retain the private contract field."
+        )
+    )]
     contract: D3D12ResidentEncodeAdapterContract,
     #[cfg(target_os = "windows")]
     inner: windows_impl::AdapterInner,
