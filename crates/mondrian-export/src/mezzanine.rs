@@ -14,8 +14,8 @@ use crate::preset::{
     UncompressedVideoFormat, VideoCodecConfig,
 };
 use mondrian_core::{Rational, SampleAspectRatio};
+use mondrian_media::FfmpegCommand as Command;
 use mondrian_timeline::sequence::{DeliveryBitDepth, VideoRange};
-use std::process::Command;
 
 /// Product-authoring defaults for one professional codec choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -430,6 +430,17 @@ where
                 Ok(())
             }
             Err(error) => {
+                if let ReferenceOutputAdapterError::ReadbackMismatchAfterOpen { shutdown }
+                | ReferenceOutputAdapterError::VendorOpenRejected { shutdown, .. } = &error
+                {
+                    // A rejected bridge open did own a Session. Preserve its
+                    // terminal closure so later App teardown cannot report a
+                    // misleading never-opened owner after the error is rendered.
+                    self.completed_stop_session = Some(shutdown.session.clone());
+                    self.completed_stop_outstanding_frames =
+                        Some(shutdown.outstanding_frames_before_shutdown);
+                    self.shutdown_module_failure = shutdown.module_failure.clone();
+                }
                 self.record_blocked(&error);
                 Err(error.into())
             }
@@ -1616,6 +1627,40 @@ pub enum ReferenceOutputError {
     /// Provider callback order violated scheduled playout identity.
     #[error("reference output completion expected {expected}, got {actual}")]
     OutOfOrderCompletion { expected: u64, actual: u64 },
+}
+
+/// Consume a bridge-returned Session that failed configuration readback. This
+/// path uses the ordinary whole-Module shutdown coordinator, including panic,
+/// timeout and worker-join accounting, before the open error is returned.
+pub(crate) fn retire_rejected_reference_session(
+    session: Box<dyn ReferenceOutputAdapterSession>,
+    evidence: ReferenceOutputProviderEvidence,
+    deadline: Instant,
+) -> ReferenceOutputModuleShutdownReceipt {
+    struct RejectedSessionAdapter {
+        evidence: ReferenceOutputProviderEvidence,
+    }
+    impl ReferenceOutputAdapter for RejectedSessionAdapter {
+        fn evidence(&self) -> &ReferenceOutputProviderEvidence {
+            &self.evidence
+        }
+        fn discover(
+            &mut self,
+        ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError> {
+            Err(ReferenceOutputAdapterError::SessionStopped)
+        }
+        fn open(
+            &mut self,
+            _device: &ReferenceOutputDeviceDescriptor,
+            _request: &ReferenceOutputOpenRequest,
+        ) -> Result<Box<dyn ReferenceOutputAdapterSession>, ReferenceOutputAdapterError> {
+            Err(ReferenceOutputAdapterError::SessionStopped)
+        }
+    }
+    let mut module = ReferenceOutputModule::new(RejectedSessionAdapter { evidence });
+    module.diagnostics.provider = Some(module.adapter.evidence().clone());
+    module.session = Some(session);
+    module.shutdown_until(deadline)
 }
 
 #[cfg(test)]

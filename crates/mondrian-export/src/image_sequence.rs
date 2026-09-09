@@ -9,10 +9,10 @@ use crate::artifact_identity::sha256_file;
 use crate::frame_contract::ExportFrameContract;
 use crate::preset::{ExportAlphaMode, ImageSequenceFormat};
 use mondrian_core::{ColorSpace, ExecutionCancellationToken, Rational};
+use mondrian_media::FfmpegCommand as Command;
 use serde::{Deserialize, Serialize};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 pub(crate) const MANIFEST_FILE_NAME: &str = "manifest.json";
 pub(crate) const FRAME_FILE_PREFIX: &str = "frame-";

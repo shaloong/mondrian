@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fmt;
 #[cfg(test)]
 use std::time::Duration;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -378,6 +379,17 @@ pub trait ReferenceOutputAdapter: Send {
     fn discover(
         &mut self,
     ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError>;
+    /// Read external-reference status without acquiring an output Session.
+    ///
+    /// `None` means the provider cannot observe this prerequisite before open;
+    /// it must never be upgraded to a locked signal during phase admission.
+    /// The device generation must still match the supplied discovery object.
+    fn preflight_reference_lock(
+        &mut self,
+        _device: &ReferenceOutputDeviceDescriptor,
+    ) -> Result<Option<bool>, ReferenceOutputAdapterError> {
+        Ok(None)
+    }
     /// Acquire, configure, read back, and return one unopened scheduled Session.
     fn open(
         &mut self,
@@ -398,6 +410,13 @@ where
         &mut self,
     ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError> {
         (**self).discover()
+    }
+
+    fn preflight_reference_lock(
+        &mut self,
+        device: &ReferenceOutputDeviceDescriptor,
+    ) -> Result<Option<bool>, ReferenceOutputAdapterError> {
+        (**self).preflight_reference_lock(device)
     }
 
     fn open(
@@ -424,6 +443,14 @@ pub trait VendorReferenceOutputBridge: Send {
     fn discover(
         &mut self,
     ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError>;
+    /// Query external-reference status without opening or reconfiguring output.
+    /// Missing pre-open status support remains unknown and fails admission.
+    fn preflight_reference_lock(
+        &mut self,
+        _device: &ReferenceOutputDeviceDescriptor,
+    ) -> Result<Option<bool>, ReferenceOutputAdapterError> {
+        Ok(None)
+    }
     /// Open an already-admitted physical Session.
     fn open(
         &mut self,
@@ -572,6 +599,17 @@ where
         Ok(devices)
     }
 
+    fn preflight_reference_lock(
+        &mut self,
+        device: &ReferenceOutputDeviceDescriptor,
+    ) -> Result<Option<bool>, ReferenceOutputAdapterError> {
+        ensure_runtime_available(self.bridge.evidence())?;
+        if device.provider != self.provider {
+            return Err(ReferenceOutputAdapterError::ProviderMismatch);
+        }
+        self.bridge.preflight_reference_lock(device)
+    }
+
     fn open(
         &mut self,
         device: &ReferenceOutputDeviceDescriptor,
@@ -588,7 +626,14 @@ where
             || session.evidence().provider != self.provider
             || !session.evidence().hardware_backed
         {
-            return Err(ReferenceOutputAdapterError::ReadbackMismatch);
+            let shutdown = crate::module::retire_rejected_reference_session(
+                session,
+                self.bridge.evidence().clone(),
+                Instant::now() + std::time::Duration::from_secs(5),
+            );
+            return Err(ReferenceOutputAdapterError::ReadbackMismatchAfterOpen {
+                shutdown: Box::new(shutdown),
+            });
         }
         Ok(session)
     }
@@ -938,6 +983,23 @@ pub enum ReferenceOutputAdapterError {
     /// Provider configuration readback differs from the admitted request.
     #[error("reference output provider configuration readback mismatch")]
     ReadbackMismatch,
+    /// A returned Session contradicted admission and was consumed by bounded teardown.
+    /// The raw receipt retains callback/device/coordinator failures; a clean
+    /// retirement still does not turn the rejected open into successful output.
+    #[error("reference output provider configuration readback mismatch after open")]
+    ReadbackMismatchAfterOpen {
+        /// Complete retirement evidence for the rejected Session owner.
+        shutdown: Box<crate::ReferenceOutputModuleShutdownReceipt>,
+    },
+    /// The native provider acquired an owner before open failed; its complete
+    /// consuming shutdown is retained alongside the original failure.
+    #[error("reference output native open failed: {detail}")]
+    VendorOpenRejected {
+        /// Original native operation failure.
+        detail: String,
+        /// Raw complete Module/Session retirement evidence.
+        shutdown: Box<crate::ReferenceOutputModuleShutdownReceipt>,
+    },
     /// Scheduled queue is full.
     #[error("reference output scheduled queue is backpressured")]
     Backpressure,
@@ -1088,5 +1150,107 @@ mod tests {
             Err(ReferenceOutputAdapterError::NoDevices)
         );
         assert_eq!(adapter.evidence().sdk_version.as_deref(), Some("17.5"));
+    }
+}
+
+#[cfg(test)]
+mod rejected_open_tests {
+    use super::*;
+    use crate::{
+        ReferenceOutputAncillaryPolicy, ReferenceOutputPixelFormat, ReferenceOutputRange,
+        ReferenceOutputReferencePolicy, ReferenceOutputScan, ReferenceOutputSignal,
+    };
+    use mondrian_core::{AudioChannelLayout, ColorSpace, Rational};
+
+    struct MismatchedBridge {
+        evidence: ReferenceOutputProviderEvidence,
+        inner: SimulatedReferenceOutputAdapter,
+    }
+    impl VendorReferenceOutputBridge for MismatchedBridge {
+        fn evidence(&self) -> &ReferenceOutputProviderEvidence {
+            &self.evidence
+        }
+        fn discover(
+            &mut self,
+        ) -> Result<Vec<ReferenceOutputDeviceDescriptor>, ReferenceOutputAdapterError> {
+            let mut devices = self.inner.discover()?;
+            for device in &mut devices {
+                device.provider = ReferenceOutputProvider::DeckLink;
+            }
+            Ok(devices)
+        }
+        fn open(
+            &mut self,
+            _: &ReferenceOutputDeviceDescriptor,
+            request: &ReferenceOutputOpenRequest,
+        ) -> Result<Box<dyn ReferenceOutputAdapterSession>, ReferenceOutputAdapterError> {
+            let devices = self.inner.discover()?;
+            self.inner.open(&devices[0], request)
+        }
+    }
+    #[test]
+    fn vendor_readback_rejection_consumes_returned_session_and_retains_shutdown_failures() {
+        let request = ReferenceOutputOpenRequest {
+            signal: ReferenceOutputSignal {
+                width: 1920,
+                height: 1080,
+                frame_rate: Rational::FPS_25,
+                scan: ReferenceOutputScan::Progressive,
+                pixel_format: ReferenceOutputPixelFormat::Yuv422TenV210,
+                color_space: ColorSpace::Rec709,
+                range: ReferenceOutputRange::Legal,
+                hdr: None,
+                audio_layout: AudioChannelLayout::Stereo,
+            },
+            reference_policy: ReferenceOutputReferencePolicy::FreeRunAllowed,
+            ancillary_policy: ReferenceOutputAncillaryPolicy::Disabled,
+            preroll_frames: 2,
+            max_scheduled_frames: 4,
+        };
+        for failure in 0..3 {
+            let mode = ReferenceOutputMode {
+                signal: request.signal.clone(),
+                supports_hdr_signal: false,
+                supports_static_hdr_metadata: false,
+                supports_reference_status: true,
+                supports_ancillary: false,
+                supports_ancillary_readback: false,
+            };
+            let inner =
+                SimulatedReferenceOutputAdapter::new(vec![mode]).expect("simulated transport");
+            let inner = match failure {
+                1 => inner.with_stop_failure(),
+                2 => inner.with_shutdown_panic(),
+                _ => inner,
+            };
+            let bridge = MismatchedBridge {
+                evidence: ReferenceOutputProviderEvidence {
+                    provider: ReferenceOutputProvider::DeckLink,
+                    adapter_version: "test-rejected-open".to_owned(),
+                    sdk_version: Some("test".to_owned()),
+                    driver_version: Some("test".to_owned()),
+                    hardware_backed: true,
+                    availability: ReferenceOutputRuntimeAvailability::Available,
+                },
+                inner,
+            };
+            let mut adapter =
+                VendorReferenceOutputAdapter::new(ReferenceOutputProvider::DeckLink, bridge)
+                    .expect("adapter");
+            let device = adapter.discover().expect("discovery").remove(0);
+            let error = match adapter.open(&device, &request) {
+                Ok(_) => panic!("wrong Session provider must reject"),
+                Err(error) => error,
+            };
+            let ReferenceOutputAdapterError::ReadbackMismatchAfterOpen { shutdown } = error else {
+                panic!("readback rejection must retain consuming shutdown evidence");
+            };
+            assert!(shutdown.session.session_present);
+            assert!(shutdown.session.coordinator.spawned);
+            assert_eq!(shutdown.session.all_resources_released(), failure == 0);
+            if failure == 2 {
+                assert!(shutdown.session.coordinator.panicked);
+            }
+        }
     }
 }

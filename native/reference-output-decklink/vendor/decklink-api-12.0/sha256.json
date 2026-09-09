@@ -1,0 +1,137 @@
+[
+  {
+    "file": "DeckLinkAPI_v10_11.idl",
+    "sha256": "da4302efab79717a00e5f94e0b4fd96bc44cfea8d03d806b6e193342038c8eb5",
+    "bytes": 12978
+  },
+  {
+    "file": "DeckLinkAPI_v10_2.idl",
+    "sha256": "a127c532e19c6523f0130dba566e5d3c6871d9c5ed467ffb2e01859f9d376588",
+    "bytes": 3386
+  },
+  {
+    "file": "DeckLinkAPI_v10_4.idl",
+    "sha256": "da9d1ef439decfd56a37190dd008d056f247bfd4f4cfa8ff44ee7f50aa45a2ff",
+    "bytes": 2764
+  },
+  {
+    "file": "DeckLinkAPI_v10_5.idl",
+    "sha256": "9ed9c941ba5c21ece0e452e3d557f7132e238c12020ad45ac23fb9d607704f1b",
+    "bytes": 2966
+  },
+  {
+    "file": "DeckLinkAPI_v10_6.idl",
+    "sha256": "75f206cf82485d18142919242d685e8fac7a81d669cdc9150c1de6325662fd36",
+    "bytes": 1898
+  },
+  {
+    "file": "DeckLinkAPI_v10_8.idl",
+    "sha256": "6b3ea60f82f5b30a28ffa09e801778a43b538f93ff9024a109fd2340db9bfedd",
+    "bytes": 1844
+  },
+  {
+    "file": "DeckLinkAPI_v10_9.idl",
+    "sha256": "9bbd3184fbdabb60e1cb5cba0deb26f68cc7084b3c140bc7353c47ba4789f1e5",
+    "bytes": 2753
+  },
+  {
+    "file": "DeckLinkAPI_v11_4.idl",
+    "sha256": "de0c4099d65d27de64db4bb2a6e09a2ac942852d4442e65b0ae99714d08fdf8b",
+    "bytes": 7116
+  },
+  {
+    "file": "DeckLinkAPI_v11_5_1.idl",
+    "sha256": "5cd41141f4bfabeb9635f3f8b8afd833b78283ef97ed0902f0c80747eb9c61d7",
+    "bytes": 4357
+  },
+  {
+    "file": "DeckLinkAPI_v11_5.idl",
+    "sha256": "ec1a6abbeffdeb01e9c55be4ba5e97a20dfa62ad1314de526028830b8112e99d",
+    "bytes": 8779
+  },
+  {
+    "file": "DeckLinkAPI_v7_1.idl",
+    "sha256": "e20378639f0f793eed8185055e016152cb9b6e3877587ad811eb2898f7492870",
+    "bytes": 7899
+  },
+  {
+    "file": "DeckLinkAPI_v7_3.idl",
+    "sha256": "ce1ecdfb7a5ba7344d92069ab481c0b83dd82d6f452df0348543fed6b44cb560",
+    "bytes": 6875
+  },
+  {
+    "file": "DeckLinkAPI_v7_6.idl",
+    "sha256": "860d7b063c45224f4ffc49ca6c1836acff745e44014bd297aa756aba3a6eb56c",
+    "bytes": 15980
+  },
+  {
+    "file": "DeckLinkAPI_v7_9.idl",
+    "sha256": "1f2edd7c017ac3af047fa411143f14555a16e587fdaf7e7b69266b4877622eda",
+    "bytes": 4054
+  },
+  {
+    "file": "DeckLinkAPI_v8_0.idl",
+    "sha256": "1fd393fb2aa693fa4cfb88a18234dd6568e536ade40e17170d4f36c05e8e3c7a",
+    "bytes": 2272
+  },
+  {
+    "file": "DeckLinkAPI_v8_1.idl",
+    "sha256": "ec634294e98522de80910deb3955c73725ce150977262d90e464ef4904f398a7",
+    "bytes": 5879
+  },
+  {
+    "file": "DeckLinkAPI_v9_2.idl",
+    "sha256": "1b56493543efdec533be0d3a07500ef8677aa407cd079f3f63e85d0a29b84f54",
+    "bytes": 3095
+  },
+  {
+    "file": "DeckLinkAPI_v9_9.idl",
+    "sha256": "679826e7a1609a22a95eed486b5c41e999ee3e231a927cd461070e9094b393e6",
+    "bytes": 4696
+  },
+  {
+    "file": "DeckLinkAPI.idl",
+    "sha256": "d898b379d1bd7f6dfa9ff9a375fe74f885cf8991b4a59670c8242751f203e348",
+    "bytes": 63252
+  },
+  {
+    "file": "DeckLinkAPIConfiguration.idl",
+    "sha256": "d1e18ea9b49ded9b7983c1da191153cbd8d0effb0726c7518bb2a3648710893b",
+    "bytes": 13177
+  },
+  {
+    "file": "DeckLinkAPIDeckControl.idl",
+    "sha256": "43a563f0cb8f4141d028c6ac99aa22038b1a9233a8f49fd1dc05cea21c23e959",
+    "bytes": 11970
+  },
+  {
+    "file": "DeckLinkAPIDiscovery.idl",
+    "sha256": "daf28ce539c2b4c3fba153b2681623826c81ef28b8405d1f0813389bf5137269",
+    "bytes": 2086
+  },
+  {
+    "file": "DeckLinkAPIModes.idl",
+    "sha256": "8337c3f3dbeaf7cf88aa5a0ccf709d026f712ae9abb4bb76d0ea9d92ab99003b",
+    "bytes": 16257
+  },
+  {
+    "file": "DeckLinkAPIStreaming_v10_8.idl",
+    "sha256": "2f52186aa20901e524c5746086ad37feea31c08e570403388c418ff83c8e0b26",
+    "bytes": 1659
+  },
+  {
+    "file": "DeckLinkAPIStreaming.idl",
+    "sha256": "ce83f9fd2a523a50a4c3a084a7168155de47a734e3f4fcbfd2931c8343fb761b",
+    "bytes": 15437
+  },
+  {
+    "file": "DeckLinkAPITypes.idl",
+    "sha256": "4308d5a72159d9a7d8962587205119e5a81eb85ad2ce9fa14676f27ace854ae9",
+    "bytes": 4778
+  },
+  {
+    "file": "DeckLinkAPIVersion.h",
+    "sha256": "db32f6be4188472ae9fd021527265d4d7893bf77e772f4cd4cf8fcb751cf1f6f",
+    "bytes": 1750
+  }
+]

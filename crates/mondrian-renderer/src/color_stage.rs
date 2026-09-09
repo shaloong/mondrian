@@ -1473,6 +1473,45 @@ impl RenderGpuOutputBoundaryRuntime {
             .map_err(RenderGpuInputStageRuntimeRecordError::Record)
     }
 
+    /// Prepare and retain the concrete OCIO backend objects for an encoded GPU
+    /// source without allocating a frame texture or recording commands.
+    ///
+    /// Realtime owners use this during bounded preroll for a known upcoming
+    /// native-video contract. The later exact frame still owns source adoption,
+    /// resource allocation, command recording, and submission; it only reuses
+    /// the shader, LUT, bind-group-layout, and render-pipeline objects prepared
+    /// here.
+    pub fn prepare_wgpu_input_stage_gpu_frame_backend_objects(
+        &mut self,
+        transform: &RenderInputTransform,
+        input: &GpuColorFrameHandle,
+        output: &GpuColorFrameHandle,
+        gpu_options: RenderColorTransformGpuOptions,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> Result<(), RenderGpuInputStageRuntimeRecordError> {
+        let Self { shader_cache, backend_prep, backend_objects, .. } = self;
+        let mut planner = RenderColorStagePlanner::prefer_gpu(shader_cache, gpu_options);
+        let stage_plan = planner
+            .plan_input_to_working(input.descriptor(), transform)
+            .map_err(RenderGpuInputStageRuntimeRecordError::Plan)?;
+        let resources = RenderGpuInputStageResourcePlan::from_gpu_encoded_source_frame(
+            input,
+            output,
+            &stage_plan,
+        )
+        .map_err(RenderGpuInputStageRuntimeRecordError::ResourcePlan)?;
+        let output_format = color_target_format_for_gpu_frame(&resources.output);
+        let shader_plan = resources.transform.wgpu.shader_plan.clone();
+        let static_pipeline = backend_prep
+            .prepare_static_pipeline(&shader_plan, output_format)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendPrep)?;
+        backend_objects
+            .prepare_backend_objects(device, queue, &shader_plan, &static_pipeline)
+            .map_err(RenderGpuInputStageRuntimeRecordError::BackendObjects)?;
+        Ok(())
+    }
+
     /// Plan, prepare runtime-owned backend objects, and record a native GPU output boundary.
     pub fn record_wgpu_output_boundary_owned_backend(
         &mut self,

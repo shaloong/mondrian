@@ -304,6 +304,9 @@ fn dummy_config(output_path: impl Into<PathBuf>) -> ExportConfig {
         output_policy: ExportOutputPolicy::CreateNew,
         smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
         broadcast_qc: None,
+        regulatory_pse: None,
+        frozen_ancillary: None,
+        approved_bmx: None,
     }
 }
 
@@ -1456,4 +1459,98 @@ fn explicit_shutdown_terminalizes_pending_jobs_and_reaps_worker() {
     assert_eq!(after_rejection.pending_jobs, 0);
     assert_eq!(after_rejection.active_jobs, 0);
     assert_eq!(after_rejection.admissions, 1);
+}
+
+#[test]
+fn regulatory_pse_missing_provider_is_notrun_before_any_export_owner_or_job() {
+    let work = tempfile::tempdir().expect("work");
+    let queue = RenderQueue::new_unstarted();
+    let mut config = dummy_config(work.path().join("never-started.mp4"));
+    let delivery = crate::delivery::resolve_export_delivery(
+        &config.preset,
+        &config.timeline.sequence.settings,
+        &config.timeline.color_environment,
+    )
+    .expect("delivery");
+    config.broadcast_qc = Some(mondrian_broadcast::BroadcastQcProfile {
+        id: "synthetic-admission".to_owned(),
+        edition: "1".to_owned(),
+        source_sha256: [1; 32],
+        signal_color_space: delivery.color_target.color_space,
+        observation_tap:
+            mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+        active_picture: mondrian_broadcast::QcActivePicture::full(
+            delivery.resolution.width,
+            delivery.resolution.height,
+        ),
+        rules: vec![mondrian_broadcast::BroadcastQcRule::LumaFlashCandidate {
+            rule_id: "triage".to_owned(),
+            minimum_mean_luma_delta: 0.5,
+            severity: mondrian_broadcast::BroadcastQcSeverity::Info,
+        }],
+        maximum_retained_findings: 1,
+        require_regulatory_flash_analysis: true,
+        require_encoded_artifact_revalidation: true,
+    });
+    assert!(matches!(
+        queue.enqueue(RenderJob::new(config)),
+        Err(ExportAdmissionError::RegulatoryPseNotRun {
+            reason: crate::RegulatoryPseNotRun::ProviderMissing
+        })
+    ));
+    assert!(queue.list_jobs().is_empty());
+    assert!(!work.path().join("never-started.mp4").exists());
+    let _ = queue.shutdown_and_wait(Duration::from_secs(1));
+}
+
+#[test]
+fn broadcast_qc_on_unimplemented_final_artifact_families_is_rejected_before_enqueue() {
+    let work = tempfile::tempdir().expect("work");
+    let queue = RenderQueue::new_unstarted();
+    for (index, preset) in [
+        ExportPreset::png_sequence(),
+        ExportPreset::audio_stems_pcm24(),
+        ExportPreset::imf_app_prores_rdd45_1080p25(),
+        ExportPreset::smpte_dcp_2k_flat_24(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut config = dummy_config(work.path().join(format!("never-started-{index}")));
+        config.preset = preset;
+        let delivery = crate::delivery::resolve_export_delivery(
+            &config.preset,
+            &config.timeline.sequence.settings,
+            &config.timeline.color_environment,
+        )
+        .expect("builtin delivery");
+        config.broadcast_qc = Some(mondrian_broadcast::BroadcastQcProfile {
+            id: "synthetic-admission".to_owned(),
+            edition: "1".to_owned(),
+            source_sha256: [1; 32],
+            signal_color_space: delivery.color_target.color_space,
+            observation_tap:
+                mondrian_broadcast::BroadcastQcObservationTap::DeliveryPictureAfterLegalizer,
+            active_picture: mondrian_broadcast::QcActivePicture::full(
+                delivery.resolution.width,
+                delivery.resolution.height,
+            ),
+            rules: vec![mondrian_broadcast::BroadcastQcRule::LumaFlashCandidate {
+                rule_id: "triage".to_owned(),
+                minimum_mean_luma_delta: 0.5,
+                severity: mondrian_broadcast::BroadcastQcSeverity::Info,
+            }],
+            maximum_retained_findings: 1,
+            require_regulatory_flash_analysis: false,
+            require_encoded_artifact_revalidation: true,
+        });
+        let Err(ExportAdmissionError::InvalidDelivery { detail }) =
+            queue.enqueue(RenderJob::new(config))
+        else {
+            panic!("unsupported final scan must not enqueue")
+        };
+        assert!(detail.contains("final-file scan path"), "{detail}");
+        assert!(queue.list_jobs().is_empty());
+    }
+    let _ = queue.shutdown_and_wait(Duration::from_secs(1));
 }

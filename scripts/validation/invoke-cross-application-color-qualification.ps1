@@ -66,8 +66,8 @@ $policyHash = Get-LowerSha256 $policyAbsolute
 $runtimeProfileHash = Get-LowerSha256 $runtimeProfileAbsolute
 $evidenceManifestHash = Get-LowerSha256 $evidenceAbsolute
 $machineReportHash = Get-LowerSha256 $machineAbsolute
-if ($policy.schema_version -ne 1 -or $policy.execution_policy -ne "sealed-required") {
-    throw "Cross-application qualification policy must be schema 1 and sealed-required."
+if ($policy.schema_version -notin @(1, 2) -or $policy.execution_policy -ne "sealed-required") {
+    throw "Cross-application qualification policy must use a supported schema and sealed-required."
 }
 if (
     $policy.local_restricted_evidence_required -ne $true -or
@@ -80,10 +80,16 @@ if (
 ) {
     throw "Cross-application qualification policy weakened a mandatory invariant."
 }
-Assert-ExactStringSet `
-    @("mondrian", "blender", "davinci_resolve", "adobe_premiere_pro") `
-    @($policy.required_producers) `
-    "required producer set"
+$producerScope = 'full_commercial_matrix'
+$expectedProducers = @('mondrian', 'blender', 'davinci_resolve', 'adobe_premiere_pro')
+if ($policy.schema_version -eq 2) {
+    if ($policy.producer_scope -cne 'blender_and_premiere' -or $runtimeProfile.producer_scope -cne 'blender_and_premiere') {
+        throw 'Local producer policy and runtime profile must explicitly bind Blender/Premiere scope.'
+    }
+    $producerScope = 'blender_and_premiere'
+    $expectedProducers = @('mondrian', 'blender', 'adobe_premiere_pro')
+}
+Assert-ExactStringSet $expectedProducers @($policy.required_producers) 'required producer set'
 if ($runtimeProfile.schema_version -ne $policy.runtime_profile_schema_version) {
     throw "Runtime profile schema does not match the sealed policy."
 }
@@ -168,6 +174,7 @@ if (-not (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
 $qualification = Read-JsonObject $reportPath "qualification report"
 if ($qualification.schema_version -ne $policy.runner.report_schema_version -or
     $qualification.status -ne "qualified" -or
+    $qualification.producer_scope -cne $producerScope -or
     @($qualification.missing_artifacts).Count -ne 0 -or
     [string]$qualification.source_revision -ne $sourceSha -or
     [string]$qualification.machine_report_sha256 -ne $machineReportHash -or
@@ -187,6 +194,7 @@ $sealed = [ordered]@{
     machine_report_sha256 = $machineReportHash
     source_sha = $sourceSha
     status = "qualified"
+    producer_scope = $producerScope
     qualification_report_sha256 = Get-LowerSha256 $reportPath
     stdout_sha256 = Get-LowerSha256 $stdoutPath
     stderr_sha256 = Get-LowerSha256 $stderrPath

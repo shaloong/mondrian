@@ -1133,6 +1133,15 @@ pub struct ExportConfig {
     /// Findings are evaluated before irreversible publication.
     #[serde(default)]
     pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcProfile>,
+    /// Frozen externally approved PSE provider; required when the QC profile requires regulatory analysis.
+    #[serde(default)]
+    pub regulatory_pse: Option<crate::RegulatoryPseProviderConfig>,
+    /// Exact immutable canonical ANC attachment; currently carried by AS-11 ST436.
+    #[serde(default)]
+    pub frozen_ancillary: Option<mondrian_broadcast::FrozenAncillaryProgram>,
+    /// Phase-owned approved BMX authority; never recreated by deserializing a job.
+    #[serde(skip)]
+    pub approved_bmx: Option<mondrian_media::BmxRuntimeHandle>,
 }
 
 /// Whether Export may reuse independently validated source video essence.

@@ -13,6 +13,20 @@ mondrian-broadcast = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+[features]
+default = ["native-aja", "native-decklink"]
+native-aja = ["dep:windows-sys"]
+native-decklink = ["dep:windows-sys"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, optional = true }
+
+[[example]]
+name = "decklink_native_probe"
+path = "examples/decklink_native_probe.rs"
+required-features = ["native-decklink"]

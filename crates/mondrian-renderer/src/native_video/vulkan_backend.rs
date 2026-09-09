@@ -107,6 +107,13 @@ impl VulkanNativeVideoImportBackend {
         self.inner.frame_cpu_timings()
     }
 
+    pub(crate) fn prepare_import_plan(
+        &mut self,
+        plan: &GpuNativeDecodedFrameImportPlan,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.inner.prepare_import_plan(plan)
+    }
+
     /// Decoder surfaces retained until the import submission completes.
     pub fn retained_source_count(&self) -> usize {
         self.inner.retained_source_count()

@@ -48,6 +48,15 @@ disconnect is not a Renderer retirement. Final owner release invalidates its poo
 generation so escaped presentation/encoder leases cannot repopulate a retired
 cache; admission closure itself does not prematurely evict retained resources.
 
+Generation teardown has an explicit foreign-resource ordering contract. Window
+and Headless retirement first release staged, active, completed, quarantined, and
+published frame owners that can retain FFmpeg `AVFrame` leases. The native D3D12
+backend likewise clears its wgpu-pending, direct-fence-pending, and poisoned source
+tables while its qualified FFmpeg device root and wgpu/raw D3D12 device and queue
+leases are still alive. Only then may the renderer runtime and device envelope be
+dropped. This order applies to successful shutdown, deadline expiry, and device
+loss; Rust field order is only a fallback, not the primary teardown mechanism.
+
 Native encoded input accepts both RGBA16F and RGBA32F without inserting a
 conversion to half precision. Compact-YUV and native materialization currently
 produce the product RGBA32F intermediate and feed the same OCIO input boundary.
@@ -1353,6 +1362,21 @@ Renderer device. The route is GPU-resident and performs zero host readbacks,
 rawvideo writes, or CPU-to-encoder uploads; it is not described as literal
 zero-copy because the RGB-to-YCbCr conversion remains a real GPU operation.
 
+The Windows same-device import submission retains both the decoder's AVFrame
+lease and an explicit `ID3D12Resource` COM lease through a two-stage renderer
+completion protocol. Acquire, wgpu sampling, and release command lists all
+refer to that physical resource, so abstract decoder ownership alone cannot be
+used as queue-lifetime evidence. The wgpu work-done callback first proves the
+shader read completed. Only then may the Adapter submit the transition back to
+`COMMON` and its completion fence. The AVFrame and COM resource retire after
+that second fence completes, so FFmpeg cannot reuse the surface on a Video
+Decode command list while Direct work still owns shader-resource state. Failed
+or uncertain submissions quarantine both leases for the backend lifetime. The
+in-flight table is also exclusive by physical `ID3D12Resource` identity: a
+second Viewer candidate for an already-submitted decoder surface receives
+backpressure until the first candidate completes both stages, preventing
+overlapping independent state-transition chains for one texture.
+
 The Adapter owns the cross-queue contract. The direct queue signals source
 readiness, the Video Process queue waits, transitions source and destination to
 VIDEO_PROCESS_READ/WRITE, executes conversion, restores the source to
@@ -1438,3 +1462,14 @@ coordination may trim idle retention without changing active precision or
 semantic admission. This budget is deliberately large enough to retain an 8K
 RGBA32F working contract between frames. The gate cannot substitute an
 unlimited test-only grant.
+
+The ignored `gpu_alpha_quantization` integration diagnostic isolates the
+production sRGB Program Output boundary from upstream composition. It uploads
+the same 64×64 Float32 working raster for separate `Rgba32Float` and
+`Rgba8Unorm` executions, then records every source/CPU/GPU Float32 bit pattern
+and output byte. Four exact coverage bands (0, 0.25, 0.5, 1) expose whether
+coverage changes before quantization or whether native UNORM conversion differs
+from the CPU nearest rule. `MONDRIAN_GPU_ALPHA_DIAGNOSTIC_OUTPUT` names a
+create-new JSON artifact; GPU absence and readback deadlines are errors, while
+observed pixel differences remain diagnostic facts with `qualified: false`.
+The test changes neither production quantization nor qualification tolerances.

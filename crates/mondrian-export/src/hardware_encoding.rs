@@ -10,8 +10,8 @@
 use crate::preset::{H264Profile, HevcProfile, VideoCodecConfig, VideoRateControl};
 use crate::video_encoding::ResolvedVideoCodingStructure;
 use mondrian_core::ExecutionCancellationToken;
+use mondrian_media::FfmpegCommand as Command;
 use mondrian_media::{run_supervised_command, SupervisedProcessPolicy, SupervisedStreamCapture};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 const NVIDIA_VENDOR_ID: u32 = 0x10de;
@@ -105,7 +105,7 @@ fn resolve_video_encoder_with_probe(
     static_hdr_metadata: bool,
     cancellation: &ExecutionCancellationToken,
     command: impl FnOnce() -> Result<Command, mondrian_media::FfmpegCommandError>,
-    probe: impl FnOnce(&mut Command, ResolvedVideoEncoder) -> Result<(), String>,
+    probe: impl FnOnce(&mut Command, ResolvedVideoEncoder) -> mondrian_core::Result<()>,
 ) -> mondrian_core::Result<ResolvedVideoEncoder> {
     let software = software_encoder(codec);
     if static_hdr_metadata {
@@ -145,11 +145,14 @@ fn resolve_video_encoder_with_probe(
             Ok(candidate)
         }
         Err(error) => {
+            if mondrian_media::FfmpegCommandError::is_cause_of(&error) {
+                return Err(error);
+            }
             tracing::warn!(
                 encoder = candidate.ffmpeg_name(codec),
                 fallback_encoder = software.ffmpeg_name(codec),
                 adapter_name = adapter.name,
-                reason = error,
+                reason = %error,
                 "hardware encoder probe failed; using proven software fallback"
             );
             Ok(software)
@@ -199,7 +202,7 @@ fn probe_encoder(
     codec: &VideoCodecConfig,
     output_pixel_format: &str,
     cancellation: &ExecutionCancellationToken,
-) -> Result<(), String> {
+) -> mondrian_core::Result<()> {
     command
         .arg("-hide_banner")
         .arg("-loglevel")
@@ -236,16 +239,18 @@ fn probe_encoder(
         },
         cancellation,
     )
-    .map_err(|error| format!("probe process failed: {error}"))?;
+    .map_err(|error| mondrian_core::MondrianError::Other(anyhow::Error::new(error)))?;
     if output.status.success() {
         return Ok(());
     }
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-    Err(if detail.is_empty() {
-        format!("probe exited with {}", output.status)
-    } else {
-        detail
-    })
+    Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+        if detail.is_empty() {
+            format!("probe exited with {}", output.status)
+        } else {
+            detail
+        }
+    )))
 }
 
 pub(crate) fn apply_video_encoder_args(
@@ -462,7 +467,9 @@ mod tests {
             || Ok(Command::new("protocol-only-not-spawned")),
             |_, candidate| {
                 assert_eq!(candidate, ResolvedVideoEncoder::NvidiaNvenc);
-                Err("unsupported driver".to_owned())
+                Err(mondrian_core::MondrianError::Other(anyhow::anyhow!(
+                    "unsupported driver"
+                )))
             },
         )
         .expect("ordinary codec fallback remains legal");

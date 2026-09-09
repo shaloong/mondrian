@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionManifest Version="7.0" ExtensionBundleId="org.mondrian.validation.capture" ExtensionBundleVersion="1.0.0" ExtensionBundleName="Mondrian Color Capture">
+  <ExtensionList><Extension Id="org.mondrian.validation.capture.panel" Version="1.0.0"/></ExtensionList>
+  <ExecutionEnvironment><HostList><Host Name="PPRO" Version="[24.0,24.9]"/></HostList><LocaleList><Locale Code="All"/></LocaleList><RequiredRuntimeList><RequiredRuntime Name="CSXS" Version="11.0"/></RequiredRuntimeList></ExecutionEnvironment>
+  <DispatchInfoList><Extension Id="org.mondrian.validation.capture.panel"><DispatchInfo>
+    <Resources><MainPath>./index.html</MainPath><ScriptPath>./capture.jsx</ScriptPath><CEFCommandLine><Parameter>--enable-nodejs</Parameter></CEFCommandLine></Resources>
+    <Lifecycle><AutoVisible>true</AutoVisible></Lifecycle>
+    <UI><Type>Panel</Type><Menu>Mondrian Color Capture</Menu><Geometry><Size><Width>520</Width><Height>440</Height></Size></Geometry></UI>
+  </DispatchInfo></Extension></DispatchInfoList>
+</ExtensionManifest>

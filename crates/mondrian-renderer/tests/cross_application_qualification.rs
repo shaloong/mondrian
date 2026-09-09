@@ -50,6 +50,7 @@ fn frame_coordinate() -> CrossApplicationFrameCoordinate {
 fn profile() -> CrossApplicationQualificationProfile {
     CrossApplicationQualificationProfile {
         schema_version: 1,
+        producer_scope: mondrian_renderer::CrossApplicationProducerScope::FullCommercialMatrix,
         qualification_id: "commercial-cross-app-color-v1".to_owned(),
         edition: "2026-08-fixture".to_owned(),
         stimulus_sha256: SHA_A.to_owned(),
@@ -572,4 +573,23 @@ fn checked_in_supervisor_policy_binds_the_stimulus_and_fail_closed_runner() {
     assert!(script.contains("source_clean"));
     assert!(script.contains("qualified"));
     assert!(!script.contains("return 0"));
+}
+
+#[test]
+fn local_blender_premiere_scope_is_explicit_and_never_weakens_legacy_matrix() {
+    let mut local = profile();
+    local
+        .required_producers
+        .retain(|entry| entry.producer != CrossApplicationProducer::DaVinciResolve);
+    for case in &mut local.cases {
+        case.required_producers
+            .retain(|producer| *producer != CrossApplicationProducer::DaVinciResolve);
+    }
+    assert!(PreparedCrossApplicationQualification::compile(local.clone()).is_err());
+    local.producer_scope = mondrian_renderer::CrossApplicationProducerScope::BlenderAndPremiere;
+    assert!(PreparedCrossApplicationQualification::compile(local.clone()).is_err());
+    local.schema_version = 2;
+    assert!(PreparedCrossApplicationQualification::compile(local.clone()).is_ok());
+    local.required_producers.pop();
+    assert!(PreparedCrossApplicationQualification::compile(local).is_err());
 }

@@ -460,27 +460,6 @@ impl NativeVideoImportGpuTimingRuntime {
         self.ring = Some(ring);
     }
 
-    pub(super) fn submission_failed_after_queue(
-        &mut self,
-        probe: NativeVideoImportGpuTimingProbe,
-        reason: String,
-    ) {
-        if matches!(
-            &probe.disposition,
-            NativeVideoImportGpuTimingProbeDisposition::Recording(_)
-        ) {
-            // Native import can report a raw release failure after the wgpu
-            // command buffer was accepted. Never recycle its query resources
-            // when submission is ambiguous. It is not added to
-            // `submitted_imports`: no usable native working-frame output was
-            // formed, and these diagnostics measure output coverage rather
-            // than every command buffer the GPU may have accepted.
-            self.disable(format!(
-                "native-import timestamp submission became ambiguous: {reason}"
-            ));
-        }
-    }
-
     pub(super) fn after_submit(&mut self, probe: NativeVideoImportGpuTimingProbe) {
         self.submitted_imports = self.submitted_imports.saturating_add(1);
         let NativeVideoImportGpuTimingProbe {

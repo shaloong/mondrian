@@ -7,6 +7,7 @@
 //! a renderer fence proves all reads complete. No bridge texture or pixel copy
 //! exists in this path.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,9 +15,9 @@ use mondrian_media::{
     DecodedGpuFrameHandleKind, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameHandle,
     RendererHwAccelDeviceContext,
 };
-use windows::core::Interface;
+use windows::core::{w, Interface};
 use windows::Win32::Graphics::Direct3D12::{
-    ID3D12CommandQueue, ID3D12Device, ID3D12Fence, D3D12_FENCE_FLAG_NONE,
+    ID3D12CommandQueue, ID3D12Device, ID3D12Fence, ID3D12Resource, D3D12_FENCE_FLAG_NONE,
     D3D12_RESOURCE_STATE_COMMON,
 };
 
@@ -108,12 +109,27 @@ impl Default for D3D12NativeVideoImportBackendOptions {
 
 struct DirectSubmissionResidency {
     completion_value: u64,
+    // Keep an explicit COM lease for the exact resource referenced by the
+    // acquire, wgpu, and release command lists. The retained AVFrame below
+    // protects decoder ownership, but is not the renderer queue's physical
+    // resource-lifetime authority.
+    _texture: ID3D12Resource,
     _source: PreviewNativeDecodedFrameHandle,
     _acquire_commands: D3D12TransitionCommands,
     _release_commands: D3D12TransitionCommands,
 }
 
+struct WgpuSubmissionResidency {
+    completion_value: u64,
+    wgpu_complete: Arc<AtomicBool>,
+    texture: ID3D12Resource,
+    source: PreviewNativeDecodedFrameHandle,
+    acquire_commands: D3D12TransitionCommands,
+    release_commands: D3D12TransitionCommands,
+}
+
 struct PoisonedSubmissionResidency {
+    _texture: ID3D12Resource,
     _source: PreviewNativeDecodedFrameHandle,
     _acquire_commands: D3D12TransitionCommands,
     _release_commands: D3D12TransitionCommands,
@@ -132,11 +148,25 @@ pub struct D3D12NativeVideoImportBackend {
     color_runtime: RenderGpuOutputBoundaryRuntime,
     completion_fence: ID3D12Fence,
     next_completion_value: u64,
+    pending_wgpu_sources: Vec<WgpuSubmissionResidency>,
     pending_sources: Vec<DirectSubmissionResidency>,
     poisoned_sources: Vec<PoisonedSubmissionResidency>,
     max_frames_in_flight: usize,
     frame_cpu_timings: NativeVideoImportCpuTimings,
     gpu_timing: NativeVideoImportGpuTimingRuntime,
+}
+
+impl Drop for D3D12NativeVideoImportBackend {
+    fn drop(&mut self) {
+        // These source leases can be the last owners of FFmpeg D3D12VA
+        // AVFrames. Release them while the renderer-qualified FFmpeg device
+        // root and every wgpu/raw D3D12 device/queue lease are still alive.
+        // Poisoned submissions stay quarantined for the backend lifetime, but
+        // generation teardown is their final safe release boundary.
+        self.pending_wgpu_sources.clear();
+        self.pending_sources.clear();
+        self.poisoned_sources.clear();
+    }
 }
 
 impl D3D12NativeVideoImportBackend {
@@ -272,12 +302,14 @@ impl D3D12NativeVideoImportBackend {
                     reason: error.to_string(),
                 },
             )?;
-        let completion_fence = unsafe { raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }
-            .map_err(
-                |error| D3D12NativeVideoImportBackendCreateError::CompletionFence {
+        let completion_fence: ID3D12Fence =
+            unsafe { raw_device.CreateFence(0, D3D12_FENCE_FLAG_NONE) }.map_err(|error| {
+                D3D12NativeVideoImportBackendCreateError::CompletionFence {
                     reason: error.to_string(),
-                },
-            )?;
+                }
+            })?;
+        let _ = unsafe { raw_queue.SetName(w!("mondrian.renderer.native-video.direct")) };
+        let _ = unsafe { completion_fence.SetName(w!("mondrian.renderer.native-video.fence")) };
         let color_runtime =
             RenderGpuOutputBoundaryRuntime::with_resource_pool(resource_pool).map_err(|error| {
                 D3D12NativeVideoImportBackendCreateError::ColorRuntime { reason: error.to_string() }
@@ -302,6 +334,7 @@ impl D3D12NativeVideoImportBackend {
             color_runtime,
             completion_fence,
             next_completion_value: 1,
+            pending_wgpu_sources: Vec::new(),
             pending_sources: Vec::new(),
             poisoned_sources: Vec::new(),
             max_frames_in_flight: options.max_frames_in_flight_per_contract,
@@ -340,6 +373,31 @@ impl D3D12NativeVideoImportBackend {
         self.frame_cpu_timings
     }
 
+    /// Materialize contract-specific OCIO backend objects before the native
+    /// decoder surface reaches its exact presentation opportunity.
+    pub(crate) fn prepare_import_plan(
+        &mut self,
+        plan: &GpuNativeDecodedFrameImportPlan,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.color_runtime
+            .prepare_wgpu_input_stage_gpu_frame_backend_objects(
+                &plan.input_transform,
+                &plan.encoded_source_frame,
+                &plan.working_frame,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Gpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                &self.device,
+                &self.queue,
+            )
+            .map_err(|error| {
+                rejected(format!(
+                    "source-to-working color backend preparation failed: {error:?}"
+                ))
+            })
+    }
+
     /// Collect timestamp callbacks after device polling.
     pub fn collect_gpu_timings_after_device_poll(&mut self) {
         self.gpu_timing.collect_after_device_poll();
@@ -367,43 +425,59 @@ impl D3D12NativeVideoImportBackend {
 
     /// Decoder sources still retained through GPU completion.
     pub fn retained_source_count(&self) -> usize {
-        self.pending_sources.len().saturating_add(self.poisoned_sources.len())
+        self.pending_wgpu_sources
+            .len()
+            .saturating_add(self.pending_sources.len())
+            .saturating_add(self.poisoned_sources.len())
     }
 
     fn poison_submission(
         &mut self,
+        texture: ID3D12Resource,
         source: PreviewNativeDecodedFrameHandle,
         acquire_commands: D3D12TransitionCommands,
         release_commands: D3D12TransitionCommands,
     ) {
         self.poisoned_sources.push(PoisonedSubmissionResidency {
+            _texture: texture,
             _source: source,
             _acquire_commands: acquire_commands,
             _release_commands: release_commands,
         });
     }
 
+    fn resource_in_flight(&self, texture: &ID3D12Resource) -> bool {
+        let identity = texture.as_raw();
+        self.pending_wgpu_sources
+            .iter()
+            .any(|source| source.texture.as_raw() == identity)
+            || self.pending_sources.iter().any(|source| source._texture.as_raw() == identity)
+            || self.poisoned_sources.iter().any(|source| source._texture.as_raw() == identity)
+    }
+
     fn release_and_retain_source(
         &mut self,
         completion_value: u64,
+        texture: ID3D12Resource,
         source: PreviewNativeDecodedFrameHandle,
         acquire_commands: D3D12TransitionCommands,
         release_commands: D3D12TransitionCommands,
     ) -> Result<(), GpuNativeDecodedFrameImportError> {
         if let Err(error) = release_commands.execute(&self.raw_queue) {
-            self.poison_submission(source, acquire_commands, release_commands);
+            self.poison_submission(texture, source, acquire_commands, release_commands);
             return Err(native_texture_error(error));
         }
         if let Err(error) =
             unsafe { self.raw_queue.Signal(&self.completion_fence, completion_value) }
         {
-            self.poison_submission(source, acquire_commands, release_commands);
+            self.poison_submission(texture, source, acquire_commands, release_commands);
             return Err(rejected(format!(
                 "renderer completion-fence signal failed: {error}"
             )));
         }
         self.pending_sources.push(DirectSubmissionResidency {
             completion_value,
+            _texture: texture,
             _source: source,
             _acquire_commands: acquire_commands,
             _release_commands: release_commands,
@@ -411,10 +485,54 @@ impl D3D12NativeVideoImportBackend {
         Ok(())
     }
 
+    fn retain_until_wgpu_completion(
+        &mut self,
+        completion_value: u64,
+        texture: ID3D12Resource,
+        source: PreviewNativeDecodedFrameHandle,
+        acquire_commands: D3D12TransitionCommands,
+        release_commands: D3D12TransitionCommands,
+    ) {
+        let wgpu_complete = Arc::new(AtomicBool::new(false));
+        let callback_complete = Arc::clone(&wgpu_complete);
+        self.queue.on_submitted_work_done(move || {
+            callback_complete.store(true, Ordering::Release);
+        });
+        self.pending_wgpu_sources.push(WgpuSubmissionResidency {
+            completion_value,
+            wgpu_complete,
+            texture,
+            source,
+            acquire_commands,
+            release_commands,
+        });
+    }
+
     /// Non-blockingly release sources whose renderer fence has completed.
     pub fn retire_completed_source_residency(
         &mut self,
     ) -> Result<usize, GpuNativeDecodedFrameImportError> {
+        let mut waiting = Vec::with_capacity(self.pending_wgpu_sources.len());
+        let mut pending = std::mem::take(&mut self.pending_wgpu_sources).into_iter();
+        while let Some(residency) = pending.next() {
+            if !residency.wgpu_complete.load(Ordering::Acquire) {
+                waiting.push(residency);
+                continue;
+            }
+            if let Err(error) = self.release_and_retain_source(
+                residency.completion_value,
+                residency.texture,
+                residency.source,
+                residency.acquire_commands,
+                residency.release_commands,
+            ) {
+                waiting.extend(pending);
+                self.pending_wgpu_sources = waiting;
+                return Err(error);
+            }
+        }
+        self.pending_wgpu_sources = waiting;
+
         let completed = unsafe { self.completion_fence.GetCompletedValue() };
         if completed == u64::MAX {
             self.pending_sources.clear();
@@ -436,7 +554,9 @@ impl D3D12NativeVideoImportBackend {
     {
         let total_started = Instant::now();
         let _ = self.retire_completed_source_residency()?;
-        if self.pending_sources.len() >= self.max_frames_in_flight {
+        if self.pending_wgpu_sources.len().saturating_add(self.pending_sources.len())
+            >= self.max_frames_in_flight
+        {
             return Err(GpuNativeDecodedFrameImportError::Backpressure {
                 reason: format!(
                     "all {} same-device native decoder surfaces are still in renderer flight",
@@ -453,6 +573,14 @@ impl D3D12NativeVideoImportBackend {
             return Err(rejected(
                 "decoder surface was not allocated by the exact renderer D3D12 device".to_owned(),
             ));
+        }
+        let _ = unsafe { source.texture.SetName(w!("mondrian.decoder.d3d12va.surface")) };
+        if self.resource_in_flight(&source.texture) {
+            return Err(GpuNativeDecodedFrameImportError::Backpressure {
+                reason:
+                    "the same D3D12VA decoder surface already has a renderer submission in flight"
+                        .to_owned(),
+            });
         }
         validate_device_feature(&self.device, source.inspection.source_texture_format)
             .map_err(native_texture_error)?;
@@ -530,6 +658,7 @@ impl D3D12NativeVideoImportBackend {
         if let Err(error) = acquire_commands.execute(&self.raw_queue) {
             self.gpu_timing.abandon_before_submit(timing_probe);
             self.poison_submission(
+                source.texture.clone(),
                 native_frame.handle.clone(),
                 acquire_commands,
                 release_commands,
@@ -600,6 +729,7 @@ impl D3D12NativeVideoImportBackend {
                 self.color_runtime.frame_table_mut().remove(plan.encoded_source_frame.id());
                 if let Err(release_error) = self.release_and_retain_source(
                     completion_value,
+                    source.texture.clone(),
                     native_frame.handle.clone(),
                     acquire_commands,
                     release_commands,
@@ -615,15 +745,13 @@ impl D3D12NativeVideoImportBackend {
 
         let submit_started = Instant::now();
         let _submission = self.queue.submit(std::iter::once(encoder.finish()));
-        if let Err(error) = self.release_and_retain_source(
+        self.retain_until_wgpu_completion(
             completion_value,
+            source.texture.clone(),
             native_frame.handle.clone(),
             acquire_commands,
             release_commands,
-        ) {
-            self.gpu_timing.submission_failed_after_queue(timing_probe, error.to_string());
-            return Err(error);
-        }
+        );
         self.gpu_timing.after_submit(timing_probe);
         drop((texture, luma, chroma));
         let submit_us = elapsed_us(submit_started);

@@ -99,6 +99,29 @@ where
         self.frame_cpu_timings
     }
 
+    pub(crate) fn prepare_import_plan(
+        &mut self,
+        plan: &GpuNativeDecodedFrameImportPlan,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        self.color_runtime
+            .prepare_wgpu_input_stage_gpu_frame_backend_objects(
+                &plan.input_transform,
+                &plan.encoded_source_frame,
+                &plan.working_frame,
+                RenderColorTransformGpuOptions {
+                    output_residency: ColorFrameResidency::Gpu,
+                    ..RenderColorTransformGpuOptions::default()
+                },
+                &self.device,
+                &self.queue,
+            )
+            .map_err(|error| {
+                backend_rejected(format!(
+                    "source-to-working color backend preparation failed: {error:?}"
+                ))
+            })
+    }
+
     pub(crate) fn retained_source_count(&self) -> usize {
         self.retained_sources.load(Ordering::Acquire)
     }

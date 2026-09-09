@@ -18,7 +18,7 @@ Prepared Visual full-raster working composite     Audio Program (48 kHz)
                   bounded Reference Output scheduler Module
                                        |
                                        v
-              delayed DeckLink COM / AJA NTV2 vendor bridge
+             Windows DeckLink COM / AJA NTV2 native bridges
                                        |
                                        v
                          physical device / SDI connector
@@ -142,11 +142,16 @@ Loading user preferences never loads an SDK or acquires a device. Preferences
 store only optional provider/device identity, carrier preference, and reference
 policy. The composition root installs a physical Adapter explicitly.
 
-DeckLink and AJA integration is delayed behind the vendor bridge so Mondrian
-does not vendor restricted SDK material. `UnavailableVendorReferenceOutputBridge`
-reports missing runtime, no devices, or a version mismatch without inventing a
-device. A physical Session is accepted only when evidence is hardware-backed
-and provider, request readback, and device generation all match.
+Windows has concrete DeckLink API 12.0 COM and AJA SDK 18.1.0 native adapters
+behind the vendor boundary. The separately built DLLs use pinned interface/SDK
+sources with their redistribution notices preserved; ordinary Cargo builds do
+not require vendor drivers or hardware. The platform registry installs their
+actual package-local loaders. Missing images, runtimes, devices and incompatible
+interfaces remain typed unavailable results. `UnavailableVendorReferenceOutputBridge`
+also preserves an explicit unavailable seam. A physical Session is accepted
+only when evidence is hardware-backed and provider, request readback, and
+device generation all match. Other operating systems and physical hardware
+qualification remain NotRun.
 
 Callbacks publish only bounded low-frequency completion/status events. The
 controlling Module owns ordering and accounting. Required external-reference
@@ -243,8 +248,118 @@ reference equipment, platform/driver matrices, and long-duration soak. Those
 facts belong to COL-042 HITL plus COL-043, COL-046, and COL-047; software
 simulation cannot close them.
 
-Vendor integration should be implemented against the official
+Vendor API references include the official
 [DeckLink SDK manual](https://documents.blackmagicdesign.com/UserManuals/DeckLinkSDKManual.pdf),
 [DeckLink scheduled output API](https://sdk-doc.blackmagicdesign.com/decklink-sdk/decklinkapi.html),
 [AJA NTV2 SDK](https://github.com/aja-video/libajantv2), and
 [AJA AutoCirculate guidance](https://sdkdocs.aja.com/public/ntv2/current/d9/d9a/recordplaytechniques.html).
+
+## Concrete Windows AJA provider and physical endurance admission
+
+`native_aja` now implements the real Windows AJA adapter, with its pinned
+C++ AutoCirculate owner under `native/reference-output-aja`. The separate SDK
+build is optional for Cargo and produces a package-local DLL; absence of the
+image, driver, exact device, supported mode, or external reference remains an
+admission-time NotRun. The native owner snapshots configuration before any
+mutation, acquires the card exclusively, reads back configured output,
+transfers bounded canonical video/Audio bundles, and records completion only
+from a previously observed active-frame cookie and the hardware Audio clock.
+See `native/reference-output-aja/README.md` for reproducible build and exact
+limits. The current implementation is SDR/v210 progressive SDI1 and includes
+validation-only luma VANC insertion plus independent second-card raw SDI
+capture. These capabilities require the exact receiver/marker binding below;
+they do not establish physical wire qualification on a machine without the
+rig. HDR and unsupported carriage remain unadvertised. The separate Windows
+DeckLink implementation is described below.
+
+`ReferenceOutputAdapter::preflight_reference_lock` is read-only and defaults to
+unknown. The physical endurance factory discovers and retains the same native
+adapter it later moves into the phase App, checks provider/SDK/driver/device
+identity and exact mode, and derives pre-start capability inventory from those
+observations. Registration alone is not capability evidence. The Windows
+registry registers the actual package-local AJA and DeckLink loaders. Native
+no-device probes validate their ABI, rejected-owner teardown and bounded ANC
+codecs; actual SDI/reference qualification requires the physical rig and remains
+NotRun locally.
+
+If a vendor open returns a mismatched or partially initialized session, that
+session is consumed through the ordinary Module shutdown coordinator before
+returning a rejection. The rejection carries the whole shutdown receipt;
+subsequent Module shutdown preserves that failure instead of relabeling the
+session never-opened. Native callback-worker join failures retain executable
+image ownership and remain visible outstanding resources.
+
+The validation-only AJA wire extension now adds full-raster progressive luma
+VANC insertion and an independent second-card SDI capture owner. Its exact
+capabilities are advertised only with the configured distinct receiver, exact
+mode, live input route and representable marker placement. The phase factory
+constructs a fresh nonce and transfers the same canonical
+`AncillaryWireCorrelation` to the Timeline pump and adapter. The pump explicitly
+constructs the marker-bearing `AncillaryFrame` before Renderer packing.
+Captured raster words are independently decoded and correlated by the actual
+on-wire nonce/frame packet; output completion or an echoed expected digest is
+insufficient. Full scheduled and received words, digests, and hardware times
+are retained in bounded create-only JSONL journals, synchronized at consuming
+shutdown. HANC/chroma ANC and unsupported geometries remain unadvertised.
+
+The Windows DeckLink path is now an independently implemented COM bridge under
+`native/reference-output-decklink`, compiled by Microsoft MIDL/MSVC from the
+27 unmodified BMD-licensed API **12.0** interfaces redistributed by official OBS
+commit `671fb57daf4972fcd506689a48a474dd4eda9e66`. It does not claim SDK 16 or
+hardware qualification. `native-decklink` enables the Rust dynamic loader without making
+ordinary Cargo builds depend on SDK headers, MIDL, installed drivers or cards.
+
+`DeckLinkReferenceOutputAdapter` retains the exact absolute DLL image lease and
+hash, distinguishes missing COM registration from missing API interfaces, and
+discovers persistent device IDs, physical-card groups, profile generations and
+separate input/output mode inventories. Its initial output scope is progressive
+HD legal-range Rec709 v210 with 48kHz stereo or 7.1 PCM24. Native scheduled
+video/audio timestamps preserve the canonical absolute-frame audio cadence,
+including nonzero initial frame positions. Native readback verifies the active
+output mode and PsF/3D status, configuration controls and unity digital gain.
+
+Output and independent capture run on separate MTA owner threads. Physical
+completion timestamps and external-reference status come from the SDK; raw
+VANC words come exclusively from retained input-callback frames. Receiver
+admission rejects two subdevices in the same physical group and requires the
+selected input mode. The shared broadcast correlation contract still owns
+nonce/frame markers and validates full expected/captured packet inventories.
+The App registry and existing machine-plan wire branch now assemble either
+actual AJA or actual DeckLink adapters. Missing image/driver/card remains
+admission-time NotRun; packet completion alone grants no wire qualification.
+
+Every partial native open has a consuming owner. Callback deregistration,
+stop, outstanding-frame or configuration-restoration failure remains in the
+shutdown receipt and conservatively retains the executable mapping. Native
+boundary probes cover failed-owner polling/teardown, 128 repeated rejected
+opens, same-line overlap, maximal packets, end-of-line placement, header parity,
+checksum corruption and overflow; they explicitly report nonqualifying results.
+
+Final native lifecycle audit tightened the stop boundary: `begin_shutdown`
+sets only an atomic signal, while the MTA owner executes SDK waits. An
+initialization deadline retains a heap-owned promise and partial owner. When
+stop/disable/callback deregistration cannot establish quiescence, the native
+bridge keeps the complete COM/callback/frame/audio owner, parks its thread on a
+condition variable, and reports unjoined/unreleased resources. It does not
+destroy the owner just because the Rust coordinator's deadline expired. The
+native fault probe exercises these mechanisms independently of any hardware.
+
+
+### Consuming program-bound wire journals
+
+Both Windows native bridge adapters accept an optional immutable program/phase
+journal binding. Their existing raw JSONL begins with the exact source hash and
+phase identity and retains actual scheduled/captured component words. The
+create-new file denies external write/delete sharing; consuming output/capture
+shutdown synchronizes it and checks its actual length through the same handle.
+The digest advances only after complete successful writes under this lease; a
+partial write or exceeded bound permanently prevents publication. This avoids
+rescanning a full day of raw journals during bounded shutdown. Path/SHA publish
+only after native owner closure is clean. The shared
+inventory does not infer evidence from filenames or expose abandoned sessions
+as completed readback. Missing hardware remains typed `NotRun`.
+
+A journal receipt proves the actual closed writer contents, not that shutdown
+met a deadline. The existing phase owner applies its original shutdown deadline
+to the complete native close/join operation. A late close may retain this raw
+diagnostic inventory but the phase remains failed and cannot qualify.

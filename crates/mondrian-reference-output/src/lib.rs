@@ -6,6 +6,10 @@
 //! DeckLink COM and AJA NTV2 C++ details remain behind concrete bridges.
 
 mod adapter;
+mod ancillary_journal;
+pub use ancillary_journal::{
+    NativeAncillaryJournalBinding, NativeAncillaryJournalInventory, NativeAncillaryJournalReceipt,
+};
 mod frame;
 mod module;
 mod signal;
@@ -39,3 +43,13 @@ pub use signal::{
     ReferenceOutputReferencePolicy, ReferenceOutputScan, ReferenceOutputSignal,
     ReferenceOutputSignalError,
 };
+
+#[cfg(all(windows, feature = "native-aja"))]
+mod native_aja;
+#[cfg(all(windows, feature = "native-aja"))]
+pub use native_aja::{AjaReferenceOutputAdapter, AjaWireReadbackConfiguration};
+
+#[cfg(all(windows, feature = "native-decklink"))]
+mod native_decklink;
+#[cfg(all(windows, feature = "native-decklink"))]
+pub use native_decklink::{DeckLinkReferenceOutputAdapter, DeckLinkWireReadbackConfiguration};

@@ -1,5 +1,8 @@
 //! 后台渲染队列
 
+mod final_broadcast_qc;
+mod st436;
+
 use crate::audio_stems::{
     stem_file_name, stem_path, validate_and_write_audio_stem_manifest, AudioStemExpectation,
     AudioStemValidationContract,
@@ -53,8 +56,10 @@ use mondrian_core::{
 };
 use mondrian_effects::{
     identity_compiled_effect_graph, EffectExecutionContinuity, EffectExecutionSessionConfig,
-    EffectFrameExtent, EffectFrameTileF32, EffectTemporalSourceIdentity, PreparedTemporalFrameSet,
+    EffectFrameExtent, EffectFrameTileF32, EffectProcessingBackend, EffectTemporalSourceIdentity,
+    EffectWorkingPrecision, PreparedTemporalFrameSet,
 };
+use mondrian_media::FfmpegCommand as Command;
 #[cfg(test)]
 use mondrian_media::PreviewDecodeSessionDisposition;
 use mondrian_media::{
@@ -118,7 +123,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 use tokio::runtime::Builder as TokioRuntimeBuilder;
@@ -1036,6 +1040,18 @@ pub struct ExportJobDiagnostics {
     pub dynamic_hdr_preservation: Option<ExportDynamicHdrPreservationEvidence>,
     /// Broadcaster-profile Program Output observation, when requested.
     pub broadcast_qc: Option<mondrian_broadcast::BroadcastQcReport>,
+    /// Independent rescan of every final encoded picture, when requested.
+    #[serde(default)]
+    pub broadcast_artifact_qc: Option<crate::FinishedBroadcastArtifactReceipt>,
+    /// Raw rejected final scan, including independent decoder cleanup.
+    #[serde(default)]
+    pub broadcast_artifact_qc_failure: Option<crate::FinishedBroadcastArtifactFailure>,
+    /// Actual external regulatory analysis with native process closure.
+    #[serde(default)]
+    pub regulatory_pse: Option<crate::RegulatoryPseExecutionEvidence>,
+    /// Final artifact QC after any independently bound regulatory obligation.
+    #[serde(default)]
+    pub broadcast_final_qc: Option<mondrian_broadcast::BroadcastQcReport>,
 }
 
 /// Dynamic metadata family proved on one byte-identical preserved source file.
@@ -2317,6 +2333,9 @@ fn execute_ffmpeg_export_job(
         return JobExecutionResult::Cancelled;
     }
     report(ExportProgress::preparing(0.01));
+    if let Err(detail) = final_broadcast_qc::validate_admission(&job.config) {
+        return JobExecutionResult::Failed(detail);
+    }
 
     let final_output = job.config.output_path.as_path();
     if job.config.preset.audio_stem_format().is_some() {
@@ -2365,6 +2384,7 @@ fn execute_ffmpeg_export_job(
     let partial_output = staging.path().to_path_buf();
     let reservation = staging.release_for_external_writer();
     let mut validation_contract = None;
+    let mut final_diagnostics = ExportJobDiagnostics::default();
     let outcome = execute_timeline_export(
         job,
         &job.config.timeline,
@@ -2373,7 +2393,10 @@ fn execute_ffmpeg_export_job(
         cancel,
         execution_gate,
         report,
-        report_diagnostics,
+        &mut |diagnostics| {
+            final_diagnostics = diagnostics.clone();
+            report_diagnostics(diagnostics);
+        },
         audio_owner,
     );
     if !matches!(outcome, JobExecutionResult::ReversibleWorkCompleted) {
@@ -2408,6 +2431,32 @@ fn execute_ffmpeg_export_job(
             return JobExecutionResult::Failed(format!("导出结果校验失败: {error}"));
         }
     }
+    if job.config.broadcast_qc.is_some() {
+        let delivery = match crate::delivery::resolve_export_delivery(
+            &job.config.preset,
+            &job.config.timeline.sequence.settings,
+            &job.config.timeline.color_environment,
+        ) {
+            Ok(delivery) => delivery,
+            Err(error) => return JobExecutionResult::Failed(error.to_string()),
+        };
+        let range =
+            match compute_timeline_render_range_for_delivery(&job.config.timeline, &delivery) {
+                Ok(range) => range,
+                Err(error) => return JobExecutionResult::Failed(error),
+            };
+        if let Err(outcome) = final_broadcast_qc::verify(
+            job,
+            &staging,
+            &validation_expectations,
+            range.total_frames,
+            cancel,
+            &mut final_diagnostics,
+            report_diagnostics,
+        ) {
+            return outcome;
+        }
+    }
     if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
         return JobExecutionResult::Failed(reason);
     }
@@ -2430,6 +2479,9 @@ fn execute_professional_delivery_export(
     report_diagnostics: &mut dyn FnMut(ExportJobDiagnostics),
     audio_owner: &mut ExportAudioSourceOwner<'_>,
 ) -> JobExecutionResult {
+    if let Err(reason) = validate_frozen_ancillary(&job.config) {
+        return JobExecutionResult::Failed(reason);
+    }
     let Some(author_output) = job.config.preset.professional_delivery().cloned() else {
         return JobExecutionResult::Failed(
             "professional delivery executor received a non-professional preset".to_owned(),
@@ -2480,11 +2532,18 @@ fn execute_professional_delivery_export(
         }
         Err(error) => return JobExecutionResult::Failed(error),
     };
-    let toolchain = match ProfessionalDeliveryToolchain::discover(author_output.profile) {
+    let toolchain = match ProfessionalDeliveryToolchain::discover_with_bmx(
+        author_output.profile,
+        job.config.approved_bmx.clone(),
+    ) {
         Ok(toolchain) => toolchain,
         Err(error) => return JobExecutionResult::Failed(error.to_string()),
     };
-    if let Err(error) = toolchain.qualify_for(author_output.profile) {
+    if let Err(error) = toolchain.qualify_for_until(
+        author_output.profile,
+        Instant::now() + Duration::from_secs(30),
+        cancel,
+    ) {
         return JobExecutionResult::Failed(error.to_string());
     }
     let parent = final_output.parent().unwrap_or_else(|| Path::new("."));
@@ -2566,22 +2625,29 @@ fn execute_professional_delivery_export(
         asset_issue_summary: media_diagnostics.issue_summary,
         audio_analysis: Some(audio_analysis),
     };
-    let video_output = match render_professional_picture_essence(
-        work.path(),
-        author_output.profile,
-        &job.config.timeline,
-        range,
-        &delivery,
-        job.config.broadcast_qc.as_ref(),
-        cancel,
-        execution_gate,
-        report,
-        report_diagnostics,
-        &mut visual_session,
-        initial_diagnostics,
-    ) {
-        Ok(path) => path,
-        Err(outcome) => return outcome,
+    let mut final_diagnostics = ExportJobDiagnostics::default();
+    let video_output = {
+        let mut capture_diagnostics = |diagnostics: ExportJobDiagnostics| {
+            final_diagnostics = diagnostics.clone();
+            report_diagnostics(diagnostics);
+        };
+        match render_professional_picture_essence(
+            work.path(),
+            author_output.profile,
+            &job.config.timeline,
+            range,
+            &delivery,
+            job.config.broadcast_qc.as_ref(),
+            cancel,
+            execution_gate,
+            report,
+            &mut capture_diagnostics,
+            &mut visual_session,
+            initial_diagnostics,
+        ) {
+            Ok(path) => path,
+            Err(outcome) => return outcome,
+        }
     };
     if !execution_gate.wait_at_boundary(ExportProgressPhase::Encoding, cancel) {
         return JobExecutionResult::Cancelled;
@@ -2737,6 +2803,13 @@ fn execute_professional_delivery_export(
             publish_professional_directory(staging, final_output, cancel, execution_gate, report)
         }
         ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => {
+            let ancillary_input = match &job.config.frozen_ancillary {
+                Some(program) => match st436::prepare(program, work.path(), cancel) {
+                    Ok(path) => Some(path),
+                    Err(outcome) => return outcome,
+                },
+                None => None,
+            };
             let staging = match OwnedPublicationFile::create_sibling(
                 final_output,
                 &format!("export-{}", job.id()),
@@ -2757,6 +2830,9 @@ fn execute_professional_delivery_export(
                 &partial_output,
                 &author_output.metadata.title,
             );
+            if let Some(input) = &ancillary_input {
+                ProfessionalDeliveryToolchain::attach_as11_ancillary(&mut command, input);
+            }
             if let Err(outcome) = run_professional_tool(&mut command, "AS-11 X9 wrapping", cancel) {
                 return outcome;
             }
@@ -2787,6 +2863,11 @@ fn execute_professional_delivery_export(
                 return JobExecutionResult::Cancelled;
             }
             report(ExportProgress::validating(0.98));
+            if let Some(program) = &job.config.frozen_ancillary
+                && let Err(outcome) = st436::verify(program, &partial_output, cancel)
+            {
+                return outcome;
+            }
             if let Err(reason) = validate_snapshot_media_revisions(&job.config.timeline) {
                 return JobExecutionResult::Failed(reason);
             }
@@ -2798,6 +2879,28 @@ fn execute_professional_delivery_export(
                     ));
                 }
             };
+            if job.config.broadcast_qc.is_some() {
+                let expectations = match final_broadcast_qc::as11_expectations(
+                    &contract,
+                    &job.config.timeline.sequence.settings,
+                    &delivery,
+                    range.total_frames,
+                ) {
+                    Ok(expectations) => expectations,
+                    Err(detail) => return JobExecutionResult::Failed(detail),
+                };
+                if let Err(outcome) = final_broadcast_qc::verify(
+                    job,
+                    &staging,
+                    &expectations,
+                    range.total_frames,
+                    cancel,
+                    &mut final_diagnostics,
+                    report_diagnostics,
+                ) {
+                    return outcome;
+                }
+            }
             if !execution_gate.wait_at_boundary(ExportProgressPhase::Publishing, cancel) {
                 return JobExecutionResult::Cancelled;
             }
@@ -3068,9 +3171,10 @@ fn render_professional_picture_essence(
                 .arg(&output);
         }
         ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => {
+            apply_export_video_signal_args(&mut command, &timeline.sequence.settings, delivery);
             command
-                .arg("-vf")
-                .arg("format=yuv422p10le")
+                .arg("-pix_fmt")
+                .arg("yuv422p10le")
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-profile:v")
@@ -3188,7 +3292,7 @@ fn write_stereo_mca_labels(path: &Path, language: &str) -> Result<(), String> {
 }
 
 fn run_professional_tool(
-    command: &mut Command,
+    command: &mut impl mondrian_media::SupervisedCommand,
     operation: &str,
     cancel: &ExecutionCancellationToken,
 ) -> Result<(), JobExecutionResult> {
@@ -3196,7 +3300,7 @@ fn run_professional_tool(
 }
 
 fn run_professional_tool_capture(
-    command: &mut Command,
+    command: &mut impl mondrian_media::SupervisedCommand,
     operation: &str,
     cancel: &ExecutionCancellationToken,
 ) -> Result<String, JobExecutionResult> {
@@ -3220,7 +3324,7 @@ fn run_professional_tool_capture(
 }
 
 fn run_dcp_package_validator(
-    command: &mut Command,
+    command: &mut impl mondrian_media::SupervisedCommand,
     cancel: &ExecutionCancellationToken,
 ) -> Result<(), JobExecutionResult> {
     let policy = SupervisedProcessPolicy {
@@ -4909,6 +5013,85 @@ fn smart_render_validation_allows_completion(
     }
 }
 
+fn validate_frozen_ancillary(config: &ExportConfig) -> Result<(), String> {
+    let Some(program) = &config.frozen_ancillary else {
+        return Ok(());
+    };
+    program.validate().map_err(|error| error.to_string())?;
+    check_ancillary_export_selection(
+        program,
+        &config.preset,
+        &config.timeline.sequence,
+        config.timeline.range,
+        &config.timeline.color_environment,
+    )
+}
+
+/// Exact output selection used by canonical ANC and caption imports.
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedAncillaryExportSelection {
+    /// Canonical selected Timeline origin.
+    pub source_start: TimelineTime,
+    /// Resolved Program Output frame rate.
+    pub output_frame_rate: Rational,
+    /// Exact selected output duration.
+    pub frame_count: u64,
+}
+
+/// Resolve supported ANC carriage using the sole Export range/cadence owner.
+pub fn resolve_ancillary_export_selection(
+    preset: &crate::preset::ExportPreset,
+    sequence: &mondrian_timeline::Sequence,
+    selection: crate::preset::TimelineExportRange,
+    color_environment: &mondrian_core::ProjectColorEnvironment,
+) -> Result<ResolvedAncillaryExportSelection, String> {
+    if preset
+        .professional_delivery()
+        .is_none_or(|output| output.profile != ProfessionalDeliveryProfile::As11X9NabaHd720p5994)
+    {
+        return Err(
+            "canonical ANC is only admitted by the implemented AS-11 ST436 delivery path"
+                .to_owned(),
+        );
+    }
+    let delivery =
+        crate::delivery::resolve_export_delivery(preset, &sequence.settings, color_environment)
+            .map_err(|error| error.to_string())?;
+    let range = compute_sequence_render_range_with_cadence(
+        sequence,
+        selection,
+        delivery.frame_rate,
+        delivery.frame_sampling,
+    )?;
+    Ok(ResolvedAncillaryExportSelection {
+        source_start: range.source_start,
+        output_frame_rate: delivery.frame_rate,
+        frame_count: range.total_frames,
+    })
+}
+
+/// Check an already validated immutable ANC program against the sole Export
+/// range/cadence resolver. Admission additionally validates every packet.
+pub fn check_ancillary_export_selection(
+    program: &mondrian_broadcast::FrozenAncillaryProgram,
+    preset: &crate::preset::ExportPreset,
+    sequence: &mondrian_timeline::Sequence,
+    selection: crate::preset::TimelineExportRange,
+    color_environment: &mondrian_core::ProjectColorEnvironment,
+) -> Result<(), String> {
+    let range = resolve_ancillary_export_selection(preset, sequence, selection, color_environment)?;
+    if program.source_start() != range.source_start
+        || program.output_frame_rate() != range.output_frame_rate
+        || program.frame_count() != range.frame_count
+    {
+        return Err(
+            "ANC source start, output frame rate or frame count does not match the selected export"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_snapshot_media_revisions(timeline: &TimelineExportSnapshot) -> Result<(), String> {
     for (asset_id, dependency) in &timeline.media {
         if !dependency.source_fingerprint.authorizes_reuse() {
@@ -5964,6 +6147,9 @@ fn qualify_resident_hevc_export(
     alpha_mode: ExportAlphaMode,
     policy: service::ExportExecutionResourcePolicy,
 ) -> Result<ResidentHevcExportPlan, ExportResidentEncodeBlocker> {
+    if !policy.opportunistic_gpu_acceleration {
+        return Err(ExportResidentEncodeBlocker::ResourceGrant);
+    }
     if delivery.field_order != mondrian_core::timeline_data::FieldOrder::Progressive {
         return Err(ExportResidentEncodeBlocker::Signal);
     }
@@ -6704,6 +6890,9 @@ impl ExportVisualRenderSession {
     fn active_adapter_identity(
         &mut self,
     ) -> Option<crate::hardware_encoding::ActiveGraphicsAdapterIdentity> {
+        if !self.resource_policy.opportunistic_gpu_acceleration {
+            return None;
+        }
         self.gpu_output.active_adapter_identity()
     }
 
@@ -7491,13 +7680,20 @@ fn render_sequence_sample_into(
         .map_err(|error| {
             format!("export visual closure exceeds its CPU working-set grant: {error}")
         })?;
-    let use_gpu = matches!(
+    let deliverable_or_resident = matches!(
         &target,
         SequenceRenderTarget::Deliverable(_) | SequenceRenderTarget::Resident(_)
-    ) && prepared_export_visual_closure_supports_gpu(
-        &closure,
-        &mut context.visual_session.composite_scratch,
-    ) && context.visual_session.gpu_output.begin_visual_frame().is_ok();
+    );
+    let gpu_supported = deliverable_or_resident
+        && prepared_export_visual_closure_supports_gpu(
+            &closure,
+            &mut context.visual_session.composite_scratch,
+        );
+    let cpu_float_supported = prepared_export_visual_closure_supports_cpu_float(&closure);
+    let use_gpu = gpu_supported
+        && (context.visual_session.resource_policy.opportunistic_gpu_acceleration
+            || !cpu_float_supported)
+        && context.visual_session.gpu_output.begin_visual_frame().is_ok();
     let mode = if use_gpu {
         ExportPreparedVisualMode::Gpu
     } else {
@@ -7514,6 +7710,75 @@ fn render_sequence_sample_into(
         )),
         Err(PreparedVisualExecutionError::Adapter(error)) => Err(error),
     }
+}
+
+fn prepared_export_visual_closure_supports_cpu_float(
+    closure: &PreparedExportVisualClosure,
+) -> bool {
+    closure.nodes().iter().all(|node| {
+        node.evaluation()
+            .plan()
+            .elements
+            .iter()
+            .all(prepared_export_element_supports_cpu_float)
+    })
+}
+
+fn prepared_export_element_supports_cpu_float(element: &TimelineRenderPlanElement) -> bool {
+    match element {
+        TimelineRenderPlanElement::Media(media) => {
+            compiled_effect_graph_supports_cpu_float(&media.effect_graph)
+        }
+        TimelineRenderPlanElement::BasicTitle(title) => {
+            compiled_effect_graph_supports_cpu_float(&title.effect_graph)
+        }
+        TimelineRenderPlanElement::NestedSequence(nested) => {
+            compiled_effect_graph_supports_cpu_float(&nested.effect_graph)
+        }
+        TimelineRenderPlanElement::SolidColor(solid) => {
+            compiled_effect_graph_supports_cpu_float(&solid.effect_graph)
+        }
+        TimelineRenderPlanElement::Adjustment(adjustment) => {
+            compiled_effect_graph_supports_cpu_float(&adjustment.effect_graph)
+        }
+        TimelineRenderPlanElement::TimelineGrade(grade) => {
+            compiled_effect_graph_supports_cpu_float(&grade.effect_graph)
+        }
+        TimelineRenderPlanElement::CrossDissolve(transition) => {
+            prepared_export_transition_input_supports_cpu_float(&transition.left)
+                && prepared_export_transition_input_supports_cpu_float(&transition.right)
+        }
+    }
+}
+
+fn prepared_export_transition_input_supports_cpu_float(
+    input: &TimelineTransitionInputPlan,
+) -> bool {
+    match input {
+        TimelineTransitionInputPlan::Transparent => true,
+        TimelineTransitionInputPlan::Media(media) => {
+            compiled_effect_graph_supports_cpu_float(&media.effect_graph)
+        }
+        TimelineTransitionInputPlan::BasicTitle(title) => {
+            compiled_effect_graph_supports_cpu_float(&title.effect_graph)
+        }
+        TimelineTransitionInputPlan::NestedSequence(nested) => {
+            compiled_effect_graph_supports_cpu_float(&nested.effect_graph)
+        }
+        TimelineTransitionInputPlan::SolidColor(solid) => {
+            compiled_effect_graph_supports_cpu_float(&solid.effect_graph)
+        }
+    }
+}
+
+fn compiled_effect_graph_supports_cpu_float(graph: &mondrian_effects::CompiledEffectGraph) -> bool {
+    graph
+        .execution_envelope()
+        .admit_single_frame_backend(
+            EffectProcessingBackend::Cpu,
+            EffectWorkingPrecision::Float32,
+        )
+        .is_ok()
 }
 
 fn prepared_export_visual_closure_supports_gpu(
@@ -8616,35 +8881,39 @@ fn render_prepared_visual_node_into(
             ExportOutputTransformIssueReason::ToneMapRequestedWithoutExportViewTransform,
         );
     }
-    let attempt = match context.visual_session.gpu_output.execute(
-        &rendered.frame,
-        &boundary,
-        frame_contract,
-        context.delivery_pixels.legalizer,
-        context.cancellation,
-    ) {
-        Ok(attempt) => Some(attempt),
-        Err(ExportGpuOutputExecutionError::Canceled) => {
-            return Err("export GPU output readback canceled".to_owned());
+    let attempt = if context.visual_session.resource_policy.opportunistic_gpu_acceleration {
+        gpu_output_attempts = gpu_output_attempts.saturating_add(1);
+        match context.visual_session.gpu_output.execute(
+            &rendered.frame,
+            &boundary,
+            frame_contract,
+            context.delivery_pixels.legalizer,
+            context.cancellation,
+        ) {
+            Ok(attempt) => Some(attempt),
+            Err(ExportGpuOutputExecutionError::Canceled) => {
+                return Err("export GPU output readback canceled".to_owned());
+            }
+            Err(ExportGpuOutputExecutionError::DeviceTimedOut) => {
+                gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+                gpu_output_fallback_reasons = gpu_output_fallback_reasons
+                    .add_reason(ExportGpuOutputFallbackReason::ReadbackTimedOut);
+                None
+            }
+            Err(ExportGpuOutputExecutionError::Fallback(reason)) => {
+                gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
+                gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(reason);
+                None
+            }
+            Err(ExportGpuOutputExecutionError::Packing(error)) => {
+                return Err(format!(
+                    "export GPU output cannot enter the declared FFmpeg pipe: {error}"
+                ));
+            }
         }
-        Err(ExportGpuOutputExecutionError::DeviceTimedOut) => {
-            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
-            gpu_output_fallback_reasons = gpu_output_fallback_reasons
-                .add_reason(ExportGpuOutputFallbackReason::ReadbackTimedOut);
-            None
-        }
-        Err(ExportGpuOutputExecutionError::Fallback(reason)) => {
-            gpu_output_cpu_fallbacks = gpu_output_cpu_fallbacks.saturating_add(1);
-            gpu_output_fallback_reasons = gpu_output_fallback_reasons.add_reason(reason);
-            None
-        }
-        Err(ExportGpuOutputExecutionError::Packing(error)) => {
-            return Err(format!(
-                "export GPU output cannot enter the declared FFmpeg pipe: {error}"
-            ));
-        }
+    } else {
+        None
     };
-    gpu_output_attempts = gpu_output_attempts.saturating_add(1);
 
     let final_bytes = match attempt {
         Some(attempt) => {
@@ -9875,7 +10144,21 @@ fn compute_timeline_render_range_with_cadence(
     output_frame_rate: Rational,
     frame_sampling: crate::preset::ExportFrameSampling,
 ) -> Result<TimelineRenderRange, String> {
-    let resolved = timeline.range.resolve(&timeline.sequence).map_err(|error| error.to_string())?;
+    compute_sequence_render_range_with_cadence(
+        &timeline.sequence,
+        timeline.range,
+        output_frame_rate,
+        frame_sampling,
+    )
+}
+
+fn compute_sequence_render_range_with_cadence(
+    sequence: &mondrian_timeline::Sequence,
+    selection: crate::preset::TimelineExportRange,
+    output_frame_rate: Rational,
+    frame_sampling: crate::preset::ExportFrameSampling,
+) -> Result<TimelineRenderRange, String> {
+    let resolved = selection.resolve(sequence).map_err(|error| error.to_string())?;
     let selected_time = resolved.time_range().map_err(|error| error.to_string())?;
     let output_frame_count = selected_time
         .duration
@@ -9889,7 +10172,7 @@ fn compute_timeline_render_range_with_cadence(
         total_frames,
         fps_num: output_frame_rate.num,
         fps_den: output_frame_rate.den,
-        sequence_frame_rate: timeline.sequence.settings.frame_rate,
+        sequence_frame_rate: sequence.settings.frame_rate,
         frame_sampling,
     })
 }
@@ -10396,6 +10679,19 @@ mod tests {
         let output = graph.add_mask(filtered, mask, false, MaskOp::Add);
         graph.set_current_output(output);
         compile_reference_render_graph(graph.finish()).expect("compile heterogeneous GPU Mask")
+    }
+
+    #[test]
+    fn realtime_gpu_yield_preserves_gpu_only_effect_contracts() {
+        let cpu_graph = compile_reference_effect_graph(&EffectRenderPlan::default())
+            .expect("compile CPU-capable identity graph");
+        assert!(compiled_effect_graph_supports_cpu_float(&cpu_graph));
+
+        let gpu_required_graph = heterogeneous_cpu_dag_graph();
+        assert!(
+            !compiled_effect_graph_supports_cpu_float(&gpu_required_graph),
+            "a graph with a GPU-only tail must retain required GPU execution"
+        );
     }
 
     fn freeze_test_heterogeneous_route(
@@ -10990,6 +11286,9 @@ mod tests {
             output_policy: ExportOutputPolicy::CreateNew,
             smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
             broadcast_qc: None,
+            regulatory_pse: None,
+            frozen_ancillary: None,
+            approved_bmx: None,
         }
     }
 
@@ -11370,9 +11669,13 @@ mod tests {
             matches!(result, JobExecutionResult::Published(_)),
             "{result:?}"
         );
-        let report = latest_diagnostics
-            .and_then(|diagnostics| diagnostics.broadcast_qc)
-            .expect("broadcast QC report");
+        let diagnostics = latest_diagnostics.expect("both observations retained");
+        let final_artifact = diagnostics.broadcast_artifact_qc.expect("independent encoded rescan");
+        assert!(final_artifact.artifact.verify_evidence());
+        assert!(final_artifact.artifact.scan.complete);
+        assert!(final_artifact.decoder_cleanup.all_resources_released());
+        assert!(final_artifact.artifact.artifact_bytes > 0);
+        let report = diagnostics.broadcast_qc.expect("broadcast QC report");
         assert!(report.complete);
         assert_eq!(report.profile_id, "test-broadcaster");
         assert_eq!(report.verdict, mondrian_broadcast::BroadcastQcVerdict::Warn);
@@ -11592,6 +11895,9 @@ mod tests {
             output_policy: ExportOutputPolicy::CreateNew,
             smart_render: crate::preset::ExportSmartRenderPolicy::Automatic,
             broadcast_qc: None,
+            regulatory_pse: None,
+            frozen_ancillary: None,
+            approved_bmx: None,
         });
         let mut latest_diagnostics = None;
         let result = FfmpegExportExecutor.execute(
@@ -11694,6 +12000,21 @@ mod tests {
         assert_eq!(plan.colorimetry, ResidentEncodeColorimetry::Rec709);
         assert!(!plan.full_range);
         assert_eq!(plan.surface_pool_size, 8);
+
+        let realtime_priority_policy = ExportExecutionResourcePolicy {
+            opportunistic_gpu_acceleration: false,
+            ..ExportExecutionResourcePolicy::default()
+        };
+        assert_eq!(
+            qualify_resident_hevc_export(
+                &timeline,
+                &delivery,
+                ExportAlphaMode::FlattenBlack,
+                realtime_priority_policy,
+            ),
+            Err(ExportResidentEncodeBlocker::ResourceGrant),
+            "an opportunistic resident route yields to realtime GPU priority"
+        );
     }
 
     #[test]

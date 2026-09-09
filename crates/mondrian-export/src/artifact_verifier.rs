@@ -1,7 +1,7 @@
 //! Independent bounded verification for a finished single-file export artifact.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -14,11 +14,11 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::validator::{probe_export_output_cancellable, ExportOutputProbe};
+use crate::validator::{probe_export_output_until, ExportOutputProbe};
 
 /// Stable implementation identity bound into every independent report.
 pub const INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID: &str =
-    "mondrian-export-independent-full-decode-v1";
+    "mondrian-export-independent-full-decode-v2";
 
 const HASH_STDOUT_LIMIT: usize = 256;
 const PROGRESS_STDERR_LIMIT: usize = 64 * 1024;
@@ -28,7 +28,7 @@ const PROGRESS_STDERR_LIMIT: usize = 64 * 1024;
 pub struct IndependentExportArtifactPolicy {
     /// Largest regular file admitted for hashing and full decode.
     maximum_artifact_bytes: u64,
-    /// Maximum wall time granted to the full FFmpeg decode process.
+    /// Maximum wall time for snapshot, probes, full decode, identity recheck and cleanup.
     decode_timeout: Duration,
 }
 
@@ -56,7 +56,7 @@ impl IndependentExportArtifactPolicy {
         self.maximum_artifact_bytes
     }
 
-    /// Maximum wall time granted to the full FFmpeg decode process.
+    /// Maximum wall time for the complete verification and consuming cleanup.
     pub const fn decode_timeout(self) -> Duration {
         self.decode_timeout
     }
@@ -87,15 +87,19 @@ pub struct IndependentExportArtifactReport {
     pub decoded_duration_us: u64,
     /// SHA-256 emitted by FFmpeg over all decoded output stream bytes.
     pub decoded_content_sha256: String,
+    /// The exact encoded snapshot was fallibly consumed before success publication.
+    pub snapshot_removed: bool,
 }
 
 /// Self-contained report plus its canonical JSON digest.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct IndependentExportArtifactReceipt {
     /// Complete independently derived report.
     report: IndependentExportArtifactReport,
     /// SHA-256 of the canonical serialized report bytes.
     validation_report_sha256: String,
+    /// Raw bounded native output retained independently of the deterministic report digest.
+    decode_execution: IndependentArtifactNativeObservation,
 }
 
 impl IndependentExportArtifactReceipt {
@@ -108,6 +112,54 @@ impl IndependentExportArtifactReceipt {
     pub fn validation_report_sha256(&self) -> &str {
         &self.validation_report_sha256
     }
+
+    /// Serialize the full success, including native stdout/stderr and cleanup.
+    pub fn evidence(&self) -> &Self {
+        self
+    }
+
+    /// Original native decoder output and consuming process-owner cleanup.
+    pub const fn native_execution(&self) -> &IndependentArtifactNativeObservation {
+        &self.decode_execution
+    }
+}
+
+/// Original native output and consuming cleanup observed before validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndependentArtifactNativeObservation {
+    /// Actual native exit status.
+    pub exit_status: String,
+    /// Bounded complete stdout.
+    pub stdout: Vec<u8>,
+    /// Bounded complete stderr/progress output.
+    pub stderr: Vec<u8>,
+    /// Whether stdout exceeded its bound.
+    pub stdout_truncated: bool,
+    /// Whether stderr exceeded its bound.
+    pub stderr_truncated: bool,
+    /// Original child and pipe-owner closure facts.
+    pub cleanup: mondrian_media::SupervisedProcessCleanupReceipt,
+}
+
+/// Independently serializable failure; absent fields were not observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct IndependentExportArtifactFailureEvidence {
+    /// Failure evidence schema.
+    pub schema_version: u32,
+    /// Full typed error chain rendered for diagnostics.
+    pub error: String,
+    /// Raw decode output when the native supervisor returned it.
+    pub decode_execution: Option<IndependentArtifactNativeObservation>,
+    /// Actual native output from a rejected or malformed probe, when available.
+    pub probe_execution: Option<IndependentArtifactNativeObservation>,
+    /// Raw cleanup from a failed probe or decoder, even without completed output.
+    pub child_cleanup: Option<mondrian_media::SupervisedProcessCleanupReceipt>,
+    /// Whether this verifier acquired a snapshot requiring consuming cleanup.
+    pub snapshot_admitted: bool,
+    /// Whether the owned snapshot was actually removed.
+    pub snapshot_removed: bool,
+    /// Original fallible snapshot removal error.
+    pub snapshot_cleanup_error: Option<String>,
 }
 
 /// Independently reopen, probe, fully decode, and rehash one finished artifact.
@@ -131,78 +183,177 @@ pub fn verify_export_artifact_cancellable(
     policy: IndependentExportArtifactPolicy,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<IndependentExportArtifactReceipt, IndependentExportArtifactVerificationError> {
+    let deadline = Instant::now()
+        .checked_add(policy.decode_timeout)
+        .ok_or(IndependentExportArtifactVerificationError::DeadlineOverflow)?;
+    verify_export_artifact_until(
+        path,
+        artifact_id,
+        policy.maximum_artifact_bytes,
+        deadline,
+        cancellation,
+    )
+}
+
+/// Verify and consume one artifact snapshot under the caller's original deadline.
+pub fn verify_export_artifact_until(
+    path: &Path,
+    artifact_id: impl Into<String>,
+    maximum_artifact_bytes: u64,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<IndependentExportArtifactReceipt, IndependentExportArtifactVerificationError> {
     let artifact_id = artifact_id.into();
     if artifact_id.is_empty() || artifact_id.len() > 256 {
         return Err(IndependentExportArtifactVerificationError::InvalidArtifactId);
     }
-    let snapshot = snapshot_artifact(path, policy.maximum_artifact_bytes, cancellation)?;
+    if maximum_artifact_bytes == 0 {
+        return Err(IndependentExportArtifactVerificationError::InvalidPolicy(
+            "maximum artifact bytes must be nonzero",
+        ));
+    }
+    let snapshot = snapshot_artifact_until(path, maximum_artifact_bytes, cancellation, deadline)?;
     let artifact_bytes = snapshot.bytes;
     let artifact_sha256 = snapshot.sha256.clone();
-    let probe = probe_export_output_cancellable(snapshot.file.path(), cancellation)
-        .map_err(IndependentExportArtifactVerificationError::Probe)?;
-    let decoded_video = probe.video.is_some();
-    let decoded_audio = probe.audio.is_some();
-    if !decoded_video && !decoded_audio {
-        return Err(IndependentExportArtifactVerificationError::NoDecodableStreams);
-    }
-    let decode = full_decode(snapshot.file.path(), policy.decode_timeout, cancellation)?;
-    if decoded_video && decode.video_frames == 0 {
-        return Err(IndependentExportArtifactVerificationError::MissingVideoFrames);
-    }
-    if probe.duration_secs.is_some_and(|duration| duration > 0.0) && decode.duration_us == 0 {
-        return Err(IndependentExportArtifactVerificationError::MissingDecodeDuration);
-    }
-
-    if let Some(expected_duration_secs) = probe.duration_secs.filter(|duration| *duration > 0.0) {
-        let decoded_duration_secs = decode.duration_us as f64 / 1_000_000.0;
-        let tolerance = expected_duration_secs.mul_add(0.005, 0.05).max(0.05);
-        if (decoded_duration_secs - expected_duration_secs).abs() > tolerance {
-            return Err(
-                IndependentExportArtifactVerificationError::DecodeDurationMismatch {
-                    expected_secs: expected_duration_secs,
-                    decoded_secs: decoded_duration_secs,
-                    tolerance_secs: tolerance,
-                },
-            );
+    let snapshot_path = snapshot.file.into_temp_path();
+    let mut decode_execution = None;
+    let outcome = (|| -> Result<_, IndependentExportArtifactVerificationError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(1);
         }
-    }
-
-    let (final_bytes, final_sha256) =
-        hash_published_artifact(path, policy.maximum_artifact_bytes, cancellation)?;
-    if final_bytes != artifact_bytes || final_sha256 != artifact_sha256 {
-        return Err(IndependentExportArtifactVerificationError::ArtifactChanged);
-    }
-
-    let report = IndependentExportArtifactReport {
-        schema_version: 1,
-        validator_id: INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
-        artifact_id,
-        artifact_bytes,
-        artifact_sha256,
-        probe,
-        decoded_video,
-        decoded_audio,
-        decoded_video_frames: decode.video_frames,
-        decoded_duration_us: decode.duration_us,
-        decoded_content_sha256: decode.content_sha256,
-    };
-    let report_bytes = serde_json::to_vec(&report)
-        .map_err(IndependentExportArtifactVerificationError::SerializeReport)?;
-    let validation_report_sha256 = format!("{:x}", Sha256::digest(&report_bytes));
-    Ok(IndependentExportArtifactReceipt { report, validation_report_sha256 })
+        let _snapshot_lease = options
+            .open(&snapshot_path)
+            .map_err(IndependentExportArtifactVerificationError::SnapshotIo)?;
+        if hash_published_artifact_until(
+            &snapshot_path,
+            maximum_artifact_bytes,
+            cancellation,
+            deadline,
+        )? != (artifact_bytes, artifact_sha256.clone())
+        {
+            return Err(IndependentExportArtifactVerificationError::ArtifactChanged);
+        }
+        let probe = probe_export_output_until(&snapshot_path, cancellation, deadline)
+            .map_err(IndependentExportArtifactVerificationError::Probe)?;
+        let decoded_video = probe.video.is_some();
+        let decoded_audio = probe.audio.is_some();
+        if !decoded_video && !decoded_audio {
+            return Err(IndependentExportArtifactVerificationError::NoDecodableStreams);
+        }
+        let decode = full_decode(
+            &snapshot_path,
+            deadline,
+            cancellation,
+            &mut decode_execution,
+        )?;
+        if decoded_video && decode.video_frames == 0 {
+            return Err(IndependentExportArtifactVerificationError::MissingVideoFrames);
+        }
+        if probe.duration_secs.is_some_and(|duration| duration > 0.0) && decode.duration_us == 0 {
+            return Err(IndependentExportArtifactVerificationError::MissingDecodeDuration);
+        }
+        if let Some(expected_duration_secs) = probe.duration_secs.filter(|duration| *duration > 0.0)
+        {
+            let decoded_duration_secs = decode.duration_us as f64 / 1_000_000.0;
+            let tolerance = expected_duration_secs.mul_add(0.005, 0.05).max(0.05);
+            if (decoded_duration_secs - expected_duration_secs).abs() > tolerance {
+                return Err(
+                    IndependentExportArtifactVerificationError::DecodeDurationMismatch {
+                        expected_secs: expected_duration_secs,
+                        decoded_secs: decoded_duration_secs,
+                        tolerance_secs: tolerance,
+                    },
+                );
+            }
+        }
+        let expected_identity = (artifact_bytes, artifact_sha256.clone());
+        if hash_published_artifact_until(path, maximum_artifact_bytes, cancellation, deadline)?
+            != expected_identity
+            || hash_published_artifact_until(
+                &snapshot_path,
+                maximum_artifact_bytes,
+                cancellation,
+                deadline,
+            )? != expected_identity
+        {
+            return Err(IndependentExportArtifactVerificationError::ArtifactChanged);
+        }
+        Ok(IndependentExportArtifactReport {
+            schema_version: 2,
+            validator_id: INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
+            artifact_id,
+            artifact_bytes,
+            artifact_sha256,
+            probe,
+            decoded_video,
+            decoded_audio,
+            decoded_video_frames: decode.video_frames,
+            decoded_duration_us: decode.duration_us,
+            decoded_content_sha256: decode.content_sha256,
+            snapshot_removed: false,
+        })
+    })();
+    let cleanup = snapshot_path.close();
+    let snapshot_removed = cleanup.is_ok();
+    let snapshot_cleanup_error = cleanup.err().map(|error| error.to_string());
+    let outcome = outcome.and_then(|mut report| {
+        check_artifact_boundary(cancellation, Some(deadline))?;
+        if let Some(error) = &snapshot_cleanup_error {
+            return Err(IndependentExportArtifactVerificationError::SnapshotIo(
+                io::Error::other(error.clone()),
+            ));
+        }
+        report.snapshot_removed = true;
+        let report_bytes = serde_json::to_vec(&report)
+            .map_err(IndependentExportArtifactVerificationError::SerializeReport)?;
+        let validation_report_sha256 = format!("{:x}", Sha256::digest(&report_bytes));
+        let decode_execution = decode_execution
+            .clone()
+            .ok_or(IndependentExportArtifactVerificationError::MissingNativeObservation)?;
+        check_artifact_boundary(cancellation, Some(deadline))?;
+        Ok(IndependentExportArtifactReceipt { report, validation_report_sha256, decode_execution })
+    });
+    outcome.map_err(|source| {
+        let mut evidence = source.evidence();
+        evidence.decode_execution = decode_execution.clone();
+        if evidence.child_cleanup.is_none() {
+            evidence.child_cleanup = decode_execution.as_ref().map(|native| native.cleanup.clone());
+        }
+        evidence.snapshot_removed = snapshot_removed;
+        evidence.snapshot_admitted = true;
+        evidence.snapshot_cleanup_error = snapshot_cleanup_error;
+        IndependentExportArtifactVerificationError::Verification {
+            source: Box::new(source),
+            evidence: Box::new(evidence),
+        }
+    })
+}
+pub(crate) struct ImmutableArtifactSnapshot {
+    pub(crate) file: tempfile::NamedTempFile,
+    pub(crate) bytes: u64,
+    pub(crate) sha256: String,
 }
 
-struct ImmutableArtifactSnapshot {
-    file: tempfile::NamedTempFile,
-    bytes: u64,
-    sha256: String,
-}
-
-fn snapshot_artifact(
+pub(crate) fn snapshot_artifact_until(
     path: &Path,
     maximum_bytes: u64,
     cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
 ) -> Result<ImmutableArtifactSnapshot, IndependentExportArtifactVerificationError> {
+    snapshot_artifact_inner(path, maximum_bytes, cancellation, Some(deadline))
+}
+
+fn snapshot_artifact_inner(
+    path: &Path,
+    maximum_bytes: u64,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Option<Instant>,
+) -> Result<ImmutableArtifactSnapshot, IndependentExportArtifactVerificationError> {
+    check_artifact_boundary(cancellation, deadline)?;
     require_direct_regular_file(path)?;
     let source = File::open(path).map_err(|source| {
         IndependentExportArtifactVerificationError::Metadata { path: path.to_path_buf(), source }
@@ -225,30 +376,59 @@ fn snapshot_artifact(
         .prefix("mondrian-export-verify-")
         .tempfile()
         .map_err(IndependentExportArtifactVerificationError::SnapshotIo)?;
-    let (bytes, sha256) = copy_and_hash_bounded(
-        BufReader::new(source),
-        snapshot.as_file_mut(),
-        maximum_bytes,
-        cancellation,
-    )?;
-    snapshot
-        .as_file_mut()
-        .flush()
-        .map_err(IndependentExportArtifactVerificationError::SnapshotIo)?;
-    require_direct_regular_file(path)?;
-    if bytes == 0 {
-        return Err(IndependentExportArtifactVerificationError::EmptyArtifact(
-            path.to_path_buf(),
-        ));
+    let outcome = (|| {
+        let (bytes, sha256) = copy_and_hash_bounded(
+            BufReader::new(source),
+            snapshot.as_file_mut(),
+            maximum_bytes,
+            cancellation,
+            deadline,
+        )?;
+        snapshot
+            .as_file_mut()
+            .flush()
+            .map_err(IndependentExportArtifactVerificationError::SnapshotIo)?;
+        require_direct_regular_file(path)?;
+        if bytes == 0 {
+            return Err(IndependentExportArtifactVerificationError::EmptyArtifact(
+                path.to_path_buf(),
+            ));
+        }
+        check_artifact_boundary(cancellation, deadline)?;
+        Ok((bytes, sha256))
+    })();
+    match outcome {
+        Ok((bytes, sha256)) => Ok(ImmutableArtifactSnapshot { file: snapshot, bytes, sha256 }),
+        Err(primary) => match snapshot.close() {
+            Ok(()) => Err(IndependentExportArtifactVerificationError::SnapshotClosed {
+                primary: Box::new(primary),
+            }),
+            Err(cleanup) => Err(
+                IndependentExportArtifactVerificationError::SnapshotCleanup {
+                    primary: Box::new(primary),
+                    cleanup,
+                },
+            ),
+        },
     }
-    Ok(ImmutableArtifactSnapshot { file: snapshot, bytes, sha256 })
 }
 
-fn hash_published_artifact(
+pub(crate) fn hash_published_artifact_until(
     path: &Path,
     maximum_bytes: u64,
     cancellation: &ExecutionCancellationToken,
+    deadline: Instant,
 ) -> Result<(u64, String), IndependentExportArtifactVerificationError> {
+    hash_published_artifact_inner(path, maximum_bytes, cancellation, Some(deadline))
+}
+
+fn hash_published_artifact_inner(
+    path: &Path,
+    maximum_bytes: u64,
+    cancellation: &ExecutionCancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(u64, String), IndependentExportArtifactVerificationError> {
+    check_artifact_boundary(cancellation, deadline)?;
     require_direct_regular_file(path)?;
     let source = File::open(path).map_err(|source| {
         IndependentExportArtifactVerificationError::Metadata { path: path.to_path_buf(), source }
@@ -272,8 +452,10 @@ fn hash_published_artifact(
         std::io::sink(),
         maximum_bytes,
         cancellation,
+        deadline,
     )?;
     require_direct_regular_file(path)?;
+    check_artifact_boundary(cancellation, deadline)?;
     Ok(result)
 }
 
@@ -296,14 +478,13 @@ fn copy_and_hash_bounded(
     mut destination: impl Write,
     maximum_bytes: u64,
     cancellation: &ExecutionCancellationToken,
+    deadline: Option<Instant>,
 ) -> Result<(u64, String), IndependentExportArtifactVerificationError> {
     let mut digest = Sha256::new();
     let mut total = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
     loop {
-        if cancellation.is_canceled() {
-            return Err(IndependentExportArtifactVerificationError::Cancelled);
-        }
+        check_artifact_boundary(cancellation, deadline)?;
         let remaining = maximum_bytes.saturating_sub(total);
         let read_limit = if remaining >= buffer.len() as u64 {
             buffer.len()
@@ -332,7 +513,21 @@ fn copy_and_hash_bounded(
         digest.update(&buffer[..read]);
         total = actual;
     }
+    check_artifact_boundary(cancellation, deadline)?;
     Ok((total, format!("{:x}", digest.finalize())))
+}
+
+fn check_artifact_boundary(
+    cancellation: &ExecutionCancellationToken,
+    deadline: Option<Instant>,
+) -> Result<(), IndependentExportArtifactVerificationError> {
+    if cancellation.is_canceled() {
+        return Err(IndependentExportArtifactVerificationError::Cancelled);
+    }
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(IndependentExportArtifactVerificationError::DeadlineExceeded);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -344,12 +539,11 @@ struct FullDecodeEvidence {
 
 fn full_decode(
     path: &Path,
-    timeout: Duration,
+    deadline: Instant,
     cancellation: &ExecutionCancellationToken,
+    observed: &mut Option<IndependentArtifactNativeObservation>,
 ) -> Result<FullDecodeEvidence, IndependentExportArtifactVerificationError> {
-    let deadline = Instant::now()
-        .checked_add(timeout)
-        .ok_or(IndependentExportArtifactVerificationError::DeadlineOverflow)?;
+    check_artifact_boundary(cancellation, Some(deadline))?;
     let mut command = mondrian_media::ffmpeg_command()
         .map_err(IndependentExportArtifactVerificationError::CommandAdmission)?;
     command
@@ -386,6 +580,17 @@ fn full_decode(
     };
     let output = run_supervised_command(&mut command, None, policy, cancellation)
         .map_err(IndependentExportArtifactVerificationError::DecodeProcess)?;
+    *observed = Some(IndependentArtifactNativeObservation {
+        exit_status: output.status.to_string(),
+        stdout: output.stdout.clone(),
+        stderr: output.stderr.clone(),
+        stdout_truncated: output.stdout_truncated,
+        stderr_truncated: output.stderr_truncated,
+        cleanup: output.cleanup.clone(),
+    });
+    if !output.cleanup.all_resources_released() {
+        return Err(IndependentExportArtifactVerificationError::UnsettledNativeOwner);
+    }
     if !output.status.success() {
         return Err(IndependentExportArtifactVerificationError::DecodeFailed {
             status: output.status.to_string(),
@@ -394,6 +599,7 @@ fn full_decode(
     }
     let content_sha256 = parse_hash_output(&output.stdout)?;
     let (video_frames, duration_us) = parse_final_progress(&output.stderr)?;
+    check_artifact_boundary(cancellation, Some(deadline))?;
     Ok(FullDecodeEvidence { video_frames, duration_us, content_sha256 })
 }
 
@@ -450,6 +656,21 @@ fn parse_final_progress(
 /// Stable independent-verification failure.
 #[derive(Debug, Error)]
 pub enum IndependentExportArtifactVerificationError {
+    /// Verification failed after snapshot admission; all consuming evidence is retained.
+    #[error("{source}")]
+    Verification {
+        /// Original operation failure.
+        #[source]
+        source: Box<IndependentExportArtifactVerificationError>,
+        /// Independent original native and filesystem closure facts.
+        evidence: Box<IndependentExportArtifactFailureEvidence>,
+    },
+    /// Native output was not accompanied by successful consuming cleanup.
+    #[error("independent artifact native decoder ownership did not settle")]
+    UnsettledNativeOwner,
+    /// Internal evidence was absent after an otherwise successful native decode.
+    #[error("independent artifact native observation is missing")]
+    MissingNativeObservation,
     /// Policy omitted a hard resource bound.
     #[error("invalid independent export verification policy: {0}")]
     InvalidPolicy(&'static str),
@@ -497,6 +718,25 @@ pub enum IndependentExportArtifactVerificationError {
     /// Decode deadline could not be represented.
     #[error("independent export decode deadline overflowed")]
     DeadlineOverflow,
+    /// Original end-to-end artifact verification deadline expired.
+    #[error("independent export artifact original deadline exceeded")]
+    DeadlineExceeded,
+    /// Snapshot preparation failed and its consuming removal also failed.
+    #[error("artifact snapshot failed: {primary}; consuming removal failed: {cleanup}")]
+    SnapshotCleanup {
+        /// Original operation failure.
+        #[source]
+        primary: Box<IndependentExportArtifactVerificationError>,
+        /// Independent removal failure.
+        cleanup: std::io::Error,
+    },
+    /// Preparation failed after acquiring a snapshot; its exact removal succeeded.
+    #[error("artifact snapshot preparation failed after successful consuming removal: {primary}")]
+    SnapshotClosed {
+        /// Original preparation failure.
+        #[source]
+        primary: Box<IndependentExportArtifactVerificationError>,
+    },
     /// Supervised FFmpeg execution failed or exceeded its bound.
     #[error("independent export decode process failed: {0}")]
     DecodeProcess(#[source] SupervisedProcessError),
@@ -540,9 +780,135 @@ pub enum IndependentExportArtifactVerificationError {
     SerializeReport(#[source] serde_json::Error),
 }
 
+impl IndependentExportArtifactVerificationError {
+    /// Serialize observed failure facts without converting native cleanup to prose.
+    pub fn evidence(&self) -> IndependentExportArtifactFailureEvidence {
+        if let Self::Verification { evidence, .. } = self {
+            return (**evidence).clone();
+        }
+        let mut result = IndependentExportArtifactFailureEvidence {
+            schema_version: 1,
+            error: self.to_string(),
+            decode_execution: None,
+            probe_execution: None,
+            child_cleanup: None,
+            snapshot_admitted: false,
+            snapshot_removed: false,
+            snapshot_cleanup_error: None,
+        };
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(error) = current {
+            if let Some(crate::validator::ExportValidationError::ProbeOutput { output, .. }) =
+                error.downcast_ref::<crate::validator::ExportValidationError>()
+            {
+                result.child_cleanup = Some(output.cleanup.clone());
+                result.probe_execution = Some(IndependentArtifactNativeObservation {
+                    exit_status: output.status.to_string(),
+                    stdout: output.stdout.clone(),
+                    stderr: output.stderr.clone(),
+                    stdout_truncated: output.stdout_truncated,
+                    stderr_truncated: output.stderr_truncated,
+                    cleanup: output.cleanup.clone(),
+                });
+            }
+            if let Some(SupervisedProcessError::Cleanup { cleanup, .. }) =
+                error.downcast_ref::<SupervisedProcessError>()
+            {
+                result.child_cleanup = Some(cleanup.as_ref().clone());
+            }
+            if let Some(Self::SnapshotCleanup { cleanup, .. }) = error.downcast_ref::<Self>() {
+                result.snapshot_admitted = true;
+                result.snapshot_cleanup_error = Some(cleanup.to_string());
+            }
+            if let Some(Self::SnapshotClosed { .. }) = error.downcast_ref::<Self>() {
+                result.snapshot_admitted = true;
+                result.snapshot_removed = true;
+            }
+            current = error.source();
+        }
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expired_artifact_deadline_precedes_snapshot_or_source_open() {
+        let root = tempfile::tempdir().expect("fixture root");
+        let absent = root.path().join("must-not-be-opened.mp4");
+        let cancellation = ExecutionCancellationToken::new();
+        let deadline = Instant::now();
+        let failure =
+            verify_export_artifact_until(&absent, "expired", 1024, deadline, &cancellation)
+                .expect_err("original deadline must precede source open");
+        assert!(matches!(
+            failure,
+            IndependentExportArtifactVerificationError::DeadlineExceeded
+        ));
+        assert!(!failure.evidence().snapshot_admitted);
+        assert!(!failure.evidence().snapshot_removed);
+        assert!(failure.evidence().child_cleanup.is_none());
+        assert!(matches!(
+            snapshot_artifact_until(&absent, 1024, &cancellation, deadline),
+            Err(IndependentExportArtifactVerificationError::DeadlineExceeded)
+        ));
+        assert!(matches!(
+            hash_published_artifact_until(&absent, 1024, &cancellation, deadline),
+            Err(IndependentExportArtifactVerificationError::DeadlineExceeded)
+        ));
+        assert_eq!(
+            std::fs::read_dir(root.path()).expect("root inventory").count(),
+            0
+        );
+    }
+
+    #[test]
+    fn copy_checks_original_deadline_after_slow_read() {
+        struct SlowRead;
+        impl Read for SlowRead {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                std::thread::sleep(Duration::from_millis(15));
+                Ok(0)
+            }
+        }
+        let deadline = Instant::now() + Duration::from_millis(5);
+        assert!(matches!(
+            copy_and_hash_bounded(
+                SlowRead,
+                std::io::sink(),
+                1024,
+                &ExecutionCancellationToken::new(),
+                Some(deadline)
+            ),
+            Err(IndependentExportArtifactVerificationError::DeadlineExceeded)
+        ));
+    }
+
+    #[test]
+    fn independent_invalid_media_retains_probe_native_and_snapshot_closure() {
+        let root = tempfile::tempdir().expect("source root");
+        let path = root.path().join("invalid.mp4");
+        std::fs::write(&path, b"not an encoded media file").expect("invalid fixture");
+        let evidence = verify_export_artifact_until(
+            &path,
+            "invalid-media",
+            1024,
+            Instant::now() + Duration::from_secs(10),
+            &ExecutionCancellationToken::new(),
+        )
+        .expect_err("real ffprobe must reject invalid bytes")
+        .evidence();
+        assert!(evidence.snapshot_admitted);
+        assert!(evidence.snapshot_removed);
+        assert!(evidence.snapshot_cleanup_error.is_none());
+        assert!(evidence.decode_execution.is_none());
+        let native = evidence.probe_execution.expect("real completed probe output");
+        assert!(!native.stderr.is_empty());
+        assert!(native.cleanup.all_resources_released());
+        assert_eq!(evidence.child_cleanup, Some(native.cleanup));
+    }
 
     #[test]
     fn parser_requires_exact_hash_and_terminal_progress() {
@@ -617,13 +983,25 @@ mod tests {
         assert!(first.report.decoded_duration_us > 0);
         assert_eq!(first.report.artifact_sha256.len(), 64);
         assert_eq!(first.report.decoded_content_sha256.len(), 64);
-        assert_eq!(first, second);
+        assert_eq!(first.report, second.report);
+        assert_eq!(
+            first.validation_report_sha256,
+            second.validation_report_sha256
+        );
+        assert!(first.decode_execution.cleanup.all_resources_released());
+        assert!(first.report.snapshot_removed);
+        assert!(!first.decode_execution.stdout.is_empty());
         let tiny_policy =
             IndependentExportArtifactPolicy::new(1, Duration::from_secs(30)).expect("tiny policy");
-        assert!(matches!(
-            verify_export_artifact(&path, "export-job-1", tiny_policy),
-            Err(IndependentExportArtifactVerificationError::ArtifactTooLarge { .. })
-        ));
+        let bound_failure = verify_export_artifact(&path, "export-job-1", tiny_policy)
+            .expect_err("byte bound must reject before any native process");
+        assert!(
+            matches!(bound_failure, IndependentExportArtifactVerificationError::SnapshotClosed { ref primary }
+            if matches!(**primary, IndependentExportArtifactVerificationError::ArtifactTooLarge { .. }))
+        );
+        assert!(bound_failure.evidence().snapshot_removed);
+        assert!(bound_failure.evidence().snapshot_admitted);
+        assert!(bound_failure.evidence().decode_execution.is_none());
         let cancellation = ExecutionCancellationToken::new();
         cancellation.cancel();
         assert!(matches!(
@@ -641,8 +1019,19 @@ mod tests {
         truncated_file
             .set_len(original_len.saturating_mul(4) / 5)
             .expect("truncate after opening frame window");
-        probe_export_output_cancellable(&truncated, &ExecutionCancellationToken::new())
-            .expect("opening-frame probe still succeeds");
-        assert!(verify_export_artifact(&truncated, "export-job-truncated", policy).is_err());
+        crate::validator::probe_export_output_cancellable(
+            &truncated,
+            &ExecutionCancellationToken::new(),
+        )
+        .expect("opening-frame probe still succeeds");
+        let failure = verify_export_artifact(&truncated, "export-job-truncated", policy)
+            .expect_err("truncated tail must fail complete decode")
+            .evidence();
+        assert!(failure.snapshot_admitted);
+        assert!(failure.snapshot_removed);
+        assert!(failure.snapshot_cleanup_error.is_none());
+        assert!(failure.decode_execution.is_some());
+        assert!(failure.child_cleanup.is_some());
+        assert!(serde_json::to_vec(&failure).is_ok());
     }
 }

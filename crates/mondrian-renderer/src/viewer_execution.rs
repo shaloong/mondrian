@@ -25,13 +25,13 @@ use crate::VulkanNativeVideoImportBackend;
 use crate::{
     CpuColorFrame, CpuSourceColorFrame, GpuColorFrameIdAllocator, GpuColorFrameResource,
     GpuColorFrameWgpuResource, GpuColorFrameWgpuResourcePool, GpuNativeDecodedFrameImportContract,
-    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportSupport,
-    GpuNativeDecodedFrameTextureFormat, GpuNativeDecodedFrameVideoSampling, GpuNativeYuvDecoder,
-    GpuVideoChromaLocation, GpuVideoRange, HeterogeneousGpuContinuationRequest,
-    NativeVideoImportCandidateTimingReceipt, NativeVideoImportCandidateToken,
-    NativeVideoImportCpuTimings, NativeVideoImportGpuTimingDiagnostics,
-    NativeVideoImportGpuTimingPolicy, NativeVideoImportGpuTimingSample, RenderInputTransform,
-    TimelineSolidColorLayer,
+    GpuNativeDecodedFrameImportError, GpuNativeDecodedFrameImportPlan,
+    GpuNativeDecodedFrameImportSupport, GpuNativeDecodedFrameTextureFormat,
+    GpuNativeDecodedFrameVideoSampling, GpuNativeYuvDecoder, GpuVideoChromaLocation, GpuVideoRange,
+    HeterogeneousGpuContinuationRequest, NativeVideoImportCandidateTimingReceipt,
+    NativeVideoImportCandidateToken, NativeVideoImportCpuTimings,
+    NativeVideoImportGpuTimingDiagnostics, NativeVideoImportGpuTimingPolicy,
+    NativeVideoImportGpuTimingSample, RenderInputTransform, TimelineSolidColorLayer,
 };
 
 /// One exact CPU-prefix completion consumed by a Viewer GPU continuation.
@@ -461,6 +461,69 @@ impl ViewerNativeVideoImportRuntime {
         Ok(0)
     }
 
+    /// Prepare contract-specific native input color objects without adopting
+    /// the decoder surface, allocating frame textures, or submitting GPU work.
+    pub fn prepare_import_backend_objects(
+        &mut self,
+        source_color_space: ColorSpace,
+        input_transform: &RenderInputTransform,
+        output_width: u32,
+        output_height: u32,
+        native_frame: &PreviewNativeDecodedFrame,
+    ) -> Result<(), GpuNativeDecodedFrameImportError> {
+        let contract = native_decoded_frame_import_contract(
+            source_color_space,
+            input_transform,
+            output_width,
+            output_height,
+            native_frame,
+        )?;
+        let mut ids = GpuColorFrameIdAllocator::new(1).map_err(|error| {
+            GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: format!("native import preparation id allocation failed: {error}"),
+            }
+        })?;
+        let plan =
+            GpuNativeDecodedFrameImportPlan::from_contract(&mut ids, contract, &self.support)?;
+        #[cfg(target_os = "windows")]
+        {
+            self.backend
+                .as_mut()
+                .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: self
+                        .support
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+                })?
+                .prepare_import_plan(&plan)
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            self.backend
+                .as_mut()
+                .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+                    reason: self
+                        .support
+                        .unavailable_reason
+                        .clone()
+                        .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+                })?
+                .prepare_import_plan(&plan)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        {
+            let _ = plan;
+            Err(GpuNativeDecodedFrameImportError::BackendRejected {
+                reason: self
+                    .support
+                    .unavailable_reason
+                    .clone()
+                    .unwrap_or_else(|| "native video backend is unavailable".to_owned()),
+            })
+        }
+    }
+
     /// Import one native decoder payload into a renderer-owned working resource.
     pub fn import(
         &mut self,
@@ -472,35 +535,13 @@ impl ViewerNativeVideoImportRuntime {
         native_frame: &PreviewNativeDecodedFrame,
     ) -> Result<GpuColorFrameResource<GpuColorFrameWgpuResource>, GpuNativeDecodedFrameImportError>
     {
-        let source_texture_format = native_source_texture_format_from_decoded(
-            native_frame.surface_format,
-        )
-        .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
-            reason: format!(
-                "decoded native surface format {:?} has no renderer import contract",
-                native_frame.surface_format
-            ),
-        })?;
-        let video_sampling = native_video_sampling_from_decoded(
+        let contract = native_decoded_frame_import_contract(
             source_color_space,
-            source_texture_format,
-            native_frame.diagnostics.decoded_video_sampling,
-        )
-        .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
-            reason: "decoded native surface has incomplete video sampling metadata".to_owned(),
-        })?;
-        let contract = GpuNativeDecodedFrameImportContract {
-            width: native_frame.width,
-            height: native_frame.height,
+            input_transform,
             output_width,
             output_height,
-            source_color_space,
-            input_transform: input_transform.clone(),
-            handle_kind: native_frame.handle_kind(),
-            source_texture_format,
-            video_sampling,
-            label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
-        };
+            native_frame,
+        )?;
         #[cfg(target_os = "windows")]
         {
             let backend = self.backend.as_mut().ok_or_else(|| {
@@ -555,6 +596,44 @@ impl ViewerNativeVideoImportRuntime {
             })
         }
     }
+}
+
+fn native_decoded_frame_import_contract(
+    source_color_space: ColorSpace,
+    input_transform: &RenderInputTransform,
+    output_width: u32,
+    output_height: u32,
+    native_frame: &PreviewNativeDecodedFrame,
+) -> Result<GpuNativeDecodedFrameImportContract, GpuNativeDecodedFrameImportError> {
+    let source_texture_format = native_source_texture_format_from_decoded(
+        native_frame.surface_format,
+    )
+    .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+        reason: format!(
+            "decoded native surface format {:?} has no renderer import contract",
+            native_frame.surface_format
+        ),
+    })?;
+    let video_sampling = native_video_sampling_from_decoded(
+        source_color_space,
+        source_texture_format,
+        native_frame.diagnostics.decoded_video_sampling,
+    )
+    .ok_or_else(|| GpuNativeDecodedFrameImportError::BackendRejected {
+        reason: "decoded native surface has incomplete video sampling metadata".to_owned(),
+    })?;
+    Ok(GpuNativeDecodedFrameImportContract {
+        width: native_frame.width,
+        height: native_frame.height,
+        output_width,
+        output_height,
+        source_color_space,
+        input_transform: input_transform.clone(),
+        handle_kind: native_frame.handle_kind(),
+        source_texture_format,
+        video_sampling,
+        label: format!("viewer-native-working-{}", native_frame.handle.id().get()),
+    })
 }
 
 /// Map a media decoded-surface fact into the renderer import format.

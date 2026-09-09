@@ -174,11 +174,12 @@ pub use cross_application_qualification::{
     CrossApplicationComparisonStatistics, CrossApplicationFrameCoordinate,
     CrossApplicationMissingArtifact, CrossApplicationPairComparison,
     CrossApplicationPixelOrientation, CrossApplicationProducer,
-    CrossApplicationProducerRequirement, CrossApplicationQualificationArtifact,
-    CrossApplicationQualificationCase, CrossApplicationQualificationError,
-    CrossApplicationQualificationLimits, CrossApplicationQualificationProfile,
-    CrossApplicationQualificationReport, CrossApplicationQualificationRun,
-    CrossApplicationQualificationStatus, PreparedCrossApplicationQualification,
+    CrossApplicationProducerRequirement, CrossApplicationProducerScope,
+    CrossApplicationQualificationArtifact, CrossApplicationQualificationCase,
+    CrossApplicationQualificationError, CrossApplicationQualificationLimits,
+    CrossApplicationQualificationProfile, CrossApplicationQualificationReport,
+    CrossApplicationQualificationRun, CrossApplicationQualificationStatus,
+    PreparedCrossApplicationQualification,
 };
 pub use display_calibration::{
     GpuDisplayCalibrationLut, GpuDisplayCalibrationPipeline, GpuDisplayCalibrationPipelineError,
@@ -329,9 +330,9 @@ pub use prepared_visual_program::{
     DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_BYTES, DEFAULT_PREPARED_VISUAL_PROGRAM_CACHE_CAPACITY,
 };
 pub use prepared_visual_range_closure::{
-    next_bound_prepared_visual_media_demand_frame, next_prepared_visual_media_demand_frame,
-    prepare_bound_visual_range_closure, prepare_visual_range_closure, PreparedVisualRangeClosure,
-    PreparedVisualRangeClosureError,
+    next_bound_prepared_visual_media_demand_frame, next_bound_prepared_visual_new_asset_frame,
+    next_prepared_visual_media_demand_frame, prepare_bound_visual_range_closure,
+    prepare_visual_range_closure, PreparedVisualRangeClosure, PreparedVisualRangeClosureError,
 };
 pub use program_scopes_gpu::{
     GpuProgramScopesBufferLayout, GpuProgramScopesError, GpuProgramScopesRecord,

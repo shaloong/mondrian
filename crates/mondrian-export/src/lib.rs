@@ -5,6 +5,7 @@
 mod artifact_identity;
 mod artifact_verifier;
 mod audio_stems;
+mod broadcast_artifact_qc;
 pub mod capture;
 pub mod delivery;
 mod dynamic_hdr;
@@ -21,9 +22,15 @@ pub mod validator;
 pub mod video_encoding;
 
 pub use artifact_verifier::{
-    verify_export_artifact, verify_export_artifact_cancellable, IndependentExportArtifactPolicy,
-    IndependentExportArtifactReceipt, IndependentExportArtifactReport,
-    IndependentExportArtifactVerificationError, INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
+    verify_export_artifact, verify_export_artifact_cancellable, verify_export_artifact_until,
+    IndependentArtifactNativeObservation, IndependentExportArtifactFailureEvidence,
+    IndependentExportArtifactPolicy, IndependentExportArtifactReceipt,
+    IndependentExportArtifactReport, IndependentExportArtifactVerificationError,
+    INDEPENDENT_EXPORT_ARTIFACT_VALIDATOR_ID,
+};
+pub use broadcast_artifact_qc::{
+    verify_finished_broadcast_artifact, FinishedBroadcastArtifactError,
+    FinishedBroadcastArtifactFailure, FinishedBroadcastArtifactReceipt,
 };
 pub use capture::{
     prepare_timeline_export_dependencies,
@@ -61,4 +68,12 @@ pub use queue::{
 pub use video_encoding::{
     resolve_video_coding_structure, ResolvedVideoCodingStructure, VideoCodingStructure,
     VideoSceneCutPolicy,
+};
+
+mod regulatory_pse;
+pub use regulatory_pse::{
+    admit_regulatory_pse_provider, PreparedRegulatoryPseProvider, RegulatoryPseAdmission,
+    RegulatoryPseExecutionEvidence, RegulatoryPseExecutionReceipt, RegulatoryPseFailure,
+    RegulatoryPseNotRun, RegulatoryPseOutput, RegulatoryPseProviderConfig, RegulatoryPseRequest,
+    RegulatoryPseRuntimeFile, RegulatoryPseTerminalFailure,
 };

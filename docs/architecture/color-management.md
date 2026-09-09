@@ -1,5 +1,12 @@
 # Color Management
 
+Preview timing reports distinguish a measured CPU output bottleneck from GPU
+route eligibility. The recommendation first profiles processor, allocation and
+memory costs while preserving mandatory CPU working-frame cache publication.
+Selecting a GPU or existing hybrid output route still requires its typed
+color/alpha, readback and native device admission contracts; stage duration
+alone cannot establish those prerequisites.
+
 Mondrian has one typed color-management pipeline. Accepted ADR-0005 defines
 Mondrian Standard as a Mondrian-owned, immutable, versioned OCIO package and
 uses stock OCIO as the default execution infrastructure. Mondrian Standard,
@@ -1884,3 +1891,54 @@ creative tone mappers are versioned baselines rather than common mathematical
 oracles. Absolute color accuracy remains owned by the Independent Colorimetric
 Oracle Corpus, while Viewer/OS color management, HDR surfaces, reference
 monitors, GPU/driver matrices, and SDI remain separate hardware qualification.
+
+### Explicit local reference producer scope
+
+Cross-application profile schema 2 can explicitly select `blender_and_premiere`
+for the user-approved local Mondrian/Blender/Premiere matrix. Schema 1 retains
+the full four-producer requirement. Scope is included in canonical profile
+identity and the output report; a missing Resolve artifact cannot silently
+reduce a legacy matrix. The separate checked-in local stimulus and policy bind
+the same analytic patches, exact frame coordinates, and required pairwise
+comparisons to their actual producer set. Installed applications do not count
+as captures: exact versions/builds and same-run exported artifacts remain
+mandatory for an executed qualification.
+
+### Blender 5.1 native capture output correction (COL-045)
+
+Native Blender readback is capture evidence, not independent color qualification.
+The fixed analytic image-sequence project uses scene origin zero with filename
+`input-0000.exr`. Blender 5.1 node RNA defines `frame_start` assuming a first picture
+numbered 1; `frame_offset = -1` is therefore required. The original offset zero
+produced frame-1 and frame-18 marker pixels for requested frames 0 and 17, despite
+correct scene-frame property readback. Decoded marker pixels must verify identity.
+
+`capture_blender.py` now sets file `color_management = OVERRIDE` and copies the
+requested display/view/look/exposure/gamma into the file's own settings before
+selecting the linear output space. `FOLLOW_SCENE` wrote `lin_rec709_scene` while
+the dormant file property read back `Linear Rec.2020`. The corrected native EXR
+header declares `lin_rec2020_scene`; it does not add a `chromaticities` attribute.
+No post-render color transform or artifact rewrite is used to obtain this result.
+
+The capture records `native_output_contract` separately from requested settings.
+Blender's native compositor/EXR output is premultiplied; this ImageFormatSettings
+RNA exposes no straight-alpha output property. The PNG save path yields straight
+RGB for nonzero alpha, while the compositor has already lost hidden RGB under
+zero alpha. The straight-coverage stimulus contract is not silently changed and
+this capture cannot qualify its hidden-RGB preservation row. Changing source
+interpretation to packed channels or fabricating missing RGB is not a correction.
+
+The second local native run (`blender-capture-v2`, Blender 5.1.1 build b70da489d7f4)
+was independently decoded with FFmpeg 6.1.1 native Float32 EXR and Pillow PNG.
+Both 64-pixel repeated frame markers identify frames 0 and 17 exactly. The EXR is
+ABGR Float32, sampling 1x1, data/display windows (0,0)..(63,63), ZIP compression;
+Rec.2020 premultiplied source pixels differ by at most 1.91e-6. Alpha values
+0/.25/.5/1 and negative -0.125 / high 16 survive. PNG nonzero-alpha pixels match
+an independently chromaticities-derived Rec.2020-to-sRGB standard transfer and
+8-bit rounding exactly; hidden RGB at alpha zero remains lost. These measurements
+explain the captured output and are not a substituted OCIO/vendor qualification
+oracle. Original failed capture and both independent diagnostics are retained.
+
+Primary native behavior sources: Blender 5.1 local RNA `CompositorNodeImage` and
+`ImageFormatSettings`, [image alpha conventions](https://docs.blender.org/manual/en/5.1/editors/image/image_settings.html),
+and [supported output formats](https://docs.blender.org/manual/en/5.1/files/media/image_formats.html).

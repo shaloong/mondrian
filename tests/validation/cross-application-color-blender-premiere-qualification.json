@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "id": "cross-application-color-blender-premiere-v1",
+  "execution_policy": "sealed-required",
+  "runtime_profile_schema_version": 2,
+  "stimulus": {
+    "path": "tests/validation/cross-application-color-stimulus-blender-premiere-v1.json",
+    "sha256": "730d60dd7e98e3c7b18f5241b9d2f7ab4d098b8362fbe489e594df2c1356dd5f"
+  },
+  "required_producers": [
+    "mondrian",
+    "blender",
+    "adobe_premiere_pro"
+  ],
+  "local_restricted_evidence_required": true,
+  "exact_versions_and_builds_required": true,
+  "clean_source_required": true,
+  "single_run_identity_required": true,
+  "bounded_decode_required": true,
+  "pairwise_matrix_required": true,
+  "public_specification_oracle_is_separate": true,
+  "runner": {
+    "integration_test": "cross_application_qualification",
+    "exact_test": "sealed_cross_application_corpus_qualification",
+    "timeout_seconds": 1800,
+    "serial_cargo_jobs": 1,
+    "report_schema_version": 2
+  },
+  "acceptance": {
+    "qualified_status_required": true,
+    "missing_artifacts_forbidden": true,
+    "skipped_execution_forbidden": true,
+    "profile_hash_required": true,
+    "report_hash_required": true,
+    "source_sha_required": true,
+    "machine_report_hash_required": true
+  },
+  "producer_scope": "blender_and_premiere"
+}

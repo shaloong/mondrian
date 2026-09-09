@@ -46,6 +46,14 @@ const EXPORT_FAILURE_DETAIL_CHARS: usize = 4_096;
 /// after crossing the Preparing gate. Preview resources are never borrowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExportExecutionResourcePolicy {
+    /// Permit equivalent CPU-capable visual work to use opportunistic GPU
+    /// acceleration.
+    ///
+    /// The product resource coordinator disables this while realtime Preview
+    /// or Audio is active. Export still uses the GPU when the immutable visual
+    /// closure has no exact CPU Float32 route, so scheduling policy never
+    /// reinterprets an authored Effect contract.
+    pub opportunistic_gpu_acceleration: bool,
     /// Maximum prepared Sequence visual programs in the frozen reachable closure.
     pub visual_program_entries: usize,
     /// Maximum aggregate conservative logical bytes for that visual closure.
@@ -112,6 +120,7 @@ pub struct ExportExecutionResourcePolicy {
 impl Default for ExportExecutionResourcePolicy {
     fn default() -> Self {
         Self {
+            opportunistic_gpu_acceleration: true,
             visual_program_entries: 32,
             visual_program_bytes: 64 * 1024 * 1024,
             lut_cache_entries: 8,
@@ -485,13 +494,19 @@ pub enum ExportArtifactPublicationEvidence {
 pub struct RenderJob {
     id: JobId,
     pub(crate) config: ExportConfig,
+    pub(crate) regulatory_pse: Mutex<Option<crate::PreparedRegulatoryPseProvider>>,
     created_at: DateTime<Utc>,
 }
 
 impl RenderJob {
     /// Create one immutable export submission.
     pub fn new(config: ExportConfig) -> Self {
-        Self { id: JobId::new(), config, created_at: Utc::now() }
+        Self {
+            id: JobId::new(),
+            config,
+            regulatory_pse: Mutex::new(None),
+            created_at: Utc::now(),
+        }
     }
 
     /// Stable identity assigned before admission.
@@ -539,6 +554,8 @@ pub struct ExportJobSnapshot {
 /// Structured reason why a submission was not admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportAdmissionError {
+    /// Required regulatory PSE work never started because its external prerequisites are absent.
+    RegulatoryPseNotRun { reason: crate::RegulatoryPseNotRun },
     /// Preset and immutable Sequence delivery intent cannot form a legal output.
     InvalidDelivery { detail: String },
     /// The bounded in-flight budget is exhausted.
@@ -560,6 +577,10 @@ pub enum ExportAdmissionError {
 impl std::fmt::Display for ExportAdmissionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RegulatoryPseNotRun { reason } => write!(
+                formatter,
+                "regulatory PSE NotRun before export admission: {reason:?}"
+            ),
             Self::InvalidDelivery { detail } => formatter.write_str(detail),
             Self::CapacityExceeded { capacity } => {
                 write!(
@@ -1233,6 +1254,45 @@ impl RenderQueue {
     pub fn enqueue(&self, mut job: RenderJob) -> Result<JobId, ExportAdmissionError> {
         if self.inner.shutdown.load(Ordering::Acquire) {
             return self.reject(ExportAdmissionError::QueueShutdown);
+        }
+        if let Err(detail) = super::final_broadcast_qc::validate_admission(&job.config) {
+            return self.reject(ExportAdmissionError::InvalidDelivery { detail });
+        }
+        if let Some(profile) = job
+            .config
+            .broadcast_qc
+            .as_ref()
+            .filter(|profile| profile.require_regulatory_flash_analysis)
+        {
+            let fingerprint = profile.fingerprint().map_err(|error| {
+                ExportAdmissionError::InvalidDelivery { detail: error.to_string() }
+            })?;
+            let Some(deadline) = Instant::now().checked_add(Duration::from_secs(30)) else {
+                return self.reject(ExportAdmissionError::InvalidDelivery {
+                    detail: "regulatory PSE admission deadline overflow".to_owned(),
+                });
+            };
+            match crate::admit_regulatory_pse_provider(
+                job.config.regulatory_pse.as_ref(),
+                fingerprint,
+                deadline,
+                &ExecutionCancellationToken::new(),
+            ) {
+                Ok(crate::RegulatoryPseAdmission::Available(prepared)) => {
+                    *job.regulatory_pse.get_mut() = Some(*prepared)
+                }
+                Ok(crate::RegulatoryPseAdmission::NotRun(reason)) => {
+                    return self.reject(ExportAdmissionError::RegulatoryPseNotRun { reason })
+                }
+                Err(error) => {
+                    return self.reject(ExportAdmissionError::InvalidDelivery {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+        if let Err(detail) = super::validate_frozen_ancillary(&job.config) {
+            return self.reject(ExportAdmissionError::InvalidDelivery { detail });
         }
         let audio_selection = job.config.preset.audio_program_selection();
         let resource_policy = self.inner.state.lock().resource_policy;

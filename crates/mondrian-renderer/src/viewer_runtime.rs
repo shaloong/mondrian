@@ -389,6 +389,55 @@ impl ViewerGpuExecutionRuntime {
         Ok(all_ready)
     }
 
+    /// Prepare contract-specific native-video input color objects without
+    /// adopting decoder surfaces or recording a Viewer candidate.
+    ///
+    /// This is a bounded preroll seam. The exact later candidate still owns
+    /// the native surface transition and all frame-local GPU resources.
+    pub fn prepare_native_video_imports(
+        &mut self,
+        layers: &[ViewerGpuExecutionLayer],
+    ) -> Result<(), ViewerGpuExecutionError> {
+        if !self.native_video_import.support().renderer_backend_ready {
+            return Ok(());
+        }
+        let mut seen = Vec::with_capacity(layers.len().saturating_mul(2));
+        for layer in layers {
+            match layer {
+                ViewerGpuExecutionLayer::Source(source) => {
+                    prepare_source_native_video_import(
+                        source,
+                        &mut self.native_video_import,
+                        &mut seen,
+                    )?;
+                }
+                ViewerGpuExecutionLayer::Adjustment { .. } => {}
+                ViewerGpuExecutionLayer::CrossDissolve(transition) => {
+                    if !transition.progress.is_finite() {
+                        continue;
+                    }
+                    let progress = transition.progress.clamp(0.0, 1.0);
+                    for (input, weight) in [
+                        (&transition.left, 1.0 - progress),
+                        (&transition.right, progress),
+                    ] {
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        if let crate::ViewerGpuTransitionInput::Source(source) = input {
+                            prepare_source_native_video_import(
+                                source,
+                                &mut self.native_video_import,
+                                &mut seen,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Collect native-import callbacks after the owner has polled the device.
     pub fn collect_native_import_gpu_timings_after_device_poll(&mut self) {
         self.native_video_import.collect_gpu_timings_after_device_poll();
@@ -2077,6 +2126,37 @@ fn prepare_source_cpu_yuv_upload(
         )),
     })?;
     Ok(())
+}
+
+fn prepare_source_native_video_import(
+    layer: &crate::ViewerGpuSourceLayer,
+    runtime: &mut crate::ViewerNativeVideoImportRuntime,
+    seen: &mut Vec<usize>,
+) -> Result<(), ViewerGpuExecutionError> {
+    if source_layer_has_zero_contribution(layer) {
+        return Ok(());
+    }
+    let crate::ViewerGpuSourceLayer::Media { native_source: Some(source), .. } = layer else {
+        return Ok(());
+    };
+    let identity = Arc::as_ptr(&source.native_frame) as usize;
+    if seen.contains(&identity) {
+        return Ok(());
+    }
+    seen.push(identity);
+    runtime
+        .prepare_import_backend_objects(
+            source.source_color_space,
+            &source.input_transform,
+            source.materialization_width,
+            source.materialization_height,
+            &source.native_frame,
+        )
+        .map_err(|error| {
+            ViewerGpuExecutionError::InputPreparation(format!(
+                "native video input backend preparation failed: {error}"
+            ))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

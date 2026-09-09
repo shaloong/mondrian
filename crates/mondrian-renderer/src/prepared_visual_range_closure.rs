@@ -298,6 +298,68 @@ pub fn next_bound_prepared_visual_media_demand_frame(
     Ok(Some(low))
 }
 
+/// Find the earliest root frame after `after_frame` whose canonical recursive
+/// visual closure introduces a media Asset outside `current_asset_ids`.
+///
+/// The predicate is evaluated over inclusive prefixes, so it stays monotonic
+/// and can use binary search. This lets realtime consumers discover a cold
+/// source transition without evaluating every intervening frame. Exact media
+/// request lowering and source-fingerprint validation remain consumer-owned at
+/// the returned frame.
+pub fn next_bound_prepared_visual_new_asset_frame(
+    root_sequence: &Sequence,
+    sequences: &[Sequence],
+    after_frame: i64,
+    horizon_frame: i64,
+    current_asset_ids: &BTreeSet<AssetId>,
+    prepare_program: impl FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
+) -> Result<Option<i64>, PreparedVisualRangeClosureError> {
+    if after_frame < 0 {
+        return Err(PreparedVisualRangeClosureError::NegativeFrame { frame: after_frame });
+    }
+    if horizon_frame < 0 {
+        return Err(PreparedVisualRangeClosureError::NegativeFrame { frame: horizon_frame });
+    }
+    let Some(first_frame) = after_frame.checked_add(1) else {
+        return Ok(None);
+    };
+    if first_frame > horizon_frame {
+        return Ok(None);
+    }
+
+    let first_time = root_frame_time(root_sequence, first_frame)?;
+    let mut programs = PinnedProgramResolver::new(prepare_program);
+    let mut low = first_frame;
+    let mut high = horizon_frame;
+    if !prefix_has_new_media_asset(
+        root_sequence,
+        sequences,
+        first_time,
+        high,
+        current_asset_ids,
+        &mut programs,
+    )? {
+        return Ok(None);
+    }
+
+    while low < high {
+        let middle = frame_midpoint(low, high);
+        if prefix_has_new_media_asset(
+            root_sequence,
+            sequences,
+            first_time,
+            middle,
+            current_asset_ids,
+            &mut programs,
+        )? {
+            high = middle;
+        } else {
+            low = middle.saturating_add(1);
+        }
+    }
+    Ok(Some(low))
+}
+
 fn prefix_has_media<Prepare>(
     root_sequence: &Sequence,
     sequences: &[Sequence],
@@ -316,6 +378,30 @@ where
         programs,
     )?;
     Ok(closure.has_media_dependencies())
+}
+
+fn prefix_has_new_media_asset<Prepare>(
+    root_sequence: &Sequence,
+    sequences: &[Sequence],
+    first_time: TimelineTime,
+    last_frame: i64,
+    current_asset_ids: &BTreeSet<AssetId>,
+    programs: &mut PinnedProgramResolver<Prepare>,
+) -> Result<bool, PreparedVisualRangeClosureError>
+where
+    Prepare: FnMut(&Sequence) -> Result<PreparedVisualProgramBinding, String>,
+{
+    let last_time = root_frame_time(root_sequence, last_frame)?;
+    let closure = prepare_visual_range_closure_with_resolver(
+        root_sequence,
+        sequences,
+        PreparedVisualNestedRange::Bounded { first: first_time, last: last_time },
+        programs,
+    )?;
+    Ok(closure
+        .media_asset_ids()
+        .iter()
+        .any(|asset_id| !current_asset_ids.contains(asset_id)))
 }
 
 fn root_frame_time(
@@ -628,6 +714,34 @@ mod tests {
         panic!("Effect registry did not stabilize during media-activation test")
     }
 
+    fn stable_next_new_asset_frame(
+        root: &Sequence,
+        sequences: &[Sequence],
+        after: i64,
+        horizon: i64,
+        current_asset_ids: &BTreeSet<AssetId>,
+    ) -> Option<i64> {
+        for _ in 0..64 {
+            match next_bound_prepared_visual_new_asset_frame(
+                root,
+                sequences,
+                after,
+                horizon,
+                current_asset_ids,
+                |sequence| {
+                    let program = prepare(sequence)?;
+                    PreparedVisualProgramBinding::checked(sequence, program)
+                        .map_err(|error| error.to_string())
+                },
+            ) {
+                Ok(frame) => return frame,
+                Err(PreparedVisualRangeClosureError::EffectRegistryRevisionMismatch { .. }) => {}
+                Err(error) => panic!("new media Asset activation: {error}"),
+            }
+        }
+        panic!("Effect registry did not stabilize during new-Asset activation test")
+    }
+
     #[test]
     fn range_closure_collects_only_selected_nested_media_and_programs() {
         let mut child = Sequence::new("child");
@@ -751,6 +865,35 @@ mod tests {
         ));
 
         assert_eq!(stable_next_media_frame(&sequence, &[], 0, 20), Some(8));
+    }
+
+    #[test]
+    fn next_new_asset_frame_skips_the_current_asset_and_finds_the_exact_cut() {
+        let mut sequence = Sequence::new("alternating media");
+        sequence.video_tracks.clear();
+        let rate = sequence.time_base();
+        let current_asset = AssetId::new();
+        let next_asset = AssetId::new();
+        let mut track = Track::new_video("V1");
+        track
+            .add_clip(
+                Clip::new(current_asset, TimelineTime::ZERO, tt(48, rate)).expect("current media"),
+            )
+            .expect("add current media");
+        track
+            .add_clip(Clip::new(next_asset, tt(48, rate), tt(48, rate)).expect("next media"))
+            .expect("add next media");
+        sequence.video_tracks.push(track);
+
+        assert_eq!(
+            stable_next_new_asset_frame(&sequence, &[], 5, 95, &BTreeSet::from([current_asset]),),
+            Some(48)
+        );
+        assert_eq!(
+            stable_next_new_asset_frame(&sequence, &[], 5, 47, &BTreeSet::from([current_asset]),),
+            None,
+            "the current Asset alone cannot fabricate a cold transition"
+        );
     }
 
     #[test]

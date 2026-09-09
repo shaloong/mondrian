@@ -222,9 +222,14 @@ Duplicate Sequence identities, missing selected children, active-path cycles,
 depth overflow, Program identity/fingerprint mismatch, or a mixed registry
 revision fail closed. Export converts its half-open delivery interval to this
 checked inclusive form for immutable dependency capture; Preview lookahead uses
-the same closure and may binary-search for its first media-demand frame. The
-range closure contains no per-frame Render Plan, placement-instance execution
-node, pixels, decoder/GPU state, audio demand, or publication policy; those
+the same closure and may binary-search for its first media-demand frame or the
+first frame whose prefix introduces an Asset outside the current media set. The
+second query avoids synchronously evaluating every intervening frame when a
+realtime owner needs the next cold-source coordinate. It returns only a frame;
+the Preview Adapter still lowers the exact media requests and validates source
+fingerprints there. The range closure contains no per-frame Render Plan,
+placement-instance execution node, pixels, decoder/GPU state, audio demand, or
+publication policy; those
 belong to frame closure or the consumer.
 
 One `TimelineRenderPlan` describes one Sequence instance only. The renderer

@@ -18,11 +18,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const QUALIFICATION_SCHEMA_VERSION: u32 = 1;
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 const HARD_MAX_CASES: usize = 64;
 const HARD_MAX_ARTIFACTS: usize = 256;
 const HARD_MAX_PIXELS_PER_ARTIFACT: u64 = 33_554_432;
 const HARD_MAX_ENCODED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Explicit producer scope; a local subset never silently claims the full matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CrossApplicationProducerScope {
+    /// Original four-application commercial comparison.
+    #[default]
+    FullCommercialMatrix,
+    /// User-selected local Mondrian, Blender, and Premiere comparison.
+    BlenderAndPremiere,
+}
 
 /// Producer identities admitted by the commercial cross-application matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -175,8 +186,11 @@ pub struct CrossApplicationQualificationLimits {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CrossApplicationQualificationProfile {
-    /// Contract schema version. Version 1 is currently required.
+    /// Contract schema version. Version 2 permits an explicit local producer scope.
     pub schema_version: u32,
+    /// Explicit matrix scope; legacy profiles retain the complete matrix.
+    #[serde(default)]
+    pub producer_scope: CrossApplicationProducerScope,
     /// Stable profile identity.
     pub qualification_id: String,
     /// Immutable profile edition.
@@ -328,6 +342,7 @@ impl PreparedCrossApplicationQualification {
             artifacts.values().map(|artifact| artifact.evidence.clone()).collect();
         let mut report = CrossApplicationQualificationReport {
             schema_version: REPORT_SCHEMA_VERSION,
+            producer_scope: self.profile.producer_scope,
             qualification_id: self.profile.qualification_id.clone(),
             edition: self.profile.edition.clone(),
             profile_sha256: self.profile_sha256.clone(),
@@ -642,6 +657,8 @@ pub enum CrossApplicationQualificationStatus {
 pub struct CrossApplicationQualificationReport {
     /// Report schema version.
     pub schema_version: u32,
+    /// Producer scope bound by the canonical profile identity.
+    pub producer_scope: CrossApplicationProducerScope,
     /// Qualification profile identity.
     pub qualification_id: String,
     /// Qualification profile edition.
@@ -699,8 +716,8 @@ pub enum CrossApplicationQualificationError {
     /// The clean Git source revision was not lowercase 40-hex SHA-1.
     #[error("cross-application qualification source revision must be a lowercase 40-hex Git SHA")]
     InvalidSourceRevision,
-    /// Producer requirements must contain each commercial matrix producer exactly once.
-    #[error("qualification profile must require Mondrian, Blender, DaVinci Resolve, and Adobe Premiere Pro exactly once")]
+    /// Producer requirements must match the explicitly selected matrix exactly once.
+    #[error("qualification profile must require each producer in its explicit scope exactly once")]
     InvalidProducerClosure,
     /// Case identity was duplicated.
     #[error("duplicate qualification case '{case_id}'")]
@@ -845,7 +862,10 @@ pub enum CrossApplicationQualificationError {
 fn validate_profile(
     profile: &CrossApplicationQualificationProfile,
 ) -> Result<(), CrossApplicationQualificationError> {
-    if profile.schema_version != QUALIFICATION_SCHEMA_VERSION {
+    if !matches!(profile.schema_version, QUALIFICATION_SCHEMA_VERSION | 2)
+        || (profile.schema_version == 1
+            && profile.producer_scope != CrossApplicationProducerScope::FullCommercialMatrix)
+    {
         return Err(CrossApplicationQualificationError::UnsupportedSchema {
             actual: profile.schema_version,
         });
@@ -853,12 +873,15 @@ fn validate_profile(
     validate_identity("qualification_id", &profile.qualification_id)?;
     validate_identity("edition", &profile.edition)?;
     validate_sha256("stimulus_sha256", &profile.stimulus_sha256)?;
-    let expected = BTreeSet::from([
+    let mut expected = BTreeSet::from([
         CrossApplicationProducer::Mondrian,
         CrossApplicationProducer::Blender,
         CrossApplicationProducer::DaVinciResolve,
         CrossApplicationProducer::AdobePremierePro,
     ]);
+    if profile.producer_scope == CrossApplicationProducerScope::BlenderAndPremiere {
+        expected.remove(&CrossApplicationProducer::DaVinciResolve);
+    }
     let actual = profile
         .required_producers
         .iter()

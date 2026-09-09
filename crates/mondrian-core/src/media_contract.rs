@@ -404,6 +404,14 @@ pub enum PixelFormat {
     Gbrap12le,
     /// Planar GBRA, 16-bit little-endian.
     Gbrap16le,
+    /// Planar GBR IEEE Float32, little-endian.
+    Gbrpf32le,
+    /// Planar GBR IEEE Float32, big-endian.
+    Gbrpf32be,
+    /// Planar GBRA IEEE Float32, little-endian.
+    Gbrapf32le,
+    /// Planar GBRA IEEE Float32, big-endian.
+    Gbrapf32be,
     /// Packed RGB24.
     Rgb24,
     /// Packed RGBA8.
@@ -424,6 +432,7 @@ impl PixelFormat {
     /// Nominal component bit depth.
     pub const fn bit_depth(self) -> u8 {
         match self {
+            Self::Gbrpf32le | Self::Gbrpf32be | Self::Gbrapf32le | Self::Gbrapf32be => 32,
             Self::BayerRggb16le
             | Self::BayerBggr16le
             | Self::BayerGbrg16le
@@ -451,7 +460,13 @@ impl PixelFormat {
     pub const fn has_alpha(self) -> bool {
         matches!(
             self,
-            Self::Rgba | Self::Rgba64le | Self::Gbrap10le | Self::Gbrap12le | Self::Gbrap16le
+            Self::Rgba
+                | Self::Rgba64le
+                | Self::Gbrap10le
+                | Self::Gbrap12le
+                | Self::Gbrap16le
+                | Self::Gbrapf32le
+                | Self::Gbrapf32be
         )
     }
 
@@ -468,6 +483,10 @@ impl PixelFormat {
                 | Self::Gbrap10le
                 | Self::Gbrap12le
                 | Self::Gbrap16le
+                | Self::Gbrpf32le
+                | Self::Gbrpf32be
+                | Self::Gbrapf32le
+                | Self::Gbrapf32be
         )
     }
 
@@ -1740,6 +1759,27 @@ mod tests {
         assert_eq!(video_stream(false, 8, false).proven_sampling(), None);
         assert_eq!(video_stream(true, 8, false).proven_sampling(), None);
         assert_eq!(video_stream(true, 10, true).proven_sampling(), None);
+    }
+
+    #[test]
+    fn float_rgb_sampling_retains_precision_alpha_and_rejects_fallback_facts() {
+        for format in [
+            PixelFormat::Gbrpf32le,
+            PixelFormat::Gbrpf32be,
+            PixelFormat::Gbrapf32le,
+            PixelFormat::Gbrapf32be,
+        ] {
+            assert_eq!(format.bit_depth(), 32);
+            assert!(format.is_rgb());
+            let mut stream = video_stream(true, 32, format.has_alpha());
+            stream.pixel_format = format;
+            assert!(stream.proven_sampling().is_some());
+            stream.bit_depth = 16;
+            assert!(stream.proven_sampling().is_none());
+            stream.bit_depth = 32;
+            stream.has_alpha = !format.has_alpha();
+            assert!(stream.proven_sampling().is_none());
+        }
     }
 
     #[test]

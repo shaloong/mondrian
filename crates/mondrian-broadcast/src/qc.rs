@@ -399,6 +399,99 @@ pub struct BroadcastQcReport {
 }
 
 impl BroadcastQcReport {
+    /// Resolve only the regulatory obligation of this exact final-artifact scan.
+    /// The execution Adapter must first verify native output, approval files and closure.
+    /// The original artifact receipt remains immutable; this returns derived QC evidence.
+    pub fn with_regulatory_pse(
+        &self,
+        artifact: &crate::BroadcastArtifactQcReport,
+        approval: &crate::RegulatoryPseApproval,
+        nonce: &str,
+        response: &crate::RegulatoryPseResponse,
+    ) -> Option<Self> {
+        if self != &artifact.scan || !response.verifies(approval, nonce, artifact) {
+            return None;
+        }
+        let mut result = self.clone();
+        let obligation = result
+            .obligations
+            .iter_mut()
+            .find(|entry| entry.kind == BroadcastQcObligationKind::RegulatoryPhotosensitiveFlash)?;
+        obligation.status = match response.verdict {
+            crate::RegulatoryPseVerdict::Pass => BroadcastQcRuleStatus::Pass,
+            crate::RegulatoryPseVerdict::Fail => BroadcastQcRuleStatus::Fail,
+            crate::RegulatoryPseVerdict::Incomplete => BroadcastQcRuleStatus::Inconclusive,
+        };
+        let native_digest: String =
+            response.native_report_sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+        obligation.detail = format!("External approval {} / {}; {} {}; {}; native report sha256={native_digest}; request={nonce}",
+            approval.approval_authority, approval.approval_id, approval.provider_id, approval.provider_version, approval.standard_edition);
+        result.verdict = if result
+            .findings
+            .iter()
+            .any(|finding| finding.severity == BroadcastQcSeverity::Fail)
+            || result
+                .obligations
+                .iter()
+                .any(|entry| entry.status == BroadcastQcRuleStatus::Fail)
+        {
+            BroadcastQcVerdict::Fail
+        } else if response.verdict == crate::RegulatoryPseVerdict::Incomplete {
+            BroadcastQcVerdict::Incomplete
+        } else if !result.findings.is_empty()
+            || result
+                .obligations
+                .iter()
+                .any(|entry| entry.status != BroadcastQcRuleStatus::Pass)
+        {
+            BroadcastQcVerdict::Warn
+        } else {
+            BroadcastQcVerdict::Pass
+        };
+        result.evidence_sha256 = report_digest(&result);
+        Some(result)
+    }
+
+    pub(crate) fn record_encoded_artifact_rescan(&mut self, artifact_sha256: [u8; 32]) {
+        if self.complete {
+            for obligation in &mut self.obligations {
+                if obligation.kind == BroadcastQcObligationKind::EncodedArtifactRevalidation {
+                    obligation.status = if self
+                        .findings
+                        .iter()
+                        .any(|finding| finding.severity == BroadcastQcSeverity::Fail)
+                    {
+                        BroadcastQcRuleStatus::Fail
+                    } else {
+                        BroadcastQcRuleStatus::Pass
+                    };
+                    let digest: String =
+                        artifact_sha256.iter().map(|byte| format!("{byte:02x}")).collect();
+                    obligation.detail = format!(
+                        "Complete independent encoded artifact content scan: sha256={digest}"
+                    );
+                }
+            }
+            self.verdict = if self
+                .findings
+                .iter()
+                .any(|finding| finding.severity == BroadcastQcSeverity::Fail)
+            {
+                BroadcastQcVerdict::Fail
+            } else if !self.findings.is_empty()
+                || self
+                    .obligations
+                    .iter()
+                    .any(|obligation| obligation.status != BroadcastQcRuleStatus::Pass)
+            {
+                BroadcastQcVerdict::Warn
+            } else {
+                BroadcastQcVerdict::Pass
+            };
+        }
+        self.evidence_sha256 = report_digest(self);
+    }
+
     /// Verify that the retained evidence still matches its canonical digest.
     pub fn verify_evidence(&self) -> bool {
         self.evidence_sha256 == report_digest(self)

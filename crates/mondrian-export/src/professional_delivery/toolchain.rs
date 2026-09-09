@@ -1,7 +1,14 @@
 use super::PackageAssetId;
 use crate::preset::ProfessionalDeliveryProfile;
+use mondrian_core::ExecutionCancellationToken;
+use mondrian_media::{
+    ApprovedBmxCommand, ApprovedBmxTool, BmxRuntimeHandle, SupervisedProcessCleanupReceipt,
+    SupervisedProcessPolicy, SupervisedStreamCapture,
+};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 const MAX_VERSION_BYTES: usize = 64 * 1024;
 
@@ -57,6 +64,10 @@ pub struct ProfessionalDeliveryToolIdentity {
     pub path: PathBuf,
     /// Bounded first-line version/help identity.
     pub version: String,
+    /// Actual native/pipe closure produced by the bounded version probe.
+    pub native_cleanup: SupervisedProcessCleanupReceipt,
+    /// SHA-256 of bounded stdout followed by stderr, before textual normalization.
+    pub version_output_sha256: String,
 }
 
 /// Concrete BMX/CineCert tool paths used by execution and reimport.
@@ -69,9 +80,45 @@ pub struct ProfessionalDeliveryToolchain {
     dcpomatic_verifier: PathBuf,
     photon_java: PathBuf,
     photon_lib: PathBuf,
+    bmx: Option<BmxRuntimeHandle>,
 }
 
 impl ProfessionalDeliveryToolchain {
+    /// Resolve exact approved BMX owners for AS-11; ordinary development retains discovery.
+    pub fn discover_with_bmx(
+        profile: ProfessionalDeliveryProfile,
+        bmx: Option<BmxRuntimeHandle>,
+    ) -> Result<Self, ProfessionalDeliveryToolchainError> {
+        let Some(bmx) = bmx else {
+            return Self::discover(profile);
+        };
+        if profile != ProfessionalDeliveryProfile::As11X9NabaHd720p5994 {
+            return Err(ProfessionalDeliveryToolchainError::Qualification {
+                tool: ProfessionalDeliveryTool::BmxRaw2Bmx,
+                detail: "approved BMX campaign owner supports the admitted AS-11 profile only"
+                    .to_owned(),
+            });
+        }
+        let mut toolchain = Self::from_paths(
+            bmx.path(ApprovedBmxTool::Raw2Bmx).to_path_buf(),
+            bmx.path(ApprovedBmxTool::Mxf2Raw).to_path_buf(),
+            PathBuf::new(),
+            PathBuf::new(),
+        );
+        toolchain.bmx = Some(bmx);
+        Ok(toolchain)
+    }
+
+    fn bmx_command(&self, tool: ApprovedBmxTool) -> ApprovedBmxCommand {
+        if let Some(owner) = &self.bmx {
+            owner.command(tool)
+        } else {
+            ApprovedBmxCommand::unapproved(match tool {
+                ApprovedBmxTool::Raw2Bmx => &self.raw2bmx,
+                ApprovedBmxTool::Mxf2Raw => &self.mxf2raw,
+            })
+        }
+    }
     /// Construct an explicit toolchain, primarily for packaged-runtime admission and tests.
     pub fn from_paths(
         raw2bmx: PathBuf,
@@ -87,6 +134,7 @@ impl ProfessionalDeliveryToolchain {
             dcpomatic_verifier: PathBuf::new(),
             photon_java: PathBuf::new(),
             photon_lib: PathBuf::new(),
+            bmx: None,
         }
     }
 
@@ -105,6 +153,7 @@ impl ProfessionalDeliveryToolchain {
             dcpomatic_verifier: PathBuf::new(),
             photon_java,
             photon_lib,
+            bmx: None,
         }
     }
 
@@ -122,6 +171,7 @@ impl ProfessionalDeliveryToolchain {
             dcpomatic_verifier,
             photon_java: PathBuf::new(),
             photon_lib: PathBuf::new(),
+            bmx: None,
         }
     }
 
@@ -141,6 +191,7 @@ impl ProfessionalDeliveryToolchain {
                     dcpomatic_verifier: PathBuf::new(),
                     photon_java,
                     photon_lib,
+                    bmx: None,
                 })
             }
             ProfessionalDeliveryProfile::As11X9NabaHd720p5994 => Ok(Self {
@@ -151,6 +202,7 @@ impl ProfessionalDeliveryToolchain {
                 dcpomatic_verifier: unavailable.clone(),
                 photon_java: unavailable.clone(),
                 photon_lib: unavailable,
+                bmx: None,
             }),
             ProfessionalDeliveryProfile::SmpteDcp2kFlat24 => Ok(Self {
                 raw2bmx: unavailable.clone(),
@@ -160,6 +212,7 @@ impl ProfessionalDeliveryToolchain {
                 dcpomatic_verifier: resolve_tool(ProfessionalDeliveryTool::DcpOMaticVerifier)?,
                 photon_java: unavailable.clone(),
                 photon_lib: unavailable,
+                bmx: None,
             }),
         }
     }
@@ -183,8 +236,8 @@ impl ProfessionalDeliveryToolchain {
         elementary_prores: &Path,
         output_pattern: &Path,
         title: &str,
-    ) -> Command {
-        let mut command = Command::new(&self.raw2bmx);
+    ) -> ApprovedBmxCommand {
+        let mut command = self.bmx_command(ApprovedBmxTool::Raw2Bmx);
         command
             .arg("-t")
             .arg("imf")
@@ -225,8 +278,8 @@ impl ProfessionalDeliveryToolchain {
         wave: &Path,
         mca_labels: &Path,
         output_pattern: &Path,
-    ) -> Command {
-        let mut command = Command::new(&self.raw2bmx);
+    ) -> ApprovedBmxCommand {
+        let mut command = self.bmx_command(ApprovedBmxTool::Raw2Bmx);
         command
             .arg("-t")
             .arg("imf")
@@ -250,8 +303,8 @@ impl ProfessionalDeliveryToolchain {
         mca_labels: &Path,
         output: &Path,
         title: &str,
-    ) -> Command {
-        let mut command = Command::new(&self.raw2bmx);
+    ) -> ApprovedBmxCommand {
+        let mut command = self.bmx_command(ApprovedBmxTool::Raw2Bmx);
         command
             .arg("-t")
             .arg("as11op1a")
@@ -287,6 +340,11 @@ impl ProfessionalDeliveryToolchain {
             .arg("--wave")
             .arg(wave);
         command
+    }
+
+    /// Attach standard variable-sized ST436 KLV frames to the AS-11 command.
+    pub fn attach_as11_ancillary(command: &mut ApprovedBmxCommand, ancillary_klv: &Path) {
+        command.arg("--klv").arg("s").arg("--anc").arg(ancillary_klv);
     }
 
     /// Build the qualified CineCert command for one SMPTE DCP picture Track File.
@@ -343,8 +401,8 @@ impl ProfessionalDeliveryToolchain {
     }
 
     /// Build the independent BMX structural reimport command.
-    pub fn bmx_reimport_command(&self, input: &Path, extract_as11: bool) -> Command {
-        let mut command = Command::new(&self.mxf2raw);
+    pub fn bmx_reimport_command(&self, input: &Path, extract_as11: bool) -> ApprovedBmxCommand {
+        let mut command = self.bmx_command(ApprovedBmxTool::Mxf2Raw);
         command.arg("--check-end").arg("--check-complete").arg("--read-ess").arg("-i");
         if extract_as11 {
             command.arg("--as11").arg("--mca-detail");
@@ -395,6 +453,20 @@ impl ProfessionalDeliveryToolchain {
         &self,
         profile: ProfessionalDeliveryProfile,
     ) -> Result<Vec<ProfessionalDeliveryToolIdentity>, ProfessionalDeliveryToolchainError> {
+        self.qualify_for_until(
+            profile,
+            Instant::now() + Duration::from_secs(30),
+            &ExecutionCancellationToken::new(),
+        )
+    }
+
+    /// Probe all required executables under one original admission deadline.
+    pub fn qualify_for_until(
+        &self,
+        profile: ProfessionalDeliveryProfile,
+        deadline: Instant,
+        cancellation: &ExecutionCancellationToken,
+    ) -> Result<Vec<ProfessionalDeliveryToolIdentity>, ProfessionalDeliveryToolchainError> {
         let tools: &[ProfessionalDeliveryTool] = match profile {
             ProfessionalDeliveryProfile::ImfAppProResRdd45_1080p25 => &[
                 ProfessionalDeliveryTool::BmxRaw2Bmx,
@@ -415,10 +487,24 @@ impl ProfessionalDeliveryToolchain {
         tools
             .iter()
             .map(|tool| match tool {
-                ProfessionalDeliveryTool::PhotonValidator => {
-                    probe_photon_identity(&self.photon_java, &self.photon_lib)
+                ProfessionalDeliveryTool::PhotonValidator => probe_photon_identity(
+                    &self.photon_java,
+                    &self.photon_lib,
+                    deadline,
+                    cancellation,
+                ),
+                ProfessionalDeliveryTool::BmxRaw2Bmx | ProfessionalDeliveryTool::BmxMxf2Raw => {
+                    let role = if *tool == ProfessionalDeliveryTool::BmxRaw2Bmx {
+                        ApprovedBmxTool::Raw2Bmx
+                    } else {
+                        ApprovedBmxTool::Mxf2Raw
+                    };
+                    let mut command = self.bmx_command(role);
+                    command.arg(tool.version_arg());
+                    let output = capture_identity(&mut command, *tool, deadline, cancellation)?;
+                    identity_from_output(*tool, self.path(*tool), output)
                 }
-                _ => probe_identity(*tool, self.path(*tool)),
+                _ => probe_identity(*tool, self.path(*tool), deadline, cancellation),
             })
             .collect()
     }
@@ -427,6 +513,25 @@ impl ProfessionalDeliveryToolchain {
 /// Tool discovery or qualification failure.
 #[derive(Debug, thiserror::Error)]
 pub enum ProfessionalDeliveryToolchainError {
+    /// A completed native version probe failed qualification; output and cleanup remain intact.
+    #[error("professional delivery tool {tool:?} version rejected: {detail}")]
+    VersionRejected {
+        /// Exact tool role.
+        tool: ProfessionalDeliveryTool,
+        /// Failed identity predicate.
+        detail: String,
+        /// Original bounded native output, status, and consuming closure facts.
+        output: Box<mondrian_media::SupervisedProcessOutput>,
+    },
+    /// Bounded native supervision failed; typed original cleanup remains retained.
+    #[error("professional delivery tool {tool:?} native supervision failed: {source}")]
+    Native {
+        /// Exact tool role.
+        tool: ProfessionalDeliveryTool,
+        /// Original bounded child/pipe failure.
+        #[source]
+        source: Box<mondrian_media::SupervisedProcessError>,
+    },
     /// Required executable was not found.
     #[error("required professional delivery tool {tool:?} was not found beside the application or on PATH")]
     Missing {
@@ -530,23 +635,26 @@ fn photon_classpath(path: &Path) -> PathBuf {
 fn probe_photon_identity(
     java: &Path,
     libraries: &Path,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
 ) -> Result<ProfessionalDeliveryToolIdentity, ProfessionalDeliveryToolchainError> {
     if !is_direct_file(java) || !photon_library_set_exists(libraries) {
         return Err(ProfessionalDeliveryToolchainError::Missing {
             tool: ProfessionalDeliveryTool::PhotonValidator,
         });
     }
-    let output = Command::new(java)
+    let mut command = Command::new(java);
+    command
         .arg("-cp")
         .arg(photon_classpath(libraries))
         .arg("com.netflix.imflibrary.app.IMPAnalyzer")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| ProfessionalDeliveryToolchainError::Spawn {
-            tool: ProfessionalDeliveryTool::PhotonValidator,
-            path: java.to_path_buf(),
-            source,
-        })?;
+        .stdin(Stdio::null());
+    let output = capture_identity(
+        &mut command,
+        ProfessionalDeliveryTool::PhotonValidator,
+        deadline,
+        cancellation,
+    )?;
     let mut bytes = output.stdout;
     bytes.extend_from_slice(&output.stderr);
     if bytes.is_empty() || bytes.len() > MAX_VERSION_BYTES {
@@ -571,31 +679,75 @@ fn probe_photon_identity(
             .unwrap_or("Photon IMPAnalyzer")
             .trim()
             .to_owned(),
+        native_cleanup: output.cleanup,
+        version_output_sha256: format!("{:x}", Sha256::digest(&bytes)),
     })
 }
 
 fn probe_identity(
     tool: ProfessionalDeliveryTool,
     path: &Path,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
 ) -> Result<ProfessionalDeliveryToolIdentity, ProfessionalDeliveryToolchainError> {
     if !is_direct_file(path) {
         return Err(ProfessionalDeliveryToolchainError::Missing { tool });
     }
-    let output = Command::new(path)
-        .arg(tool.version_arg())
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|source| ProfessionalDeliveryToolchainError::Spawn {
+    let mut command = Command::new(path);
+    command.arg(tool.version_arg());
+    let output = capture_identity(&mut command, tool, deadline, cancellation)?;
+    identity_from_output(tool, path, output)
+}
+
+fn capture_identity(
+    command: &mut impl mondrian_media::SupervisedCommand,
+    tool: ProfessionalDeliveryTool,
+    deadline: Instant,
+    cancellation: &ExecutionCancellationToken,
+) -> Result<mondrian_media::SupervisedProcessOutput, ProfessionalDeliveryToolchainError> {
+    mondrian_media::run_supervised_command(
+        command,
+        None,
+        SupervisedProcessPolicy {
+            stdout: SupervisedStreamCapture::Head {
+                limit_bytes: MAX_VERSION_BYTES,
+                reject_excess: true,
+            },
+            stderr: SupervisedStreamCapture::Head {
+                limit_bytes: MAX_VERSION_BYTES,
+                reject_excess: true,
+            },
+            deadline: Some(deadline),
+            ..Default::default()
+        },
+        cancellation,
+    )
+    .map_err(|source| ProfessionalDeliveryToolchainError::Native { tool, source: Box::new(source) })
+}
+
+fn identity_from_output(
+    tool: ProfessionalDeliveryTool,
+    path: &Path,
+    output: mondrian_media::SupervisedProcessOutput,
+) -> Result<ProfessionalDeliveryToolIdentity, ProfessionalDeliveryToolchainError> {
+    if matches!(
+        tool,
+        ProfessionalDeliveryTool::BmxRaw2Bmx | ProfessionalDeliveryTool::BmxMxf2Raw
+    ) && !output.status.success()
+    {
+        return Err(ProfessionalDeliveryToolchainError::VersionRejected {
             tool,
-            path: path.to_path_buf(),
-            source,
-        })?;
-    let mut bytes = output.stdout;
+            detail: "BMX version probe exited unsuccessfully".to_owned(),
+            output: Box::new(output),
+        });
+    }
+    let mut bytes = output.stdout.clone();
     bytes.extend_from_slice(&output.stderr);
     if bytes.is_empty() || bytes.len() > MAX_VERSION_BYTES {
-        return Err(ProfessionalDeliveryToolchainError::Qualification {
+        return Err(ProfessionalDeliveryToolchainError::VersionRejected {
             tool,
             detail: "version output is empty or exceeds 64 KiB".to_owned(),
+            output: Box::new(output),
         });
     }
     // CineCert help returns a non-zero status on some builds; bounded output
@@ -607,10 +759,17 @@ fn probe_identity(
         .trim()
         .to_owned();
     if version.is_empty() {
-        return Err(ProfessionalDeliveryToolchainError::Qualification {
+        return Err(ProfessionalDeliveryToolchainError::VersionRejected {
             tool,
             detail: "version identity has no non-empty line".to_owned(),
+            output: Box::new(output),
         });
     }
-    Ok(ProfessionalDeliveryToolIdentity { tool, path: path.to_path_buf(), version })
+    Ok(ProfessionalDeliveryToolIdentity {
+        tool,
+        path: path.to_path_buf(),
+        version,
+        native_cleanup: output.cleanup,
+        version_output_sha256: format!("{:x}", Sha256::digest(&bytes)),
+    })
 }

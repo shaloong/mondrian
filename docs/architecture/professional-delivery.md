@@ -35,6 +35,15 @@ Continuous Export never requests cancellation. This owner must be dropped
 before App-wide consuming shutdown so its Queue reference cannot outlive the
 qualified phase.
 
+Each attempt also freezes the App resource coordinator's acceleration policy.
+During realtime playback, an Export closure with an exact Float32 CPU route
+uses that route and performs the delivery color/output boundary on CPU, so it
+does not contend with Preview or Reference Output for opportunistic GPU work.
+GPU-only Effect contracts retain GPU execution, and offline attempts retain
+normal GPU and resident-encoder qualification. This changes scheduling only;
+the frozen Timeline, Effect, color, codec, and artifact validation contracts
+are unchanged.
+
 The validation feature also exposes one persistent frozen Timeline visual
 Session for Reference Output correctness qualification. It owns the same
 `TimelineExportSnapshot` and `ExportVisualRenderSession` used by production
@@ -296,3 +305,97 @@ Vision CM version, metadata levels, bitstream profile/level, licensed tooling,
 and delivery profile are retained as distinct qualifications. Open syntax tools
 or FFmpeg/x265 parameter availability alone do not establish either branded
 workflow.
+
+Export CLI construction uses Media's opaque `FfmpegCommand` throughout encoder,
+image/mezzanine, signal-validation and queue argument lowering. Native spawn
+retains the qualified capsule independently of command lifetime. Hardware
+probe errors preserve typed spawn-time authority rejection and cannot select
+software fallback after rejection. This type migration does not change codec,
+color, authoring snapshot or output publication semantics.
+### Frozen ANC attachment in AS-11
+
+The typed App export request and `ExportConfig` can carry an optional Broadcast
+`FrozenAncillaryProgram`. Queue admission rejects non-AS-11 profiles and any
+source-start, output-rate or duration mismatch before media preparation.
+AS-11 writes a bounded standard ST436 KLV stream into its owned temporary
+directory and attaches it to the same qualified BMX wrapping command. Export
+cancellation stops generation and final MXF scanning; cancellation errors are
+terminal rather than `Interrupted`, which `read_exact` would retry.
+
+Before publication, actual output MXF ANC elements are independently decoded
+and compared against the frozen canonical program, including explicitly empty
+frames. A successful wrapper exit or metadata-only reimport cannot substitute
+for this check. No ANC attachment is inferred from captions or filenames; the
+caller must author/select the canonical program. Exact arbitrary horizontal
+SDI positions cannot be carried by ST436 and fail admission instead of being
+quietly changed.
+
+Final-artifact QC freezes its deadline before snapshot admission. The new explicit
+until APIs carry it through bounded copy/hash loops and stream, opening-frame and
+GOP FFprobe owners; no per-probe renewal or thread-local state exists. Native probe
+errors retain supervised child/pipe receipts through their typed source chain.
+Snapshot preparation and consuming close keep independent errors, and a late close
+cannot produce success. Decoder autorotation and autoscaling are disabled; codec
+cropping remains allowed for coded padding, while unsupported container display
+matrix/rotation/cropping is rejected. Native regressions use a non-square rotated
+MP4, lossless 10-bit limited-range Y=0/Y=1023 excursions, and a real-time FFprobe
+that exceeds the original deadline.
+
+Caption-file import now shares `resolve_ancillary_export_selection` with ANC
+readiness and queue admission. SCC/CDP conversion receives that exact selection
+and writes the same immutable `FrozenAncillaryProgram` used by AS-11 ST436. Source
+provenance and transport qualification survive export freezing and final MXF
+reimport; no caption edit path or format-specific export timeline is added. See
+`broadcast-qc-and-ancillary.md` for the explicit supported syntax and bounded limits.
+
+The shared normal/AS-11 gate borrows OwnedPublicationFile for regulatory analysis.
+The provider clones its retained source handle while the publication owner remains
+borrowed; its existing deny-write protection continues throughout copy and native
+execution. This avoids a conflicting fresh strict read open against a legitimate
+publication writer. Path-only callers retain the stricter read-only identity lease.
+The read-only snapshot has its own strict lease, with exact hashes before and after
+provider execution. The native writer-owner regression proves snapshot admission
+and native invocation while separate write opens remain rejected.
+
+Qualified PSE configuration requires runtime_files: an explicitly approved complete
+non-system DLL list. None is NotRun before phase admission. Runtime files and the
+three approval-bound inputs form the sealed Media provider owner; ordinary product
+providers without a campaign retain their existing installation behavior. The
+fixed provider command now participates in the same native child ledger instead
+of attempting an unqualified Command bypass. Independent runtime_cleanup_error
+remains distinct from snapshot_cleanup_error in both successful and failed evidence.
+
+Independent finished-artifact verification v2 uses a single caller-owned Instant
+through snapshot admission, bounded copy, every FFprobe, complete decode, final
+source/snapshot hashes, serialization and consuming close. The legacy duration
+entry freezes that Instant once. Report schema 2 adds actual snapshot removal;
+its digest remains deterministic. The serializable receipt independently retains
+the decoder's original bounded stdout/stderr, native exit and child/pipe closure,
+so nondeterministic PIDs/progress do not contaminate the report digest. Failure
+`.evidence()` retains observed probe/decode output, typed native cleanup, snapshot
+admission/removal and independent removal errors. A preparation failure after
+acquisition also records whether its exact snapshot was consumed successfully.
+
+The independent receipt exposes its original native execution through a read-only
+accessor so the phase-owned asynchronous worker can project actual cleanup without
+reparsing JSON. Failure evidence supports structural equality without dropping raw
+native stdout/stderr or snapshot facts.
+Qualified AS-11 exports carry one phase-owned `BmxRuntimeHandle` through
+`ExportConfig.approved_bmx` (never deserialized as execution authority).
+Wrapping, ancillary attachment, reimport and version probes all use its exact
+approved executable objects and the existing Media supervisor. Tool identities
+include SHA-256 of bounded stdout followed by stderr and real native cleanup.
+Ordinary development discovery remains available, but a qualified process cannot
+turn PATH-discovered standard commands into provider authority. IMF and DCP need
+their additional approved runtime owners before campaign admission; BMX approval
+alone does not authorize CineCert, Photon or Java.
+
+The ignored `mondrian-export/tests/approved_bmx_ancillary.rs` regression exercises
+approved BMX commands beyond version probing: SCC 608, CDP 708 and sparse ANC
+are wrapped into actual OP1a MXF, reimported through the production command
+builder, and rescanned through both canonical word-verification entrypoints.
+`MONDRIAN_BMX_TOOL_DIR` selects the official binary directory and
+`MONDRIAN_BMX_ANC_EVIDENCE_DIR` selects an existing parent for a unique retained
+artifact directory. Raw native command cleanup, immutable tool hashes and the
+consuming runtime receipt accompany the MXF files. This ANC-only test does not
+claim full AS-11 picture/audio or physical broadcast qualification.

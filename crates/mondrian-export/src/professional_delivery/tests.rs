@@ -676,8 +676,20 @@ fn real_as11_x9_file_passes_bmx_structural_and_metadata_reimport() {
     }
 }
 
-fn run_qualification_command(command: &mut Command, label: &str) -> String {
-    let output = command.output().unwrap_or_else(|error| panic!("{label} spawn failed: {error}"));
+fn run_qualification_command(
+    command: &mut impl mondrian_media::SupervisedCommand,
+    label: &str,
+) -> String {
+    let output = mondrian_media::run_supervised_command(
+        command,
+        None,
+        mondrian_media::SupervisedProcessPolicy {
+            deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(120)),
+            ..Default::default()
+        },
+        &mondrian_core::ExecutionCancellationToken::new(),
+    )
+    .unwrap_or_else(|error| panic!("{label} spawn failed: {error}"));
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&output.stderr));
     assert!(output.status.success(), "{label} failed: {text}");
