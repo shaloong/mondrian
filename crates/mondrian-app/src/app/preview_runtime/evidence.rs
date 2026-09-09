@@ -770,7 +770,6 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             Some(budget_us) => {
                 self.metrics.playback_current_deadline_budget_us.set(Some(budget_us));
                 bump(&self.metrics.playback_current_deadline_assignments);
-                bump(&self.metrics.playback_current_decode_decisions);
             }
             None => {
                 bump(&self.metrics.playback_current_deadline_missing_frame_rate);

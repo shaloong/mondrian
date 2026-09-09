@@ -958,10 +958,7 @@ fn media_preview_job_queue_diagnostics(
         queued_playback_lane_eligible_jobs: state.queued_playback,
         queued_scrub_lane_eligible_jobs: state.queued_interactive,
         queued_still_lane_eligible_jobs: state.queued_still,
-        queued_non_playback_lane_eligible_jobs: state
-            .queued_interactive
-            .saturating_add(state.queued_still)
-            .saturating_add(state.queued_prefetch),
+        queued_non_playback_lane_eligible_jobs: state.queued_non_playback_lane_eligible,
         closed: state.closed,
     }
 }

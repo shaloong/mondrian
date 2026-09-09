@@ -958,7 +958,13 @@ fn repeated_demands_for_one_epoch_frame_count_as_one_publication_coverage_unit()
         )
         .expect("pressure delivery");
     assert!(application.accepted());
-    let second = engine.pending_frame_demand().expect("reissued demand").identity();
+    let second = engine
+        .reissue_current_frame_demand_for_recovery(
+            mondrian_playback::MonotonicTimestamp::ZERO,
+            mondrian_playback::MonotonicTimestamp::from_duration(std::time::Duration::from_secs(1)),
+        )
+        .expect("explicit bounded recovery demand")
+        .identity();
     assert_ne!(first.sequence, second.sequence);
     assert_eq!(
         (first.epoch, first.target_frame),

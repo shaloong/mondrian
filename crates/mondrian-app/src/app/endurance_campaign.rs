@@ -2769,7 +2769,7 @@ mod tests {
 
     #[test]
     fn nine_second_startup_precedes_full_day_measurement_and_first_probe_budget() {
-        let (_temporary, request, _profile, evidence) = campaign_fixture();
+        let (_temporary, request, profile, evidence) = campaign_fixture();
         let clock = FakeClock::default();
         let mut runtime = FakeRuntime::new(&clock);
         runtime.startup_delay_us = 9_000_000;
@@ -2800,7 +2800,11 @@ mod tests {
         let first = &first_chunk.samples[0];
         let last = last_chunk.samples.last().expect("terminal sample");
         assert_eq!(first.scheduled_at_us, 0);
-        assert_eq!(first.completed_at_us, 1);
+        assert_eq!(first.started_at_us, 0);
+        // The real sampler worker races the fake runtime pump. Its one-unit
+        // work cost does not imply it was scheduled at the measurement origin.
+        assert!(first.completed_at_us >= 1);
+        assert!(first.completed_at_us - first.started_at_us <= profile.maximum_probe_latency_us);
         assert_eq!(last.scheduled_at_us, 86_400_000_000);
         assert_eq!(
             last.counters.export_frames - first.counters.export_frames,

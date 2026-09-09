@@ -3553,7 +3553,8 @@ mod tests {
     #[test]
     fn bounded_recovery_deadline_is_shared_by_engine_and_preview_adapter() {
         let mut state = state_with_sequence(40);
-        state.set_playback_frame_running(4);
+        play_ready(&mut state);
+        state.advance_playback_clock(Duration::from_millis(40));
         let original = state
             .playback_frame_presentation_ticket(FramePresentationQuality::Ready)
             .expect("original presentation ticket");

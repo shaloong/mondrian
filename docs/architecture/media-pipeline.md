@@ -3845,3 +3845,9 @@ Windows WASAPI output helpers, FFmpeg 7.1 D3D12 encoder device retention and
 Windows-only qualification probes are compiled only with their actual consumers.
 Linux continues to use CPAL/ALSA and its linked FFmpeg version; unavailable
 qualification capsule preparation remains `UnsupportedPlatform`.
+
+Static Playback requests select an existing lane from the production worker
+topology: Any for one worker, NonPlayback for two, and the dedicated Still lane
+when present. The existing per-context CpuStill slot isolates static decoding
+from moving-source locality. Affinity never creates an unserviced Still queue
+on a two-worker CPU budget, and does not increase the thread or cache budget.

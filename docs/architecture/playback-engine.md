@@ -2266,13 +2266,25 @@ sampled visibility time. No replacement GPU submission is created. A different
 plan key, execution nonce, physical artifact, seek epoch, quality revision, or
 frame intent continues through terminal preflight and ordinary publication.
 When accepting that frame advances the adaptive quality revision, the satisfied
-binding remains current for the same epoch and frame until the clock advances,
-provided no replacement demand exists and the revision only moves forward.
-This keeps the accepted physical picture visible during Recovering without
-issuing or inventing a second same-frame delivery.
+binding remains current only for the same epoch, frame and quality revision,
+provided no replacement demand exists. An already accepted physical picture may
+remain visible during Recovering and remain historical presentation evidence,
+but it cannot satisfy a newer quality revision. The newer intent must reconcile
+through the existing candidate path; retaining visibility does not invent a
+second same-frame delivery receipt.
 An exact prepared successor also carries its queue-ordered availability across
 the device-clock boundary. The Headless adapter passes that boundary timestamp
 into the pointer-only semantic and physical slot promotion, validates the exact
 prepared key and artifact, and then completes the demand against that prior
 publication time. A replacement without prepared publication proof still runs
 terminal preflight at the actual submission or promotion attempt.
+
+Non-playback lane eligibility diagnostics are produced under the Frame Work
+Broker's state lock using the same current failover, prefetch borrowing and
+worker-affinity predicates as dequeue. The App projects that count directly;
+adding all queued prefetch to interactive and still counts would claim work is
+eligible even when no current Playback execution permits borrowing.
+
+Preview decode admission diagnostics count accepted Broker submissions or exact
+queued/in-flight reuse. Projecting a deadline alone does not count a decode:
+requests deferred under sustained execution pressure retain their skip evidence.

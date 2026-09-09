@@ -418,12 +418,21 @@ mod tests {
     fn pump_retains_accepted_delivery_when_recovery_snapshot_does_not_change() {
         let mut state = AppState::new();
         state.set_playback_frame_running(4);
+        state
+            .playback_engine
+            .complete_priming(
+                mondrian_playback::ClockMaster::Synthetic,
+                state.playback_engine.monotonic_high_water(),
+            )
+            .expect("timed playback before a terminal late delivery");
         let first_identity =
             state.pending_playback_frame_demand_identity().expect("first active demand");
-        assert!(state.observe_frame_delivery_candidate(
-            FrameDeliveryCandidate::for_demand(first_identity, FrameDeliveryKind::Late),
-            std::time::Instant::now(),
-        ));
+        assert!(state
+            .observe_frame_delivery_candidate_with_receipt(
+                FrameDeliveryCandidate::for_demand(first_identity, FrameDeliveryKind::Late),
+                std::time::Instant::now(),
+            )
+            .accepted());
         let second_identity = state
             .reissue_current_frame_demand_for_recovery_until(
                 std::time::Instant::now() + std::time::Duration::from_secs(1),

@@ -164,11 +164,9 @@ impl HeadlessGpuCandidateBinding {
             return true;
         }
         self.state == HeadlessGpuCandidateBindingState::Satisfied
-            && self.intent.epoch == current.epoch
-            && self.intent.frame == current.frame
+            && self.intent.same_coordinate(current)
             && self.intent.pending_demand.is_some()
             && current.pending_demand.is_none()
-            && self.intent.quality_revision <= current.quality_revision
     }
 
     fn satisfies(self, sampled: HeadlessGpuCandidateIntent) -> bool {
@@ -3030,6 +3028,7 @@ mod tests {
     #[test]
     fn ready_output_requires_the_exact_pending_demand_receipt() {
         let mut state = AppState::new();
+        state.test_set_sequence(Some(mondrian_timeline::Sequence::new("Demand receipt")));
         state.set_playback_frame_running(11);
         let attempted = HeadlessGpuCandidateIntent::from_state(&state);
         let pending = attempted.pending_demand.expect("timed playback demand");
@@ -3346,8 +3345,8 @@ mod tests {
             ..sampled
         };
         assert!(
-            binding.is_some_and(|binding| binding.covers_current(policy_advanced)),
-            "a terminally presented frame must remain visible when its delivery advances the next-frame quality policy"
+            !binding.is_some_and(|binding| binding.covers_current(policy_advanced)),
+            "historical presentation cannot satisfy another quality revision"
         );
         assert!(!binding.is_some_and(|binding| binding.covers_current(
             HeadlessGpuCandidateIntent {

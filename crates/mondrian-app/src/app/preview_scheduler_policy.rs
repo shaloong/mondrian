@@ -477,9 +477,17 @@ mod tests {
         let resolution = mondrian_core::Resolution { width: 3840, height: 2160 };
         let stream = mondrian_media::VideoStreamInfo {
             index: 0,
-            codec: mondrian_core::VideoCodec::H264,
+            codec: if pixel_format == mondrian_core::PixelFormat::Yuv420p10le {
+                mondrian_core::VideoCodec::H265
+            } else {
+                mondrian_core::VideoCodec::H264
+            },
             duration: Some(std::time::Duration::from_secs(1)),
-            codec_profile: mondrian_media::VideoCodecProfile::H264High422,
+            codec_profile: if pixel_format == mondrian_core::PixelFormat::Yuv420p10le {
+                mondrian_media::VideoCodecProfile::HevcMain10
+            } else {
+                mondrian_media::VideoCodecProfile::H264High422
+            },
             width: resolution.width,
             height: resolution.height,
             picture: mondrian_core::PictureStreamMetadata::default(),
@@ -504,7 +512,7 @@ mod tests {
             mondrian_media::DecodedVideoRange::Limited,
         );
         let source = mondrian_media::PreviewDecodeSource::from_probed_stream(
-            std::path::PathBuf::from("E:/media/sony-high422.mp4"),
+            std::env::temp_dir().join("mondrian-preview-policy-high422.mp4"),
             MediaPreviewKey::test_fingerprint(4_422),
             &stream,
         )

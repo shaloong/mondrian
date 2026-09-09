@@ -4321,7 +4321,8 @@ fn preview_playback_schedule_diagnostics_records_clock_contract() {
     assert_eq!(diagnostics.last_current_deadline_budget_us, Some(33_333));
     assert_eq!(diagnostics.current_deadline_assignments, 1);
     assert_eq!(diagnostics.current_deadline_missing_frame_rate, 0);
-    assert_eq!(diagnostics.current_decode_decisions, 1);
+    // Deadline projection alone does not admit a decode owner.
+    assert_eq!(diagnostics.current_decode_decisions, 0);
     assert_eq!(diagnostics.current_drop_late_decisions, 0);
     assert_eq!(
         diagnostics.current_proxy_or_hardware_recommended_decisions,
@@ -5230,31 +5231,39 @@ fn decoder_residency_trim_preserves_physical_source_worker_ownership() {
     window.release_decoded_residency();
 
     assert_eq!(
-        window.playback_worker_affinity(&source),
+        window.playback_worker_affinity(&source, 3),
         MediaPreviewWorkerLane::NonPlayback,
         "reclaiming decoded frames must not move a live Playback Session to another worker"
     );
     window.clear();
     assert_eq!(
-        window.playback_worker_affinity(&source),
+        window.playback_worker_affinity(&source, 3),
         MediaPreviewWorkerLane::Playback,
         "a full lifecycle clear must release the prior Session ownership map"
     );
 }
 
 #[test]
-fn static_playback_sources_use_the_dedicated_still_worker() {
+fn static_playback_sources_use_only_existing_bounded_worker_lanes() {
     let moving = test_media_key(8_002).decode.source().clone();
     let still = moving.clone().with_still_image_source();
     let mut window = FutureMediaWindowCache::default();
 
+    for worker_count in [1, 2, 3] {
+        let lane = window.playback_worker_affinity(&still, worker_count);
+        assert!(
+            (0..worker_count).any(|index| media_preview_worker_lane(index, worker_count) == lane),
+            "static Current must have a receiving worker in a {worker_count}-worker topology"
+        );
+    }
+
     assert_eq!(
-        window.playback_worker_affinity(&still),
+        window.playback_worker_affinity(&still, 3),
         MediaPreviewWorkerLane::Still,
         "a static image probe must not occupy a moving-source Session owner"
     );
     assert_eq!(
-        window.playback_worker_affinity(&moving),
+        window.playback_worker_affinity(&moving, 3),
         MediaPreviewWorkerLane::Playback,
         "moving-source locality remains on the primary Playback owner"
     );
@@ -5654,7 +5663,8 @@ fn future_media_prefix_commits_nearest_first_lru_priority_after_preroll_inspecti
         Some(PreviewVideoPreroll {
             ready_media_frames: 2,
             preservable_media_frames: 2,
-            bounded_cold_activation_ready: true,
+            // A retained prefix does not prove the uninspected cold horizon.
+            bounded_cold_activation_ready: false,
             bounded_cold_activation_frame: None,
         })
     );
@@ -11027,12 +11037,13 @@ fn playback_pressure_promotes_exact_prefetch_before_suppressing_new_current_work
     service
         .record_playback_current_late_drop(MEDIA_PREVIEW_PLAYBACK_PRESSURE_LATE_STREAK_THRESHOLD);
     let demand = WindowPreviewAdapter::test_frame_demand_identity();
+    service.scheduler.synchronize_playback_current_demand(demand);
 
     assert_eq!(
         service.request_media_preview(
             key,
             crate::app::preview_access_mode::MediaPreviewRequestIntent::Current(
-                test_media_work_demand(201),
+                mondrian_playback::MediaWorkDemandId::for_playback(demand),
             ),
             PreviewDecodeAccessMode::PlaybackCursor,
             Some(Instant::now() + Duration::from_millis(33)),
@@ -11374,6 +11385,13 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play().expect("play");
     deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state
+        .playback_engine
+        .complete_priming(
+            mondrian_playback::ClockMaster::Synthetic,
+            state.playback_engine.monotonic_high_water(),
+        )
+        .expect("enter steady playback before testing rolling top-up");
     let sequence = state.active_sequence().expect("sequence");
     let _prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -11401,12 +11419,10 @@ fn playback_prefetch_tops_up_only_remaining_window_slots() {
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
-    // Residency is charged at the decode representation extent (the source
-    // raster), not an output extent: a 4K source admits fewer physically
-    // resident frames than an output-sized one, so the scheduled prefetch
-    // window is bounded by residency, not by the frame-rate window alone.
-    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 3);
-    assert_eq!(diagnostics.enqueued_jobs, 2);
+    // The two-unit physical reservation cap is independent of temporal
+    // lookahead. Existing queued/in-flight work consumes that same cap.
+    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 2);
+    assert_eq!(diagnostics.enqueued_jobs, 1);
     service.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }
@@ -11417,6 +11433,13 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
     let (mut state, _, root) = state_with_invalid_video_asset();
     state.play().expect("play");
     deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state
+        .playback_engine
+        .complete_priming(
+            mondrian_playback::ClockMaster::Synthetic,
+            state.playback_engine.monotonic_high_water(),
+        )
+        .expect("enter steady playback before testing rolling top-up");
     let sequence = state.active_sequence().expect("sequence");
     let _prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -11439,19 +11462,26 @@ fn playback_prefetch_tops_up_only_remaining_in_flight_window_slots() {
     // Residency is charged at the decode representation extent (the source
     // raster), so one in-flight prefetch plus the queued window is bounded by
     // the source representation byte cost, not by the frame-rate window.
-    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 2);
+    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 1);
     assert_eq!(diagnostics.worker_queue.in_flight_prefetch_jobs, 1);
-    assert_eq!(diagnostics.enqueued_jobs, 2);
+    assert_eq!(diagnostics.enqueued_jobs, 1);
     service.shutdown();
     let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
-fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
+fn playback_prefetch_does_not_split_a_multi_track_frame_into_one_remaining_slot() {
     let service = WindowPreviewAdapter::new_without_workers_for_test();
     let (mut state, root) = state_with_two_invalid_video_assets();
     state.play().expect("play");
     deliver_test_current_frame(&mut state, mondrian_playback::FrameDeliveryKind::Ready);
+    state
+        .playback_engine
+        .complete_priming(
+            mondrian_playback::ClockMaster::Synthetic,
+            state.playback_engine.monotonic_high_water(),
+        )
+        .expect("enter steady playback before testing rolling top-up");
     let sequence = state.active_sequence().expect("sequence");
     let _prefetch_window =
         media_preview_forward_prefetch_window_frames(sequence.settings.frame_rate)
@@ -11479,11 +11509,10 @@ fn playback_prefetch_tops_up_by_actual_jobs_across_tracks() {
 
     let diagnostics = service.diagnostics();
     assert_eq!(diagnostics.prefetch_skipped_prefetch_backlog, 0);
-    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 3);
+    assert_eq!(diagnostics.worker_queue.queued_prefetch_jobs, 1);
     assert_eq!(
-        diagnostics.enqueued_jobs,
-        2,
-        "prefetch must fill only the remaining job slots even when a future frame has multiple active tracks"
+        diagnostics.enqueued_jobs, 0,
+        "one remaining physical slot cannot admit half of a two-track frame closure"
     );
     service.shutdown();
     let _ = std::fs::remove_dir_all(root);

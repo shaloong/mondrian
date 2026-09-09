@@ -356,12 +356,13 @@ impl FutureMediaWindowCache {
     pub(super) fn playback_worker_affinity(
         &mut self,
         source: &mondrian_media::PreviewDecodeSource,
+        worker_count: usize,
     ) -> MediaPreviewWorkerLane {
         if source.is_still_image() {
-            // Static files have no stateful playback cursor to preserve. Their
-            // potentially expensive container/image probe must not replace or
-            // occupy either moving-source decoder Session owner.
-            return MediaPreviewWorkerLane::Still;
+            // Use the actual bounded worker topology. Two-worker hosts have
+            // no dedicated Still lane; the CPU-still slot on NonPlayback
+            // preserves its separate moving-source decoder session.
+            return media_preview_worker_lane(worker_count.saturating_sub(1), worker_count);
         }
         self.existing_playback_worker_affinity(source).unwrap_or_else(|| {
             self.remember_playback_worker_affinity(
@@ -1525,7 +1526,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
             let worker_affinity = self
                 .future_media_window
                 .borrow_mut()
-                .playback_worker_affinity(request.key.decode.source());
+                .playback_worker_affinity(request.key.decode.source(), self.decode_worker_count);
             let job = MediaPreviewJob {
                 key: request.key.clone(),
                 generation,
@@ -1918,7 +1919,7 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         let worker_affinity = (access_mode == PreviewDecodeAccessMode::PlaybackCursor).then(|| {
             self.future_media_window
                 .borrow_mut()
-                .playback_worker_affinity(key.decode.source())
+                .playback_worker_affinity(key.decode.source(), self.decode_worker_count)
         });
         let submission = self.scheduler.submit_job(job, resource_scope, worker_affinity);
         self.media_request_admission_from_submission(
@@ -1938,6 +1939,17 @@ impl<O: Clone> PreviewProductionRuntime<O> {
         access_mode: PreviewDecodeAccessMode,
         submission: MediaPreviewRequestStatus,
     ) -> MediaPreviewRequestAdmission {
+        if priority == MediaPreviewRequestPriority::Current
+            && access_mode == PreviewDecodeAccessMode::PlaybackCursor
+            && matches!(
+                submission,
+                MediaPreviewRequestStatus::Scheduled { .. }
+                    | MediaPreviewRequestStatus::UpdatedQueued { .. }
+                    | MediaPreviewRequestStatus::ReusedInFlight
+            )
+        {
+            bump(&self.metrics.playback_current_decode_decisions);
+        }
         match submission {
             MediaPreviewRequestStatus::Scheduled { evicted_prefetch, evicted_still } => {
                 tracing::debug!(

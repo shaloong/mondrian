@@ -318,6 +318,8 @@ pub struct FrameWorkBrokerDiagnostics {
     pub queued_current: usize,
     /// Queued speculative work.
     pub queued_prefetch: usize,
+    /// Queued work admitted by the non-playback lane's current dispatch predicates.
+    pub queued_non_playback_lane_eligible: usize,
     /// Queued playback-class work.
     pub queued_playback: usize,
     /// Queued interactive work.
@@ -1735,7 +1737,27 @@ where
             closed: state.closed_at.is_some(),
             ..FrameWorkBrokerDiagnostics::default()
         };
+        let allow_current_failover =
+            non_playback_current_failover_allowed(&state, FrameWorkerLane::NonPlayback, now);
+        let allow_prefetch_borrow =
+            playback_prefetch_borrow_allowed(&state, FrameWorkerLane::NonPlayback);
         for queued in &state.queue {
+            let eligible = match queued.request.priority {
+                FrameWorkPriority::Current => lane_accepts_current(
+                    FrameWorkerLane::NonPlayback,
+                    &queued.request,
+                    allow_current_failover,
+                ),
+                FrameWorkPriority::Prefetch => lane_accepts_prefetch(
+                    FrameWorkerLane::NonPlayback,
+                    queued.request.work_class,
+                    queued.request.worker_affinity,
+                    allow_prefetch_borrow,
+                ),
+            };
+            if eligible {
+                diagnostics.queued_non_playback_lane_eligible += 1;
+            }
             match queued.request.priority {
                 FrameWorkPriority::Current => diagnostics.queued_current += 1,
                 FrameWorkPriority::Prefetch => diagnostics.queued_prefetch += 1,
@@ -2420,13 +2442,7 @@ where
 {
     refresh_in_flight_invalidations_locked(state, now);
     let allow_current_playback_failover = non_playback_current_failover_allowed(state, lane, now);
-    let allow_playback_prefetch_borrow = lane == FrameWorkerLane::NonPlayback
-        && state.in_flight.values().any(|execution| {
-            execution.worker_lane == Some(FrameWorkerLane::Playback)
-                && execution.priority == FrameWorkPriority::Current
-                && execution.work_class == FrameWorkClass::Playback
-                && execution.completed_at.is_none()
-        });
+    let allow_playback_prefetch_borrow = playback_prefetch_borrow_allowed(state, lane);
     let index = next_work_index_with_failover(
         &state.queue,
         lane,
@@ -2644,6 +2660,19 @@ fn lane_accepts_prefetch(
         || (allow_playback_prefetch_borrow
             && lane == FrameWorkerLane::NonPlayback
             && class == FrameWorkClass::Playback)
+}
+
+fn playback_prefetch_borrow_allowed<K, D, P>(
+    state: &BrokerState<K, D, P>,
+    lane: FrameWorkerLane,
+) -> bool {
+    lane == FrameWorkerLane::NonPlayback
+        && state.in_flight.values().any(|execution| {
+            execution.worker_lane == Some(FrameWorkerLane::Playback)
+                && execution.priority == FrameWorkPriority::Current
+                && execution.work_class == FrameWorkClass::Playback
+                && execution.completed_at.is_none()
+        })
 }
 
 fn non_playback_current_failover_allowed<K, D, P>(

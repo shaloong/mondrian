@@ -2022,6 +2022,7 @@ fn non_playback_lane_uses_idle_capacity_for_playback_prefetch() {
     broker.submit(prefetch);
 
     clock.set(Duration::from_micros(5_001));
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 1);
     let preload = match broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO) {
         FrameWorkReceiveWait::Work(FrameWorkReceive::Ready(execution)) => execution,
         other => panic!("idle shared lane must accept playback Prefetch: {other:?}"),
@@ -2045,6 +2046,7 @@ fn non_playback_lane_does_not_steal_prefetch_from_an_idle_playback_lane() {
         ));
     }
 
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 0);
     assert!(matches!(
         broker.receive_timeout(FrameWorkerLane::NonPlayback, Duration::ZERO),
         FrameWorkReceiveWait::TimedOut
@@ -2071,6 +2073,8 @@ fn non_playback_current_work_precedes_playback_prefetch() {
     prefetch.priority = FrameWorkPriority::Prefetch;
     broker.submit(prefetch);
     broker.submit(request(2, generation, FrameWorkClass::Still));
+
+    assert_eq!(broker.diagnostics().queued_non_playback_lane_eligible, 1);
 
     let current = match broker.receive(FrameWorkerLane::NonPlayback) {
         Some(FrameWorkReceive::Ready(execution)) => execution,
