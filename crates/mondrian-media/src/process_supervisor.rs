@@ -5,11 +5,14 @@
 //! retained output is bounded, stdin is written on an owned pump thread, and
 //! every terminal path kills when necessary and reaps the child.
 
+use crate::{FfmpegChild as Child, SupervisedCommand};
 use mondrian_core::ExecutionCancellationToken;
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, BufWriter, Read, Write};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+#[cfg(test)]
+use std::process::Command;
+use std::process::{ChildStdin, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
@@ -71,6 +74,23 @@ impl fmt::Display for SupervisedProcessStream {
 /// Typed terminal error from an externally supervised media process.
 #[derive(Debug, Error)]
 pub enum SupervisedProcessError {
+    /// The original operation failed and native cleanup independently failed.
+    #[error("{primary}; external process cleanup: {cleanup:?}")]
+    Cleanup {
+        /// Original operation error, retained without string conversion.
+        #[source]
+        primary: Box<SupervisedProcessError>,
+        /// Native process and pipe-worker closure facts.
+        cleanup: Box<SupervisedProcessCleanupReceipt>,
+    },
+    /// A pipe worker could not be consumed within the original deadline.
+    #[error("external media process worker did not settle during {stage}: {detail}")]
+    WorkerClosure {
+        /// Worker whose consuming close failed.
+        stage: SupervisedProcessStage,
+        /// Independent timeout or panic fact.
+        detail: String,
+    },
     /// The owning execution generation was invalidated.
     #[error("external media process canceled during {stage}")]
     Canceled {
@@ -120,13 +140,69 @@ pub enum SupervisedProcessError {
 
 impl SupervisedProcessError {
     /// Return whether this terminal outcome was caused by cancellation.
-    pub const fn is_canceled(&self) -> bool {
-        matches!(self, Self::Canceled { .. })
+    pub fn is_canceled(&self) -> bool {
+        matches!(self.primary(), Self::Canceled { .. })
+            || matches!(self.primary(), Self::Io { stage: SupervisedProcessStage::Spawn, source }
+                if source.get_ref().is_some_and(|error|
+                    error.is::<crate::approved_provider_command::ProviderPreparationCanceled>()))
     }
 
     /// Return whether this terminal outcome was caused by an elapsed deadline.
-    pub const fn is_deadline_exceeded(&self) -> bool {
-        matches!(self, Self::DeadlineExceeded { .. })
+    pub fn is_deadline_exceeded(&self) -> bool {
+        matches!(self.primary(), Self::DeadlineExceeded { .. })
+            || matches!(self.primary(), Self::Io { stage: SupervisedProcessStage::Spawn, source } if source.kind() == io::ErrorKind::TimedOut)
+    }
+
+    /// Original process failure beneath any independent cleanup attachment.
+    pub fn primary(&self) -> &Self {
+        match self {
+            Self::Cleanup { primary, .. } => primary.primary(),
+            _ => self,
+        }
+    }
+}
+
+/// Native process termination and consuming pipe-worker cleanup evidence.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisedProcessCleanupReceipt {
+    /// The native child and its owned Windows job descendants all exited (or none existed).
+    pub native_exit_observed: bool,
+    /// Failure returned by the native termination request.
+    pub kill_error: Option<String>,
+    /// Failure returned while observing/reaping native exit.
+    pub wait_error: Option<String>,
+    /// Native exit was unavailable at the original deadline.
+    pub deadline_exceeded: bool,
+    /// Stdin worker cleanup failure.
+    pub stdin_error: Option<String>,
+    /// Stdout worker cleanup failure.
+    pub stdout_error: Option<String>,
+    /// Stderr worker cleanup failure.
+    pub stderr_error: Option<String>,
+}
+
+impl SupervisedProcessCleanupReceipt {
+    fn empty() -> Self {
+        Self {
+            native_exit_observed: true,
+            kill_error: None,
+            wait_error: None,
+            deadline_exceeded: false,
+            stdin_error: None,
+            stdout_error: None,
+            stderr_error: None,
+        }
+    }
+    /// Native exit and every pipe-worker return were observed without cleanup error.
+    pub fn all_resources_released(&self) -> bool {
+        self.native_exit_observed
+            && self.kill_error.is_none()
+            && self.wait_error.is_none()
+            && !self.deadline_exceeded
+            && self.stdin_error.is_none()
+            && self.stdout_error.is_none()
+            && self.stderr_error.is_none()
     }
 }
 
@@ -194,6 +270,8 @@ impl Default for SupervisedProcessPolicy {
 /// Bounded output and exit status from a fully reaped process.
 #[derive(Debug)]
 pub struct SupervisedProcessOutput {
+    /// Consuming closure evidence for this exact native process and its pipes.
+    pub cleanup: SupervisedProcessCleanupReceipt,
     /// Child exit status.
     pub status: ExitStatus,
     /// Bounded stdout evidence.
@@ -254,101 +332,112 @@ pub struct SupervisedChild {
     stdout: PipeDrain,
     stderr: PipeDrain,
     policy: SupervisedProcessPolicy,
+    stdout_chunks: Option<Receiver<Vec<u8>>>,
 }
 
 impl SupervisedChild {
     /// Spawn a child and immediately start bounded stdout/stderr drains.
     pub fn spawn(
-        command: &mut Command,
+        command: &mut impl SupervisedCommand,
         policy: SupervisedProcessPolicy,
     ) -> Result<Self, SupervisedProcessError> {
-        command
-            .stdin(if policy.pipe_stdin {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        configure_hidden_child(command);
-        let mut child = command.spawn().map_err(|source| SupervisedProcessError::Io {
-            stage: SupervisedProcessStage::Spawn,
-            source,
+        Self::spawn_inner(command, policy, false)
+    }
+
+    fn spawn_inner(
+        command: &mut impl SupervisedCommand,
+        policy: SupervisedProcessPolicy,
+        stream_stdout: bool,
+    ) -> Result<Self, SupervisedProcessError> {
+        command.configure_supervised_streams(policy.pipe_stdin);
+        let child = command.spawn_supervised_until(policy.deadline).map_err(|source| {
+            #[cfg(windows)]
+            let cleanup = source
+                .get_ref()
+                .and_then(|error| {
+                    error.downcast_ref::<crate::ffmpeg_command::NativeProcessSpawnFailure>()
+                })
+                .map(|error| error.cleanup.clone());
+            let primary =
+                SupervisedProcessError::Io { stage: SupervisedProcessStage::Spawn, source };
+            #[cfg(windows)]
+            if let Some(cleanup) = cleanup {
+                return SupervisedProcessError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                };
+            }
+            primary
         })?;
-
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                terminate_and_reap(&mut child);
-                return Err(SupervisedProcessError::MissingPipe { stream: "stdout" });
-            }
+        let mut owner = Self {
+            child: Some(child),
+            stdin_tx: None,
+            stdin_thread: None,
+            stdout: empty_pipe_drain(SupervisedProcessStream::Stdout),
+            stderr: empty_pipe_drain(SupervisedProcessStream::Stderr),
+            policy,
+            stdout_chunks: None,
         };
-        let stderr = match child.stderr.take() {
-            Some(stderr) => stderr,
-            None => {
-                terminate_and_reap(&mut child);
-                return Err(SupervisedProcessError::MissingPipe { stream: "stderr" });
-            }
-        };
-
-        let stdout_drain = spawn_pipe_drain(stdout, policy.stdout, SupervisedProcessStream::Stdout)
-            .map_err(|source| {
-                terminate_and_reap(&mut child);
-                SupervisedProcessError::Io { stage: SupervisedProcessStage::StdoutDrain, source }
+        let startup = (|| {
+            let child = owner
+                .child
+                .as_mut()
+                .ok_or(SupervisedProcessError::MissingPipe { stream: "child" })?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or(SupervisedProcessError::MissingPipe { stream: "stdout" })?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or(SupervisedProcessError::MissingPipe { stream: "stderr" })?;
+            let stdout_sender = if stream_stdout {
+                let (sender, receiver) = mpsc::sync_channel(2);
+                owner.stdout_chunks = Some(receiver);
+                Some(sender)
+            } else {
+                None
+            };
+            owner.stdout = spawn_pipe_drain_inner(
+                stdout,
+                owner.policy.stdout,
+                SupervisedProcessStream::Stdout,
+                stdout_sender,
+            )
+            .map_err(|source| SupervisedProcessError::Io {
+                stage: SupervisedProcessStage::StdoutDrain,
+                source,
             })?;
-        let stderr_drain =
-            match spawn_pipe_drain(stderr, policy.stderr, SupervisedProcessStream::Stderr) {
-                Ok(drain) => drain,
-                Err(source) => {
-                    terminate_and_reap(&mut child);
-                    let _ = join_pipe_drain(stdout_drain, SupervisedProcessStage::StdoutDrain);
-                    return Err(SupervisedProcessError::Io {
+            owner.stderr =
+                spawn_pipe_drain(stderr, owner.policy.stderr, SupervisedProcessStream::Stderr)
+                    .map_err(|source| SupervisedProcessError::Io {
                         stage: SupervisedProcessStage::StderrDrain,
                         source,
-                    });
-                }
-            };
-
-        let (stdin_tx, stdin_thread) = if policy.pipe_stdin {
-            let stdin = match child.stdin.take() {
-                Some(stdin) => stdin,
-                None => {
-                    terminate_and_reap(&mut child);
-                    let _ = join_pipe_drain(stdout_drain, SupervisedProcessStage::StdoutDrain);
-                    let _ = join_pipe_drain(stderr_drain, SupervisedProcessStage::StderrDrain);
-                    return Err(SupervisedProcessError::MissingPipe { stream: "stdin" });
-                }
-            };
-            let (sender, receiver) = mpsc::sync_channel(1);
-            let chunk_bytes = policy.stdin_chunk_bytes.max(1);
-            let handle = match thread::Builder::new()
-                .name("mondrian-media-process-stdin".to_owned())
-                .spawn(move || pump_stdin(stdin, receiver, chunk_bytes))
-            {
-                Ok(handle) => handle,
-                Err(source) => {
-                    terminate_and_reap(&mut child);
-                    let _ = join_pipe_drain(stdout_drain, SupervisedProcessStage::StdoutDrain);
-                    let _ = join_pipe_drain(stderr_drain, SupervisedProcessStage::StderrDrain);
-                    return Err(SupervisedProcessError::Io {
-                        stage: SupervisedProcessStage::StdinWrite,
-                        source,
-                    });
-                }
-            };
-            (Some(sender), Some(handle))
-        } else {
-            (None, None)
-        };
-
-        Ok(Self {
-            child: Some(child),
-            stdin_tx,
-            stdin_thread,
-            stdout: stdout_drain,
-            stderr: stderr_drain,
-            policy,
-        })
+                    })?;
+            if owner.policy.pipe_stdin {
+                let stdin = child
+                    .stdin
+                    .take()
+                    .ok_or(SupervisedProcessError::MissingPipe { stream: "stdin" })?;
+                let (sender, receiver) = mpsc::sync_channel(1);
+                let chunk_bytes = owner.policy.stdin_chunk_bytes.max(1);
+                owner.stdin_thread = Some(
+                    thread::Builder::new()
+                        .name("mondrian-media-process-stdin".to_owned())
+                        .spawn(move || pump_stdin(stdin, receiver, chunk_bytes))
+                        .map_err(|source| SupervisedProcessError::Io {
+                            stage: SupervisedProcessStage::StdinWrite,
+                            source,
+                        })?,
+                );
+                owner.stdin_tx = Some(sender);
+            }
+            Ok::<(), SupervisedProcessError>(())
+        })();
+        match startup {
+            Ok(()) => Ok(owner),
+            Err(primary) => Err(owner.fail(primary)),
+        }
     }
 
     /// Write one owned buffer while retaining cancellation authority.
@@ -373,8 +462,7 @@ impl SupervisedChild {
         if let Err(error) =
             self.check_terminal_while(SupervisedProcessStage::StdinWrite, should_cancel)
         {
-            self.abort_and_settle();
-            return Err(error);
+            return Err(self.fail(error));
         }
         let Some(stdin_tx) = self.stdin_tx.as_ref() else {
             return Err(SupervisedProcessError::MissingPipe { stream: "stdin" });
@@ -394,8 +482,7 @@ impl SupervisedChild {
                 stage: SupervisedProcessStage::StdinWrite,
                 source: io::Error::new(io::ErrorKind::BrokenPipe, "stdin pump is closed"),
             };
-            self.abort_and_settle();
-            return Err(error);
+            return Err(self.fail(error));
         }
 
         loop {
@@ -405,8 +492,7 @@ impl SupervisedChild {
                         self.check_terminal_while(SupervisedProcessStage::StdinWrite, should_cancel)
                     {
                         write_cancel.store(true, Ordering::Release);
-                        self.abort_and_settle();
-                        return Err(error);
+                        return Err(self.fail(error));
                     }
                     return match completion.result {
                         Ok(()) => Ok(completion.bytes),
@@ -414,23 +500,20 @@ impl SupervisedChild {
                             let error = SupervisedProcessError::Canceled {
                                 stage: SupervisedProcessStage::StdinWrite,
                             };
-                            self.abort_and_settle();
-                            Err(error)
+                            Err(self.fail(error))
                         }
                         Err(StdinWriteFailure::DeadlineExceeded) => {
                             let error = SupervisedProcessError::DeadlineExceeded {
                                 stage: SupervisedProcessStage::StdinWrite,
                             };
-                            self.abort_and_settle();
-                            Err(error)
+                            Err(self.fail(error))
                         }
                         Err(StdinWriteFailure::Io(source)) => {
                             let error = SupervisedProcessError::Io {
                                 stage: SupervisedProcessStage::StdinWrite,
                                 source,
                             };
-                            self.abort_and_settle();
-                            Err(error)
+                            Err(self.fail(error))
                         }
                     };
                 }
@@ -439,16 +522,14 @@ impl SupervisedChild {
                         self.check_terminal_while(SupervisedProcessStage::StdinWrite, should_cancel)
                     {
                         write_cancel.store(true, Ordering::Release);
-                        self.abort_and_settle();
-                        return Err(error);
+                        return Err(self.fail(error));
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     let error = SupervisedProcessError::WorkerPanicked {
                         stage: SupervisedProcessStage::StdinWrite,
                     };
-                    self.abort_and_settle();
-                    return Err(error);
+                    return Err(self.fail(error));
                 }
             }
         }
@@ -464,19 +545,67 @@ impl SupervisedChild {
 
     /// Close stdin and settle the process using an Adapter cancellation probe.
     pub fn finish_while(
-        mut self,
+        self,
         should_cancel: &(dyn Fn() -> bool + Send + Sync),
     ) -> Result<SupervisedProcessOutput, SupervisedProcessError> {
+        self.finish_with_consumer(should_cancel, &mut |_| Ok(()))
+    }
+
+    fn finish_with_consumer(
+        mut self,
+        should_cancel: &(dyn Fn() -> bool + Send + Sync),
+        consumer: &mut impl FnMut(&[u8]) -> io::Result<()>,
+    ) -> Result<SupervisedProcessOutput, SupervisedProcessError> {
         if let Err(error) = self.close_stdin_while(should_cancel) {
-            self.abort_and_settle();
-            return Err(error);
+            return Err(self.fail(error));
         }
+        let mut native_status = None;
         let status = loop {
             if let Err(error) =
                 self.check_terminal_while(SupervisedProcessStage::Wait, should_cancel)
             {
-                self.abort_and_settle();
-                return Err(error);
+                return Err(self.fail(error));
+            }
+            // Bounded work per poll preserves native cancellation/deadline authority.
+            let mut progressed = false;
+            for _ in 0..8 {
+                let next = self.stdout_chunks.as_ref().map(Receiver::try_recv);
+                match next {
+                    Some(Ok(bytes)) => {
+                        progressed = true;
+                        let consumed =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                consumer(&bytes)
+                            }));
+                        let failure = match consumed {
+                            Ok(Ok(())) => None,
+                            Ok(Err(source)) => Some(SupervisedProcessError::Io {
+                                stage: SupervisedProcessStage::StdoutDrain,
+                                source,
+                            }),
+                            Err(_) => Some(SupervisedProcessError::WorkerPanicked {
+                                stage: SupervisedProcessStage::StdoutDrain,
+                            }),
+                        };
+                        if let Some(error) = failure {
+                            return Err(self.fail(error));
+                        }
+                    }
+                    Some(Err(mpsc::TryRecvError::Disconnected)) => {
+                        self.stdout_chunks.take();
+                        break;
+                    }
+                    Some(Err(mpsc::TryRecvError::Empty)) | None => break,
+                }
+            }
+            if let Some(status) = native_status {
+                if self.stdout_chunks.is_none() {
+                    break status;
+                }
+                if !progressed {
+                    thread::sleep(self.policy.poll_interval);
+                }
+                continue;
             }
             let Some(child) = self.child.as_mut() else {
                 return Err(SupervisedProcessError::Io {
@@ -485,21 +614,29 @@ impl SupervisedChild {
                 });
             };
             match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => thread::sleep(self.policy.poll_interval),
+                Ok(Some(status)) => native_status = Some(status),
+                Ok(None) => {
+                    if !progressed {
+                        thread::sleep(self.policy.poll_interval);
+                    }
+                }
                 Err(source) => {
                     let error =
                         SupervisedProcessError::Io { stage: SupervisedProcessStage::Wait, source };
-                    self.abort_and_settle();
-                    return Err(error);
+                    return Err(self.fail(error));
                 }
             }
         };
+        let child_pid = self.child.as_ref().map(|child| child.id());
         self.child.take();
         self.stdin_tx.take();
+        let deadline = self.cleanup_deadline();
         let stdin_error = self.stdin_thread.take().and_then(|handle| {
-            handle.join().err().map(|_| SupervisedProcessError::WorkerPanicked {
-                stage: SupervisedProcessStage::StdinClose,
+            join_worker_until(handle, deadline).err().map(|detail| {
+                SupervisedProcessError::WorkerClosure {
+                    stage: SupervisedProcessStage::StdinClose,
+                    detail,
+                }
             })
         });
         let stdout_result = join_pipe_drain(
@@ -508,6 +645,7 @@ impl SupervisedChild {
                 empty_pipe_drain(SupervisedProcessStream::Stdout),
             ),
             SupervisedProcessStage::StdoutDrain,
+            deadline,
         );
         let stderr_result = join_pipe_drain(
             std::mem::replace(
@@ -515,18 +653,40 @@ impl SupervisedChild {
                 empty_pipe_drain(SupervisedProcessStream::Stderr),
             ),
             SupervisedProcessStage::StderrDrain,
+            deadline,
         );
-        if let Some(error) = stdin_error {
-            return Err(error);
+        let cleanup = SupervisedProcessCleanupReceipt {
+            stdin_error: stdin_error.as_ref().map(ToString::to_string),
+            stdout_error: stdout_result.as_ref().err().map(ToString::to_string),
+            stderr_error: stderr_result.as_ref().err().map(ToString::to_string),
+            ..SupervisedProcessCleanupReceipt::empty()
+        };
+        if let Some(pid) = child_pid {
+            crate::ffmpeg_command::record_native_cleanup(pid, &cleanup);
         }
-        let stdout = stdout_result?;
-        let stderr = stderr_result?;
+        let (stdout, stderr) = match (stdin_error, stdout_result, stderr_result) {
+            (Some(primary), _, _) | (None, Err(primary), _) | (None, Ok(_), Err(primary)) => {
+                return Err(SupervisedProcessError::Cleanup {
+                    primary: Box::new(primary),
+                    cleanup: Box::new(cleanup),
+                });
+            }
+            (None, Ok(stdout), Ok(stderr)) => (stdout, stderr),
+        };
         if should_cancel() {
-            return Err(SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Wait });
+            return Err(SupervisedProcessError::Cleanup {
+                primary: Box::new(SupervisedProcessError::Canceled {
+                    stage: SupervisedProcessStage::Wait,
+                }),
+                cleanup: Box::new(cleanup),
+            });
         }
         if self.policy.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            return Err(SupervisedProcessError::DeadlineExceeded {
-                stage: SupervisedProcessStage::Wait,
+            return Err(SupervisedProcessError::Cleanup {
+                primary: Box::new(SupervisedProcessError::DeadlineExceeded {
+                    stage: SupervisedProcessStage::Wait,
+                }),
+                cleanup: Box::new(cleanup),
             });
         }
         for (stream, capture, exceeded) in [
@@ -542,17 +702,21 @@ impl SupervisedChild {
             ),
         ] {
             if exceeded && let Some(limit_bytes) = capture.strict_limit() {
-                return Err(SupervisedProcessError::OutputLimitExceeded {
-                    stage: match stream {
-                        SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
-                        SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
-                    },
-                    stream,
-                    limit_bytes,
+                return Err(SupervisedProcessError::Cleanup {
+                    primary: Box::new(SupervisedProcessError::OutputLimitExceeded {
+                        stage: match stream {
+                            SupervisedProcessStream::Stdout => SupervisedProcessStage::StdoutDrain,
+                            SupervisedProcessStream::Stderr => SupervisedProcessStage::StderrDrain,
+                        },
+                        stream,
+                        limit_bytes,
+                    }),
+                    cleanup: Box::new(cleanup),
                 });
             }
         }
         Ok(SupervisedProcessOutput {
+            cleanup,
             status,
             stdout: stdout.retained,
             stderr: stderr.retained,
@@ -597,8 +761,11 @@ impl SupervisedChild {
             }
         }
         if let Some(handle) = self.stdin_thread.take() {
-            handle.join().map_err(|_| SupervisedProcessError::WorkerPanicked {
-                stage: SupervisedProcessStage::StdinClose,
+            join_worker_until(handle, self.cleanup_deadline()).map_err(|detail| {
+                SupervisedProcessError::WorkerClosure {
+                    stage: SupervisedProcessStage::StdinClose,
+                    detail,
+                }
             })?;
         }
         Ok(())
@@ -641,25 +808,51 @@ impl SupervisedChild {
         Ok(())
     }
 
-    fn abort_and_settle(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            terminate_and_reap(child);
+    fn cleanup_deadline(&self) -> Instant {
+        self.policy.deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(5))
+    }
+
+    fn fail(&mut self, primary: SupervisedProcessError) -> SupervisedProcessError {
+        let cleanup = self.abort_and_settle();
+        SupervisedProcessError::Cleanup {
+            primary: Box::new(primary),
+            cleanup: Box::new(cleanup),
+        }
+    }
+
+    fn abort_and_settle(&mut self) -> SupervisedProcessCleanupReceipt {
+        // Unblock the bounded stdout sender before joining or terminating the child.
+        self.stdout_chunks.take();
+        let deadline = self.cleanup_deadline();
+        let mut receipt = self
+            .child
+            .as_mut()
+            .map_or_else(SupervisedProcessCleanupReceipt::empty, |child| {
+                terminate_and_reap(child, deadline)
+            });
+        self.stdin_tx.take();
+        if let Some(handle) = self.stdin_thread.take()
+            && let Err(error) = join_worker_until(handle, deadline)
+        {
+            receipt.stdin_error = Some(error);
+        }
+        for (drain, error) in [
+            (&mut self.stdout, &mut receipt.stdout_error),
+            (&mut self.stderr, &mut receipt.stderr_error),
+        ] {
+            if let Some(handle) = drain.handle.take() {
+                match join_worker_until(handle, deadline) {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(failure)) => *error = Some(failure.to_string()),
+                    Err(failure) => *error = Some(failure),
+                }
+            }
+        }
+        if let Some(child) = self.child.as_ref() {
+            crate::ffmpeg_command::record_native_cleanup(child.id(), &receipt);
         }
         self.child.take();
-        self.stdin_tx.take();
-        if let Some(handle) = self.stdin_thread.take() {
-            let _ = handle.join();
-        }
-        let stdout = std::mem::replace(
-            &mut self.stdout,
-            empty_pipe_drain(SupervisedProcessStream::Stdout),
-        );
-        let stderr = std::mem::replace(
-            &mut self.stderr,
-            empty_pipe_drain(SupervisedProcessStream::Stderr),
-        );
-        let _ = join_pipe_drain(stdout, SupervisedProcessStage::StdoutDrain);
-        let _ = join_pipe_drain(stderr, SupervisedProcessStage::StderrDrain);
+        receipt
     }
 }
 
@@ -673,11 +866,14 @@ impl Drop for SupervisedChild {
 
 /// Run one bounded external command with optional owned stdin.
 pub fn run_supervised_command(
-    command: &mut Command,
+    command: &mut impl SupervisedCommand,
     stdin: Option<Vec<u8>>,
     mut policy: SupervisedProcessPolicy,
     cancellation: &ExecutionCancellationToken,
 ) -> Result<SupervisedProcessOutput, SupervisedProcessError> {
+    if cancellation.is_canceled() {
+        return Err(SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Spawn });
+    }
     policy.pipe_stdin = stdin.is_some();
     let mut child = SupervisedChild::spawn(command, policy)?;
     if let Some(stdin) = stdin {
@@ -688,11 +884,14 @@ pub fn run_supervised_command(
 
 /// Run one bounded external command with an Adapter cancellation probe.
 pub fn run_supervised_command_while(
-    command: &mut Command,
+    command: &mut impl SupervisedCommand,
     stdin: Option<Vec<u8>>,
     mut policy: SupervisedProcessPolicy,
     should_cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<SupervisedProcessOutput, SupervisedProcessError> {
+    if should_cancel() {
+        return Err(SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Spawn });
+    }
     policy.pipe_stdin = stdin.is_some();
     let mut child = SupervisedChild::spawn(command, policy)?;
     if let Some(stdin) = stdin {
@@ -701,10 +900,39 @@ pub fn run_supervised_command_while(
     child.finish_while(should_cancel)
 }
 
+/// Consume stdout incrementally on the calling thread with two bounded 16 KiB chunks.
+///
+/// The consumer must return promptly. Consumer errors and panics terminate and
+/// consume the same native process and pipe owners, preserving cleanup evidence.
+/// Stdin is disabled; stdout is streamed without retained capture or disk spooling.
+pub fn run_supervised_command_streaming_stdout(
+    command: &mut impl SupervisedCommand,
+    mut policy: SupervisedProcessPolicy,
+    should_cancel: &(dyn Fn() -> bool + Send + Sync),
+    mut consumer: impl FnMut(&[u8]) -> io::Result<()>,
+) -> Result<SupervisedProcessOutput, SupervisedProcessError> {
+    if should_cancel() {
+        return Err(SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Spawn });
+    }
+    policy.pipe_stdin = false;
+    policy.stdout = SupervisedStreamCapture::Drain;
+    SupervisedChild::spawn_inner(command, policy, true)?
+        .finish_with_consumer(should_cancel, &mut consumer)
+}
+
 fn spawn_pipe_drain(
     pipe: impl Read + Send + 'static,
     capture: SupervisedStreamCapture,
     stream: SupervisedProcessStream,
+) -> io::Result<PipeDrain> {
+    spawn_pipe_drain_inner(pipe, capture, stream, None)
+}
+
+fn spawn_pipe_drain_inner(
+    pipe: impl Read + Send + 'static,
+    capture: SupervisedStreamCapture,
+    stream: SupervisedProcessStream,
+    sender: Option<SyncSender<Vec<u8>>>,
 ) -> io::Result<PipeDrain> {
     let exceeded = Arc::new(AtomicBool::new(false));
     let failed = Arc::new(AtomicBool::new(false));
@@ -712,7 +940,7 @@ fn spawn_pipe_drain(
     let reader_failed = Arc::clone(&failed);
     let handle = thread::Builder::new()
         .name(format!("mondrian-media-process-{stream}"))
-        .spawn(move || drain_pipe(pipe, capture, reader_exceeded, reader_failed))?;
+        .spawn(move || drain_pipe(pipe, capture, reader_exceeded, reader_failed, sender))?;
     Ok(PipeDrain {
         handle: Some(handle),
         exceeded,
@@ -727,6 +955,7 @@ fn drain_pipe(
     capture: SupervisedStreamCapture,
     exceeded: Arc<AtomicBool>,
     failed: Arc<AtomicBool>,
+    sender: Option<SyncSender<Vec<u8>>>,
 ) -> io::Result<CapturedPipe> {
     let mut head = Vec::new();
     let mut tail = VecDeque::new();
@@ -742,6 +971,12 @@ fn drain_pipe(
         };
         if read == 0 {
             break;
+        }
+        if let Some(sender) = &sender {
+            // A disconnected consumer means its owner is already closing this drain.
+            if sender.send(chunk[..read].to_vec()).is_err() {
+                break;
+            }
         }
         match capture {
             SupervisedStreamCapture::Drain => {}
@@ -779,13 +1014,13 @@ fn drain_pipe(
 fn join_pipe_drain(
     mut drain: PipeDrain,
     stage: SupervisedProcessStage,
+    deadline: Instant,
 ) -> Result<CapturedPipe, SupervisedProcessError> {
     let Some(handle) = drain.handle.take() else {
         return Ok(CapturedPipe { retained: Vec::new(), exceeded: false });
     };
-    handle
-        .join()
-        .map_err(|_| SupervisedProcessError::WorkerPanicked { stage })?
+    join_worker_until(handle, deadline)
+        .map_err(|detail| SupervisedProcessError::WorkerClosure { stage, detail })?
         .map_err(|source| SupervisedProcessError::Io { stage, source })
 }
 
@@ -843,21 +1078,56 @@ fn write_stdin_chunks(
     Ok(())
 }
 
-fn terminate_and_reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+pub(crate) fn terminate_and_reap(
+    child: &mut Child,
+    deadline: Instant,
+) -> SupervisedProcessCleanupReceipt {
+    let mut receipt = SupervisedProcessCleanupReceipt::empty();
+    match child.try_wait() {
+        Ok(Some(_)) => return receipt,
+        Ok(None) => {}
+        Err(error) => receipt.wait_error = Some(error.to_string()),
+    }
+    receipt.native_exit_observed = false;
+    receipt.kill_error = child.kill().err().map(|error| error.to_string());
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                receipt.native_exit_observed = true;
+                break;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                receipt.wait_error = Some(error.to_string());
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            receipt.deadline_exceeded = true;
+            break;
+        }
+        thread::sleep(
+            Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    receipt
 }
 
-#[cfg(windows)]
-fn configure_hidden_child(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
+pub(crate) fn join_worker_until<T>(handle: JoinHandle<T>, deadline: Instant) -> Result<T, String> {
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            return Err("worker did not return by the original process deadline".to_owned());
+        }
+        thread::sleep(
+            Duration::from_millis(1).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+    handle.join().map_err(|payload| {
+        // Opaque destructor execution is not permitted on the closure stack.
+        std::mem::forget(payload);
+        "process worker panicked (payload abandoned)".to_owned()
+    })
 }
-
-#[cfg(not(windows))]
-fn configure_hidden_child(_command: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
@@ -946,14 +1216,14 @@ mod tests {
         cancel_thread.join().expect("cancel trigger");
 
         assert!(matches!(
-            error,
+            error.primary(),
             SupervisedProcessError::Canceled { stage: SupervisedProcessStage::StdinWrite }
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
-    fn deadline_terminates_and_reaps_a_running_child() {
+    fn original_deadline_covers_native_spawn_wait_and_retirement() {
         let mut command = child_command("sleep");
         let mut policy = test_policy(false);
         policy.deadline = Some(Instant::now() + Duration::from_millis(40));
@@ -966,11 +1236,77 @@ mod tests {
         )
         .expect_err("deadline must terminate child");
 
-        assert!(matches!(
-            error,
-            SupervisedProcessError::DeadlineExceeded { stage: SupervisedProcessStage::Wait }
-        ));
+        // Native Job admission now shares the original deadline. On a busy
+        // Windows host this budget may expire before the suspended child resumes;
+        // that is still a deadline failure and must retain its raw cleanup.
+        assert!(error.is_deadline_exceeded(), "{error:?}");
+        match &error {
+            SupervisedProcessError::Cleanup { cleanup, .. } => {
+                assert!(
+                    cleanup.native_exit_observed || cleanup.deadline_exceeded,
+                    "{cleanup:?}"
+                );
+            }
+            // Admission may reject the expired budget before a child exists.
+            SupervisedProcessError::Io { stage: SupervisedProcessStage::Spawn, source }
+                if source.kind() == io::ErrorKind::TimedOut => {}
+            _ => panic!("an admitted child must preserve native cleanup: {error:?}"),
+        }
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn provider_cancel_race_keeps_typed_cause_without_reclassifying_os_interruptions() {
+        let token = ExecutionCancellationToken::new();
+        token.cancel();
+        let source = crate::approved_provider_command::boundary(
+            Instant::now() + Duration::from_secs(1),
+            &token,
+        )
+        .expect_err("provider owner observed cancellation after entry admission");
+        assert_eq!(source.kind(), io::ErrorKind::Interrupted);
+        let canceled = SupervisedProcessError::Io { stage: SupervisedProcessStage::Spawn, source };
+        assert!(canceled.is_canceled());
+        let wrapped = SupervisedProcessError::Cleanup {
+            primary: Box::new(canceled),
+            cleanup: Box::new(SupervisedProcessCleanupReceipt::empty()),
+        };
+        assert!(wrapped.is_canceled());
+        assert!(matches!(
+            wrapped.primary(),
+            SupervisedProcessError::Io { .. }
+        ));
+        let ordinary = SupervisedProcessError::Io {
+            stage: SupervisedProcessStage::Spawn,
+            source: io::Error::new(io::ErrorKind::Interrupted, "ordinary OS interruption"),
+        };
+        assert!(!ordinary.is_canceled());
+    }
+
+    #[test]
+    fn precanceled_commands_reject_before_spawn_in_all_output_modes() {
+        let cancel = ExecutionCancellationToken::new();
+        cancel.cancel();
+        let mut command = child_command("stdout-overflow");
+        let ordinary = run_supervised_command(&mut command, None, test_policy(false), &cancel);
+        let probed = run_supervised_command_while(&mut command, None, test_policy(false), &|| true);
+        let streamed = run_supervised_command_streaming_stdout(
+            &mut command,
+            test_policy(false),
+            &|| true,
+            |_| panic!("a precanceled command must never reach the output consumer"),
+        );
+        for result in [ordinary, probed, streamed] {
+            let error = result.expect_err("precanceled command must not start");
+            assert!(
+                matches!(
+                    error,
+                    SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Spawn }
+                ),
+                "{error:?}"
+            );
+            assert!(error.is_canceled());
+        }
     }
 
     #[test]
@@ -988,12 +1324,95 @@ mod tests {
         .expect_err("strict output cap must fail");
 
         assert!(matches!(
-            error,
+            error.primary(),
             SupervisedProcessError::OutputLimitExceeded {
                 stage: SupervisedProcessStage::StdoutDrain,
                 stream: SupervisedProcessStream::Stdout,
                 limit_bytes: 4096
             }
         ));
+    }
+    #[test]
+    fn simultaneous_pipe_panics_preserve_both_raw_cleanup_failures() {
+        let stdout = thread::spawn(|| -> io::Result<CapturedPipe> { panic!("stdout failure") });
+        let stderr = thread::spawn(|| -> io::Result<CapturedPipe> { panic!("stderr failure") });
+        let mut owner = SupervisedChild {
+            child: None,
+            stdin_tx: None,
+            stdin_thread: None,
+            stdout: empty_pipe_drain(SupervisedProcessStream::Stdout),
+            stderr: empty_pipe_drain(SupervisedProcessStream::Stderr),
+            policy: test_policy(false),
+            stdout_chunks: None,
+        };
+        owner.stdout.handle = Some(stdout);
+        owner.stderr.handle = Some(stderr);
+        let primary = SupervisedProcessError::Canceled { stage: SupervisedProcessStage::Wait };
+        let error = owner.fail(primary);
+        assert!(error.is_canceled());
+        let SupervisedProcessError::Cleanup { cleanup, .. } = error else {
+            panic!("raw closure required")
+        };
+        assert!(cleanup.stdout_error.is_some());
+        assert!(cleanup.stderr_error.is_some());
+        assert!(!cleanup.all_resources_released());
+    }
+
+    #[test]
+    fn expired_cleanup_deadline_does_not_block_on_a_nonreturning_pipe_worker() {
+        let (release, blocked) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = blocked.recv();
+        });
+        let started = Instant::now();
+        let result = join_worker_until(worker, started);
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let _ = release.send(());
+    }
+
+    #[test]
+    fn streamed_stdout_is_complete_without_retained_capture() {
+        let mut count = 0;
+        let output = run_supervised_command_streaming_stdout(
+            &mut child_command("stdout-overflow"),
+            test_policy(false),
+            &|| false,
+            |bytes| {
+                assert!(bytes.len() <= 16 * 1024);
+                count += bytes.iter().filter(|&&byte| byte == b'o').count();
+                Ok(())
+            },
+        )
+        .expect("stream must consume all queued data after native exit");
+        assert!(output.status.success());
+        assert!(output.cleanup.all_resources_released());
+        assert!(output.stdout.is_empty());
+        assert!(count >= 128 * 1024);
+    }
+
+    #[test]
+    fn streamed_consumer_error_panic_and_cancellation_consume_all_owners() {
+        for mode in 0..3 {
+            let canceled = AtomicBool::new(false);
+            let error = run_supervised_command_streaming_stdout(
+                &mut child_command("stdout-overflow"),
+                test_policy(false),
+                &|| canceled.load(Ordering::Acquire),
+                |_| match mode {
+                    0 => Err(io::Error::other("consumer rejected content")),
+                    1 => panic!("consumer panic"),
+                    _ => {
+                        canceled.store(true, Ordering::Release);
+                        Ok(())
+                    }
+                },
+            )
+            .expect_err("consumer must terminate the operation");
+            let SupervisedProcessError::Cleanup { cleanup, .. } = error else {
+                panic!("raw cleanup required")
+            };
+            assert!(cleanup.all_resources_released(), "{cleanup:?}");
+        }
     }
 }

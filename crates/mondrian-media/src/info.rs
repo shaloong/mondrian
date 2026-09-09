@@ -1958,6 +1958,10 @@ fn map_pixel_format(pixel: ffmpeg::util::format::pixel::Pixel) -> Option<PixelFo
         Pixel::GBRAP10LE => Some(PixelFormat::Gbrap10le),
         Pixel::GBRAP12LE => Some(PixelFormat::Gbrap12le),
         Pixel::GBRAP16LE => Some(PixelFormat::Gbrap16le),
+        Pixel::GBRPF32LE => Some(PixelFormat::Gbrpf32le),
+        Pixel::GBRPF32BE => Some(PixelFormat::Gbrpf32be),
+        Pixel::GBRAPF32LE => Some(PixelFormat::Gbrapf32le),
+        Pixel::GBRAPF32BE => Some(PixelFormat::Gbrapf32be),
         Pixel::RGB24 => Some(PixelFormat::Rgb24),
         Pixel::RGBA => Some(PixelFormat::Rgba),
         Pixel::RGBA64LE => Some(PixelFormat::Rgba64le),
@@ -2357,6 +2361,23 @@ mod tests {
         let exactly_one = probe_exactly_one_video_frame(&path, 0).expect("probe GIF frames");
 
         assert!(!exactly_one);
+    }
+
+    #[test]
+    fn probe_maps_float_rgb_without_losing_precision_or_alpha() {
+        use ffmpeg::util::format::pixel::Pixel;
+        for (native, expected, alpha) in [
+            (Pixel::GBRPF32LE, PixelFormat::Gbrpf32le, false),
+            (Pixel::GBRPF32BE, PixelFormat::Gbrpf32be, false),
+            (Pixel::GBRAPF32LE, PixelFormat::Gbrapf32le, true),
+            (Pixel::GBRAPF32BE, PixelFormat::Gbrapf32be, true),
+        ] {
+            let format = map_pixel_format(native).expect("proven Float32 RGB format");
+            assert_eq!(format, expected);
+            assert_eq!(format.bit_depth(), 32);
+            assert_eq!(format.has_alpha(), alpha);
+            assert!(format.is_rgb());
+        }
     }
 
     #[test]

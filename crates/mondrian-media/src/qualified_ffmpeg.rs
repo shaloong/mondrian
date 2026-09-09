@@ -5,6 +5,7 @@
 //! snapshot for each tool, retains both the approved source objects and the
 //! snapshots, and installs that pair once for every later CLI call.
 
+use parking_lot::Mutex;
 #[cfg(windows)]
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -50,7 +51,48 @@ const TOOL_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(windows)]
 const CAPABILITY_REPORT_DOMAIN: &[u8] = b"mondrian/ffmpeg-capability-report/v1\0";
 
+#[cfg(windows)]
+#[path = "qualified_ffmpeg_windows.rs"]
+mod windows_capsule;
+
 static PROCESS_TOOLCHAIN: OnceLock<Arc<PreparedFfmpegToolchain>> = OnceLock::new();
+
+pub use mondrian_platform_core::QualifiedRuntimeCapsuleClosureEvidence as QualifiedFfmpegShutdownReceipt;
+
+#[derive(Debug, Default)]
+struct CapsuleLifecycle {
+    admission_closed: bool,
+    children_admitted: u64,
+    children_settled: u64,
+    children_remaining: u64,
+    children_abandoned: u64,
+    receipt: Option<QualifiedFfmpegShutdownReceipt>,
+    child_cleanup_failures: Vec<QualifiedChildCleanupFailure>,
+    external_capsule_cleanup_errors: Vec<String>,
+}
+
+type QualifiedChildCleanupFailure =
+    mondrian_platform_core::QualifiedRuntimeCapsuleChildCleanupEvidence;
+#[derive(Debug)]
+pub(crate) struct QualifiedChildLease {
+    owner: Arc<PreparedFfmpegToolchain>,
+}
+
+impl QualifiedChildLease {
+    pub(crate) fn abandon(self) {
+        self.owner.lifecycle.lock().children_abandoned += 1;
+        // The unavailable native exit cannot authorize releasing mapped inputs.
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for QualifiedChildLease {
+    fn drop(&mut self) {
+        let mut state = self.owner.lifecycle.lock();
+        state.children_remaining -= 1;
+        state.children_settled += 1;
+    }
+}
 
 /// FFmpeg command-line executable role inside one exact toolchain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,24 +204,34 @@ struct PreparedFfmpegTool {
     receipt: QualifiedFfmpegToolReceipt,
     snapshot_path: PathBuf,
     snapshot_directory: PathBuf,
-    _source_lease: File,
-    _snapshot_lease: File,
+    _source_lease: Mutex<Option<File>>,
+    _snapshot_lease: Mutex<Option<File>>,
 }
 
 impl PreparedFfmpegTool {
-    fn command(&self) -> Command {
+    fn command(&self) -> Result<Command, QualifiedFfmpegToolchainError> {
         let mut command = Command::new(&self.snapshot_path);
+        command.env_clear();
         command.current_dir(&self.snapshot_directory);
         command.env("PATH", &self.snapshot_directory);
-        command
+        #[cfg(windows)]
+        {
+            let directories = windows_system_directories()?;
+            let root = directories
+                .first()
+                .and_then(|directory| directory.parent())
+                .ok_or(QualifiedFfmpegToolchainError::SpawnContractChanged)?;
+            command.env("SystemRoot", root);
+        }
+        Ok(command)
     }
 }
 
 #[derive(Debug)]
 struct PreparedFfmpegRuntimeFile {
     receipt: QualifiedFfmpegRuntimeFileReceipt,
-    _source_lease: File,
-    _snapshot_lease: File,
+    _source_lease: Mutex<Option<File>>,
+    _snapshot_lease: Mutex<Option<File>>,
 }
 
 /// Process-retained exact FFmpeg/FFprobe executable pair.
@@ -194,8 +246,14 @@ pub struct PreparedFfmpegToolchain {
     ffmpeg: PreparedFfmpegTool,
     ffprobe: PreparedFfmpegTool,
     runtime_files: Vec<PreparedFfmpegRuntimeFile>,
-    _snapshot_directory_lease: File,
-    _snapshot_directory: TempDir,
+    _snapshot_directory_lease: Mutex<Option<File>>,
+    _snapshot_directory: Mutex<Option<TempDir>>,
+    snapshot_path: PathBuf,
+    lifecycle: Mutex<CapsuleLifecycle>,
+    #[cfg(windows)]
+    namespace_seal: Mutex<Option<windows_capsule::CapsuleSeal>>,
+    #[cfg(windows)]
+    ancestor_leases: Mutex<Vec<File>>,
     #[cfg(windows)]
     namespace_poisoned: AtomicBool,
 }
@@ -215,9 +273,16 @@ impl PreparedFfmpegToolchain {
 
         #[cfg(windows)]
         {
+            let parent = ordinary_canonical_path(&std::env::temp_dir())
+                .map_err(QualifiedFfmpegToolchainError::SnapshotDirectory)?;
+            let ancestor_leases = parent
+                .ancestors()
+                .map(open_direct_read_directory)
+                .collect::<std::io::Result<Vec<_>>>()
+                .map_err(QualifiedFfmpegToolchainError::SnapshotDirectory)?;
             let snapshot_directory = tempfile::Builder::new()
                 .prefix("mondrian-qualified-ffmpeg-")
-                .tempdir()
+                .tempdir_in(parent)
                 .map_err(QualifiedFfmpegToolchainError::SnapshotDirectory)?;
             let snapshot_directory_lease = open_direct_read_directory(snapshot_directory.path())
                 .map_err(QualifiedFfmpegToolchainError::SnapshotDirectory)?;
@@ -238,15 +303,42 @@ impl PreparedFfmpegToolchain {
                 ffprobe,
                 snapshot_directory.path(),
             )?;
-            verify_command_semantics(&prepared_ffmpeg)?;
-            Ok(Arc::new(Self {
+            let namespace_seal = windows_capsule::CapsuleSeal::seal(snapshot_directory.path())
+                .map_err(QualifiedFfmpegToolchainError::NamespaceSeal)?;
+            let prepared = Arc::new(Self {
                 ffmpeg: prepared_ffmpeg,
                 ffprobe: prepared_ffprobe,
                 runtime_files: prepared_runtime_files,
-                _snapshot_directory_lease: snapshot_directory_lease,
-                _snapshot_directory: snapshot_directory,
+                _snapshot_directory_lease: Mutex::new(Some(snapshot_directory_lease)),
+                snapshot_path: snapshot_directory.path().to_path_buf(),
+                _snapshot_directory: Mutex::new(Some(snapshot_directory)),
+                lifecycle: Mutex::new(CapsuleLifecycle::default()),
                 namespace_poisoned: AtomicBool::new(false),
-            }))
+                namespace_seal: Mutex::new(Some(namespace_seal)),
+                ancestor_leases: Mutex::new(ancestor_leases),
+            });
+            let verification = verify_tool_observations(&prepared)
+                .and_then(|()| verify_command_semantics(&prepared));
+            if let Err(primary) = verification {
+                let receipt = prepared.shutdown_until(Instant::now() + TOOL_PROBE_TIMEOUT);
+                return Err(QualifiedFfmpegToolchainError::PreparationCleanup {
+                    primary: Box::new(primary),
+                    receipt,
+                });
+            }
+            Ok(prepared)
+        }
+    }
+
+    /// OS-readback namespace DACL, independent of mapped-image qualification.
+    pub fn namespace_seal_sddl(&self) -> Option<String> {
+        #[cfg(windows)]
+        {
+            self.namespace_seal.lock().as_ref().map(|seal| seal.descriptor().to_owned())
+        }
+        #[cfg(not(windows))]
+        {
+            None
         }
     }
 
@@ -269,6 +361,14 @@ impl PreparedFfmpegToolchain {
 
     /// Revalidate the retained source identities and exact capsule namespace.
     pub fn validate_current(&self) -> Result<(), QualifiedFfmpegToolchainError> {
+        let state = self.lifecycle.lock();
+        if state.admission_closed {
+            return Err(QualifiedFfmpegToolchainError::AdmissionClosed);
+        }
+        self.validate_objects()
+    }
+
+    fn validate_objects(&self) -> Result<(), QualifiedFfmpegToolchainError> {
         #[cfg(not(windows))]
         {
             return Err(QualifiedFfmpegToolchainError::UnsupportedPlatform);
@@ -279,18 +379,189 @@ impl PreparedFfmpegToolchain {
                 self.namespace_poisoned.store(true, Ordering::Release);
                 return Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged);
             }
+            let seal = self.namespace_seal.lock();
+            let seal = seal.as_ref().ok_or(QualifiedFfmpegToolchainError::SpawnContractChanged)?;
+            seal.validate().map_err(QualifiedFfmpegToolchainError::NamespaceSeal)?;
             verify_linked_runtime_identity(&self.runtime_files)
         }
     }
 
-    pub(crate) fn ffmpeg_command(&self) -> Result<Command, QualifiedFfmpegToolchainError> {
+    pub(crate) fn ffmpeg_command(
+        self: &Arc<Self>,
+    ) -> Result<crate::FfmpegCommand, QualifiedFfmpegToolchainError> {
         self.validate_current()?;
-        Ok(self.ffmpeg.command())
+        Ok(crate::FfmpegCommand::qualified(
+            self.ffmpeg.command()?,
+            Arc::clone(self),
+        ))
     }
 
-    pub(crate) fn ffprobe_command(&self) -> Result<Command, QualifiedFfmpegToolchainError> {
+    pub(crate) fn ffprobe_command(
+        self: &Arc<Self>,
+    ) -> Result<crate::FfmpegCommand, QualifiedFfmpegToolchainError> {
         self.validate_current()?;
-        Ok(self.ffprobe.command())
+        Ok(crate::FfmpegCommand::qualified(
+            self.ffprobe.command()?,
+            Arc::clone(self),
+        ))
+    }
+
+    pub(crate) fn native_helper_command(
+        self: &Arc<Self>,
+        path: &Path,
+    ) -> Result<crate::FfmpegCommand, QualifiedFfmpegToolchainError> {
+        self.validate_current()?;
+        let command = native_helper_template(path)?;
+        Ok(crate::FfmpegCommand::qualified(command, Arc::clone(self)))
+    }
+    pub(crate) fn admit_child(
+        self: &Arc<Self>,
+        command: &Command,
+    ) -> Result<QualifiedChildLease, QualifiedFfmpegToolchainError> {
+        let mut state = self.lifecycle.lock();
+        if state.admission_closed {
+            return Err(QualifiedFfmpegToolchainError::AdmissionClosed);
+        }
+        self.validate_objects()?;
+        let expected = if command.get_program() == self.ffmpeg.snapshot_path.as_os_str()
+            || command.get_program() == self.ffprobe.snapshot_path.as_os_str()
+        {
+            self.ffmpeg.command()?
+        } else {
+            let arguments = command.get_args().collect::<Vec<_>>();
+            if !matches!(arguments.as_slice(), [mode] if *mode == "--internal-demux-worker-v2")
+                && !matches!(arguments.as_slice(), [mode, _path] if *mode == crate::MEDIA_PROBE_WORKER_ARGUMENT)
+            {
+                return Err(QualifiedFfmpegToolchainError::SpawnContractChanged);
+            }
+            native_helper_template(Path::new(command.get_program()))?
+        };
+        if command.get_current_dir() != expected.get_current_dir()
+            || command.get_envs().collect::<Vec<_>>() != expected.get_envs().collect::<Vec<_>>()
+        {
+            return Err(QualifiedFfmpegToolchainError::SpawnContractChanged);
+        }
+        // Bound native ownership independently of domain-specific queue capacity.
+        if state.children_remaining >= 256 || state.children_admitted == u64::MAX {
+            return Err(QualifiedFfmpegToolchainError::ChildCapacityExceeded);
+        }
+        state.children_admitted += 1;
+        state.children_remaining += 1;
+        Ok(QualifiedChildLease { owner: Arc::clone(self) })
+    }
+
+    pub(crate) fn admit_provider_child(
+        self: &Arc<Self>,
+    ) -> Result<QualifiedChildLease, QualifiedFfmpegToolchainError> {
+        let mut state = self.lifecycle.lock();
+        if state.admission_closed {
+            return Err(QualifiedFfmpegToolchainError::AdmissionClosed);
+        }
+        self.validate_objects()?;
+        if state.children_remaining >= 256 || state.children_admitted == u64::MAX {
+            return Err(QualifiedFfmpegToolchainError::ChildCapacityExceeded);
+        }
+        state.children_admitted += 1;
+        state.children_remaining += 1;
+        Ok(QualifiedChildLease { owner: Arc::clone(self) })
+    }
+
+    /// Permanently close admission and consume this exact capsule under one deadline.
+    /// Repeated calls return the first immutable receipt; identities never reset.
+    pub fn shutdown_until(&self, deadline: std::time::Instant) -> QualifiedFfmpegShutdownReceipt {
+        loop {
+            let mut state = self.lifecycle.lock();
+            if let Some(receipt) = &state.receipt {
+                return receipt.clone();
+            }
+            state.admission_closed = true;
+            let deadline_exceeded =
+                state.children_remaining != 0 && std::time::Instant::now() >= deadline;
+            if state.children_remaining != 0 && !deadline_exceeded {
+                drop(state);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
+            let namespace_verification = {
+                #[cfg(windows)]
+                {
+                    self.namespace_seal
+                        .lock()
+                        .as_ref()
+                        .ok_or_else(|| "capsule namespace owner is absent".to_owned())
+                        .and_then(|seal| {
+                            seal.validate().map_err(|error| {
+                                format!("verify capsule namespace authority: {error}")
+                            })
+                        })
+                }
+                #[cfg(not(windows))]
+                {
+                    Err::<(), String>(
+                        "capsule namespace authority is unsupported on this platform".to_owned(),
+                    )
+                }
+            };
+            let mut receipt = QualifiedFfmpegShutdownReceipt {
+                namespace_seal_verified: namespace_verification.is_ok(),
+                children_admitted: state.children_admitted,
+                children_settled: state.children_settled,
+                children_remaining: state.children_remaining,
+                children_abandoned: state.children_abandoned,
+                child_cleanup_failures: state.child_cleanup_failures.clone(),
+                deadline_exceeded,
+                capsule_removed: false,
+                cleanup_error: namespace_verification.err(),
+            };
+            for error in &state.external_capsule_cleanup_errors {
+                append_capsule_cleanup_error(&mut receipt.cleanup_error, error.clone());
+            }
+            if state.children_remaining == 0 {
+                #[cfg(windows)]
+                let namespace_seal = { self.namespace_seal.lock().take() };
+                #[cfg(windows)]
+                if let Some(mut seal) = namespace_seal
+                    && let Err(error) = seal.restore()
+                {
+                    append_capsule_cleanup_error(
+                        &mut receipt.cleanup_error,
+                        format!("restore capsule namespace authority: {error}"),
+                    );
+                    *self.namespace_seal.lock() = Some(seal);
+                    state.receipt = Some(receipt.clone());
+                    return receipt;
+                }
+                self.ffmpeg._source_lease.lock().take();
+                self.ffmpeg._snapshot_lease.lock().take();
+                self.ffprobe._source_lease.lock().take();
+                self.ffprobe._snapshot_lease.lock().take();
+                for runtime in &self.runtime_files {
+                    runtime._source_lease.lock().take();
+                    runtime._snapshot_lease.lock().take();
+                }
+                self._snapshot_directory_lease.lock().take();
+                match self._snapshot_directory.lock().take() {
+                    Some(directory) => match directory.close() {
+                        Ok(()) => receipt.capsule_removed = true,
+                        Err(error) => append_capsule_cleanup_error(
+                            &mut receipt.cleanup_error,
+                            error.to_string(),
+                        ),
+                    },
+                    None => append_capsule_cleanup_error(
+                        &mut receipt.cleanup_error,
+                        "capsule directory owner was already consumed without a receipt".to_owned(),
+                    ),
+                }
+            }
+            #[cfg(windows)]
+            if receipt.capsule_removed {
+                self.ancestor_leases.lock().clear();
+            }
+            receipt.deadline_exceeded |= std::time::Instant::now() > deadline;
+            state.receipt = Some(receipt.clone());
+            return receipt;
+        }
     }
 
     fn same_identity(&self, other: &Self) -> bool {
@@ -300,13 +571,39 @@ impl PreparedFfmpegToolchain {
     }
 }
 
+fn append_capsule_cleanup_error(target: &mut Option<String>, next: String) {
+    *target = Some(match target.take() {
+        Some(previous) => format!("{previous}; {next}"),
+        None => next,
+    });
+}
+impl Drop for PreparedFfmpegToolchain {
+    fn drop(&mut self) {
+        let receipt =
+            self.shutdown_until(std::time::Instant::now() + std::time::Duration::from_secs(5));
+        if !receipt.all_resources_released() {
+            tracing::error!(
+                ?receipt,
+                "qualified FFmpeg owner fallback closure was incomplete"
+            );
+        }
+    }
+}
+
+/// Close the installed process-wide capsule after every phase/verifier owner.
+/// The installed identity remains a tombstone and cannot admit another child.
+pub fn shutdown_process_ffmpeg_toolchain_until(
+    deadline: std::time::Instant,
+) -> Option<QualifiedFfmpegShutdownReceipt> {
+    PROCESS_TOOLCHAIN.get().map(|owner| owner.shutdown_until(deadline))
+}
 pub(crate) fn verify_installed_process_toolchain() -> Result<bool, QualifiedFfmpegToolchainError> {
     let Some(toolchain) = PROCESS_TOOLCHAIN.get() else {
         return Ok(false);
     };
     toolchain.validate_current()?;
     #[cfg(windows)]
-    verify_command_semantics(&toolchain.ffmpeg)?;
+    verify_command_semantics(toolchain)?;
     Ok(true)
 }
 
@@ -345,12 +642,32 @@ pub fn install_process_ffmpeg_toolchain(
     }
 }
 
-pub(crate) fn process_ffmpeg_command() -> Result<Option<Command>, QualifiedFfmpegToolchainError> {
+pub(crate) fn process_ffmpeg_command(
+) -> Result<Option<crate::FfmpegCommand>, QualifiedFfmpegToolchainError> {
     PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffmpeg_command()).transpose()
 }
 
-pub(crate) fn process_ffprobe_command() -> Result<Option<Command>, QualifiedFfmpegToolchainError> {
+pub(crate) fn process_ffprobe_command(
+) -> Result<Option<crate::FfmpegCommand>, QualifiedFfmpegToolchainError> {
     PROCESS_TOOLCHAIN.get().map(|toolchain| toolchain.ffprobe_command()).transpose()
+}
+
+pub(crate) fn reject_unattested_native_helper() -> Result<(), QualifiedFfmpegToolchainError> {
+    if PROCESS_TOOLCHAIN.get().is_some() {
+        Err(QualifiedFfmpegToolchainError::PreloaderAuthorityUnavailable)
+    } else {
+        Ok(())
+    }
+}
+
+pub(crate) fn reject_unqualified_spawn(
+    _command: &Command,
+) -> Result<(), QualifiedFfmpegToolchainError> {
+    if PROCESS_TOOLCHAIN.get().is_some() {
+        Err(QualifiedFfmpegToolchainError::SpawnContractChanged)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -361,7 +678,7 @@ fn capsule_namespace_matches(toolchain: &PreparedFfmpegToolchain) -> bool {
         .flatten()
         .map(std::ffi::OsStr::to_os_string)
         .collect::<BTreeSet<_>>();
-    capsule_directory_matches(toolchain._snapshot_directory.path(), &expected)
+    capsule_directory_matches(toolchain.snapshot_path.as_path(), &expected)
 }
 
 #[cfg(windows)]
@@ -522,8 +839,8 @@ fn prepare_runtime_files(
                 sha256: expectation.sha256.to_owned(),
                 byte_length: length,
             },
-            _source_lease: source,
-            _snapshot_lease: snapshot_lease,
+            _source_lease: Mutex::new(Some(source)),
+            _snapshot_lease: Mutex::new(Some(snapshot_lease)),
         });
     }
     Ok(prepared)
@@ -605,7 +922,7 @@ fn verify_linked_runtime_identity(
         }
         if loaded_path
             .as_ref()
-            .is_some_and(|path| path != &runtime_file.receipt.source_path)
+            .is_some_and(|path| path != &preloader_runtime_path(&runtime_file.receipt))
         {
             return Err(QualifiedFfmpegToolchainError::LinkedRuntime(format!(
                 "loaded module {} differs from approved source {}",
@@ -634,7 +951,7 @@ fn verify_linked_runtime_identity(
     }
     let approved_paths = runtime_files
         .iter()
-        .map(|file| file.receipt.source_path.clone())
+        .map(|file| preloader_runtime_path(&file.receipt))
         .collect::<BTreeSet<_>>();
     let system_directories = windows_system_directories()?;
     for loaded_path in loaded_process_module_paths()? {
@@ -650,6 +967,12 @@ fn verify_linked_runtime_identity(
     Ok(())
 }
 
+#[cfg(windows)]
+fn preloader_runtime_path(receipt: &QualifiedFfmpegRuntimeFileReceipt) -> PathBuf {
+    mondrian_validation_launcher::process_authority()
+        .and_then(|authority| authority.mapped_path(&receipt.source_path, &receipt.sha256))
+        .map_or_else(|| receipt.source_path.clone(), Path::to_path_buf)
+}
 #[cfg(windows)]
 fn module_path_is_admitted(
     loaded_path: &Path,
@@ -781,7 +1104,7 @@ fn canonical_module_path(
 }
 
 #[cfg(windows)]
-fn windows_system_directories() -> Result<Vec<PathBuf>, QualifiedFfmpegToolchainError> {
+pub(crate) fn windows_system_directories() -> Result<Vec<PathBuf>, QualifiedFfmpegToolchainError> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::SystemInformation::{
         GetSystemDirectoryW, GetWindowsDirectoryW,
@@ -903,63 +1226,69 @@ fn prepare_tool(
         });
     }
 
-    let version_output = run_tool(&snapshot_path, kind, &["-version"])?;
-    let version_output_sha = lower_sha256(&version_output);
-    if version_output_sha != expectation.version_output_sha256 {
-        return Err(QualifiedFfmpegToolchainError::VersionOutputMismatch {
-            kind,
-            expected: expectation.version_output_sha256.to_owned(),
-            actual: version_output_sha,
-        });
-    }
-
-    let capability_report = capture_capability_report(&snapshot_path, kind)?;
-    let capability_report_sha = lower_sha256(&capability_report);
-    if capability_report_sha != expectation.capability_report_sha256 {
-        return Err(QualifiedFfmpegToolchainError::CapabilityReportMismatch {
-            kind,
-            expected: expectation.capability_report_sha256.to_owned(),
-            actual: capability_report_sha,
-        });
-    }
-
     Ok(PreparedFfmpegTool {
         receipt: QualifiedFfmpegToolReceipt {
             kind,
             source_path: canonical_path,
             executable_sha256: expectation.executable_sha256.to_owned(),
             snapshot_sha256: snapshot_sha,
-            version_output_sha256: version_output_sha,
-            capability_report_sha256: capability_report_sha,
+            version_output_sha256: expectation.version_output_sha256.to_owned(),
+            capability_report_sha256: expectation.capability_report_sha256.to_owned(),
         },
         snapshot_path,
         snapshot_directory: snapshot_directory.to_path_buf(),
-        _source_lease: source,
-        _snapshot_lease: snapshot_lease,
+        _source_lease: Mutex::new(Some(source)),
+        _snapshot_lease: Mutex::new(Some(snapshot_lease)),
     })
 }
 
 #[cfg(windows)]
+fn verify_tool_observations(
+    toolchain: &Arc<PreparedFfmpegToolchain>,
+) -> Result<(), QualifiedFfmpegToolchainError> {
+    for tool in [&toolchain.ffmpeg, &toolchain.ffprobe] {
+        let kind = tool.receipt.kind;
+        let observed = lower_sha256(&run_tool(toolchain, kind, &["-version"])?);
+        if observed != tool.receipt.version_output_sha256 {
+            return Err(QualifiedFfmpegToolchainError::VersionOutputMismatch {
+                kind,
+                expected: tool.receipt.version_output_sha256.clone(),
+                actual: observed,
+            });
+        }
+        let observed = lower_sha256(&capture_capability_report(toolchain, kind)?);
+        if observed != tool.receipt.capability_report_sha256 {
+            return Err(QualifiedFfmpegToolchainError::CapabilityReportMismatch {
+                kind,
+                expected: tool.receipt.capability_report_sha256.clone(),
+                actual: observed,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
 fn verify_command_semantics(
-    ffmpeg: &PreparedFfmpegTool,
+    toolchain: &Arc<PreparedFfmpegToolchain>,
 ) -> Result<(), QualifiedFfmpegToolchainError> {
     let encoders = run_tool(
-        &ffmpeg.snapshot_path,
+        toolchain,
         QualifiedFfmpegToolKind::Ffmpeg,
         &["-hide_banner", "-encoders"],
     )?;
     let filters = run_tool(
-        &ffmpeg.snapshot_path,
+        toolchain,
         QualifiedFfmpegToolKind::Ffmpeg,
         &["-hide_banner", "-filters"],
     )?;
     let muxers = run_tool(
-        &ffmpeg.snapshot_path,
+        toolchain,
         QualifiedFfmpegToolKind::Ffmpeg,
         &["-hide_banner", "-muxers"],
     )?;
     let build_configuration = run_tool(
-        &ffmpeg.snapshot_path,
+        toolchain,
         QualifiedFfmpegToolKind::Ffmpeg,
         &["-hide_banner", "-buildconf"],
     )?;
@@ -977,13 +1306,13 @@ fn verify_command_semantics(
         &String::from_utf8_lossy(&muxers),
         |encoder| {
             run_tool(
-                &ffmpeg.snapshot_path,
+                toolchain,
                 QualifiedFfmpegToolKind::Ffmpeg,
                 &["-hide_banner", "-h", &format!("encoder={encoder}")],
             )
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .map_err(|error| MondrianError::MediaOpen {
-                path: ffmpeg.snapshot_path.display().to_string(),
+                path: toolchain.ffmpeg.snapshot_path.display().to_string(),
                 reason: error.to_string(),
             })
         },
@@ -993,14 +1322,14 @@ fn verify_command_semantics(
 
 #[cfg(windows)]
 fn capture_capability_report(
-    executable: &Path,
+    toolchain: &Arc<PreparedFfmpegToolchain>,
     kind: QualifiedFfmpegToolKind,
 ) -> Result<Vec<u8>, QualifiedFfmpegToolchainError> {
     let mut report = Vec::with_capacity(1024 * 1024);
     report.extend_from_slice(CAPABILITY_REPORT_DOMAIN);
     for arguments in kind.capability_arguments() {
         append_framed(&mut report, arguments.join("\0").as_bytes(), kind)?;
-        let output = run_tool(executable, kind, arguments)?;
+        let output = run_tool(toolchain, kind, arguments)?;
         append_framed(&mut report, &output, kind)?;
         if report.len() > MAXIMUM_TOOL_OUTPUT_BYTES {
             return Err(QualifiedFfmpegToolchainError::CapabilityReportTooLarge { kind });
@@ -1024,19 +1353,18 @@ fn append_framed(
 
 #[cfg(windows)]
 fn run_tool(
-    executable: &Path,
+    toolchain: &Arc<PreparedFfmpegToolchain>,
     kind: QualifiedFfmpegToolKind,
     arguments: &[&str],
 ) -> Result<Vec<u8>, QualifiedFfmpegToolchainError> {
     let deadline = Instant::now()
         .checked_add(TOOL_PROBE_TIMEOUT)
         .ok_or(QualifiedFfmpegToolchainError::ProbeDeadlineOverflow { kind })?;
-    let mut command = Command::new(executable);
+    let mut command = match kind {
+        QualifiedFfmpegToolKind::Ffmpeg => toolchain.ffmpeg_command()?,
+        QualifiedFfmpegToolKind::Ffprobe => toolchain.ffprobe_command()?,
+    };
     command.args(arguments);
-    if let Some(snapshot_directory) = executable.parent() {
-        command.current_dir(snapshot_directory);
-        command.env("PATH", snapshot_directory);
-    }
     let policy = SupervisedProcessPolicy {
         pipe_stdin: false,
         stdout: SupervisedStreamCapture::Head {
@@ -1056,7 +1384,10 @@ fn run_tool(
         policy,
         &ExecutionCancellationToken::new(),
     )
-    .map_err(|source| QualifiedFfmpegToolchainError::ProbeProcess { kind, source })?;
+    .map_err(|source| QualifiedFfmpegToolchainError::ProbeProcess {
+        kind,
+        source: Box::new(source),
+    })?;
     if !output.status.success() {
         return Err(QualifiedFfmpegToolchainError::ProbeFailed {
             kind,
@@ -1160,7 +1491,7 @@ fn create_direct_exclusive_file(path: &Path) -> std::io::Result<File> {
 }
 
 #[cfg(windows)]
-fn open_direct_read_directory(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_direct_read_directory(path: &Path) -> std::io::Result<File> {
     use std::os::windows::fs::OpenOptionsExt;
 
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
@@ -1239,6 +1570,30 @@ fn validate_sha256(
 /// Exact FFmpeg toolchain preparation or process-installation failure.
 #[derive(Debug, Error)]
 pub enum QualifiedFfmpegToolchainError {
+    /// Native namespace access-control preparation or readback failed.
+    #[error("FFmpeg capsule namespace seal failed: {0}")]
+    NamespaceSeal(#[source] std::io::Error),
+    /// A sealed preparation failed and retained its independent cleanup receipt.
+    #[error("{primary}; capsule preparation closure: {receipt:?}")]
+    PreparationCleanup {
+        /// Original identity or tool-probe failure.
+        #[source]
+        primary: Box<QualifiedFfmpegToolchainError>,
+        /// Exact consuming capsule cleanup outcome.
+        receipt: QualifiedFfmpegShutdownReceipt,
+    },
+    /// The run owner permanently closed process-wide child admission.
+    #[error("qualified FFmpeg process admission is closed")]
+    AdmissionClosed,
+    /// A command no longer carries its exact capsule spawn contract.
+    #[error("qualified FFmpeg spawn contract changed or authority was omitted")]
+    SpawnContractChanged,
+    /// A native helper has no loader-before-execution object authority.
+    #[error("native helper pre-loader and mapped-object authority is unavailable")]
+    PreloaderAuthorityUnavailable,
+    /// The bounded native child inventory cannot admit another owner.
+    #[error("qualified FFmpeg native child capacity exhausted")]
+    ChildCapacityExceeded,
     /// Descriptor/object-based execution has not yet been qualified here.
     #[error("exact FFmpeg executable ownership is not qualified on this platform")]
     UnsupportedPlatform,
@@ -1370,7 +1725,7 @@ pub enum QualifiedFfmpegToolchainError {
     ProbeProcess {
         kind: QualifiedFfmpegToolKind,
         #[source]
-        source: SupervisedProcessError,
+        source: Box<SupervisedProcessError>,
     },
     /// A fixed probe returned a non-success terminal status.
     #[error("{kind:?} probe '{arguments}' failed with {status}: {stderr}")]
@@ -1400,6 +1755,78 @@ pub enum QualifiedFfmpegToolchainError {
     /// Another exact identity was already installed in this process.
     #[error("a different exact FFmpeg toolchain is already installed in this process")]
     ProcessIdentityConflict,
+}
+
+pub(crate) fn process_toolchain() -> Option<&'static Arc<PreparedFfmpegToolchain>> {
+    PROCESS_TOOLCHAIN.get()
+}
+
+fn native_helper_template(path: &Path) -> Result<Command, QualifiedFfmpegToolchainError> {
+    #[cfg(windows)]
+    {
+        let authority = mondrian_validation_launcher::process_authority()
+            .ok_or(QualifiedFfmpegToolchainError::PreloaderAuthorityUnavailable)?;
+        authority
+            .validate()
+            .map_err(|error| QualifiedFfmpegToolchainError::LinkedRuntime(error.to_string()))?;
+        if path != authority.application_path() {
+            return Err(QualifiedFfmpegToolchainError::SpawnContractChanged);
+        }
+        let directory = path.parent().ok_or(QualifiedFfmpegToolchainError::SpawnContractChanged)?;
+        let system = windows_system_directories()?;
+        let root = system[0].parent().ok_or(QualifiedFfmpegToolchainError::SpawnContractChanged)?;
+        let mut command = Command::new(path);
+        command
+            .env_clear()
+            .current_dir(directory)
+            .env("PATH", directory)
+            .env("SystemRoot", root);
+        Ok(command)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(QualifiedFfmpegToolchainError::PreloaderAuthorityUnavailable)
+    }
+}
+
+pub(crate) fn record_native_cleanup_failure(
+    pid: u32,
+    cleanup: &crate::SupervisedProcessCleanupReceipt,
+) {
+    if cleanup.all_resources_released() {
+        return;
+    }
+    if let Some(owner) = PROCESS_TOOLCHAIN.get() {
+        let mut state = owner.lifecycle.lock();
+        state.admission_closed = true;
+        if state.child_cleanup_failures.iter().all(|failure| failure.child_pid != pid)
+            && state.child_cleanup_failures.len() < 256
+        {
+            state.child_cleanup_failures.push(QualifiedChildCleanupFailure {
+                child_pid: pid,
+                native_exit_observed: cleanup.native_exit_observed,
+                kill_error: cleanup.kill_error.clone(),
+                wait_error: cleanup.wait_error.clone(),
+                deadline_exceeded: cleanup.deadline_exceeded,
+                stdin_error: cleanup.stdin_error.clone(),
+                stdout_error: cleanup.stdout_error.clone(),
+                stderr_error: cleanup.stderr_error.clone(),
+            });
+        }
+    }
+}
+
+pub(crate) fn record_external_provider_cleanup_failure(error: &str) {
+    if let Some(owner) = PROCESS_TOOLCHAIN.get() {
+        let mut state = owner.lifecycle.lock();
+        state.admission_closed = true;
+        if state.external_capsule_cleanup_errors.len() < 256 {
+            state
+                .external_capsule_cleanup_errors
+                .push(format!("external provider runtime cleanup: {error}"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1578,8 +2005,8 @@ mod tests {
             },
             snapshot_path: path.to_path_buf(),
             snapshot_directory: capsule.path().to_path_buf(),
-            _source_lease: File::open(path).expect("open source lease"),
-            _snapshot_lease: File::open(path).expect("open snapshot lease"),
+            _source_lease: Mutex::new(Some(File::open(path).expect("open source lease"))),
+            _snapshot_lease: Mutex::new(Some(File::open(path).expect("open snapshot lease"))),
         };
         let directory_lease =
             open_direct_read_directory(capsule.path()).expect("retain capsule directory");
@@ -1588,13 +2015,24 @@ mod tests {
             ffmpeg: make_tool(QualifiedFfmpegToolKind::Ffmpeg, &ffmpeg_path),
             ffprobe: make_tool(QualifiedFfmpegToolKind::Ffprobe, &ffprobe_path),
             runtime_files: Vec::new(),
-            _snapshot_directory_lease: directory_lease,
-            _snapshot_directory: capsule,
+            _snapshot_directory_lease: Mutex::new(Some(directory_lease)),
+            snapshot_path: capsule.path().to_path_buf(),
+            _snapshot_directory: Mutex::new(Some(capsule)),
+            lifecycle: Mutex::new(CapsuleLifecycle::default()),
             namespace_poisoned: AtomicBool::new(false),
+            namespace_seal: Mutex::new(None),
+            ancestor_leases: Mutex::new(Vec::new()),
         });
+        let mut delayed = crate::FfmpegCommand::qualified(
+            toolchain.ffmpeg.command().expect("command template"),
+            Arc::clone(&toolchain),
+        );
+        let spawn_error = delayed.spawn().expect_err("spawn-time namespace rejection");
+        assert!(crate::FfmpegCommandError::is_error_cause(&spawn_error));
+        assert_eq!(toolchain.lifecycle.lock().children_admitted, 0);
         // Even a present old sentinel pathname must not become a Command.
         fs::write(
-            toolchain._snapshot_directory.path().join("invalid-ffmpeg-identity"),
+            toolchain.snapshot_path.as_path().join("invalid-ffmpeg-identity"),
             b"not authority",
         )
         .expect("create former sentinel pathname");
@@ -1606,9 +2044,9 @@ mod tests {
             toolchain.ffprobe_command(),
             Err(QualifiedFfmpegToolchainError::CapsuleNamespaceChanged)
         ));
-        fs::remove_file(toolchain._snapshot_directory.path().join("invalid-ffmpeg-identity"))
+        fs::remove_file(toolchain.snapshot_path.as_path().join("invalid-ffmpeg-identity"))
             .expect("remove former sentinel");
-        fs::remove_file(toolchain._snapshot_directory.path().join("poison.dll"))
+        fs::remove_file(toolchain.snapshot_path.as_path().join("poison.dll"))
             .expect("restore namespace");
         assert!(
             matches!(

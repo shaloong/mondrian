@@ -7,18 +7,31 @@
 //! - 预览帧缓存与解码调度
 //! - 代理文件生成（Proxy）
 
+mod approved_bmx;
+mod approved_provider_command;
+pub use approved_bmx::{
+    prepare_bmx_runtime, prepare_bmx_runtime_for_phase, ApprovedBmxCommand, ApprovedBmxTool,
+    BmxRuntimeHandle, PreparedBmxRuntime,
+};
 pub mod audio;
+pub use approved_provider_command::{
+    prepare_regulatory_pse_runtime, ApprovedProviderFile, ApprovedProviderRuntimeCleanupReceipt,
+    ApprovedRegulatoryPseCommand, PreparedRegulatoryPseRuntime, RegulatoryPseRuntimeAdmission,
+};
 mod audio_device;
 mod audio_output;
 mod audio_playback;
 pub mod audio_source;
 mod camera_raw;
 pub mod decoder;
+mod ffmpeg_command;
 mod ffmpeg_runtime;
 mod ffmpeg_tools;
 pub mod info;
 mod media_probe_process;
 pub mod multilevel_cache;
+#[cfg(windows)]
+mod native_process_job;
 mod owner_lifetime;
 mod packet_identity;
 pub mod preview;
@@ -31,12 +44,13 @@ pub mod waveform;
 
 pub use audio::{AudioBuffer, RealtimeAudioOutputControlError, RealtimeAudioOutputSnapshot};
 pub use audio_device::{
-    discover_realtime_audio_output_devices, RealtimeAudioCandidateCounts,
-    RealtimeAudioChannelSemantics, RealtimeAudioOutputContract, RealtimeAudioOutputDeviceCatalog,
-    RealtimeAudioOutputDeviceDescriptor, RealtimeAudioOutputDeviceEvidence,
-    RealtimeAudioOutputDeviceId, RealtimeAudioOutputDeviceIdError,
-    RealtimeAudioOutputDeviceSelection, RealtimeAudioOutputDiscoveryFailure,
-    RealtimeAudioOutputOpenFailure, RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
+    discover_realtime_audio_output_devices, probe_realtime_audio_output_contract,
+    RealtimeAudioCandidateCounts, RealtimeAudioChannelSemantics, RealtimeAudioOutputContract,
+    RealtimeAudioOutputDeviceCatalog, RealtimeAudioOutputDeviceDescriptor,
+    RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputDeviceId,
+    RealtimeAudioOutputDeviceIdError, RealtimeAudioOutputDeviceSelection,
+    RealtimeAudioOutputDiscoveryFailure, RealtimeAudioOutputOpenFailure,
+    RealtimeAudioOutputOpenFailureCode, RealtimeAudioSampleFormat,
     RealtimeAudioSupportedBufferSize,
 };
 pub use audio_output::{RealtimeAudioOutputLossReason, RealtimeAudioOutputShutdownEvidence};
@@ -67,6 +81,10 @@ pub use decoder::{
     HwAccelProbe, HwDeviceContextPool, HwDeviceContextPoolDiagnostics, HwDeviceContextPoolPolicy,
     RendererHwAccelDeviceContext, RendererHwAccelDeviceContextCreateError,
     RendererHwAccelDeviceContextInstallError,
+};
+pub use ffmpeg_command::{
+    media_helper_command, qualified_media_helper_path, FfmpegChild, FfmpegCommand,
+    SupervisedCommand,
 };
 pub use ffmpeg_runtime::verify_ffmpeg_runtime;
 pub use ffmpeg_tools::{ffmpeg_command, ffprobe_command, FfmpegCommandError};
@@ -107,24 +125,26 @@ pub use preview::{
     PreviewDecodeOutcome, PreviewDecodePath, PreviewDecodePayloadRequirement,
     PreviewDecodeRepresentation, PreviewDecodeRequest, PreviewDecodeSeekStrategy,
     PreviewDecodeSessionContext, PreviewDecodeSessionContextBootstrap,
-    PreviewDecodeSessionDisposition, PreviewDecodeSessionResidencyConfig, PreviewDecodeSource,
-    PreviewDecodeStageDurations, PreviewDecodeTemporalSelection, PreviewDecodeThreadingKind,
-    PreviewDecodeWorkerResources, PreviewHardwareDecodeBlocker,
-    PreviewHardwareDecodeCpuTransferStatus, PreviewHardwareDecodeDecision,
-    PreviewHardwareDecodeRequest, PreviewIsolatedDemuxExecutionEvidence,
-    PreviewNativeDecodeFallback, PreviewNativeDecodedFrame, PreviewNativeDecodedFrameError,
-    PreviewNativeDecodedFrameHandle, PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint,
-    PreviewPlaybackDirection, PreviewRepresentationQuality, PreviewScrubAdaptiveClass,
-    PreviewSeekIndexCache, PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy,
-    PreviewSeekIndexSource, PreviewSourceColorContract, PreviewSourceFieldProcessing,
-    PreviewSourceSampleIdentity, PreviewTemporalExtentSource, RgbaFrame,
+    PreviewDecodeSessionDisposition, PreviewDecodeSessionFamily,
+    PreviewDecodeSessionResidencyConfig, PreviewDecodeSource, PreviewDecodeStageDurations,
+    PreviewDecodeTemporalSelection, PreviewDecodeThreadingKind, PreviewDecodeWorkerResources,
+    PreviewHardwareDecodeBlocker, PreviewHardwareDecodeCpuTransferStatus,
+    PreviewHardwareDecodeDecision, PreviewHardwareDecodeRequest,
+    PreviewIsolatedDemuxExecutionEvidence, PreviewNativeDecodeFallback, PreviewNativeDecodedFrame,
+    PreviewNativeDecodedFrameError, PreviewNativeDecodedFrameHandle,
+    PreviewNativeDecodedFrameResource, PreviewNativeSurfaceHint, PreviewPlaybackDirection,
+    PreviewRepresentationQuality, PreviewScrubAdaptiveClass, PreviewSeekIndexCache,
+    PreviewSeekIndexCacheDiagnostics, PreviewSeekIndexCachePolicy, PreviewSeekIndexSource,
+    PreviewSourceColorContract, PreviewSourceFieldProcessing, PreviewSourceSampleIdentity,
+    PreviewTemporalExtentSource, RgbaFrame,
 };
 #[cfg(target_os = "linux")]
 pub use preview::{
     FfmpegDrmPrimeFrame, FfmpegDrmPrimeLayer, FfmpegDrmPrimeObject, FfmpegDrmPrimePlane,
 };
 pub use process_supervisor::{
-    run_supervised_command, run_supervised_command_while, SupervisedChild, SupervisedProcessError,
+    run_supervised_command, run_supervised_command_streaming_stdout, run_supervised_command_while,
+    SupervisedChild, SupervisedProcessCleanupReceipt, SupervisedProcessError,
     SupervisedProcessOutput, SupervisedProcessPolicy, SupervisedProcessStage,
     SupervisedProcessStream, SupervisedStreamCapture,
 };
@@ -137,8 +157,9 @@ pub use proxy::{
 };
 #[cfg(feature = "validation")]
 pub use qualified_ffmpeg::{
-    install_process_ffmpeg_toolchain, PreparedFfmpegToolchain,
-    QualifiedFfmpegRuntimeFileExpectation, QualifiedFfmpegRuntimeFileReceipt,
+    install_process_ffmpeg_toolchain, shutdown_process_ffmpeg_toolchain_until,
+    PreparedFfmpegToolchain, QualifiedFfmpegRuntimeFileExpectation,
+    QualifiedFfmpegRuntimeFileReceipt, QualifiedFfmpegShutdownReceipt,
     QualifiedFfmpegToolExpectation, QualifiedFfmpegToolKind, QualifiedFfmpegToolReceipt,
     QualifiedFfmpegToolchainError,
 };

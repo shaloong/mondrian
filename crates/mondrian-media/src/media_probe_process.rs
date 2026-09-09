@@ -8,6 +8,7 @@
 use std::ffi::OsStr;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::time::Instant;
 
@@ -113,13 +114,18 @@ pub fn prepare_media_probe_isolated(
     cancellation: &ExecutionCancellationToken,
     deadline: Instant,
 ) -> Result<IsolatedMediaProbeSnapshot, IsolatedMediaProbeError> {
-    let mut command = Command::new(helper_executable);
+    let mut command = crate::media_helper_command(helper_executable).map_err(|source| {
+        SupervisedProcessError::Io {
+            stage: crate::SupervisedProcessStage::Spawn,
+            source,
+        }
+    })?;
     command.arg(MEDIA_PROBE_WORKER_ARGUMENT).arg(path);
     run_probe_helper_command(&mut command, cancellation, deadline)
 }
 
 fn run_probe_helper_command(
-    command: &mut Command,
+    command: &mut impl crate::SupervisedCommand,
     cancellation: &ExecutionCancellationToken,
     deadline: Instant,
 ) -> Result<IsolatedMediaProbeSnapshot, IsolatedMediaProbeError> {

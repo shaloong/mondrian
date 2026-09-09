@@ -265,27 +265,18 @@ fn convert_decoded_to_float_rgba(
     path: &Path,
     source_color: PreviewSourceColorContract,
 ) -> Result<FloatRgbaFrame> {
-    let Some(source_color_space) = source_color.color_space() else {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: "data-texture samples cannot enter the scene-linear color materializer"
-                .to_owned(),
-        });
-    };
-    if !source_color_space.is_scene_linear() {
-        return Err(MondrianError::DecodeFailed {
-            asset_id: path.display().to_string(),
-            reason: format!(
-                "float preview materialization requires a scene-linear source identity, got {:?}",
-                source_color_space
-            ),
-        });
-    }
-
     let decoded_surface_format = decoded_surface_format_from_pixel(decoded.format());
     let decoded_video_sampling = decoded_video_sampling_from_frame(decoded);
     let copy_started_at = Instant::now();
     let rgba = unpack_ffmpeg_planar_float_rgba(decoded, path)?;
+    // Float storage does not imply a linear transfer function. Preserve the
+    // already resolved author interpretation while bypassing integer swscale
+    // for encoded RGB and numeric data just as for scene-linear RGB.
+    let color_contract = if source_color.is_scene_linear() {
+        DecodedRgbaFrameContract::source_linear(source_color)
+    } else {
+        resolve_cpu_rgba_contract(decoded, source_color, path)?
+    };
     let rgba = resize_float_rgba(
         &rgba,
         decoded.width(),
@@ -299,7 +290,7 @@ fn convert_decoded_to_float_rgba(
         target_width,
         target_height,
         rgba,
-        DecodedRgbaFrameContract::source_linear(source_color),
+        color_contract,
         PreviewDecodePath::InProcessFfmpegCpuFloat,
     )
     .with_decoded_surface_format(decoded_surface_format)
@@ -310,24 +301,30 @@ fn convert_decoded_to_float_rgba(
     }))
 }
 
+fn planar_float_layout(pixel_format: ffmpeg::util::format::pixel::Pixel) -> Option<(bool, bool)> {
+    use ffmpeg::util::format::pixel::Pixel;
+    match pixel_format {
+        Pixel::GBRPF32LE => Some((true, false)),
+        Pixel::GBRPF32BE => Some((false, false)),
+        Pixel::GBRAPF32LE => Some((true, true)),
+        Pixel::GBRAPF32BE => Some((false, true)),
+        _ => None,
+    }
+}
+
 fn unpack_ffmpeg_planar_float_rgba(
     decoded: &ffmpeg::util::frame::video::Video,
     path: &Path,
 ) -> Result<Vec<f32>> {
-    let (little_endian, has_alpha) = match decoded.format() {
-        ffmpeg::util::format::pixel::Pixel::GBRPF32LE => (true, false),
-        ffmpeg::util::format::pixel::Pixel::GBRPF32BE => (false, false),
-        ffmpeg::util::format::pixel::Pixel::GBRAPF32LE => (true, true),
-        ffmpeg::util::format::pixel::Pixel::GBRAPF32BE => (false, true),
-        format => {
-            return Err(MondrianError::DecodeFailed {
-                asset_id: path.display().to_string(),
-                reason: format!(
-                    "scene-linear source decoded to unsupported non-planar-f32 format {format:?}; refusing RGBA8 quantization"
-                ),
-            });
+    let (little_endian, has_alpha) = planar_float_layout(decoded.format()).ok_or_else(|| {
+        MondrianError::DecodeFailed {
+            asset_id: path.display().to_string(),
+            reason: format!(
+                "float source decoded to unsupported non-planar-f32 format {:?}; refusing integer quantization",
+                decoded.format()
+            ),
         }
-    };
+    })?;
 
     let width = decoded.width() as usize;
     let height = decoded.height() as usize;
@@ -754,7 +751,7 @@ fn materialize_decoded_to_cpu(
                 |frame| Ok(PreviewDecodedFramePayload::CpuYuv(frame)),
             );
         }
-        if source_color.is_scene_linear() {
+        if source_color.is_scene_linear() || planar_float_layout(decoded.format()).is_some() {
             return convert_decoded_to_float_rgba(
                 decoded,
                 target_width,
@@ -840,7 +837,7 @@ fn materialize_decoded_to_cpu(
             },
         );
     }
-    if source_color.is_scene_linear() {
+    if source_color.is_scene_linear() || planar_float_layout(transferred.format()).is_some() {
         return convert_decoded_to_float_rgba(
             &transferred,
             target_width,
@@ -907,7 +904,9 @@ fn materialize_decoded_to_cpu(
 fn cpu_preview_destination_format(
     decoded: &ffmpeg::util::frame::video::Video,
 ) -> ffmpeg::util::format::pixel::Pixel {
-    if decoded_video_sampling_from_frame(decoded).bit_depth > 8 {
+    if super::decode_contract::cpu_preview_uses_float(
+        decoded_video_sampling_from_frame(decoded).bit_depth,
+    ) {
         ffmpeg::util::format::pixel::Pixel::RGBA64LE
     } else {
         ffmpeg::util::format::pixel::Pixel::RGBA

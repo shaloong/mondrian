@@ -2330,6 +2330,7 @@ dependencies = [
  "mondrian-ui-theme",
  "mondrian-ui-tooltip",
  "mondrian-ui-widgets",
+ "mondrian-validation-launcher",
  "parking_lot",
  "pollster",
  "raw-window-handle",
@@ -2340,6 +2341,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 1.0.69",
+ "tiff",
  "tiny-skia",
  "tokio",
  "tracing",
@@ -2395,6 +2397,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
@@ -2459,6 +2462,7 @@ dependencies = [
 name = "mondrian-export"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
  "bytemuck",
@@ -2521,7 +2525,9 @@ dependencies = [
  "libc",
  "lru",
  "mondrian-core",
+ "mondrian-platform-core",
  "mondrian-storage",
+ "mondrian-validation-launcher",
  "parking_lot",
  "rubato",
  "serde",
@@ -2604,6 +2610,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 1.0.69",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2791,6 +2798,20 @@ dependencies = [
  "unicode-segmentation",
  "usvg",
  "wgpu",
+]
+
+[[package]]
+name = "mondrian-validation-launcher"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -11,7 +11,7 @@ use crate::{
     SupervisedStreamCapture,
 };
 use std::io;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 const EXTERNAL_DECODE_STDERR_RETAIN_BYTES: usize = 64 * 1024;
 
@@ -149,6 +149,9 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
         match run_external_decode_command_cancellable(&mut command, expected, should_cancel) {
             Ok(Some(output)) => output,
             Ok(None) => return Some(Ok(None)),
+            Err(error) if crate::FfmpegCommandError::is_error_cause(&error) => {
+                return Some(Err(MondrianError::Other(anyhow::Error::new(error))))
+            }
             Err(_) => return None,
         };
 
@@ -192,7 +195,7 @@ pub(super) fn try_decode_with_external_ffmpeg_cpu_rgba(
 }
 
 pub(super) fn run_external_decode_command_cancellable(
-    command: &mut Command,
+    command: &mut impl crate::SupervisedCommand,
     stdout_retain_bytes: usize,
     should_cancel: &(dyn Fn() -> bool + Send + Sync),
 ) -> io::Result<Option<(Output, bool)>> {
@@ -214,7 +217,17 @@ pub(super) fn run_external_decode_command_cancellable(
             },
             output.stdout_truncated,
         ))),
-        Err(SupervisedProcessError::Canceled { .. }) => Ok(None),
+        Err(error)
+            if error.is_canceled()
+                && (matches!(
+                    &error,
+                    SupervisedProcessError::Canceled {
+                        stage: crate::SupervisedProcessStage::Spawn
+                    }
+                ) || matches!(&error, SupervisedProcessError::Cleanup { cleanup, .. } if cleanup.all_resources_released())) =>
+        {
+            Ok(None)
+        }
         Err(error) => Err(io::Error::other(error)),
     }
 }

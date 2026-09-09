@@ -8,12 +8,13 @@ use super::{
 };
 use crate::audio::AudioBuffer;
 use crate::owner_lifetime::{abandon_io_error, dispose_canonical_or_abandon_opaque_panic_payload};
+use crate::{FfmpegChild as Child, FfmpegCommand as Command};
 use mondrian_core::{AudioChannelLayout, ExecutionCancellationToken, MondrianError, Result};
 use parking_lot::{Condvar, Mutex};
 use std::collections::VecDeque;
 use std::io::Read;
 use std::mem::ManuallyDrop;
-use std::process::{Child, ChildStderr, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{ChildStderr, ChildStdout, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::Arc;
@@ -1022,12 +1023,15 @@ fn run_decoder_teardown_worker(
     shutdown_signal.register_worker();
     let mut evidence = AudioWindowDecoderShutdownEvidence::default();
     let mut initial_sweep_pending = true;
+    let mut shutdown_deadline = None;
     loop {
-        let retired = terminate_teardown_owners(queue.wait_for_work(
-            shutdown_signal,
-            startup,
-            initial_sweep_pending,
-        ));
+        let owners = queue.wait_for_work(shutdown_signal, startup, initial_sweep_pending);
+        let deadline = if shutdown_signal.is_requested() {
+            *shutdown_deadline.get_or_insert_with(|| Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT)
+        } else {
+            Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT
+        };
+        let retired = terminate_teardown_owners_until(owners, deadline);
         if teardown_retirement_failed(retired) {
             teardown_faulted.store(true, Ordering::Release);
         }
@@ -1055,7 +1059,7 @@ fn run_decoder_teardown_worker(
                 idle
             };
             evidence.sessions_before = evidence.sessions_before.saturating_add(idle.len());
-            let retired = terminate_teardown_owners(idle);
+            let retired = terminate_teardown_owners_until(idle, deadline);
             if teardown_retirement_failed(retired) {
                 teardown_faulted.store(true, Ordering::Release);
             }
@@ -1074,7 +1078,6 @@ fn run_decoder_teardown_worker(
         };
         evidence.sessions_before = evidence.sessions_before.saturating_add(entries.len());
         evidence.merge(retired);
-        let deadline = Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT;
         evidence.merge(shutdown_entries_until(entries, deadline));
         // Sweep again after signal publication so an acquire that was already
         // inside the state critical section cannot escape terminal evidence.
@@ -1091,7 +1094,10 @@ fn run_decoder_teardown_worker(
         // Closing and draining after every admitted slot has quiesced makes a
         // random-seek handoff racing the global signal either visible here or
         // explicitly rejected by the bounded queue.
-        evidence.merge(terminate_teardown_owners(queue.close_and_take_pending()));
+        evidence.merge(terminate_teardown_owners_until(
+            queue.close_and_take_pending(),
+            deadline,
+        ));
         return evidence;
     }
 }
@@ -1107,17 +1113,21 @@ fn teardown_retirement_failed(evidence: AudioWindowDecoderShutdownEvidence) -> b
         || evidence.shutdown_worker_owner_abandonments > 0
 }
 
-fn terminate_teardown_owners(
+fn terminate_teardown_owners_until(
     owners: VecDeque<DecoderTeardownOwner>,
+    deadline: Instant,
 ) -> AudioWindowDecoderShutdownEvidence {
     let mut evidence = AudioWindowDecoderShutdownEvidence::default();
     for owner in owners {
-        evidence.merge(terminate_teardown_owner(owner));
+        evidence.merge(terminate_teardown_owner(owner, deadline));
     }
     evidence
 }
 
-fn terminate_teardown_owner(owner: DecoderTeardownOwner) -> AudioWindowDecoderShutdownEvidence {
+fn terminate_teardown_owner(
+    owner: DecoderTeardownOwner,
+    deadline: Instant,
+) -> AudioWindowDecoderShutdownEvidence {
     let external_references = match &owner {
         DecoderTeardownOwner::Session(_)
         | DecoderTeardownOwner::PartialSession(_)
@@ -1125,19 +1135,28 @@ fn terminate_teardown_owner(owner: DecoderTeardownOwner) -> AudioWindowDecoderSh
         DecoderTeardownOwner::Entry(entry) => Arc::strong_count(&entry.slot).saturating_sub(1),
     };
     let mut owner = ManuallyDrop::new(owner);
+    let mut abandon_owner = false;
     let terminated = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match &mut *owner {
-        DecoderTeardownOwner::Session(session) => session.terminate(),
-        DecoderTeardownOwner::PartialSession(session) => session.terminate(),
+        DecoderTeardownOwner::Session(session) => session.terminate_until(deadline),
+        DecoderTeardownOwner::PartialSession(session) => session.terminate_until(deadline),
         DecoderTeardownOwner::FinalizeSession { session, completion } => {
-            let result = session.finalize_after_stdout_on_owner_worker();
-            let evidence = session.terminate();
+            let result = session.finalize_after_stdout_on_owner_worker(deadline);
+            let evidence = session.terminate_until(deadline);
             let _ = completion.send(result);
             evidence
         }
         DecoderTeardownOwner::Entry(entry) => {
-            let mut slot = entry.slot.lock();
+            let Some(mut slot) = entry.slot.try_lock_until(deadline) else {
+                abandon_owner = true;
+                return AudioWindowDecoderShutdownEvidence {
+                    sessions_remaining: 1,
+                    resource_handles_remaining: 1,
+                    shutdown_worker_owner_abandonments: 1,
+                    ..AudioWindowDecoderShutdownEvidence::default()
+                };
+            };
             match slot.as_mut() {
-                Some(session) => session.terminate(),
+                Some(session) => session.terminate_until(deadline),
                 None => AudioWindowDecoderShutdownEvidence::default(),
             }
         }
@@ -1146,7 +1165,9 @@ fn terminate_teardown_owner(owner: DecoderTeardownOwner) -> AudioWindowDecoderSh
         Ok(mut terminated) => {
             terminated.external_session_slot_references =
                 terminated.external_session_slot_references.saturating_add(external_references);
-            drop(ManuallyDrop::into_inner(owner));
+            if !abandon_owner {
+                drop(ManuallyDrop::into_inner(owner));
+            }
             terminated
         }
         Err(payload) => AudioWindowDecoderShutdownEvidence {
@@ -1172,7 +1193,7 @@ fn shutdown_entries_until(
     loop {
         let mut busy = VecDeque::new();
         for entry in pending {
-            if let Some(terminated) = shutdown_entry_if_ready(entry, &mut busy) {
+            if let Some(terminated) = shutdown_entry_if_ready(entry, &mut busy, deadline) {
                 evidence.merge(terminated);
             }
         }
@@ -1201,6 +1222,7 @@ fn shutdown_entries_until(
 fn shutdown_entry_if_ready(
     entry: DecoderEntry,
     busy: &mut VecDeque<DecoderEntry>,
+    deadline: Instant,
 ) -> Option<AudioWindowDecoderShutdownEvidence> {
     let slot_owner = Arc::clone(&entry.slot);
     let Some(mut slot) = slot_owner.try_lock() else {
@@ -1211,7 +1233,7 @@ fn shutdown_entry_if_ready(
     let entry = ManuallyDrop::new(entry);
     let terminated =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match slot.as_mut() {
-            Some(session) => session.terminate(),
+            Some(session) => session.terminate_until(deadline),
             None => AudioWindowDecoderShutdownEvidence::default(),
         }));
     match terminated {
@@ -1273,6 +1295,7 @@ enum StdoutMessage {
 }
 
 struct DecodeSession {
+    native_pid: u32,
     source_path: std::path::PathBuf,
     sample_rate: u32,
     channel_layout: AudioChannelLayout,
@@ -1297,6 +1320,7 @@ struct DecodeSessionSpawnFailure {
 }
 
 struct PartialDecodeSession {
+    native_pid: u32,
     child: Option<Child>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
@@ -1313,6 +1337,7 @@ impl PartialDecodeSession {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Self {
+            native_pid: child.id(),
             child: Some(child),
             stdout,
             stderr,
@@ -1325,23 +1350,18 @@ impl PartialDecodeSession {
         }
     }
 
-    fn terminate(&mut self) -> AudioWindowDecoderShutdownEvidence {
+    fn terminate_until(&mut self, deadline: Instant) -> AudioWindowDecoderShutdownEvidence {
         self.stdout_rx.take();
         self.stderr_rx.take();
         self.stdout.take();
         self.stderr.take();
-        if let Some(child) = self.child.take() {
-            terminate_child_with_evidence(child, &mut self.shutdown_evidence);
-        }
-        join_pump_thread(
+        consume_audio_resources(
+            self.native_pid,
+            self.child.take(),
             self.stdout_thread.take(),
-            PumpKind::Stdout,
-            &mut self.shutdown_evidence,
-        );
-        join_pump_thread(
             self.stderr_thread.take(),
-            PumpKind::Stderr,
             &mut self.shutdown_evidence,
+            deadline,
         );
         self.permit.take();
         std::mem::take(&mut self.shutdown_evidence)
@@ -1446,6 +1466,12 @@ impl DecodeSession {
             }));
         }
         let child = native_spawn(&mut command).map_err(|error| {
+            if crate::FfmpegCommandError::is_error_cause(&error) {
+                return Box::new(DecodeSessionSpawnFailure {
+                    error: Box::new(MondrianError::Other(anyhow::Error::new(error))),
+                    owner: None,
+                });
+            }
             Box::new(DecodeSessionSpawnFailure {
                 error: Box::new(MondrianError::DecodeFailed {
                     asset_id: key.source.path.display().to_string(),
@@ -1538,6 +1564,7 @@ impl DecodeSession {
             sample_rate: key.sample_rate,
             channel_layout: key.channel_layout,
             next_frame: start_frame,
+            native_pid: partial.native_pid,
             child: partial.child.take(),
             terminal_status: None,
             stdout_rx: partial.stdout_rx.take(),
@@ -1645,11 +1672,13 @@ impl DecodeSession {
         Ok(())
     }
 
-    fn finalize_after_stdout_on_owner_worker(&mut self) -> std::result::Result<(), String> {
+    fn finalize_after_stdout_on_owner_worker(
+        &mut self,
+        deadline: Instant,
+    ) -> std::result::Result<(), String> {
         self.ended = true;
         self.awaiting_terminal_status = false;
         self.stdout_rx.take();
-        let deadline = Instant::now() + DECODER_TERMINAL_STATUS_WAIT;
         let status = if let Some(status) = self.terminal_status.take() {
             status
         } else {
@@ -1731,32 +1760,26 @@ impl DecodeSession {
             .unwrap_or_default()
     }
 
-    fn terminate_resources(&mut self) {
+    fn terminate_until(&mut self, deadline: Instant) -> AudioWindowDecoderShutdownEvidence {
         self.ended = true;
         self.stdout_rx.take();
         self.stderr_rx.take();
-        if let Some(child) = self.child.take() {
-            terminate_child_with_evidence(child, &mut self.shutdown_evidence);
-        }
-        self.terminal_status.take();
-        join_pump_thread(
+        consume_audio_resources(
+            self.native_pid,
+            self.child.take(),
             self.stdout_thread.take(),
-            PumpKind::Stdout,
-            &mut self.shutdown_evidence,
-        );
-        join_pump_thread(
             self.stderr_thread.take(),
-            PumpKind::Stderr,
             &mut self.shutdown_evidence,
+            deadline,
         );
+        self.terminal_status.take();
         self.pending.clear();
         self.pending_offset = 0;
-    }
-
-    fn terminate(&mut self) -> AudioWindowDecoderShutdownEvidence {
-        self.terminate_resources();
         self.permit.take();
         std::mem::take(&mut self.shutdown_evidence)
+    }
+    fn terminate(&mut self) -> AudioWindowDecoderShutdownEvidence {
+        self.terminate_until(Instant::now() + DECODER_SHUTDOWN_SLOT_WAIT)
     }
 }
 
@@ -1834,21 +1857,58 @@ enum PumpKind {
     Stderr,
 }
 
+fn consume_audio_resources(
+    native_pid: u32,
+    mut child: Option<Child>,
+    stdout: Option<JoinHandle<()>>,
+    stderr: Option<JoinHandle<()>>,
+    evidence: &mut AudioWindowDecoderShutdownEvidence,
+    deadline: Instant,
+) {
+    let mut cleanup = crate::SupervisedProcessCleanupReceipt {
+        native_exit_observed: true,
+        kill_error: None,
+        wait_error: None,
+        deadline_exceeded: false,
+        stdin_error: None,
+        stdout_error: None,
+        stderr_error: None,
+    };
+    if let Some(child) = child.as_mut() {
+        evidence.child_processes_observed = evidence.child_processes_observed.saturating_add(1);
+        cleanup = crate::process_supervisor::terminate_and_reap(child, deadline);
+        if cleanup.native_exit_observed {
+            evidence.child_processes_terminated =
+                evidence.child_processes_terminated.saturating_add(1);
+        } else {
+            evidence.resource_handles_remaining =
+                evidence.resource_handles_remaining.saturating_add(1);
+        }
+        if !cleanup.all_resources_released() {
+            evidence.child_process_termination_failures =
+                evidence.child_process_termination_failures.saturating_add(1);
+        }
+    }
+    cleanup.stdout_error = join_pump_thread(stdout, PumpKind::Stdout, evidence, deadline);
+    cleanup.stderr_error = join_pump_thread(stderr, PumpKind::Stderr, evidence, deadline);
+    cleanup.deadline_exceeded |= !cleanup.all_resources_released() && Instant::now() >= deadline;
+    crate::ffmpeg_command::record_native_cleanup(native_pid, &cleanup);
+    drop(child);
+}
+
 fn join_pump_thread(
     thread: Option<JoinHandle<()>>,
     kind: PumpKind,
     evidence: &mut AudioWindowDecoderShutdownEvidence,
-) {
-    let Some(thread) = thread else {
-        return;
-    };
-    let (panicked, owner_abandoned) = match thread.join() {
-        Ok(()) => (false, false),
-        Err(payload) => (
-            true,
-            dispose_canonical_or_abandon_opaque_panic_payload(payload),
-        ),
-    };
+    deadline: Instant,
+) -> Option<String> {
+    let thread = thread?;
+    let result = crate::process_supervisor::join_worker_until(thread, deadline);
+    let panicked = result.as_ref().is_err_and(|error| error.contains("panicked"));
+    let failed = result.is_err();
+    if failed {
+        evidence.resource_handles_remaining = evidence.resource_handles_remaining.saturating_add(1);
+    }
     match kind {
         PumpKind::Stdout => {
             evidence.stdout_pump_threads_observed =
@@ -1856,10 +1916,10 @@ fn join_pump_thread(
             if panicked {
                 evidence.stdout_pump_threads_panicked =
                     evidence.stdout_pump_threads_panicked.saturating_add(1);
-                if owner_abandoned {
-                    evidence.stdout_pump_thread_owner_abandonments =
-                        evidence.stdout_pump_thread_owner_abandonments.saturating_add(1);
-                }
+            }
+            if failed {
+                evidence.stdout_pump_thread_owner_abandonments =
+                    evidence.stdout_pump_thread_owner_abandonments.saturating_add(1);
             } else {
                 evidence.stdout_pump_threads_joined =
                     evidence.stdout_pump_threads_joined.saturating_add(1);
@@ -1871,61 +1931,21 @@ fn join_pump_thread(
             if panicked {
                 evidence.stderr_pump_threads_panicked =
                     evidence.stderr_pump_threads_panicked.saturating_add(1);
-                if owner_abandoned {
-                    evidence.stderr_pump_thread_owner_abandonments =
-                        evidence.stderr_pump_thread_owner_abandonments.saturating_add(1);
-                }
+            }
+            if failed {
+                evidence.stderr_pump_thread_owner_abandonments =
+                    evidence.stderr_pump_thread_owner_abandonments.saturating_add(1);
             } else {
                 evidence.stderr_pump_threads_joined =
                     evidence.stderr_pump_threads_joined.saturating_add(1);
             }
         }
     }
+    result.err()
 }
-
-fn terminate_child_with_evidence(
-    mut child: Child,
-    evidence: &mut AudioWindowDecoderShutdownEvidence,
-) {
-    evidence.child_processes_observed = evidence.child_processes_observed.saturating_add(1);
-    let mut failed = false;
-    let already_exited = match child.try_wait() {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(_) => {
-            failed = true;
-            false
-        }
-    };
-    if already_exited {
-        evidence.child_processes_terminated = evidence.child_processes_terminated.saturating_add(1);
-    } else {
-        if child.kill().is_err() {
-            failed = true;
-        }
-        match child.wait() {
-            Ok(_) => {
-                evidence.child_processes_terminated =
-                    evidence.child_processes_terminated.saturating_add(1);
-            }
-            Err(_) => {
-                failed = true;
-                evidence.resource_handles_remaining =
-                    evidence.resource_handles_remaining.saturating_add(1);
-            }
-        }
-    }
-    if failed {
-        evidence.child_process_termination_failures =
-            evidence.child_process_termination_failures.saturating_add(1);
-    }
-}
-
 #[cfg(windows)]
 fn hide_child_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
+    command.hide_window();
 }
 
 #[cfg(not(windows))]
@@ -2049,6 +2069,7 @@ mod tests {
             sample_rate: 48_000,
             channel_layout: AudioChannelLayout::Stereo,
             next_frame: 0,
+            native_pid: child.as_ref().map_or(0, |child| child.id()),
             child,
             terminal_status: None,
             stdout_rx: None,
@@ -2308,16 +2329,41 @@ mod tests {
     }
 
     #[test]
+    fn audio_pipe_teardown_uses_one_expired_deadline_and_keeps_both_failures() {
+        let (release, blocked) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let stdout = std::thread::spawn(move || {
+            let _ = blocked.recv();
+            let _ = finished.send(());
+        });
+        let stderr = std::thread::spawn(|| panic!("audio stderr failure"));
+        while !stderr.is_finished() {
+            std::thread::yield_now();
+        }
+        let mut evidence = AudioWindowDecoderShutdownEvidence::default();
+        let deadline = Instant::now();
+        consume_audio_resources(0, None, Some(stdout), Some(stderr), &mut evidence, deadline);
+        assert!(deadline.elapsed() < Duration::from_millis(100));
+        assert_eq!(evidence.stdout_pump_threads_joined, 0);
+        assert_eq!(evidence.stdout_pump_thread_owner_abandonments, 1);
+        assert_eq!(evidence.stderr_pump_threads_panicked, 1);
+        assert_eq!(evidence.stderr_pump_thread_owner_abandonments, 1);
+        assert!(!evidence.all_resources_released());
+        release.send(()).expect("release fixture reader");
+        done.recv_timeout(Duration::from_secs(1)).expect("fixture reader returned");
+    }
+    #[test]
     fn consuming_decoder_shutdown_reaps_child_and_joins_both_pumps() {
-        let child = std::process::Command::new(
-            std::env::current_exe().expect("current test executable path"),
+        let child = crate::ffmpeg_command::spawn_native_helper(
+            std::process::Command::new(
+                std::env::current_exe().expect("current test executable path"),
+            )
+            .arg("shutdown_child_fixture")
+            .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
         )
-        .arg("shutdown_child_fixture")
-        .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
         .expect("spawn disposable child process");
         let decoder = decoder_with_session(test_decode_session(
             Some(child),
@@ -2339,15 +2385,16 @@ mod tests {
 
     #[test]
     fn eof_terminal_handoff_waits_for_delayed_normal_process_exit() {
-        let child = std::process::Command::new(
-            std::env::current_exe().expect("current test executable path"),
+        let child = crate::ffmpeg_command::spawn_native_helper(
+            std::process::Command::new(
+                std::env::current_exe().expect("current test executable path"),
+            )
+            .arg("shutdown_child_fixture")
+            .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_EXIT_DELAY_MS", "20")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
         )
-        .arg("shutdown_child_fixture")
-        .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_EXIT_DELAY_MS", "20")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
         .expect("spawn delayed terminal child");
         let decoder = PersistentFfmpegAudioWindowDecoder::with_capacity(1);
         let mut session = test_decode_session(Some(child), None, None);
@@ -2396,7 +2443,9 @@ mod tests {
         assert_eq!(evidence.stdout_pump_threads_observed, 1);
         assert_eq!(evidence.stdout_pump_threads_joined, 0);
         assert_eq!(evidence.stdout_pump_threads_panicked, 1);
-        assert_eq!(evidence.stdout_pump_thread_owner_abandonments, 0);
+        // The shared bounded join retains every panic payload instead of
+        // running a potentially hostile destructor on the teardown owner.
+        assert_eq!(evidence.stdout_pump_thread_owner_abandonments, 1);
         assert!(!evidence.all_resources_released());
     }
 
@@ -2480,5 +2529,20 @@ mod tests {
         assert!(!evidence.all_resources_released());
         drop(retained_guard);
         drop(retained_slot);
+    }
+
+    #[test]
+    fn retired_busy_slot_preserves_expired_owner_deadline() {
+        let slot = Arc::new(Mutex::new(None));
+        let held = slot.lock();
+        let entry = DecoderEntry { key: test_session_key(0), slot: Arc::clone(&slot) };
+        let deadline = Instant::now();
+        let evidence = terminate_teardown_owner(DecoderTeardownOwner::Entry(entry), deadline);
+        assert!(deadline.elapsed() < Duration::from_millis(100));
+        assert_eq!(evidence.sessions_remaining, 1);
+        assert_eq!(evidence.external_session_slot_references, 1);
+        assert_eq!(evidence.shutdown_worker_owner_abandonments, 1);
+        assert!(!evidence.all_resources_released());
+        drop(held);
     }
 }

@@ -14,9 +14,10 @@ use super::execution_progress::{
     PreviewIsolatedDemuxTermination,
 };
 use super::MediaFileFingerprint;
+use crate::FfmpegChild as Child;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::{self, JoinHandle};
@@ -75,6 +76,9 @@ pub(super) struct IsolatedDemuxSession {
     lifecycle: PreviewIsolatedDemuxSessionEvidence,
     next_command_id: u64,
     poisoned: bool,
+    stderr_evidence: Vec<u8>,
+    cleanup_deadline: Option<Instant>,
+    cleanup_receipt: Option<crate::SupervisedProcessCleanupReceipt>,
 }
 
 impl IsolatedDemuxSession {
@@ -90,92 +94,65 @@ impl IsolatedDemuxSession {
             return Err(IsolatedDemuxOpenError::Canceled);
         }
         let nonce = launch_nonce();
-        let mut command = Command::new(&config.executable);
+        let mut command = crate::media_helper_command(&config.executable).map_err(|error| {
+            IsolatedDemuxOpenError::Failed(format!("admit Preview demux worker: {error}"))
+        })?;
         command
             .arg("--internal-demux-worker-v2")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_hidden_child(&mut command);
-        let mut child = command.spawn().map_err(|error| {
+        command.hide_window();
+        let child = command.spawn().map_err(|error| {
             IsolatedDemuxOpenError::Failed(format!(
                 "start Preview demux worker {}: {error}",
                 config.executable.display()
             ))
         })?;
-        let mut lifecycle = config.execution_observer.begin_isolated_demux_session();
-
-        let Some(mut stdin) = child.stdin.take() else {
-            terminate_child(&mut child);
-            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-            return Err(IsolatedDemuxOpenError::Failed(
-                "Preview demux worker stdin was not piped".to_owned(),
-            ));
-        };
-        if let Err(error) =
-            write_worker_request(&mut stdin, nonce, path, source_revision, video_stream_index)
-                .and_then(|()| stdin.flush())
-        {
-            terminate_child(&mut child);
-            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-            return Err(IsolatedDemuxOpenError::Failed(format!(
-                "send Preview demux worker request: {error}"
-            )));
-        }
-
-        let Some(stdout) = child.stdout.take() else {
-            terminate_child(&mut child);
-            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-            return Err(IsolatedDemuxOpenError::Failed(
-                "Preview demux worker stdout was not piped".to_owned(),
-            ));
-        };
-        let Some(stderr) = child.stderr.take() else {
-            terminate_child(&mut child);
-            lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-            return Err(IsolatedDemuxOpenError::Failed(
-                "Preview demux worker stderr was not piped".to_owned(),
-            ));
-        };
-        let (message_tx, message_rx) = mpsc::sync_channel(IPC_QUEUE_CAPACITY);
-        let protocol_reader = match thread::Builder::new()
-            .name("mondrian-preview-demux-ipc".to_owned())
-            .spawn(move || read_protocol_stream(stdout, nonce, message_tx))
-        {
-            Ok(reader) => reader,
-            Err(error) => {
-                terminate_child(&mut child);
-                lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-                return Err(IsolatedDemuxOpenError::Failed(format!(
-                    "start Preview demux protocol reader: {error}"
-                )));
-            }
-        };
-        let stderr_reader = match thread::Builder::new()
-            .name("mondrian-preview-demux-stderr".to_owned())
-            .spawn(move || drain_bounded_stderr(stderr))
-        {
-            Ok(reader) => reader,
-            Err(error) => {
-                terminate_child(&mut child);
-                let _ = protocol_reader.join();
-                lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-                return Err(IsolatedDemuxOpenError::Failed(format!(
-                    "start Preview demux stderr reader: {error}"
-                )));
-            }
-        };
-
+        let lifecycle = config.execution_observer.begin_isolated_demux_session();
         let mut source = Self {
             child,
-            stdin: Some(stdin),
-            messages: Some(message_rx),
-            protocol_reader: Some(protocol_reader),
-            stderr_reader: Some(stderr_reader),
+            stdin: None,
+            messages: None,
+            protocol_reader: None,
+            stderr_reader: None,
             lifecycle,
             next_command_id: 1,
             poisoned: false,
+            stderr_evidence: Vec::new(),
+            cleanup_deadline: None,
+            cleanup_receipt: None,
         };
+        let setup = (|| -> Result<(), String> {
+            let mut stdin = source.child.stdin.take().ok_or("Preview demux stdin was not piped")?;
+            write_worker_request(&mut stdin, nonce, path, source_revision, video_stream_index)
+                .and_then(|()| stdin.flush())
+                .map_err(|error| format!("send Preview demux worker request: {error}"))?;
+            source.stdin = Some(stdin);
+            let stdout = source.child.stdout.take().ok_or("Preview demux stdout was not piped")?;
+            let stderr = source.child.stderr.take().ok_or("Preview demux stderr was not piped")?;
+            let (message_tx, message_rx) = mpsc::sync_channel(IPC_QUEUE_CAPACITY);
+            source.messages = Some(message_rx);
+            source.protocol_reader = Some(
+                thread::Builder::new()
+                    .name("mondrian-preview-demux-ipc".to_owned())
+                    .spawn(move || read_protocol_stream(stdout, nonce, message_tx))
+                    .map_err(|error| format!("start Preview demux protocol reader: {error}"))?,
+            );
+            source.stderr_reader = Some(
+                thread::Builder::new()
+                    .name("mondrian-preview-demux-stderr".to_owned())
+                    .spawn(move || drain_bounded_stderr(stderr))
+                    .map_err(|error| format!("start Preview demux stderr reader: {error}"))?,
+            );
+            Ok(())
+        })();
+        if let Err(error) = setup {
+            let cleanup = source.terminate(PreviewIsolatedDemuxTermination::Failed);
+            return Err(IsolatedDemuxOpenError::Failed(format!(
+                "{error}; cleanup: {cleanup:?}"
+            )));
+        }
         let mut open_phases_seen = 0_u8;
         let stream = loop {
             match source.wait_for_message(should_cancel) {
@@ -381,96 +358,119 @@ impl IsolatedDemuxSession {
     }
 
     fn failure_with_stderr(&mut self, message: String) -> String {
-        self.reap_child_bounded();
-        self.stdin.take();
-        self.messages.take();
-        if let Some(reader) = self.protocol_reader.take() {
-            let _ = reader.join();
-        }
-        let stderr = self
-            .stderr_reader
-            .take()
-            .and_then(|reader| reader.join().ok())
-            .unwrap_or_default();
-        self.lifecycle.settle(PreviewIsolatedDemuxTermination::Failed);
-        if stderr.is_empty() {
-            message
-        } else {
-            format!("{message}; stderr: {}", String::from_utf8_lossy(&stderr))
-        }
+        let cleanup = self.terminate(PreviewIsolatedDemuxTermination::Failed);
+        format!(
+            "{message}; stderr: {}; native/pipe cleanup: {cleanup:?}",
+            String::from_utf8_lossy(&self.stderr_evidence)
+        )
+    }
+
+    fn closure_deadline(&mut self) -> Instant {
+        *self.cleanup_deadline.get_or_insert_with(|| Instant::now() + CLEAN_CLOSE_GRACE)
     }
 
     fn close(&mut self) {
-        if self.poisoned {
-            self.terminate(PreviewIsolatedDemuxTermination::Failed);
+        if self.cleanup_receipt.is_some() {
             return;
         }
-        let command_id = self.next_command_id;
-        let sent = self.send_command(DemuxWorkerCommand::Close { command_id }).is_ok();
-        if sent {
-            let deadline = Instant::now() + CLEAN_CLOSE_GRACE;
-            while Instant::now() < deadline {
-                let Some(messages) = self.messages.as_ref() else {
-                    break;
-                };
-                match messages.recv_timeout(IPC_POLL_INTERVAL) {
-                    Ok(Ok(DemuxProtocolMessage::Closed { command_id: observed }))
-                        if observed == command_id =>
-                    {
-                        let exited_cleanly = self.reap_child_bounded();
-                        self.stdin.take();
-                        self.messages.take();
-                        if let Some(reader) = self.protocol_reader.take() {
-                            let _ = reader.join();
+        let deadline = self.closure_deadline();
+        if !self.poisoned {
+            let command_id = self.next_command_id;
+            if self.send_command(DemuxWorkerCommand::Close { command_id }).is_ok() {
+                // Reserve part of this one deadline for native reap and both readers.
+                let acknowledgment_deadline =
+                    Instant::now() + deadline.saturating_duration_since(Instant::now()) / 2;
+                while Instant::now() < acknowledgment_deadline {
+                    let Some(messages) = self.messages.as_ref() else {
+                        break;
+                    };
+                    match messages.recv_timeout(
+                        IPC_POLL_INTERVAL
+                            .min(acknowledgment_deadline.saturating_duration_since(Instant::now())),
+                    ) {
+                        Ok(Ok(DemuxProtocolMessage::Closed { command_id: observed }))
+                            if observed == command_id =>
+                        {
+                            self.terminate(PreviewIsolatedDemuxTermination::CleanClose);
+                            return;
                         }
-                        if let Some(reader) = self.stderr_reader.take() {
-                            let _ = reader.join();
-                        }
-                        self.lifecycle.settle(if exited_cleanly {
-                            PreviewIsolatedDemuxTermination::CleanClose
-                        } else {
-                            PreviewIsolatedDemuxTermination::ForcedClose
-                        });
-                        self.poisoned = true;
-                        return;
+                        Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
+                        Err(RecvTimeoutError::Timeout) => {}
                     }
-                    Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
-                    Err(RecvTimeoutError::Timeout) => {}
                 }
             }
         }
-        self.terminate(PreviewIsolatedDemuxTermination::ForcedClose);
+        self.terminate(if self.poisoned {
+            PreviewIsolatedDemuxTermination::Failed
+        } else {
+            PreviewIsolatedDemuxTermination::ForcedClose
+        });
     }
 
-    fn terminate(&mut self, termination: PreviewIsolatedDemuxTermination) {
+    fn terminate(
+        &mut self,
+        mut termination: PreviewIsolatedDemuxTermination,
+    ) -> crate::SupervisedProcessCleanupReceipt {
+        if let Some(receipt) = &self.cleanup_receipt {
+            return receipt.clone();
+        }
         self.poisoned = true;
+        let deadline = self.closure_deadline();
         self.stdin.take();
         self.messages.take();
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        if let Some(reader) = self.protocol_reader.take() {
-            let _ = reader.join();
-        }
-        if let Some(reader) = self.stderr_reader.take() {
-            let _ = reader.join();
-        }
-        self.lifecycle.settle(termination);
-    }
-
-    fn reap_child_bounded(&mut self) -> bool {
-        let started = Instant::now();
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(_)) => return true,
-                Ok(None) if started.elapsed() < CLEAN_CLOSE_GRACE => {
-                    thread::sleep(IPC_POLL_INTERVAL);
+        self.child.stdin.take();
+        self.child.stdout.take();
+        self.child.stderr.take();
+        let mut passive_wait_error = None;
+        if termination == PreviewIsolatedDemuxTermination::CleanClose {
+            let passive_deadline =
+                Instant::now() + deadline.saturating_duration_since(Instant::now()) / 2;
+            loop {
+                match self.child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Err(error) => {
+                        passive_wait_error = Some(error.to_string());
+                        termination = PreviewIsolatedDemuxTermination::ForcedClose;
+                        break;
+                    }
+                    Ok(None) if Instant::now() < passive_deadline => {
+                        thread::sleep(IPC_POLL_INTERVAL)
+                    }
+                    Ok(None) => {
+                        termination = PreviewIsolatedDemuxTermination::ForcedClose;
+                        break;
+                    }
                 }
-                Ok(None) | Err(_) => break,
             }
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        false
+        let mut receipt = crate::process_supervisor::terminate_and_reap(&mut self.child, deadline);
+        if let Some(passive) = passive_wait_error {
+            receipt.wait_error = Some(match receipt.wait_error.take() {
+                Some(forced) => format!(
+                    "clean-close observation: {passive}; forced cleanup observation: {forced}"
+                ),
+                None => passive,
+            });
+        }
+        if let Some(reader) = self.protocol_reader.take() {
+            receipt.stdout_error =
+                crate::process_supervisor::join_worker_until(reader, deadline).err();
+        }
+        if let Some(reader) = self.stderr_reader.take() {
+            match crate::process_supervisor::join_worker_until(reader, deadline) {
+                Ok(bytes) => self.stderr_evidence = bytes,
+                Err(error) => receipt.stderr_error = Some(error),
+            }
+        }
+        receipt.deadline_exceeded |=
+            !receipt.all_resources_released() && Instant::now() >= deadline;
+        // Process counters describe observed native exit, never a kill request.
+        if receipt.native_exit_observed {
+            self.lifecycle.settle(termination);
+        }
+        crate::ffmpeg_command::record_native_cleanup(self.child.id(), &receipt);
+        self.cleanup_receipt = Some(receipt.clone());
+        receipt
     }
 }
 
@@ -563,18 +563,63 @@ fn launch_nonce() -> [u8; 16] {
     nonce
 }
 
-fn terminate_child(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+    #[test]
+    fn demux_cleanup_preserves_both_pipe_failures_and_original_deadline() {
+        let child = crate::ffmpeg_command::spawn_native_helper(
+            std::process::Command::new(std::env::current_exe().expect("test executable"))
+                .arg("shutdown_child_fixture")
+                .env("MONDRIAN_AUDIO_SHUTDOWN_CHILD_FIXTURE", "1")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .expect("disposable native child");
+        let observer = PreviewDecodeExecutionObserver::new();
+        let lifecycle = observer.begin_isolated_demux_session();
+        let (release, blocked) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let reader = thread::spawn(move || {
+            let _ = blocked.recv();
+            let _ = finished.send(());
+        });
+        let stderr = thread::spawn(|| -> Vec<u8> {
+            panic!("demux stderr failure");
+        });
+        while !stderr.is_finished() {
+            thread::yield_now();
+        }
+        let original_deadline = Instant::now() + Duration::from_millis(50);
+        let mut session = IsolatedDemuxSession {
+            child,
+            stdin: None,
+            messages: None,
+            protocol_reader: Some(reader),
+            stderr_reader: Some(stderr),
+            lifecycle,
+            next_command_id: 1,
+            poisoned: false,
+            stderr_evidence: Vec::new(),
+            cleanup_deadline: Some(original_deadline),
+            cleanup_receipt: None,
+        };
+        let started = Instant::now();
+        let receipt = session.terminate(PreviewIsolatedDemuxTermination::Canceled);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(receipt.native_exit_observed);
+        assert!(receipt.stdout_error.as_deref().is_some_and(|error| error.contains("deadline")));
+        assert!(receipt.stderr_error.as_deref().is_some_and(|error| error.contains("panicked")));
+        assert!(receipt.deadline_exceeded);
+        assert_eq!(session.cleanup_deadline, Some(original_deadline));
+        assert_eq!(
+            session.terminate(PreviewIsolatedDemuxTermination::Failed),
+            receipt
+        );
+        assert_eq!(observer.snapshot().isolated_demux.active_sessions, 0);
+        release.send(()).expect("release deliberately blocked fixture reader");
+        done.recv_timeout(Duration::from_secs(1))
+            .expect("fixture reader actually returned");
+    }
 }
-
-#[cfg(windows)]
-fn configure_hidden_child(command: &mut Command) {
-    use std::os::windows::process::CommandExt as _;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(windows))]
-fn configure_hidden_child(_command: &mut Command) {}

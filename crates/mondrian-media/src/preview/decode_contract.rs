@@ -182,6 +182,8 @@ pub struct PreviewDecodeSource {
     alpha_presence: PreviewDecodeAlphaPresence,
     native_surface_hint: Option<PreviewNativeSurfaceHint>,
     compact_cpu_yuv_hint: Option<PreviewCompactCpuYuvHint>,
+    cpu_component_bit_depth: Option<u8>,
+    still_image: bool,
     source_extent: Resolution,
 }
 
@@ -220,7 +222,7 @@ impl PreviewDecodeSource {
         } else {
             PreviewDecodeAlphaPresence::Opaque
         };
-        Self::new(
+        let mut source = Self::new(
             path.into(),
             fingerprint,
             stream.index,
@@ -228,7 +230,9 @@ impl PreviewDecodeSource {
             native_surface_hint_from_stream(stream, sampling.pixel_format),
             compact_cpu_yuv_hint_from_pixel_format(sampling.pixel_format),
             Resolution { width: stream.width, height: stream.height },
-        )
+        )?;
+        source.cpu_component_bit_depth = Some(sampling.bit_depth);
+        Ok(source)
     }
 
     /// Capture and validate one generated proxy artifact under its exact manifest contract.
@@ -266,7 +270,7 @@ impl PreviewDecodeSource {
             ProxyEncodingProfile::H265Main10 => Some(PreviewNativeSurfaceHint::P010),
             ProxyEncodingProfile::DnxHrSq8 | ProxyEncodingProfile::DnxHrHqx10 => None,
         };
-        Self::new(
+        let mut source = Self::new(
             path.into(),
             fingerprint,
             PROXY_PRIMARY_VIDEO_STREAM_INDEX,
@@ -279,7 +283,12 @@ impl PreviewDecodeSource {
                 | ProxyEncodingProfile::DnxHrSq8 => None,
             },
             source_extent,
-        )
+        )?;
+        source.cpu_component_bit_depth = Some(match manifest.encoding {
+            ProxyEncodingProfile::H264High8 | ProxyEncodingProfile::DnxHrSq8 => 8,
+            ProxyEncodingProfile::H265Main10 | ProxyEncodingProfile::DnxHrHqx10 => 10,
+        });
+        Ok(source)
     }
 
     /// Build an exact CPU-only source when no complete sampling evidence was frozen.
@@ -335,6 +344,8 @@ impl PreviewDecodeSource {
             alpha_presence,
             native_surface_hint,
             compact_cpu_yuv_hint,
+            cpu_component_bit_depth: None,
+            still_image: false,
             source_extent,
         })
     }
@@ -369,6 +380,40 @@ impl PreviewDecodeSource {
         self.compact_cpu_yuv_hint
     }
 
+    /// Freeze an admitted single-image Asset's physical source family.
+    ///
+    /// Callers must supply domain evidence; extensions and unknown CPU sources
+    /// do not establish this fact. It selects the existing bounded CPU-still
+    /// Session slot without changing request timing or presentation authority.
+    pub fn with_still_image_source(mut self) -> Self {
+        self.still_image = true;
+        self.native_surface_hint = None;
+        self.compact_cpu_yuv_hint = None;
+        self
+    }
+
+    /// Whether an admitted Asset established the single-image source family.
+    pub const fn is_still_image(&self) -> bool {
+        self.still_image
+    }
+
+    /// Conservative retained CPU RGBA source bytes per pixel, before working conversion.
+    ///
+    /// Encoded sources above eight bits retain float RGBA just like the actual
+    /// decoder materializer. Unproven sampling reserves float capacity; proven
+    /// eight-bit sources retain their smaller RGBA8 allocation. Compact YUV and
+    /// native surfaces have separate representation-specific accounting.
+    pub fn cpu_rgba_retained_bytes_per_pixel(&self, color: PreviewSourceColorContract) -> usize {
+        if color.is_scene_linear()
+            || color.is_data_texture()
+            || self.cpu_component_bit_depth.is_none_or(cpu_preview_uses_float)
+        {
+            4 * std::mem::size_of::<f32>()
+        } else {
+            4
+        }
+    }
+
     /// The source's own raster extent (never a consumer/output extent).
     pub const fn source_extent(&self) -> Resolution {
         self.source_extent
@@ -379,6 +424,10 @@ impl PreviewDecodeSource {
         matches!(self.alpha_presence, PreviewDecodeAlphaPresence::Opaque)
             && self.native_surface_hint.is_some()
     }
+}
+
+pub(super) const fn cpu_preview_uses_float(bit_depth: u8) -> bool {
+    bit_depth > 8
 }
 
 /// Working representation quality requested by one Preview decode consumer.
@@ -903,6 +952,10 @@ const fn native_surface_hint_from_pixel_format(
         | PixelFormat::Gbrap10le
         | PixelFormat::Gbrap12le
         | PixelFormat::Gbrap16le
+        | PixelFormat::Gbrpf32le
+        | PixelFormat::Gbrpf32be
+        | PixelFormat::Gbrapf32le
+        | PixelFormat::Gbrapf32be
         | PixelFormat::Rgb24
         | PixelFormat::Rgba
         | PixelFormat::Rgba64le
@@ -1253,6 +1306,51 @@ mod tests {
     }
 
     #[test]
+    fn still_source_identity_requires_explicit_frozen_kind_and_survives_request_projection() {
+        let unknown = PreviewDecodeSource::from_frozen_cpu_stream(
+            absolute_test_path("media/image.png"),
+            exact_fingerprint(41),
+            0,
+            Resolution { width: 16, height: 16 },
+        )
+        .expect("frozen source without asset kind");
+        assert!(
+            !unknown.is_still_image(),
+            "extensions are not source-kind authority"
+        );
+        let source = PreviewDecodeSource::from_probed_stream(
+            absolute_test_path("media/image.png"),
+            exact_fingerprint(42),
+            &video_stream(0, PixelFormat::P010, true),
+        )
+        .expect("probed sampling does not imply static time");
+        assert!(!source.is_still_image());
+        let still = source.with_still_image_source();
+        assert!(still.is_still_image());
+        assert!(still.native_surface_hint().is_none());
+        assert!(still.compact_cpu_yuv_hint().is_none());
+        let key = PreviewDecodeKey::new(
+            still,
+            mondrian_core::SourceSampleTarget::covering(mondrian_core::TimelineTime::ZERO),
+            PreviewDecodeRepresentation::NativeCpu,
+            super::super::PreviewSourceColorContract::automatic(
+                mondrian_core::ColorSpace::Rec709,
+                crate::DecodedVideoRange::Limited,
+            ),
+        )
+        .expect("static CPU key");
+        let request = super::super::PreviewDecodeRequest::from_key(
+            &key,
+            super::super::PreviewDecodeAccessMode::PlaybackCursor,
+        );
+        assert!(request.still_image);
+        assert_eq!(
+            request.access_mode,
+            super::super::PreviewDecodeAccessMode::PlaybackCursor
+        );
+    }
+
+    #[test]
     fn proxy_uses_output_stream_zero_and_profile_surface_instead_of_source_facts() {
         let original = PreviewDecodeSource::from_probed_stream(
             absolute_test_path("media/source.mov"),
@@ -1274,6 +1372,10 @@ mod tests {
             Some(PreviewNativeSurfaceHint::P010)
         );
         assert_eq!(proxy.video_stream_index(), 0);
+        assert!(
+            !proxy.is_still_image(),
+            "generated video proxy retains video session identity"
+        );
         assert_eq!(
             proxy.native_surface_hint(),
             Some(PreviewNativeSurfaceHint::Nv12)

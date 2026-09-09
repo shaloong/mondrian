@@ -5,7 +5,9 @@
 //! Keeping this policy here prevents media, proxy, and export call sites from
 //! acquiring different runtime implementations accidentally.
 
+use crate::FfmpegCommand;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 
 /// Command admission failed before a child process could be created.
@@ -21,8 +23,30 @@ pub enum FfmpegCommandError {
 }
 
 impl FfmpegCommandError {
-    pub(crate) fn is_cause_of(error: &mondrian_core::MondrianError) -> bool {
-        matches!(error, mondrian_core::MondrianError::Other(source) if source.is::<Self>())
+    /// Find typed command admission through native I/O and domain error wrappers.
+    pub fn is_error_cause(mut error: &(dyn std::error::Error + 'static)) -> bool {
+        loop {
+            if error.is::<Self>() {
+                return true;
+            }
+            if let Some(inner) =
+                error.downcast_ref::<std::io::Error>().and_then(std::io::Error::get_ref)
+                && Self::is_error_cause(inner)
+            {
+                return true;
+            }
+            match error.source() {
+                Some(source) => error = source,
+                None => return false,
+            }
+        }
+    }
+    /// Test whether a domain failure retains rejected execution authority.
+    pub fn is_cause_of(error: &mondrian_core::MondrianError) -> bool {
+        match error {
+            mondrian_core::MondrianError::Other(source) => source.chain().any(Self::is_error_cause),
+            _ => Self::is_error_cause(error),
+        }
     }
 }
 
@@ -65,16 +89,16 @@ pub(crate) struct ResolvedFfmpegTool {
 
 /// Construct an admitted FFmpeg command, using packaged/PATH resolution only
 /// when no qualification toolchain is installed. Rejection never yields a command.
-pub fn ffmpeg_command() -> Result<Command, FfmpegCommandError> {
+pub fn ffmpeg_command() -> Result<FfmpegCommand, FfmpegCommandError> {
     command(FfmpegTool::Ffmpeg)
 }
 
 /// Construct an admitted ffprobe command under the same policy as [`ffmpeg_command`].
-pub fn ffprobe_command() -> Result<Command, FfmpegCommandError> {
+pub fn ffprobe_command() -> Result<FfmpegCommand, FfmpegCommandError> {
     command(FfmpegTool::Ffprobe)
 }
 
-fn command(tool: FfmpegTool) -> Result<Command, FfmpegCommandError> {
+fn command(tool: FfmpegTool) -> Result<FfmpegCommand, FfmpegCommandError> {
     #[cfg(feature = "validation")]
     let qualified = match tool {
         FfmpegTool::Ffmpeg => crate::qualified_ffmpeg::process_ffmpeg_command(),
@@ -87,12 +111,12 @@ fn command(tool: FfmpegTool) -> Result<Command, FfmpegCommandError> {
 }
 
 fn resolve_command(
-    qualified: Result<Option<Command>, FfmpegCommandError>,
+    qualified: Result<Option<FfmpegCommand>, FfmpegCommandError>,
     fallback: impl FnOnce() -> ResolvedFfmpegTool,
-) -> Result<Command, FfmpegCommandError> {
+) -> Result<FfmpegCommand, FfmpegCommandError> {
     match qualified? {
         Some(command) => Ok(command),
-        None => Ok(Command::new(fallback().path)),
+        None => Ok(FfmpegCommand::new(fallback().path)),
     }
 }
 
@@ -144,7 +168,7 @@ mod tests {
         let path = root.path().join("ffmpeg.exe");
         let mut prepared = Command::new(&path);
         prepared.current_dir(root.path()).env("PATH", root.path()).arg("-nostdin");
-        let command = resolve_command(Ok(Some(prepared)), || {
+        let command = resolve_command(Ok(Some(FfmpegCommand::ordinary(prepared))), || {
             panic!("must not resolve another tool")
         })
         .expect("already admitted command");

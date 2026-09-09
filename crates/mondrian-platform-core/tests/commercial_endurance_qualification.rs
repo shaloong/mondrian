@@ -17,6 +17,262 @@ use sha2::{Digest, Sha256};
 const SHA: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SOURCE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+#[test]
+fn measurement_origin_excludes_startup_and_cannot_be_removed_or_overlapped() {
+    let (prepared, mut run, chunks) = qualified_fixture();
+    for (index, phase) in run.phases.iter_mut().enumerate() {
+        let startup = index as u64 * 9_000_030;
+        phase.started_at_run_us = startup + 9_000_000;
+        phase.completed_at_run_us = phase.started_at_run_us + 21;
+        phase.producer.measurement_timing =
+            Some(mondrian_platform_core::EndurancePhaseMeasurementTiming {
+                startup_started_at_run_us: startup,
+                startup_deadline_at_run_us: startup + 120_000_000,
+                owners_ready_at_run_us: phase.started_at_run_us,
+                measurement_started_at_run_us: phase.started_at_run_us,
+                measurement_deadline_at_run_us: phase.started_at_run_us + 20,
+            });
+    }
+    run.phase_owner_history = test_phase_owner_history(&run.run_id, &run.phases);
+    let evaluate = |run| {
+        prepared.evaluate(run, |receipt| {
+            chunks
+                .get(&receipt.file_name)
+                .cloned()
+                .ok_or(EnduranceQualificationError::EmptyChunk)
+        })
+    };
+    assert_eq!(
+        evaluate(run.clone())
+            .expect("nine-second setup excludes measured duration")
+            .status,
+        EnduranceQualificationStatus::Qualified
+    );
+    for mutation in 0..5 {
+        let mut invalid = run.clone();
+        let first_started = invalid.phases[0].started_at_run_us;
+        let first_completed = invalid.phases[0].completed_at_run_us;
+        match mutation {
+            0 => {
+                for phase in &mut invalid.phases {
+                    phase.producer.measurement_timing = None;
+                }
+            }
+            1 => {
+                invalid.phases[0]
+                    .producer
+                    .measurement_timing
+                    .as_mut()
+                    .expect("timing")
+                    .measurement_deadline_at_run_us -= 1
+            }
+            2 => {
+                invalid.phases[0]
+                    .producer
+                    .measurement_timing
+                    .as_mut()
+                    .expect("timing")
+                    .startup_deadline_at_run_us = first_started
+            }
+            3 => {
+                invalid.phases[0]
+                    .producer
+                    .measurement_timing
+                    .as_mut()
+                    .expect("timing")
+                    .measurement_started_at_run_us += 1
+            }
+            _ => {
+                invalid.phases[1]
+                    .producer
+                    .measurement_timing
+                    .as_mut()
+                    .expect("timing")
+                    .startup_started_at_run_us = first_completed - 1
+            }
+        }
+        invalid.phase_owner_history = test_phase_owner_history(&invalid.run_id, &invalid.phases);
+        if mutation == 0 {
+            for owner in &mut invalid.phase_owner_history {
+                let mut raw: serde_json::Value =
+                    serde_json::from_str(&owner.canonical_json).expect("owner");
+                raw.as_object_mut().expect("object").remove("measurement_timing");
+                owner.canonical_json = raw.to_string();
+                owner.sha256 = format!("{:x}", Sha256::digest(owner.canonical_json.as_bytes()));
+            }
+        }
+        assert!(
+            evaluate(invalid).is_err(),
+            "rehash-all mutation {mutation} must fail"
+        );
+    }
+}
+
+#[test]
+fn bmx_owner_requires_complete_clean_receipt_without_erasing_failed_cleanup() {
+    let (_, run, _) = qualified_fixture();
+    let original = &run.phase_owner_history[1];
+    let root: serde_json::Value =
+        serde_json::from_str(&original.canonical_json).expect("owner JSON");
+    let validate = |root: &serde_json::Value, status| {
+        let mut receipt = original.clone();
+        receipt.canonical_json = serde_json::to_string(root).expect("canonical owner");
+        receipt.sha256 = format!("{:x}", Sha256::digest(receipt.canonical_json.as_bytes()));
+        receipt.validates_binding(&run.run_id, &run.phases[1].phase_id, 1, status)
+    };
+    assert!(validate(&root, EndurancePhaseTerminalStatus::Completed));
+    let mut optional = root.clone();
+    optional["terminal"]["bmx_runtime"] = serde_json::Value::Null;
+    assert!(validate(&optional, EndurancePhaseTerminalStatus::Completed));
+    let mut clean = root;
+    clean["terminal"]["bmx_runtime"] = serde_json::json!({
+        "commands_released":true,"namespace_owned":true,"file_leases_released":true,
+        "deadline_exceeded":false,"namespace_validation_error":null,"namespace_restore_error":null,
+        "namespace_remove_error":null,"outstanding_owner_error":null,
+    });
+    assert!(validate(&clean, EndurancePhaseTerminalStatus::Completed));
+    for field in [
+        "commands_released",
+        "namespace_owned",
+        "file_leases_released",
+        "deadline_exceeded",
+    ] {
+        let mut failed = clean.clone();
+        failed["terminal"]["bmx_runtime"][field] = serde_json::json!(field == "deadline_exceeded");
+        assert!(
+            !validate(&failed, EndurancePhaseTerminalStatus::Completed),
+            "{field}"
+        );
+        failed["terminal"]["bmx_runtime"][field] = serde_json::json!("true");
+        assert!(
+            !validate(&failed, EndurancePhaseTerminalStatus::Completed),
+            "typed {field}"
+        );
+    }
+    for field in [
+        "namespace_validation_error",
+        "namespace_restore_error",
+        "namespace_remove_error",
+        "outstanding_owner_error",
+    ] {
+        let mut failed = clean.clone();
+        failed["terminal"]["bmx_runtime"][field] = serde_json::json!("actual owner cleanup failed");
+        assert!(
+            !validate(&failed, EndurancePhaseTerminalStatus::Completed),
+            "{field}"
+        );
+        failed["terminal"]["closure"]["status"] = serde_json::json!("failed");
+        failed["terminal"]["failures"] = serde_json::json!(["BMX owner cleanup failed"]);
+        assert!(
+            validate(&failed, EndurancePhaseTerminalStatus::Failed),
+            "retain {field}"
+        );
+    }
+    let fields = clean["terminal"]["bmx_runtime"]
+        .as_object()
+        .expect("receipt")
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    for field in fields {
+        let mut missing = clean.clone();
+        missing["terminal"]["bmx_runtime"]
+            .as_object_mut()
+            .expect("receipt")
+            .remove(&field);
+        assert!(
+            !validate(&missing, EndurancePhaseTerminalStatus::Completed),
+            "missing {field}"
+        );
+    }
+    clean["terminal"]["bmx_runtime"]["invented_cleanup"] = serde_json::json!(true);
+    assert!(!validate(&clean, EndurancePhaseTerminalStatus::Completed));
+}
+
+#[test]
+fn ancillary_inventory_roundtrips_and_rejects_partial_duplicate_or_cross_owner_evidence() {
+    use mondrian_platform_core::{
+        EnduranceAncillaryExportArtifact, EnduranceAncillaryPhaseEvidence,
+        EnduranceAncillaryWireJournal,
+    };
+    let (_, run, _) = qualified_fixture();
+    let mut producer = run.phases[1].producer.clone();
+    let legacy = serde_json::to_value(&producer).expect("legacy");
+    assert!(legacy.get("ancillary_program_sha256").is_none());
+    assert_eq!(
+        serde_json::from_value::<EndurancePhaseProducerEvidence>(legacy.clone())
+            .expect("legacy roundtrip"),
+        producer
+    );
+    let evidence = EnduranceAncillaryPhaseEvidence {
+        ancillary_program_sha256: SHA.to_owned(),
+        ancillary_export_artifacts: vec![EnduranceAncillaryExportArtifact {
+            artifact_id: "export-001".to_owned(),
+            verification_path: "/owner/export-001.json".into(),
+            verification_sha256: SHA.to_owned(),
+        }],
+        wire_journals: vec![EnduranceAncillaryWireJournal {
+            path: "/owner/wire-001.jsonl".into(),
+            sha256: SHA.to_owned(),
+        }],
+    };
+    assert!(evidence.validates_inventory());
+    producer.ancillary = Some(evidence.clone());
+    let declared = serde_json::to_value(&producer).expect("declared");
+    assert_eq!(
+        serde_json::from_value::<EndurancePhaseProducerEvidence>(declared.clone())
+            .expect("declared roundtrip"),
+        producer
+    );
+    for field in [
+        "ancillary_program_sha256",
+        "ancillary_export_artifacts",
+        "wire_journals",
+    ] {
+        let mut partial = declared.clone();
+        partial.as_object_mut().expect("object").remove(field);
+        assert!(serde_json::from_value::<EndurancePhaseProducerEvidence>(partial).is_err());
+    }
+    let mut unknown = legacy;
+    unknown["extra_ancillary"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<EndurancePhaseProducerEvidence>(unknown).is_err());
+    let mut duplicate = evidence.clone();
+    duplicate
+        .ancillary_export_artifacts
+        .push(duplicate.ancillary_export_artifacts[0].clone());
+    assert!(!duplicate.validates_inventory());
+    let mut overlap = evidence.clone();
+    overlap.wire_journals[0].path = overlap.ancillary_export_artifacts[0].verification_path.clone();
+    assert!(!overlap.validates_inventory());
+    let mut overflow = evidence.clone();
+    overflow.ancillary_export_artifacts = (0..257)
+        .map(|index| EnduranceAncillaryExportArtifact {
+            artifact_id: format!("export-{index}"),
+            verification_path: format!("/owner/export-{index}.json").into(),
+            verification_sha256: SHA.to_owned(),
+        })
+        .collect();
+    assert!(!overflow.validates_inventory());
+    let mut receipt = run.phase_owner_history[1].clone();
+    assert!(receipt.binds_ancillary(None));
+    assert!(!receipt.binds_ancillary(Some(&evidence)));
+    let mut report: serde_json::Value =
+        serde_json::from_str(&receipt.canonical_json).expect("owner");
+    report.as_object_mut().expect("object").extend(
+        serde_json::to_value(&evidence)
+            .expect("fields")
+            .as_object()
+            .expect("object")
+            .clone(),
+    );
+    receipt.canonical_json = serde_json::to_string(&report).expect("canonical");
+    assert!(receipt.binds_ancillary(Some(&evidence)));
+    assert!(!receipt.binds_ancillary(None));
+    let mut different = evidence;
+    different.wire_journals[0].sha256 = "c".repeat(64);
+    assert!(!receipt.binds_ancillary(Some(&different)));
+}
+
 fn file_sha256(path: &Path) -> String {
     format!(
         "{:x}",
@@ -221,6 +477,14 @@ fn phase(
             started_at_run_us,
             completed_at_run_us: started_at_run_us + 21,
             producer: EndurancePhaseProducerEvidence {
+                measurement_timing: Some(mondrian_platform_core::EndurancePhaseMeasurementTiming {
+                    startup_started_at_run_us: started_at_run_us,
+                    startup_deadline_at_run_us: started_at_run_us + 120_000_000,
+                    owners_ready_at_run_us: started_at_run_us,
+                    measurement_started_at_run_us: started_at_run_us,
+                    measurement_deadline_at_run_us: started_at_run_us + 20,
+                }),
+                ancillary: None,
                 owner: "mondrian-app".to_owned(),
                 verifier_id: "mondrian-app-endurance-capture-v1".to_owned(),
                 report_schema_version: 1,
@@ -274,8 +538,9 @@ fn qualified_fixture() -> (
         chunks.insert(manifest.chunks[0].file_name.clone(), chunk);
         manifests.push(manifest);
     }
+    let phase_owner_history = test_phase_owner_history("commercial-run-001", &manifests);
     let run = EnduranceRunManifest {
-        schema_version: 3,
+        schema_version: 4,
         run_id: "commercial-run-001".to_owned(),
         profile_sha256: prepared.profile_sha256().to_owned(),
         source_revision: SOURCE.to_owned(),
@@ -289,12 +554,67 @@ fn qualified_fixture() -> (
         capture_authority_sha256: SHA.to_owned(),
         environment_before_sha256: SHA.to_owned(),
         environment_after_sha256: SHA.to_owned(),
-        owner_closure: EnduranceRunOwnerClosureEvidence::event_loop(
-            ProcessEventLoopOwnerClosureEvidence::after_rust_owner_drop(),
-        ),
+        owner_closure: EnduranceRunOwnerClosureEvidence::WithFfmpeg {
+            surface: Box::new(EnduranceRunOwnerClosureEvidence::event_loop(
+                ProcessEventLoopOwnerClosureEvidence::after_rust_owner_drop(),
+            )),
+            ffmpeg: mondrian_platform_core::QualifiedRuntimeCapsuleClosureEvidence {
+                namespace_seal_verified: true,
+                children_admitted: 9,
+                children_settled: 9,
+                children_remaining: 0,
+                children_abandoned: 0,
+                child_cleanup_failures: Vec::new(),
+                deadline_exceeded: false,
+                capsule_removed: true,
+                cleanup_error: None,
+            },
+        },
         phases: manifests,
+        phase_owner_history,
     };
     (prepared, run, chunks)
+}
+
+fn test_phase_owner_history(
+    run_id: &str,
+    phases: &[EndurancePhaseManifest],
+) -> Vec<mondrian_platform_core::EndurancePhaseOwnerReceipt> {
+    let app: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/validation/fixtures/app-shutdown-closure.json"
+    ))
+    .expect("synthetic canonical App fixture");
+    let app_body: serde_json::Value =
+        serde_json::from_str(app["canonical_json"].as_str().expect("App JSON")).expect("App body");
+    let export: serde_json::Value =
+        serde_json::from_str(app_body["export"]["json"].as_str().expect("Export JSON"))
+            .expect("Export body");
+    let realtime: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/validation/fixtures/phase-owner-realtime.json"
+    ))
+    .expect("synthetic realtime fixture");
+    phases.iter().filter(|phase| phase.terminal.status != EndurancePhaseTerminalStatus::NotRun).enumerate().map(|(ordinal, phase)| {
+        let (kind, owners) = if phase.phase_id.contains("continuous-export") {
+            ("continuous_export", serde_json::json!({"AppOnly": app}))
+        } else {
+            (if phase.phase_id.contains("recovery") { "concurrent_recovery" } else { "playback_reference" }, serde_json::json!({"Realtime": realtime}))
+        };
+        let verifier = if kind == "playback_reference" { serde_json::Value::Null } else { serde_json::json!({
+            "workers_started":2,"workers_joined":2,"workers_remaining":0,"workers_abandoned":0,"cancellation_requested":true,"deadline_exceeded":false,"failure":null,
+            "terminal_publications":{"workers_started":2,"workers_joined":2,"workers_remaining":0,"workers_abandoned":0,"failure":null,"last_worker":{
+                "job_id":"11111111-1111-4111-8111-111111111111","output_path":"fixture-export.mp4","thread_joined":true,"evidence_persisted":true,"panic":null,"failure":null,
+                "terminal_snapshot_json":serde_json::json!({"schema_version":1,"job":{
+                    "id":"11111111-1111-4111-8111-111111111111","generation":2,"output_path":"fixture-export.mp4","output_policy":"create_only","preset_name":"fixture","status":{"status":"completed"},"progress":{},"publication":{},"diagnostics":{},"created_at":"2026-09-06T00:00:00Z","started_at":"2026-09-06T00:00:00Z","completed_at":"2026-09-06T00:00:01Z","terminal_evidence":null,"artifact_publication":null,"executed":true
+                }}).to_string()
+            }},
+            "last_worker":{"job_id":"11111111-1111-4111-8111-111111111111","output_path":"fixture-export.mp4","thread_joined":true,"evidence_persisted":true,"verification_failure":null,"panic":null,"failure":null,
+                "native_cleanup":{"native_exit_observed":true,"kill_error":null,"wait_error":null,"deadline_exceeded":false,"stdin_error":null,"stdout_error":null,"stderr_error":null}}
+        }) };
+        let report = serde_json::json!({"schema_version":2,"run_id":run_id,"phase_id":phase.phase_id,"ordinal":ordinal,"measurement_timing":phase.producer.measurement_timing,
+            "terminal":{"phase_kind":kind,"closure":{"status":phase.terminal.status,"playback_workers_terminated":true,"supervised_child_processes_remaining":0,"export":export},"owners":owners,"export_verifier":verifier,"failures":[]}});
+        let canonical_json = report.to_string();
+        mondrian_platform_core::EndurancePhaseOwnerReceipt {phase_id:phase.phase_id.clone(),report_path:format!("phase-owner-{ordinal:02}.json"),sha256:format!("{:x}",Sha256::digest(canonical_json.as_bytes())),canonical_json}
+    }).collect()
 }
 
 #[test]
@@ -316,6 +636,77 @@ fn complete_serial_campaign_qualifies_and_self_verifies() {
 }
 
 #[test]
+fn declared_ancillary_inventory_is_bound_across_owner_manifest_and_report() {
+    use mondrian_platform_core::{
+        EnduranceAncillaryExportArtifact, EnduranceAncillaryPhaseEvidence,
+        EnduranceAncillaryWireJournal,
+    };
+    let (prepared, mut run, chunks) = qualified_fixture();
+    for (phase, owner) in run.phases.iter_mut().zip(&mut run.phase_owner_history) {
+        let evidence = EnduranceAncillaryPhaseEvidence {
+            ancillary_program_sha256: SHA.to_owned(),
+            ancillary_export_artifacts: (0..phase.terminal.counters.export_artifacts_verified)
+                .map(|index| EnduranceAncillaryExportArtifact {
+                    artifact_id: format!("export-{index}"),
+                    verification_path: format!("/owner/{}/export-{index}.json", phase.phase_id)
+                        .into(),
+                    verification_sha256: SHA.to_owned(),
+                })
+                .collect(),
+            wire_journals: if phase.phase_id.contains("continuous-export") {
+                vec![]
+            } else {
+                vec![EnduranceAncillaryWireJournal {
+                    path: format!("/owner/{}/wire.jsonl", phase.phase_id).into(),
+                    sha256: SHA.to_owned(),
+                }]
+            },
+        };
+        let mut root: serde_json::Value =
+            serde_json::from_str(&owner.canonical_json).expect("owner root");
+        root.as_object_mut().expect("root").extend(
+            serde_json::to_value(&evidence)
+                .expect("evidence")
+                .as_object()
+                .expect("fields")
+                .clone(),
+        );
+        owner.canonical_json = serde_json::to_string(&root).expect("canonical");
+        owner.sha256 = format!("{:x}", Sha256::digest(owner.canonical_json.as_bytes()));
+        phase.producer.ancillary = Some(evidence);
+    }
+    let report = prepared
+        .evaluate(run.clone(), |receipt| {
+            chunks
+                .get(&receipt.file_name)
+                .cloned()
+                .ok_or(EnduranceQualificationError::EmptyChunk)
+        })
+        .expect("evaluate declared program");
+    assert_eq!(report.status, EnduranceQualificationStatus::Qualified);
+    assert!(report.verify_evidence());
+    let roundtrip = serde_json::from_slice::<mondrian_platform_core::EnduranceQualificationReport>(
+        &serde_json::to_vec(&report).expect("serialize report"),
+    )
+    .expect("strict report roundtrip");
+    assert_eq!(report, roundtrip);
+    for (actual, phase) in report.phases.iter().zip(&run.phases) {
+        assert_eq!(actual.ancillary, phase.producer.ancillary);
+    }
+    run.phases[1]
+        .producer
+        .ancillary
+        .as_mut()
+        .expect("declared")
+        .ancillary_export_artifacts[0]
+        .verification_sha256 = "c".repeat(64);
+    assert!(matches!(
+        prepared.evaluate(run, |_| Err(EnduranceQualificationError::EmptyChunk)),
+        Err(EnduranceQualificationError::InvalidRunOwnerClosure)
+    ));
+}
+
+#[test]
 fn schema_three_owner_closure_and_machine_plan_are_hashed_into_report() {
     let (prepared, mut run, chunks) = qualified_fixture();
     let expected_machine_plan = run.machine_plan_sha256.clone();
@@ -327,7 +718,7 @@ fn schema_three_owner_closure_and_machine_plan_are_hashed_into_report() {
                 .ok_or(EnduranceQualificationError::EmptyChunk)
         })
         .expect("evaluate schema-three run");
-    assert_eq!(report.schema_version, 3);
+    assert_eq!(report.schema_version, 4);
     assert!(report.owner_closure.all_owned_authority_released());
     assert_eq!(report.machine_plan_sha256, expected_machine_plan);
     report.machine_plan_sha256 = "b".repeat(64);
@@ -360,7 +751,7 @@ fn started_concurrent_recovery_rejects_not_applicable_run_owner_closure() {
 fn malformed_event_loop_owner_closure_fails_before_phase_replay() {
     let (prepared, run, _) = qualified_fixture();
     let mut value = serde_json::to_value(run).expect("serialize run");
-    value["owner_closure"]["closure"]["physical_native_termination_verified"] =
+    value["owner_closure"]["surface"]["closure"]["physical_native_termination_verified"] =
         serde_json::json!(true);
     let run = serde_json::from_value(value).expect("deserialize malformed closure");
 
@@ -384,6 +775,7 @@ fn malformed_machine_plan_digest_is_rejected_before_phase_replay() {
 fn missing_phase_is_incomplete_not_qualified() {
     let (prepared, mut run, chunks) = qualified_fixture();
     run.phases.pop();
+    run.phase_owner_history = test_phase_owner_history(&run.run_id, &run.phases);
     let report = prepared
         .evaluate(run, |receipt| {
             chunks
@@ -404,7 +796,9 @@ fn not_run_phase_remains_explicitly_incomplete() {
     phase.chunks.clear();
     phase.completed_at_run_us = phase.started_at_run_us;
     phase.terminal.status = EndurancePhaseTerminalStatus::NotRun;
+    phase.producer.measurement_timing = None;
     phase.terminal.counters = EnduranceCounters::default();
+    run.phase_owner_history = test_phase_owner_history(&run.run_id, &run.phases);
     let report = prepared
         .evaluate(run, |receipt| {
             chunks
@@ -702,10 +1096,18 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                         "exact_picture_ready": true,
                     }),
                     "surface_device_reopen" => {
+                        let gpu_owners: serde_json::Value = serde_json::from_str(include_str!(
+                            "../../../tests/validation/fixtures/window-owner-closure.json"
+                        ))
+                        .expect("owner fixture");
                         let shutdown_receipt_json = serde_json::to_string(&serde_json::json!({
-                            "schema_version": 3,
+                            "schema_version": 4,
                             "surface_generation": cycle + 1,
                             "device_generation": cycle + 3,
+                            "worker_shutdown": "terminated",
+                            "wake_callbacks": gpu_owners["host_shutdown"]["preview"]["work_callbacks"],
+                            "native_wake_failures": 0,
+                            "wake_registration_rejections": 0,
                             "worker_started": true,
                             "worker_terminated": true,
                             "worker_panicked": false,
@@ -820,14 +1222,21 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                 let operation_receipt_sha256 =
                     format!("{:x}", Sha256::digest(operation_receipt_json.as_bytes()));
                 let window_run_receipt = (step == "surface_device_reopen").then(|| {
-                    let runtime = r#"{"supervisor":"terminated"}"#;
-                    let host = r#"{"services":"returned"}"#;
+                    let owners: serde_json::Value = serde_json::from_str(include_str!(
+                        "../../../tests/validation/fixtures/window-owner-closure.json"
+                    )).expect("owner replay fixture");
+                    let runtime = serde_json::to_string(&owners["runtime_shutdown"]).expect("runtime leaf");
+                    let host = serde_json::to_string(&owners["host_shutdown"]).expect("host leaf");
                     let gpu = serde_json::to_string(&serde_json::json!({
                         "surface_generation": cycle + 2,
                         "device_generation": cycle + 4,
                         "publication_cleanup": { "Ok": null },
                         "retirement": {
                             "retired": {
+                                "worker_shutdown": "terminated",
+                                "wake_callbacks": owners["host_shutdown"]["preview"]["work_callbacks"],
+                                "native_wake_failures": 0,
+                                "wake_registration_rejections": 0,
                                 "worker_started": true,
                                 "worker_terminated": true,
                                 "worker_panicked": false,
@@ -845,8 +1254,25 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
                     }))
                     .expect("serialize final GPU shutdown");
                     let native = r#"{"event_loop_borrow_returned":true,"window_owner_scope_exited":true,"physical_native_termination":"unverified"}"#;
+                    let final_gpu: serde_json::Value = serde_json::from_str(&gpu).expect("final GPU history");
+                    let mut old_raw: serde_json::Value = serde_json::from_str(receipt["shutdown_receipt_json"].as_str().expect("old receipt JSON")).expect("old raw history");
+                    let old_fields = old_raw.as_object_mut().expect("old fields");
+                    old_fields.remove("schema_version"); old_fields.remove("surface_generation"); old_fields.remove("device_generation");
+                    let old_gpu = serde_json::json!({ "surface_generation": receipt["surface_generation_before"],
+                        "device_generation": receipt["device_generation_before"], "publication_cleanup": { "Ok": null },
+                        "retirement": { "retired": old_raw } });
+                    let generation_history = serde_json::json!({
+                        "schema_version": 1, "overflowed": false,
+                        "events": [
+                            { "event": "began", "surface_generation": receipt["surface_generation_before"], "device_generation": receipt["device_generation_before"] },
+                            { "event": "activated", "surface_generation": receipt["surface_generation_after"], "device_generation": receipt["device_generation_after"] },
+                            { "event": "retired", "shutdown": old_gpu },
+                            { "event": "final", "shutdown": final_gpu }
+                        ]
+                    });
                     let outer = serde_json::json!({
-                        "schema_version": 2,
+                        "schema_version": 3,
+                        "generation_history": generation_history,
                         "outcome": "active_exited",
                         "recovery_receipt_json": operation_receipt_json.clone(),
                         "recovery_receipt_sha256": operation_receipt_sha256.clone(),
@@ -885,6 +1311,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
             "producer_owner": phase.producer.owner,
             "producer_verifier_id": phase.producer.verifier_id,
             "events": events,
+            "measurement_timing": phase.producer.measurement_timing,
         });
         std::fs::write(
             &raw_path,
@@ -905,6 +1332,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
             "event_count": events.len(),
             "verified_export_artifacts": phase.terminal.counters.export_artifacts_verified,
             "recovery_cycles": phase.terminal.counters.recovery_cycles,
+            "measurement_timing": phase.producer.measurement_timing,
         });
         std::fs::write(
             &report_path,
@@ -926,10 +1354,31 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::to_vec_pretty(&profile()).expect("serialize profile"),
     )
     .expect("write profile");
+    let preset_path = temporary.path().join("synthetic-export-preset.json");
+    std::fs::write(&preset_path, br#"{"artifact":{"kind":"media_file"}}"#)
+        .expect("write structural preset fixture");
+    let exports = profile()
+        .phases
+        .iter()
+        .filter(|phase| phase.kind != EndurancePhaseKind::PlaybackReference)
+        .map(|phase| {
+            serde_json::json!({
+                "phase_id":phase.phase_id,
+                "preset":{"path":preset_path,"sha256":file_sha256(&preset_path)}
+            })
+        })
+        .collect::<Vec<_>>();
     let machine_plan_path = temporary.path().join("machine-plan.json");
     std::fs::write(
         &machine_plan_path,
-        br#"{"schema_version":2,"plan_id":"test-machine-plan"}"#,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version":2,"plan_id":"test-machine-plan",
+            "exports":exports,
+            "verifier_tools": {
+                "preloader": {"path":temporary.path().join("synthetic-launcher.exe"),"sha256":SHA},
+                "runtime_files":[{"path":temporary.path().join("approved-avcodec-62.dll"),"sha256":SHA}]
+            }
+        })).expect("serialize synthetic preloader-bound machine plan"),
     )
     .expect("write machine plan");
     run.machine_plan_sha256 = file_sha256(&machine_plan_path);
@@ -968,6 +1417,15 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     )
     .expect("write authority");
     run.capture_authority_sha256 = file_sha256(&authority_path);
+    for owner in &mut run.phase_owner_history {
+        let path = evidence_directory.join(&owner.report_path);
+        owner.report_path = path.to_string_lossy().into_owned();
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(owner).expect("serialize complete phase owner fixture"),
+        )
+        .expect("write complete phase owner fixture");
+    }
     let manifest_path = temporary.path().join("run.json");
     std::fs::write(
         &manifest_path,
@@ -1017,7 +1475,47 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         .arg(SHA)
         .arg("-OutputPath")
         .arg(&output_path);
-    let status = verifier.status().expect("run PowerShell verifier");
+    // Synthetic protocol evidence, not a claim that these native processes ran.
+    // Rebind this independent outer fixture for each intentionally rehashed test
+    // manifest so downstream owner mutations are tested rather than masked by
+    // the outer manifest SHA guard.
+    let preloader_path = temporary.path().join("native-preloader-report.json");
+    let staged_app = temporary.path().join("removed-capsule").join("app.exe");
+    let staged_codec = temporary.path().join("removed-capsule").join("avcodec-62.dll");
+    let preloader_template = serde_json::json!({
+        "schema_version":1,"exit_code":0,"deadline_exceeded":false,
+        "capsule_removed":true,"descendants_reaped":true,"errors":[],
+        "child_manifest":{"path":manifest_path,"sha256":file_sha256(&manifest_path)},
+        "attestation": {
+            "schema_version":1,"launcher_pid":100,"child_pid":101,
+            "launcher_sha256":SHA,"request_sha256":SHA,
+            "machine_plan_sha256":file_sha256(&machine_plan_path),
+            "challenge":"12345678-1234-4234-8234-123456789abc",
+            "owned_images":[
+                {"source":{"path":temporary.path().join("approved-app.exe"),"sha256":SHA},"staged_path":staged_app,"object":{"volume_serial":10,"file_index":1,"length":256}},
+                {"source":{"path":temporary.path().join("approved-avcodec-62.dll"),"sha256":SHA},"staged_path":staged_codec,"object":{"volume_serial":10,"file_index":2,"length":256}}
+            ],
+            "mapped_image_paths":[staged_app,staged_codec]
+        }
+    });
+    let run_verifier = || {
+        let mut report = preloader_template.clone();
+        report["child_manifest"]["sha256"] = file_sha256(&manifest_path).into();
+        std::fs::write(
+            &preloader_path,
+            serde_json::to_vec_pretty(&report).expect("serialize native outer fixture"),
+        )
+        .expect("write native outer fixture");
+        let mut invocation = Command::new(verifier.get_program());
+        invocation
+            .args(verifier.get_args())
+            .arg("-PreloaderReportPath")
+            .arg(&preloader_path)
+            .arg("-ExpectedPreloaderReportSha256")
+            .arg(file_sha256(&preloader_path));
+        invocation.status()
+    };
+    let status = run_verifier().expect("run PowerShell verifier");
     assert!(status.success());
     assert!(output_path.is_file());
 
@@ -1026,7 +1524,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     let mut tampered_machine_plan = machine_plan_bytes.clone();
     tampered_machine_plan.push(b'\n');
     std::fs::write(&machine_plan_path, tampered_machine_plan).expect("tamper machine plan");
-    let status = verifier.status().expect("rerun verifier with tampered machine plan");
+    let status = run_verifier().expect("rerun verifier with tampered machine plan");
     assert!(!status.success(), "machine-plan byte drift must fail");
     assert!(
         !output_path.exists(),
@@ -1037,14 +1535,14 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
     let baseline_manifest_bytes =
         serde_json::to_vec_pretty(&run).expect("serialize baseline manifest");
     let mut promoted_closure = serde_json::to_value(&run).expect("serialize closure tamper");
-    promoted_closure["owner_closure"]["closure"]["physical_native_termination_verified"] =
-        serde_json::json!(true);
+    promoted_closure["owner_closure"]["surface"]["closure"]
+        ["physical_native_termination_verified"] = serde_json::json!(true);
     std::fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&promoted_closure).expect("serialize promoted closure"),
     )
     .expect("write promoted closure");
-    let status = verifier.status().expect("rerun verifier with promoted closure");
+    let status = run_verifier().expect("rerun verifier with promoted closure");
     assert!(
         !status.success(),
         "invented physical native closure must fail"
@@ -1058,7 +1556,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::to_vec_pretty(&absent_closure).expect("serialize absent closure"),
     )
     .expect("write absent closure");
-    let status = verifier.status().expect("rerun verifier with absent closure");
+    let status = run_verifier().expect("rerun verifier with absent closure");
     assert!(
         !status.success(),
         "started Concurrent Recovery cannot use NotApplicable closure"
@@ -1080,7 +1578,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
         serde_json::from_slice(&std::fs::read(&report_path).expect("read producer report"))
             .expect("parse producer report");
     let baseline_run = run.clone();
-    let mut assert_rehashed_tamper_rejected = |description: &str, raw: &serde_json::Value| {
+    let assert_rehashed_tamper_rejected = |description: &str, raw: &serde_json::Value| {
         let mut tampered_run = baseline_run.clone();
         let phase = tampered_run
             .phases
@@ -1110,7 +1608,7 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
             serde_json::to_vec_pretty(&tampered_run).expect("serialize tampered run"),
         )
         .expect("write tampered run");
-        let status = verifier.status().expect("rerun PowerShell verifier");
+        let status = run_verifier().expect("rerun PowerShell verifier");
         assert!(!status.success(), "{description}");
         assert!(
             !output_path.exists(),
@@ -1150,6 +1648,71 @@ fn powershell_verifier_checks_authority_and_complete_owner_evidence_closure() {
             serde_json::json!(format!("{:x}", Sha256::digest(window_run_json.as_bytes())));
         event["window_run_receipt_json"] = serde_json::json!(window_run_json);
     };
+
+    for (leaf_name, pointer, replacement) in [
+        (
+            "runtime_shutdown",
+            "/supervisor",
+            serde_json::json!("not_started"),
+        ),
+        (
+            "runtime_shutdown",
+            "/shutdown_signal_delivered",
+            serde_json::json!(false),
+        ),
+        (
+            "host_shutdown",
+            "/preview/worker_timeouts",
+            serde_json::json!(1),
+        ),
+        (
+            "host_shutdown",
+            "/preview/timeline_render_cache/worker/worker_started",
+            serde_json::json!(false),
+        ),
+        (
+            "host_shutdown",
+            "/auxiliary/waveform/source_cache/decoder_sessions_remaining",
+            serde_json::json!(1),
+        ),
+        (
+            "host_shutdown",
+            "/auxiliary/thumbnails/Ok/active_requests_remaining",
+            serde_json::json!(1),
+        ),
+        (
+            "host_shutdown",
+            "/auxiliary/catalog/results_missing",
+            serde_json::json!(1),
+        ),
+    ] {
+        let mut raw = baseline_raw.clone();
+        let event = raw["events"]
+            .as_array_mut()
+            .expect("events")
+            .iter_mut()
+            .find(|event| {
+                event["kind"] == "recovery_step_completed"
+                    && event["step"] == "surface_device_reopen"
+            })
+            .expect("Surface event");
+        let mut window: serde_json::Value =
+            serde_json::from_str(event["window_run_receipt_json"].as_str().expect("Window JSON"))
+                .expect("Window");
+        let json_key = format!("{leaf_name}_json");
+        let hash_key = format!("{leaf_name}_sha256");
+        let mut owner: serde_json::Value =
+            serde_json::from_str(window[&json_key].as_str().expect("owner JSON")).expect("owner");
+        *owner.pointer_mut(pointer).expect("exact owner field") = replacement;
+        let owner_json = serde_json::to_string(&owner).expect("owner JSON");
+        window[hash_key] = format!("{:x}", Sha256::digest(owner_json.as_bytes())).into();
+        window[json_key] = owner_json.into();
+        let window_json = serde_json::to_string(&window).expect("Window JSON");
+        event["window_run_receipt_sha256"] =
+            format!("{:x}", Sha256::digest(window_json.as_bytes())).into();
+        event["window_run_receipt_json"] = window_json.into();
+        assert_rehashed_tamper_rejected(&format!("rehashed dirty {leaf_name}{pointer}"), &raw);
+    }
 
     let mut raw = baseline_raw.clone();
     let event = raw["events"]

@@ -21,8 +21,10 @@ pub use display::{
     DisplayProbeBackend, DisplayProfileProbe, DisplayProfileProbeTarget,
 };
 pub use endurance_qualification::{
-    EnduranceCounterRequirement, EnduranceCounters, EnduranceGauges, EnduranceMemoryRequirement,
-    EndurancePhaseChunkReceipt, EndurancePhaseKind, EndurancePhaseManifest,
+    EnduranceAncillaryExportArtifact, EnduranceAncillaryPhaseEvidence,
+    EnduranceAncillaryWireJournal, EnduranceCounterRequirement, EnduranceCounters, EnduranceGauges,
+    EnduranceMemoryRequirement, EndurancePhaseChunkReceipt, EndurancePhaseKind,
+    EndurancePhaseManifest, EndurancePhaseMeasurementTiming, EndurancePhaseOwnerReceipt,
     EndurancePhaseProducerEvidence, EndurancePhaseReport, EndurancePhaseRequirement,
     EndurancePhaseTerminalEvidence, EndurancePhaseTerminalStatus, EnduranceProcessMemorySample,
     EnduranceQualificationError, EnduranceQualificationProfile, EnduranceQualificationReport,
@@ -58,3 +60,8 @@ pub use user_state_directory::{UserStateDirectory, UserStateDirectoryError};
 /// cancelled/no-op shell outcome. It never manufactures native evidence.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NoopPlatformService;
+
+mod runtime_capsule;
+pub use runtime_capsule::{
+    QualifiedRuntimeCapsuleChildCleanupEvidence, QualifiedRuntimeCapsuleClosureEvidence,
+};

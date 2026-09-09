@@ -1,5 +1,32 @@
 # Media Pipeline
 
+Preview decode sources retain an explicit single-image fact only when the Asset's frozen kind identifies the original source as a still image. Filename extensions and generated video proxies cannot infer this fact. Such CPU RGBA requests use the existing context-owned `CpuStill` session slot even during `PlaybackCursor` work, preserving the video cursor in its separate slot. Scheduling lane, cancellation, original deadline, exact source-time selection, and residency authority remain unchanged; context clear and consuming shutdown release both slots. Multi-layer Current admission therefore does not create another worker or replace the current video decoder whenever an image overlay is sampled.
+
+Preview CPU residency freezes component depth from the admitted stream sampling
+or proxy encoding in `PreviewDecodeSource`. Its source-byte estimate and the
+actual CPU materializer share the same greater-than-eight-bit precision rule:
+proven encoded eight-bit data retains RGBA8, while higher-depth data retains
+RGBA float. Unknown precision, scene-linear data and non-color data reserve
+float capacity. This bound describes retained source storage only; consumers
+add their working-frame storage and keep compact YUV/native accounting separate.
+
+Approved BMX execution shares the approved provider capsule and native child
+ledger. `PreparedBmxRuntime` owns the exact raw2bmx/mxf2raw file objects and the
+declared DLL closure; `BmxRuntimeHandle` is a borrowing authority carried by
+immutable Export requests. `ApprovedBmxCommand` exposes argv only and runs through
+`SupervisedChild`, including Windows Job descendants, pipe workers, cancellation
+and the minimum of its original phase horizon and each operation deadline.
+An expired version probe does not shorten the retained owner's phase horizon.
+Consuming close reports namespace validation/restoration/removal, file leases,
+outstanding handles and deadline facts separately. A live borrower prevents a
+successful close and quarantines the owner instead of deleting a live namespace.
+Ordinary development may omit a runtime closure without claiming namespace
+ownership; a qualified campaign requires the complete declared closure before
+starting a phase. Native coverage is in `tests/approved_bmx.rs` and must be run
+explicitly with the approved official BMX installation.
+
+Float OpenEXR admission maps FFmpeg GBRPF32/GBRAPF32 (LE and BE) into exact Core sampling facts. The existing direct Float32 materializer preserves negative values, highlights and Alpha; no 8/16-bit fallback or invented native YUV surface may authorize this path. A source color override and full-range interpretation remain explicit authoring inputs for untagged analytic EXR fixtures. Storage precision does not imply a transfer function: a planar Float32 source interpreted as encoded RGB or non-color data must retain its samples and carry that explicit contract instead of entering an integer scaler.
+
 Decoded RGBA payloads cross the Media/Renderer seam with an explicit
 `PreviewSourceSampleIdentity`: either `ColorManaged(ColorSpace)` or
 `DataTexture`. Media owns this decode evidence and emits
@@ -760,6 +787,11 @@ and resolves the concrete backend, it derives one private immutable Session
 open contract. Session-reuse matching and replacement Session construction
 consume that same value, so stream, geometry, hardware-device, and source-color
 identity cannot drift between parallel positional argument lists.
+The App's bounded physical-source worker assignment survives in-family decoded
+frame and cache-pressure trims. Those trims may reclaim Frame Store and
+cold-lookahead surface owners, but they cannot move the next request to another
+worker and cold-open a duplicate Session. Project/lifecycle invalidation and
+bounded LRU eviction remain the authority that releases the assignment.
 
 Every successful result carries one explicit
 `PreviewDecodeSessionDisposition`: `Opened`, `Replaced`, `Reused`, or
@@ -1111,14 +1143,15 @@ ingest records a mapped ICC identity only when the shared core parser identifies
 a supported named standard; generic RGB/GRAY profiles remain unmapped evidence
 and enter the explicit missing-metadata policy.
 App preview scheduling preserves decoder-session locality with semantic worker
-lanes. The production App has at most two decode workers: worker 0 has Playback
-affinity and worker 1 is the shared NonPlayback lane for scrub and deterministic
-Still work. A worker may dequeue current work only when its lane accepts that
-work class; this prevents an idle playback worker from cold-opening a second
-interactive FFmpeg hardware session or blocking realtime work behind a
-deterministic seek. `Prefetch` remains playback-only and lower priority than
-every eligible current-frame request. With only one worker, the lane is `Any`
-and all classes still make progress without a hidden cross-lane exception.
+lanes. On a sufficient CPU budget the production App has three decode workers:
+worker 0 owns moving Playback continuity, worker 1 owns cold-source Playback
+plus Interactive work, and worker 2 owns static-image and deterministic Still
+decode. A static source has no stateful playback cursor, so every Timeline
+request for it carries exact Still-worker affinity even though its visibility
+and deadline remain `PlaybackCursor` semantics. This prevents a slow image
+probe from occupying or replacing either moving-source FFmpeg Session. With
+two workers, Playback and NonPlayback retain the bounded fallback; with one
+worker, the lane is `Any` and all classes still make progress.
 The sole bounded exception is recovery after a live Playback-lane execution has
 authoritative cancellation evidence: the NonPlayback lane may take one
 `Current + Playback` replacement ahead of ordinary Interactive/Still current
@@ -1182,6 +1215,17 @@ cannot advance availability or permit farther work to bypass it. Blank frames
 do not terminate the prefix, whereas dependency errors and terminal failures
 do. Actual Store admission remains authoritative; the scheduler never inflates
 policy to make all eight fit.
+Priming's distinct-source proof retains one bounded physical dependency closure
+after its decode completes. The owner is keyed by the complete future-window
+identity and exact activation frame. It holds the Frame Store allocation leases
+until the activation becomes the consumed current picture, a seek or lifecycle
+edge clears the window, or authoring, scale, color, library, proxy, or hardware
+admission changes its identity. Store headroom counts those leases as retained,
+so ordinary rolling Prefetch may shorten its prefix but cannot evict the
+already-proved cold decoder surface and force a second source open before the
+cut. Diagnostics expose the retained activation frame and dependency count;
+the owner is limited to one activation closure and does not acquire a Current
+demand or presentation ticket.
 Once a slack-admitted `PlaybackCursor` prefetch begins, a later Playback-current
 request does not by itself preempt the lease. The task has a two-second hard
 execution budget and may finish only under normal Broker freshness/publication
@@ -1316,7 +1360,17 @@ indexed exact seek and codec flush; scrub follows its independently derived
 bounded low-latency policy. Neither may reuse the shared Interactive context
 until its prior native-output lease has retired. After release, access-mode
 change alone is not a terminal condition.
-The playback decode Session also owns a small CPU-frame ring. A hit
+Each decode worker retains a bounded, source-local set of Playback Sessions.
+A composited current frame can require several video sources, while lookahead
+can overlap the next edit; these requests must not replace one shared decoder
+slot and repeatedly pay format/codec/DPB setup. Matching decoder contracts are
+selected first and promoted to most-recently-used order. A new source grows the
+set only within the App-derived per-worker current-media resource grant. At the
+grant, only the least-recently-used Session whose native outputs are released
+may be replaced; otherwise the cancellable output-lease wait remains in force.
+Worker-family retirement and context clear consume the entire set, so this
+locality does not create another process-wide residency authority.
+Each playback decode Session also owns a small CPU-frame ring. A hit
 requires containment in the entry's retained Decoded Presentation Extent and
 is reported as `PlaybackSessionRingHit`; ring lookup never derives a tolerance
 from nominal rate or frame diagnostics. Entries are not available to Scrub or
@@ -1668,7 +1722,16 @@ distinct. `media_frame_for_plan` sets Preview pending only for an outcome with
 a concrete progress edge. It reports grant exhaustion or unobservable aggregate
 ownership as `Blocked`, and obsolete/invalid/worker-terminal outcomes as
 non-pending typed unavailability. This prevents a rejected reservation from
-leaving the Viewer in Loading with no job or completion.
+leaving the Viewer in Loading with no job or completion. A retryable admission also registers its concrete
+progress owner. Exact existing work retains its Broker binding; sustained
+realtime pressure retains the waiting media key and Preview generation. The
+result pump evaluates these as level predicates. When the exact binding or the
+entire realtime pressure owner set settles, it invalidates only evaluations
+that named the waiting media key and retains one retry edge until a real Viewer
+candidate acknowledges it. Registration immediately rechecks the predicate,
+closing the race in which the final owner settles between admission and waiter
+publication. No `RetryAdmission` state may exist without one of these observable
+owners.
 Viewer lifecycle is adapted through `app_ui::playback_feedback` into typed Frame
 Deliveries. `Ready`, `StaleAvailable`, and `Blocked` are terminal observations;
 `Loading` is non-terminal pending work. Loading or stale presentation does not
@@ -1889,7 +1952,7 @@ exhaustions, and poll durations. This keeps worker bursts, cache insertion, and
 decode diagnostic aggregation from delaying transport controls or close/quit
 events during buffering. The producer side is independently bounded to eight
 results, equal to one maximum foreground drain. At most one additional result
-may remain owned by each of the two workers while that queue is full. A blocked
+may remain owned by each of the three workers while that queue is full. A blocked
 publisher polls shutdown and decoder-residency revisions: shutdown abandons its
 lease, while a transport-family transition resolves the completed binding as
 non-reusable, drops the payload, then returns to the worker-owned
@@ -1958,14 +2021,20 @@ Each worker bootstrap carries its lane-specific FFmpeg thread ceiling into the
 non-`Send` decode context. Access-mode defaults and environment overrides may
 choose any lower value but cannot exceed that ceiling; diagnostics report the
 actual decoder threading observed after FFmpeg opens the codec.
-Single-worker systems use one `Any` lane; every multi-worker production system
-uses one `Playback` lane plus one shared `NonPlayback` lane. The Broker's work
-classes and realtime-over-Still preemption keep exact Still work from taking
-priority over active playhead dragging, while the physical two-lane bound avoids
-opening independent scrub and Still hardware surface pools. Playback prefetch
-cannot consume the interactive worker. Preview diagnostics expose the resolved
-CPU budget and the actually started worker count so perf reports can distinguish
-codec cost from scheduling over-subscription.
+Single-worker systems use one `Any` lane. Two-worker systems use `Playback` plus
+shared `NonPlayback`; CPU budgets that admit a third worker add `Still`. The
+Still lane isolates static image/container probing from both moving-source
+Session owners without adding another request queue or completion authority.
+Playback prefetch may use NonPlayback only when the Broker's bounded borrowing
+rule or an App-derived exact moving-source affinity authorizes it. A cold-source
+request binds the worker that opens its FFmpeg Session, and subsequent Playback
+requests for that same immutable moving source remain on that worker across
+Prefetch-to-Current promotion. Static sources use intrinsic Still affinity and
+never enter that moving-source map. The bounded source-affinity owner rotates
+with the future-media semantic identity.
+Preview diagnostics expose the resolved CPU budget and the actually started
+worker count so perf reports can distinguish codec cost from scheduling
+over-subscription.
 Preview completion has separate display and cache semantics. A decode result is
 `Current` only when it still matches pending visible work; same-generation
 results whose pending request was canceled or whose access mode has been
@@ -2023,6 +2092,10 @@ every exact staged-frame-to-current binding synchronizes the Broker before
 completion pumping or publication. Successor/lookahead requests never do. This
 ordering prunes superseded unstarted Current work even when the picture is an
 evaluation-cache hit and no Timeline or media interpretation runs.
+Those speculative requests also cannot call recurring future-window planning.
+They may admit only the exact Prefetch media dependencies discovered while
+evaluating their own frame. Current/priming execution remains the single owner
+that replenishes the ordinary future-media prefix.
 Scheduler diagnostics keep aggregate skip/drop/stale counters plus reason
 breakdowns for missing pending work, access-mode mismatch, obsolete generation,
 obsolete request generation, and pending-window backpressure. Access-mode
@@ -2779,7 +2852,7 @@ surfaces every codec/driver combination can make concurrently available and
 not application cache capacity; CPU-transfer
 decode leaves the setting at zero because it exports no hardware surfaces. The
 external-lease proof is deliberately conservative and bounded: eight queued
-App completions plus at most two worker-held publishers, eight Preview Frame
+App completions plus at most three worker-held publishers, eight Preview Frame
 Store resource units, four renderer-completion leases, and two
 selector/transient owners. The direct-import Renderer owns zero duplicate YUV
 bridge textures. These are ceilings, not expected steady-state occupancy;
@@ -2799,9 +2872,16 @@ hard grant. This permits useful forward residency without treating a
 zero-host-byte surface as free or allowing multiple demands, duplicate
 attempts, or external clones to exhaust the decoder pool. CPU fallback payloads
 use the same ledger's exact host-byte charge. The shared future-prefix planner
-also preserves accepted native resident leases until all nearer missing work
-has transferred into Broker ownership; decoder-surface LRU policy therefore
- cannot invert timeline priority.
+accepts each media-bearing frame only when every missing layer fits, reserves
+that complete closure atomically, and preserves accepted native resident
+leases until all planned work has transferred into Broker ownership. It gives
+a discovered cold activation this aggregate reservation before ordinary near
+repair, so decoder-surface LRU policy cannot invert timeline priority or split
+a multi-layer activation across competing scheduling turns.
+During Priming, a fully reserved current closure may run concurrently with that
+one cold batch so independent decoder session open does not consume the visible
+picture's fixed delivery interval. Near-prefix repair still waits for current
+residency; a partial current reservation cannot authorize any future work.
 The App evaluation working set retains only Store-protected frame clones. Every
 decoder-family, media-only, and all-residency retirement first drops matching
 evaluation entries, then clears the Frame Store, preventing a native lease
@@ -3103,6 +3183,21 @@ the app may still record decode diagnostics and success/failure telemetry, but
 it must not cache the frame, mark it visible, or reset sustained-pressure
 recovery as a successful current playback frame. This protects the viewer from
 decode backends that return after missing a cooperative cancellation check.
+Settling that late Broker lease also invalidates the exact media-producer wait
+in the frame-evaluation working set. The pixels remain non-cacheable, while the
+Timeline regains authority to consume another resident copy or admit replacement
+work instead of retaining a wait whose producer no longer exists.
+Priming prefetch uses the Playback Session's fixed preparation horizon. Once
+that horizon is expired, the App rejects a new speculative request before
+reserving Frame Store capacity or publishing Broker work. The resulting
+Timeline media observation is terminal for that evaluation; an already-expired
+payload cannot cycle through queue cancellation, wait invalidation, and
+readmission without any owner capable of extending the horizon.
+Headless cold-activation GPU prewarm checks the same admission fact before it
+asks Preview to evaluate the distant coordinate. The bounded media-residency
+owner remains authoritative for startup readiness; expired optional GPU work is
+not retried and cannot delay Audio Device clock admission after the exact
+immediate successor is physically prepared.
 Repeated playback-current deadline misses put the app scheduler into sustained
 pressure recovery. In that state, a fresh `Current + PlaybackCursor` request
 must not pile onto the decode queue while another current or playback decode is
@@ -3259,17 +3354,25 @@ decoder threads per app preview worker and remains clamped by the coordinated
 CPU budget. App worker count has no environment override: the Viewer Preview
 Service derives it directly from `PreviewDecodeCpuBudget` for playback and
 interactive lanes. Production sessions live in each worker's explicit
-`PreviewDecodeSessionContext`, remain alive across short gaps for locality, and
-are cleared automatically after two seconds idle, at an acknowledged
-playback/interactive residency-family transition, or at worker shutdown. The
+`PreviewDecodeSessionContext` for the active Runtime residency phase rather
+than expiring after an arbitrary quiet interval. Each context has separate
+bounded Playback and Interactive Session sets. An acknowledged family
+transition retires the obsolete set on every worker, including a cold Playback
+Session owned by NonPlayback, while preserving the newly active set. Worker
+shutdown retires both. The
 top-level media convenience function retains a thread-local context only for
 standalone diagnostic/test callers that do not own a production worker;
 `clear_thread_local_preview_decode_session()` exists for those callers and is
 not the production worker lifecycle mechanism. Test builds clear that
 convenience Session at project close to keep process-local fixtures isolated;
 release builds cannot make App lifecycle depend on it. Production worker
-contexts retire through their own acknowledged idle/shutdown boundary. Idle
-release is resource policy, not a cache-key or generation change.
+contexts retire through their own acknowledged family/shutdown boundary. Queue
+idle is an observation point for pending native-output retirement; it is not
+authority to destroy an active cold-source Session. Worker-local codec
+Sessions may share one immutable hardware-device root, so the shared
+worker-family resource owner serializes their FFmpeg/driver destruction after
+native-output release. Sibling D3D12 decoder Sessions therefore cannot enter
+provider pool teardown concurrently.
 Cross-family admission may report transient pressure only while a real retry
 owner exists. The decoder-residency coordinator publishes one shared Preview
 work-watch edge when the final required worker acknowledgement changes its
@@ -3588,3 +3691,128 @@ Unknown/missing metadata policy is resolved from the Sequence input-color
 settings, not by UI panels. A nested Sequence keeps its own media
 interpretation policy even when its placement forces evaluation in the parent
 working space.
+
+Physical endurance admission now calls
+`probe_realtime_audio_output_contract` to use the same exact device selection,
+sample rate, channel-layout and platform negotiation as the real Audio output
+owner. The probe creates no running stream and cannot prove later callback
+progress; stream-open/runtime evidence still belongs to the phase owner. A
+missing device or unsupported exact contract produces missing pre-start
+capability and NotRun, while a later device loss is a startup/runtime failure.
+
+### Qualified CLI capsule and native process closure
+
+The validation-only exact toolchain now returns `FfmpegCommand`, whose private
+native command retains its capsule authority. Spawn revalidates namespace,
+loader environment and exact executable under the admission gate, reserves a
+bounded child lease before native creation, and transfers that lease to
+`FfmpegChild`. The capsule retains source/snapshot files, the directory and every
+canonical ancestor. Its protected Windows DACL denies namespace mutation and
+uses OWNER RIGHTS to deny implicit owner ACL rewriting. A pre-acquired ACL handle
+owns restoration; handle-based readback is checked at admission and closure.
+The child environment is cleared and rebuilt from the capsule PATH and the
+OS-derived Windows system root. No privileged broker or new security principal
+is introduced. This protects filesystem namespace continuity; process injection
+and privileged handle theft are separate deployment threat models.
+
+Both CLI tools are completely staged and the namespace is sealed before any
+version/capability probe executes. Preparation probes use the same spawn/child
+lease path as Preview audio, proxies, Export and independent validation. The
+supervisor owns partial native startup immediately, retains original operation
+errors together with all pipe/termination cleanup facts, and consumes joins
+under the original process deadline. A raw native exit does not erase stdin,
+stdout or stderr cleanup failures. Unobserved native termination retains its
+capsule lease and cannot become successful cleanup.
+
+Process installation retains an immutable identity tombstone but no longer
+requires process-exit TempDir destruction. Explicit run closure permanently
+closes admission, waits for admitted child leases under one original deadline,
+restores the exact namespace through its retained handle, releases object
+handles and calls fallible exact-directory removal. The first raw closure
+receipt is immutable. Filename-prefix orphan deletion is never used.
+
+Previously mapped in-process DLLs require the loader-before-execution native
+handshake. Path enumeration alone is not mapped-object attestation. Without an
+authenticated retained launcher authority, `PreloaderMappedImageIdentityPrepared`
+is absent and physical campaign admission is `NotRun`; native helper spawning in
+an installed qualified process rejects unattested loader authority. Ordinary
+product helper execution retains its established behavior.
+
+The native pre-loader implementation now lives in the FFmpeg-free
+`mondrian-validation-launcher` package. Media shares its single Windows namespace
+policy and borrows its native authenticated authority to resolve mapped source
+DLLs. Qualified demux/probe helpers use the pre-loader's retained application image
+and the same typed spawn/child ledger; plain vendor commands remain fail-closed.
+See `native-validation-launcher.md` for object continuity and outer Job closure.
+
+Demux and Audio teardown now reuse the supervisor's single native terminate/reap
+and bounded worker-join implementation. Each demux owner captures its first
+closure deadline and reuses it through Close acknowledgement, native exit, both
+reader joins, cancellation, and Drop. Audio uses one deadline per retirement
+batch and one non-renewing deadline for its shutdown sweeps, late handoffs, EOF
+finalization, native child and both pump joins. Retired entry mutex acquisition
+uses the same deadline and preserves the owner when that deadline expires.
+No native child counter settles from a kill request alone.
+
+Every failed native/pipe closure publishes its original typed leaves and PID into
+`QualifiedRuntimeCapsuleClosureEvidence.child_cleanup_failures`. The first such
+failure closes process admission, bounding the list by the existing 256-child
+capacity. `cleanup_error` remains reserved for capsule filesystem cleanup errors.
+The independent verifier validates the raw child shape and rejects any recorded
+failure even when all native children were subsequently reaped.
+
+ApprovedRegulatoryPseCommand is the sole narrow external-provider transport. It
+consumes exact approved executable/approval/profile file leases, verifies native
+object identity and full-file hashes, fixes its protocol argument and retains
+that authority in FfmpegChild. Qualified provider children reserve the same
+CapsuleLifecycle ledger as FFmpeg. Explicit DLL closures are staged with the
+three approved files into a separate sealed namespace, retaining source/staged
+objects and ancestor handles. Missing runtime closure is admission-time NotRun.
+Consuming provider cleanup removes its exact namespace after all native child
+owners return; raw filesystem errors also close global campaign admission.
+
+Provider admission retains its seal before any post-seal inventory/hash operation.
+Every rejection explicitly restores that seal and consumes the exact directory,
+retaining restoration and removal failures alongside the original rejection.
+Contended retained-file validation uses try_lock_until with the original deadline;
+its native regression verifies post-seal rejection, namespace removal and bounded
+lock contention, without a new child or a renewed timeout.
+
+The physical endurance factory also registers the Windows DeckLink API 12.0
+COM implementation. Existing exact provider/device/open-request/wire fields
+select it without an alternate machine-plan schema. The owner-derived marker
+and full raw independent-receiver journal follow the same broadcast contract;
+DeckLink additionally requires different physical-card group IDs, so distinct
+subdevice IDs on one card cannot qualify as independent reception. Driver,
+image and device absence remain pre-start NotRun observations.
+
+Windows native media execution now owns a kill-on-close Job before any executable
+code runs: CREATE_SUSPENDED, native Job assignment, then primary-thread resume.
+FFmpeg, FFprobe, approved PSE commands and ordinary supervised native helpers all
+use this same spawn path; wrapping an already-running std::Child is not supported.
+The original supervisor deadline is checked before spawn, assignment and resume,
+and partial startup failure retains its primary error plus consuming cleanup.
+
+FfmpegChild::kill terminates the entire owned Job. try_wait returns a terminal
+status only after both the entry process exited and Job ActiveProcesses is zero,
+so a Chocolatey shim cannot release its capsule lease or leak its real ffprobe
+child. The existing native_exit_observed receipt now derives from that complete
+owned process-group observation. The regression deliberately launches an exiting
+native shim with a still-running child holding inherited stdout/stderr, cancels,
+and verifies both raw cleanup and the actual descendant's native terminal state.
+
+A canceled process request is rejected before native spawn for captured output,
+Adapter cancellation probes and streaming stdout alike. The terminal result is
+`Canceled { stage: Spawn }`; no child or pipe cleanup is invented for an owner
+that was never created. Native approved-BMX tests also exercise this path after
+successful actual wrapping and reimport, while retaining the earlier successful
+child receipts and consuming the original runtime owner.
+The external still-decode adapter treats direct pre-spawn cancellation as an empty canceled result: no process or pipes were created. Post-spawn cancellation still requires a clean consuming supervisor receipt; dirty cleanup remains an error.
+
+Campaign BMX preparation freezes a startup deadline separately from the initial
+phase-owner horizon. `prepare_bmx_runtime_for_phase` bounds namespace copying and
+sealing by startup, then constructs the first handle with the already fixed
+startup-plus-measurement-plus-close horizon. It does not extend a live command
+or verifier deadline. The original single-deadline API supplies the same bound
+to both stages. App admission and version probes also use the startup limit;
+prepared Export references are dropped before the native BMX owner is consumed.

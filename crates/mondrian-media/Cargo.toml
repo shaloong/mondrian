@@ -7,11 +7,13 @@ license.workspace    = true
 
 [features]
 default = []
-validation = []
+validation = ["dep:mondrian-platform-core", "dep:mondrian-validation-launcher"]
 
 [dependencies]
+mondrian-validation-launcher = { workspace = true, optional = true }
 mondrian-storage = { workspace = true }
 mondrian-core = { workspace = true }
+mondrian-platform-core = { workspace = true, optional = true }
 
 # FFmpeg bindings link dynamically for source builds. Product packages carry
 # their own verified private runtime closure; end users do not install FFmpeg.
@@ -56,7 +58,7 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true }
-windows-sys = { workspace = true }
+windows-sys = { workspace = true, features = ["Win32_Security_Authorization", "Win32_System_JobObjects"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

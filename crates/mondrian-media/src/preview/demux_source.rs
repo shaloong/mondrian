@@ -30,7 +30,7 @@ pub(super) enum PreviewPacketSeek {
 
 pub(super) enum PreviewPacketSource {
     Direct(ffmpeg::format::context::Input),
-    Isolated(IsolatedDemuxSession),
+    Isolated(Box<IsolatedDemuxSession>),
 }
 
 pub(super) struct PreviewPacketSourceOpen {
@@ -96,7 +96,7 @@ impl PreviewPacketSource {
                             index
                         });
                     Ok(PreviewPacketSourceOpen {
-                        source: Self::Isolated(open.source),
+                        source: Self::Isolated(Box::new(open.source)),
                         parameters: stream.parameters,
                         stream_index: stream.stream_index,
                         stream_tb: stream.time_base,

@@ -439,6 +439,20 @@ pub(crate) fn current_default_realtime_audio_output_device_id(
 }
 
 /// Resolve one device intent and select an exact executable stream contract.
+/// Inspect the exact production output negotiation without creating a stream.
+///
+/// This uses the same device selection, rate, scalar-format and channel-semantics
+/// authority as Playback. The returned evidence is a preflight observation;
+/// stream creation must negotiate again and prove the live device identity.
+pub fn probe_realtime_audio_output_contract(
+    selection: &RealtimeAudioOutputDeviceSelection,
+    sample_rate: u32,
+    channel_layout: AudioChannelLayout,
+) -> Result<RealtimeAudioOutputDeviceEvidence, RealtimeAudioOutputOpenFailure> {
+    let prepared = prepare_realtime_audio_output(selection, sample_rate, channel_layout)?;
+    Ok(prepared.evidence)
+}
+
 pub(crate) fn prepare_realtime_audio_output(
     selection: &RealtimeAudioOutputDeviceSelection,
     sample_rate: u32,

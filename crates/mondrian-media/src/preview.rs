@@ -549,6 +549,9 @@ pub struct PreviewDecodeRequest<'a> {
     pub field_processing: PreviewSourceFieldProcessing,
     /// Probe-admitted Camera RAW development identity.
     pub camera_raw: Option<CameraRawDecodeIntent>,
+    /// Admitted single-image source; independent of the consumer's access mode.
+    /// This selects the bounded CPU-still slot while keeping Playback deadlines.
+    pub still_image: bool,
 }
 
 /// Semantic interpretation of decoded RGB samples at the Media/Renderer seam.
@@ -669,6 +672,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_color: key.source_color(),
             field_processing: key.field_processing(),
             camera_raw: key.camera_raw(),
+            still_image: key.source().is_still_image(),
         }
     }
 
@@ -694,6 +698,7 @@ impl<'a> PreviewDecodeRequest<'a> {
             source_color,
             field_processing: PreviewSourceFieldProcessing::Automatic,
             camera_raw: None,
+            still_image: false,
         }
     }
 
@@ -1665,8 +1670,8 @@ pub enum PreviewDecodeOutcome {
 
 pub use decode_session::{
     clear_thread_local_preview_decode_session, PreviewDecodeSessionContext,
-    PreviewDecodeSessionContextBootstrap, PreviewDecodeSessionResidencyConfig,
-    PreviewDecodeWorkerResources,
+    PreviewDecodeSessionContextBootstrap, PreviewDecodeSessionFamily,
+    PreviewDecodeSessionResidencyConfig, PreviewDecodeWorkerResources,
 };
 use decode_session::{
     decode_preview_frame_outcome, preview_create_rgba_scaler, PreviewDecodedFramePayload,

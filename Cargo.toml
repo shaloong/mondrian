@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/mondrian-storage",
+    "crates/mondrian-validation-launcher",
     "crates/mondrian-core",
     "crates/mondrian-media",
     "crates/mondrian-timeline",
@@ -43,6 +44,7 @@ rust-version  = "1.97.1"
 [workspace.dependencies]
 # ---- 内部 crate ----
 mondrian-storage  = { path = "crates/mondrian-storage" }
+mondrian-validation-launcher = { path = "crates/mondrian-validation-launcher" }
 mondrian-core     = { path = "crates/mondrian-core" }
 mondrian-media    = { path = "crates/mondrian-media" }
 mondrian-timeline = { path = "crates/mondrian-timeline" }
@@ -182,12 +184,34 @@ opt-level = 1          # 适度优化，加快媒体解码调试体验
 # domain crates retain normal test debuginfo and App incremental builds stay on.
 [profile.test.package.mondrian-app]
 debug = 0
+# Keep the expanded App harness within local commit limits. Domain/media code
+# stays optimized; performance acceptance uses separately linked dev/release runs.
+opt-level = 0
 
 [profile.release]
 opt-level     = 3
 lto           = "thin"
 codegen-units = 1
 strip         = "symbols"
+
+# Native validation keeps production execution semantics (including disabled
+# debug assertions) without the release profile's memory-heavy whole-workspace
+# ThinLTO/link shape. This is the intended profile for hardware and endurance
+# validation executables on bounded qualification hosts.
+[profile.validation]
+inherits      = "release"
+lto           = false
+codegen-units = 16
+incremental   = true
+debug         = 1
+strip         = false
+
+# The application composition root is substantially larger than every domain
+# crate. Split only that crate more finely so native validation binaries can be
+# generated on the supported 16 GiB qualification host without changing the
+# release optimization level or the codegen shape of execution dependencies.
+[profile.validation.package.mondrian-app]
+codegen-units = 64
 
 [profile.bench]
 inherits  = "release"

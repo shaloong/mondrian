@@ -20,6 +20,27 @@ thread_local! {
 
 const PREVIEW_HARDWARE_FAILURE_QUARANTINE: Duration = Duration::from_secs(30);
 const DEFAULT_INTERACTIVE_SESSIONS_PER_WORKER: usize = 8;
+const DEFAULT_PLAYBACK_SESSIONS_PER_WORKER: usize = 8;
+
+/// Access family for explicit worker-local decoder Session retirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewDecodeSessionFamily {
+    /// Stateful forward/reverse Timeline playback Sessions.
+    Playback,
+    /// Scrub and deterministic still Sessions.
+    Interactive,
+}
+
+impl PreviewDecodeSessionFamily {
+    /// Resolve the Session family for one public Preview access contract.
+    pub const fn for_access_mode(access_mode: PreviewDecodeAccessMode) -> Self {
+        match access_mode {
+            PreviewDecodeAccessMode::PlaybackCursor => Self::Playback,
+            PreviewDecodeAccessMode::ScrubCursor
+            | PreviewDecodeAccessMode::RandomAccessStillFrame => Self::Interactive,
+        }
+    }
+}
 
 /// Reusable resources explicitly owned by one Preview decode worker family.
 ///
@@ -30,6 +51,7 @@ const DEFAULT_INTERACTIVE_SESSIONS_PER_WORKER: usize = 8;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreviewDecodeSessionResidencyConfig {
     max_interactive_sessions_per_worker: usize,
+    max_playback_sessions_per_worker: usize,
 }
 
 impl PreviewDecodeSessionResidencyConfig {
@@ -44,12 +66,21 @@ impl PreviewDecodeSessionResidencyConfig {
                 .max(1)
                 .div_euclid(worker_count)
                 .max(1),
+            max_playback_sessions_per_worker: resource_unit_budget
+                .max(1)
+                .div_euclid(worker_count)
+                .max(1),
         }
     }
 
     /// Maximum GPU-resident interactive decoder Sessions owned by one worker.
     pub const fn max_interactive_sessions_per_worker(self) -> usize {
         self.max_interactive_sessions_per_worker
+    }
+
+    /// Maximum source-local Playback decoder Sessions owned by one worker.
+    pub const fn max_playback_sessions_per_worker(self) -> usize {
+        self.max_playback_sessions_per_worker
     }
 }
 
@@ -63,6 +94,7 @@ impl Default for PreviewDecodeSessionResidencyConfig {
 #[derive(Debug)]
 struct PreviewDecodeSessionResidencyPolicy {
     max_interactive_sessions_per_worker: AtomicUsize,
+    max_playback_sessions_per_worker: AtomicUsize,
 }
 
 impl Default for PreviewDecodeSessionResidencyPolicy {
@@ -71,6 +103,9 @@ impl Default for PreviewDecodeSessionResidencyPolicy {
             max_interactive_sessions_per_worker: AtomicUsize::new(
                 PreviewDecodeSessionResidencyConfig::default()
                     .max_interactive_sessions_per_worker(),
+            ),
+            max_playback_sessions_per_worker: AtomicUsize::new(
+                DEFAULT_PLAYBACK_SESSIONS_PER_WORKER,
             ),
         }
     }
@@ -82,6 +117,14 @@ pub struct PreviewDecodeWorkerResources {
     hardware_device_contexts: HwDeviceContextPool,
     native_outputs: PreviewNativeOutputTracker,
     session_residency: Arc<PreviewDecodeSessionResidencyPolicy>,
+    /// Serialize FFmpeg/driver Session destruction across this worker family.
+    ///
+    /// Decoder contexts remain worker-local, but hardware Sessions may share
+    /// one immutable device root. Some Windows driver stacks enter the same
+    /// D3D12 pool teardown from `avcodec_close`; concurrent destruction of
+    /// sibling Sessions can race inside that provider even after every native
+    /// output lease is released.
+    session_retirement: Arc<Mutex<()>>,
 }
 
 impl PreviewDecodeWorkerResources {
@@ -95,6 +138,7 @@ impl PreviewDecodeWorkerResources {
             hardware_device_contexts,
             native_outputs: PreviewNativeOutputTracker::default(),
             session_residency: Arc::new(PreviewDecodeSessionResidencyPolicy::default()),
+            session_retirement: Arc::new(Mutex::new(())),
         }
     }
 
@@ -104,6 +148,9 @@ impl PreviewDecodeWorkerResources {
             config.max_interactive_sessions_per_worker(),
             Ordering::Release,
         );
+        self.session_residency
+            .max_playback_sessions_per_worker
+            .store(config.max_playback_sessions_per_worker(), Ordering::Release);
     }
 
     /// Current per-worker interactive decoder Session residency grant.
@@ -112,6 +159,10 @@ impl PreviewDecodeWorkerResources {
             max_interactive_sessions_per_worker: self
                 .session_residency
                 .max_interactive_sessions_per_worker
+                .load(Ordering::Acquire),
+            max_playback_sessions_per_worker: self
+                .session_residency
+                .max_playback_sessions_per_worker
                 .load(Ordering::Acquire),
         }
     }
@@ -134,6 +185,10 @@ impl PreviewDecodeWorkerResources {
 
     fn native_output_tracker(&self) -> &PreviewNativeOutputTracker {
         &self.native_outputs
+    }
+
+    fn lock_session_retirement(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.session_retirement.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -310,7 +365,7 @@ impl PreviewDecodeSessionContext {
     ) -> Self {
         Self {
             sessions: PreviewDecodeSessions {
-                playback: None,
+                playback: Vec::new(),
                 interactive: Vec::new(),
                 cpu_still: None,
             },
@@ -329,10 +384,27 @@ impl PreviewDecodeSessionContext {
 
     /// Release all codec sessions and their owned decode resources.
     pub fn clear(&mut self) {
+        let _retirement = self.resources.lock_session_retirement();
         if !self.sessions.is_empty() {
             self.execution_observer
                 .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
             self.sessions.clear();
+            self.execution_observer.finish_idle();
+        }
+        self.resources.hardware_device_contexts.release_idle();
+    }
+
+    /// Release one access family's Sessions without disturbing the other.
+    ///
+    /// A shared App worker may own a cold Playback source and interactive
+    /// Sessions at different times. Family transitions therefore retire the
+    /// obsolete vector rather than destroying unrelated source locality.
+    pub fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
+        let _retirement = self.resources.lock_session_retirement();
+        if !self.sessions.family_is_empty(family) {
+            self.execution_observer
+                .publish_stage(PreviewDecodeExecutionStage::SessionRetire);
+            self.sessions.clear_family(family);
             self.execution_observer.finish_idle();
         }
         self.resources.hardware_device_contexts.release_idle();
@@ -345,6 +417,11 @@ impl PreviewDecodeSessionContext {
     /// references already published to a completion queue or renderer.
     pub fn native_outputs_released(&self) -> bool {
         self.resources.native_outputs.is_released()
+    }
+
+    /// Whether every native output issued by one Session family is released.
+    pub fn family_native_outputs_released(&self, family: PreviewDecodeSessionFamily) -> bool {
+        self.sessions.family_native_outputs_released(family)
     }
 
     /// Number of live decoder Sessions owned by this context.
@@ -558,7 +635,11 @@ pub fn clear_thread_local_preview_decode_session() {
 }
 
 struct PreviewDecodeSessions {
-    playback: Option<PreviewDecodeSession>,
+    /// Source-local Playback Sessions ordered from least to most recently
+    /// selected. A composited frame can require several video sources, and
+    /// lookahead may overlap an edit boundary; one global cursor would make
+    /// those valid requests repeatedly destroy each other's codec locality.
+    playback: Vec<Option<PreviewDecodeSession>>,
     /// Latest-wins Viewer Sessions. Scrub and exact Still retain distinct seek
     /// policies while physical residency follows the worker-family grant.
     interactive: Vec<Option<PreviewDecodeSession>>,
@@ -567,7 +648,7 @@ struct PreviewDecodeSessions {
 
 impl PreviewDecodeSessions {
     fn is_empty(&self) -> bool {
-        self.playback.is_none()
+        self.playback.iter().all(Option::is_none)
             && self.interactive.iter().all(Option::is_none)
             && self.cpu_still.is_none()
     }
@@ -579,7 +660,7 @@ impl PreviewDecodeSessions {
         interactive_capacity: usize,
     ) -> Option<PreviewDecodeSessionSlot> {
         match access_mode {
-            PreviewDecodeAccessMode::PlaybackCursor => Some(PreviewDecodeSessionSlot::Playback),
+            PreviewDecodeAccessMode::PlaybackCursor => None,
             PreviewDecodeAccessMode::ScrubCursor => {
                 self.available_interactive_slot(interactive_capacity)
             }
@@ -592,6 +673,42 @@ impl PreviewDecodeSessions {
                 Some(PreviewDecodeSessionSlot::CpuStill)
             }
         }
+    }
+
+    fn available_playback_slot(
+        &mut self,
+        playback_capacity: usize,
+        mut contract_matches: impl FnMut(&PreviewDecodeSession) -> bool,
+    ) -> Option<PreviewDecodeSessionSlot> {
+        let playback_capacity = playback_capacity.max(1);
+        while self.playback.len() > playback_capacity {
+            let Some(released) = self.playback.iter().position(|session| {
+                session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
+            }) else {
+                break;
+            };
+            self.playback.remove(released);
+        }
+
+        if let Some(index) = self
+            .playback
+            .iter()
+            .position(|session| session.as_ref().is_some_and(&mut contract_matches))
+        {
+            let matched = self.playback.remove(index);
+            self.playback.push(matched);
+            return Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1));
+        }
+        if self.playback.len() < playback_capacity {
+            self.playback.push(None);
+            return Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1));
+        }
+        let released = self.playback.iter().position(|session| {
+            session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
+        })?;
+        self.playback.remove(released);
+        self.playback.push(None);
+        Some(PreviewDecodeSessionSlot::Playback(self.playback.len() - 1))
     }
 
     fn available_interactive_slot(
@@ -623,20 +740,58 @@ impl PreviewDecodeSessions {
 
     fn slot_mut(&mut self, slot: PreviewDecodeSessionSlot) -> &mut Option<PreviewDecodeSession> {
         match slot {
-            PreviewDecodeSessionSlot::Playback => &mut self.playback,
+            PreviewDecodeSessionSlot::Playback(index) => &mut self.playback[index],
             PreviewDecodeSessionSlot::Interactive(index) => &mut self.interactive[index],
             PreviewDecodeSessionSlot::CpuStill => &mut self.cpu_still,
         }
     }
 
     fn resident_session_count(&self) -> usize {
-        usize::from(self.playback.is_some())
+        self.playback
+            .iter()
+            .filter(|session| session.is_some())
+            .count()
             .saturating_add(self.interactive.iter().filter(|session| session.is_some()).count())
             .saturating_add(usize::from(self.cpu_still.is_some()))
     }
 
+    fn family_is_empty(&self, family: PreviewDecodeSessionFamily) -> bool {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback.iter().all(Option::is_none),
+            PreviewDecodeSessionFamily::Interactive => {
+                self.interactive.iter().all(Option::is_none) && self.cpu_still.is_none()
+            }
+        }
+    }
+
+    fn family_native_outputs_released(&self, family: PreviewDecodeSessionFamily) -> bool {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback.iter().all(|session| {
+                session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
+            }),
+            PreviewDecodeSessionFamily::Interactive => {
+                self.interactive.iter().all(|session| {
+                    session.as_ref().is_none_or(PreviewDecodeSession::native_output_released)
+                }) && self
+                    .cpu_still
+                    .as_ref()
+                    .is_none_or(PreviewDecodeSession::native_output_released)
+            }
+        }
+    }
+
+    fn clear_family(&mut self, family: PreviewDecodeSessionFamily) {
+        match family {
+            PreviewDecodeSessionFamily::Playback => self.playback.clear(),
+            PreviewDecodeSessionFamily::Interactive => {
+                self.interactive.clear();
+                self.cpu_still = None;
+            }
+        }
+    }
+
     fn clear(&mut self) {
-        self.playback = None;
+        self.playback.clear();
         self.interactive.clear();
         self.cpu_still = None;
     }
@@ -644,7 +799,7 @@ impl PreviewDecodeSessions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreviewDecodeSessionSlot {
-    Playback,
+    Playback(usize),
     Interactive(usize),
     CpuStill,
 }
@@ -2732,6 +2887,7 @@ fn decode_preview_frame_outcome_in_sessions(
         source_color,
         field_processing,
         camera_raw,
+        still_image,
     } = request;
     let started_at = Instant::now();
     if should_cancel() {
@@ -2789,13 +2945,47 @@ fn decode_preview_frame_outcome_in_sessions(
             Err(error) => return Err(error),
         }
     }
+    let backend = preview_decode_backend();
+    let open_request = PreviewDecodeSessionOpenRequest {
+        path,
+        fingerprint,
+        video_stream_index,
+        max_width,
+        max_height,
+        representation,
+        access_mode,
+        backend,
+        hardware_decode_request,
+        hardware_decode_device_selector,
+        source_color,
+        field_processing,
+        decoder_thread_limit,
+    };
+    let residency_config = resources.session_residency_config();
     let output_lease_wait_started_at = Instant::now();
     let selected_slot = loop {
-        if let Some(slot) = sessions.available_slot(
-            access_mode,
-            hardware_decode_request,
-            resources.session_residency_config().max_interactive_sessions_per_worker(),
-        ) {
+        if still_image {
+            if representation.is_native_surface() || representation.is_compact_cpu_yuv() {
+                return Err(MondrianError::DecodeFailed {
+                    asset_id: path.display().to_string(),
+                    reason: "single-image source requires CPU RGBA residency".to_owned(),
+                });
+            }
+            break PreviewDecodeSessionSlot::CpuStill;
+        }
+        let available = if access_mode == PreviewDecodeAccessMode::PlaybackCursor {
+            sessions.available_playback_slot(
+                residency_config.max_playback_sessions_per_worker(),
+                |session| session.matches_decoder_contract(&open_request, demux_worker.is_some()),
+            )
+        } else {
+            sessions.available_slot(
+                access_mode,
+                hardware_decode_request,
+                residency_config.max_interactive_sessions_per_worker(),
+            )
+        };
+        if let Some(slot) = available {
             break slot;
         }
         execution_observer.publish_stage(PreviewDecodeExecutionStage::OutputLeaseWait);
@@ -2814,22 +3004,6 @@ fn decode_preview_frame_outcome_in_sessions(
     let output_lease_wait_us = duration_us(output_lease_wait_started_at.elapsed());
     let outcome: Result<PreviewDecodeOutcome> = {
         let slot = sessions.slot_mut(selected_slot);
-        let backend = preview_decode_backend();
-        let open_request = PreviewDecodeSessionOpenRequest {
-            path,
-            fingerprint,
-            video_stream_index,
-            max_width,
-            max_height,
-            representation,
-            access_mode,
-            backend,
-            hardware_decode_request,
-            hardware_decode_device_selector,
-            source_color,
-            field_processing,
-            decoder_thread_limit,
-        };
         let mut session_open_us = 0;
 
         if should_cancel() {
@@ -3219,7 +3393,7 @@ mod session_topology_tests {
 
     fn empty_sessions() -> PreviewDecodeSessions {
         PreviewDecodeSessions {
-            playback: None,
+            playback: Vec::new(),
             interactive: Vec::new(),
             cpu_still: None,
         }
@@ -3294,15 +3468,15 @@ mod session_topology_tests {
     }
 
     #[test]
-    fn realtime_access_modes_keep_dedicated_single_slots() {
+    fn realtime_access_modes_keep_dedicated_bounded_slots() {
         let mut sessions = empty_sessions();
         assert_eq!(
-            sessions.available_slot(
-                PreviewDecodeAccessMode::PlaybackCursor,
-                PreviewHardwareDecodeRequest::PreferGpuResident,
-                4,
-            ),
-            Some(PreviewDecodeSessionSlot::Playback)
+            sessions.available_playback_slot(4, |_| false),
+            Some(PreviewDecodeSessionSlot::Playback(0))
+        );
+        assert_eq!(
+            sessions.available_playback_slot(4, |_| false),
+            Some(PreviewDecodeSessionSlot::Playback(1))
         );
         assert_eq!(
             sessions.available_slot(
@@ -3318,8 +3492,10 @@ mod session_topology_tests {
     fn family_resource_units_are_conservatively_partitioned_per_worker() {
         let config = PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(16, 2);
         assert_eq!(config.max_interactive_sessions_per_worker(), 8);
+        assert_eq!(config.max_playback_sessions_per_worker(), 8);
         let minimum = PreviewDecodeSessionResidencyConfig::from_family_resource_unit_budget(1, 2);
         assert_eq!(minimum.max_interactive_sessions_per_worker(), 1);
+        assert_eq!(minimum.max_playback_sessions_per_worker(), 1);
     }
 
     #[test]

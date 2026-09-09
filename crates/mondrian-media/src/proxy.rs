@@ -3,6 +3,7 @@
 //! 后台将高码率原始素材转码为低码率代理文件，用于编辑时的流畅预览。
 //! 导出时自动切换回原始文件。
 
+use crate::FfmpegCommand as Command;
 use crate::{
     DecodedVideoRange, MediaFileChangeStamp, MediaFileFingerprint, MediaFileObjectIdentity,
     SupervisedProcessPolicy, SupervisedStreamCapture,
@@ -16,7 +17,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tokio::sync::mpsc;

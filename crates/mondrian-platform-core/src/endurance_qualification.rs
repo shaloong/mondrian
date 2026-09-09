@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 const PROFILE_SCHEMA_VERSION: u32 = 1;
-const RUN_SCHEMA_VERSION: u32 = 3;
+const RUN_SCHEMA_VERSION: u32 = 4;
 const CHUNK_SCHEMA_VERSION: u32 = 1;
-const REPORT_SCHEMA_VERSION: u32 = 3;
+const REPORT_SCHEMA_VERSION: u32 = 4;
 const HARD_MAX_PHASES: usize = 8;
 const HARD_MAX_CHUNKS_PER_PHASE: usize = 2_048;
 const HARD_MAX_SAMPLES_PER_CHUNK: usize = 256;
@@ -292,12 +292,7 @@ impl PreparedEnduranceQualification {
                     phase.terminal.status != EndurancePhaseTerminalStatus::NotRun
                 })
         });
-        if started_concurrent_recovery
-            && matches!(
-                run.owner_closure,
-                EnduranceRunOwnerClosureEvidence::NotApplicable
-            )
-        {
+        if started_concurrent_recovery && !run.owner_closure.has_event_loop() {
             return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
         }
         let mut report = EnduranceQualificationReport {
@@ -316,6 +311,7 @@ impl PreparedEnduranceQualification {
             machine_plan_sha256: run.machine_plan_sha256,
             capture_authority_sha256: run.capture_authority_sha256,
             owner_closure: run.owner_closure,
+            phase_owner_history: run.phase_owner_history,
             status,
             missing_phases,
             phases: reports,
@@ -633,10 +629,103 @@ impl EndurancePhaseChunkReceipt {
     }
 }
 
-/// Owner and runtime facts frozen for one phase.
+/// One immutable final-artifact ANC verification published by its joined Export owner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct EnduranceAncillaryExportArtifact {
+    /// Exact independently verified Export event identity.
+    pub artifact_id: String,
+    /// Create-only whole verification sidecar path.
+    pub verification_path: std::path::PathBuf,
+    /// SHA-256 of all bytes of the verification sidecar.
+    pub verification_sha256: String,
+}
+
+/// Journal identity minted only after consuming the native physical wire owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceAncillaryWireJournal {
+    /// Native owner's closed journal path.
+    pub path: std::path::PathBuf,
+    /// SHA-256 read from the same synchronized journal handle.
+    pub sha256: String,
+}
+
+/// Bounded phase evidence for a declared, retained canonical ANC program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnduranceAncillaryPhaseEvidence {
+    /// Hash of the same retained program bytes shared by physical and Export owners.
+    pub ancillary_program_sha256: String,
+    /// One final-artifact rescan receipt per actual verified Export event, in event order.
+    pub ancillary_export_artifacts: Vec<EnduranceAncillaryExportArtifact>,
+    /// Closed physical journals for this exact phase, including reopened sessions.
+    pub wire_journals: Vec<EnduranceAncillaryWireJournal>,
+}
+
+impl EnduranceAncillaryPhaseEvidence {
+    /// Check bounded unique identities without interpreting or opening artifact bytes.
+    pub fn validates_inventory(&self) -> bool {
+        let valid_path = |path: &std::path::Path| {
+            !path.as_os_str().is_empty()
+                && path.as_os_str().len() <= 32_768
+                && !path.to_string_lossy().chars().any(char::is_control)
+        };
+        let mut artifacts = BTreeSet::new();
+        let mut paths = BTreeSet::new();
+        validate_sha256("ancillary_program_sha256", &self.ancillary_program_sha256).is_ok()
+            && self.ancillary_export_artifacts.len() <= 256
+            && self.wire_journals.len() <= 64
+            && self.ancillary_export_artifacts.iter().all(|artifact| {
+                validate_identity("artifact_id", &artifact.artifact_id).is_ok()
+                    && valid_path(&artifact.verification_path)
+                    && validate_sha256("verification_sha256", &artifact.verification_sha256).is_ok()
+                    && artifacts.insert(&artifact.artifact_id)
+                    && paths.insert(&artifact.verification_path)
+            })
+            && self.wire_journals.iter().all(|journal| {
+                valid_path(&journal.path)
+                    && validate_sha256("wire_journal_sha256", &journal.sha256).is_ok()
+                    && paths.insert(&journal.path)
+            })
+    }
+}
+
+/// Distinct, non-renewing startup and measured-work coordinates from one run clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndurancePhaseMeasurementTiming {
+    /// Admission began before any phase owner was created.
+    pub startup_started_at_run_us: u64,
+    /// Original machine-plan startup limit, never renewed by progress.
+    pub startup_deadline_at_run_us: u64,
+    /// All cold product owners finished preparation.
+    pub owners_ready_at_run_us: u64,
+    /// The single counter/scheduling origin after owner preparation.
+    pub measurement_started_at_run_us: u64,
+    /// End of the entire required measurement duration.
+    pub measurement_deadline_at_run_us: u64,
+}
+
+impl EndurancePhaseMeasurementTiming {
+    /// Validate ordering without interpreting any physical readiness or counter.
+    pub fn validates(self) -> bool {
+        self.startup_started_at_run_us <= self.owners_ready_at_run_us
+            && self.owners_ready_at_run_us <= self.measurement_started_at_run_us
+            && self.measurement_started_at_run_us < self.startup_deadline_at_run_us
+            && self.measurement_started_at_run_us < self.measurement_deadline_at_run_us
+    }
+}
+
+/// Owner and runtime facts frozen for one phase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndurancePhaseProducerEvidence {
+    /// Actual preparation and measurement origins; required for started qualification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_timing: Option<EndurancePhaseMeasurementTiming>,
+    /// Optional canonical ANC binding and its actual phase-owned sidecar inventory.
+    #[serde(flatten, deserialize_with = "deserialize_optional_ancillary")]
+    pub ancillary: Option<EnduranceAncillaryPhaseEvidence>,
     /// Module responsible for the product workload.
     pub owner: String,
     /// Exact producer/verifier identity.
@@ -694,6 +783,424 @@ pub struct EndurancePhaseManifest {
 }
 
 /// Final process-local owner closure for the complete serial run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndurancePhaseOwnerReceipt {
+    /// Exact profile identity of the started phase.
+    pub phase_id: String,
+    /// Create-only durable report path, resolved by the independent verifier.
+    pub report_path: String,
+    /// Complete canonical owner report, including failed raw leaf receipts.
+    pub canonical_json: String,
+    /// SHA-256 of the exact canonical owner report bytes.
+    pub sha256: String,
+}
+
+impl EndurancePhaseOwnerReceipt {
+    /// Require the canonical owner root to carry exactly the same optional ANC evidence.
+    pub fn binds_ancillary(&self, expected: Option<&EnduranceAncillaryPhaseEvidence>) -> bool {
+        serde_json::from_str::<serde_json::Value>(&self.canonical_json)
+            .ok()
+            .and_then(|report| ancillary_evidence_from_root(&report).ok())
+            .is_some_and(|actual| actual.as_ref() == expected)
+    }
+
+    /// Verify immutable report identity and complete App receipt hash linkage.
+    pub fn validates_binding(
+        &self,
+        run_id: &str,
+        phase_id: &str,
+        ordinal: usize,
+        status: EndurancePhaseTerminalStatus,
+    ) -> bool {
+        if self.phase_id != phase_id
+            || self.report_path.is_empty()
+            || self.canonical_json.len() > 4 * 1024 * 1024
+            || format!("{:x}", Sha256::digest(self.canonical_json.as_bytes())) != self.sha256
+        {
+            return false;
+        }
+        let Ok(report) = serde_json::from_str::<serde_json::Value>(&self.canonical_json) else {
+            return false;
+        };
+        let Ok(ancillary) = ancillary_evidence_from_root(&report) else {
+            return false;
+        };
+        let timing = report.get("measurement_timing");
+        if timing.is_some_and(|value| {
+            !serde_json::from_value::<EndurancePhaseMeasurementTiming>(value.clone())
+                .is_ok_and(EndurancePhaseMeasurementTiming::validates)
+        }) {
+            return false;
+        }
+        if serde_json::to_string(&report).ok().as_deref() != Some(self.canonical_json.as_str())
+            || report.as_object().is_none_or(|object| {
+                object.len()
+                    != 5 + usize::from(ancillary.is_some()) * 3 + usize::from(timing.is_some())
+            })
+            || report["schema_version"] != 2
+            || report["run_id"] != run_id
+            || report["phase_id"] != phase_id
+            || report["ordinal"].as_u64() != Some(ordinal as u64)
+            || serde_json::from_value::<EndurancePhaseTerminalStatus>(
+                report["terminal"]["closure"]["status"].clone(),
+            )
+            .ok()
+                != Some(status)
+        {
+            return false;
+        }
+        let Some(owners) =
+            report["terminal"]["owners"].as_object().filter(|owners| owners.len() == 1)
+        else {
+            return false;
+        };
+        let (kind, owners) = owners.iter().next().expect("one owner variant");
+        let phase_kind =
+            serde_json::from_value::<EndurancePhaseKind>(report["terminal"]["phase_kind"].clone());
+        let Ok(phase_kind) = phase_kind else {
+            return false;
+        };
+        if report["terminal"].as_object().is_none_or(|terminal| {
+            terminal.len() != 5 + usize::from(terminal.contains_key("bmx_runtime"))
+                || !terminal.contains_key("export_verifier")
+        }) || !phase_bmx_runtime_valid(report["terminal"].get("bmx_runtime"), status)
+            || report["terminal"]["closure"]
+                .as_object()
+                .is_none_or(|closure| closure.len() != 4)
+            || !report["terminal"]["failures"].is_array()
+            || (status == EndurancePhaseTerminalStatus::Completed
+                && (report["terminal"]["failures"]
+                    .as_array()
+                    .is_none_or(|failures| !failures.is_empty())
+                    || report["terminal"]["closure"]["playback_workers_terminated"] != true
+                    || report["terminal"]["closure"]["supervised_child_processes_remaining"] != 0
+                    || (phase_kind == EndurancePhaseKind::ContinuousExport && kind != "AppOnly")
+                    || (phase_kind != EndurancePhaseKind::ContinuousExport && kind != "Realtime")
+                    || !phase_export_verifier_closed(
+                        &report["terminal"]["export_verifier"],
+                        phase_kind,
+                    )))
+        {
+            return false;
+        }
+        let app = match kind.as_str() {
+            "AppOnly" => owners,
+            "Realtime" | "Startup" => &owners["app"],
+            _ => return false,
+        };
+        if app.as_object().is_none_or(|app| app.len() != 2) {
+            return false;
+        }
+        let (Some(json), Some(digest)) = (app["canonical_json"].as_str(), app["sha256"].as_str())
+        else {
+            return false;
+        };
+        if json.len() > 2 * 1024 * 1024
+            || format!("{:x}", Sha256::digest(json.as_bytes())) != digest
+        {
+            return false;
+        }
+        let Ok(app) = serde_json::from_str::<serde_json::Value>(json) else {
+            return false;
+        };
+        if app["schema_version"] != 1 || !app["app_owner_consumed"].is_boolean() {
+            return false;
+        }
+        for name in [
+            "reference_output",
+            "export",
+            "export_terminal_snapshot",
+            "audio",
+        ] {
+            let (Some(json), Some(digest)) =
+                (app[name]["json"].as_str(), app[name]["sha256"].as_str())
+            else {
+                return false;
+            };
+            if format!("{:x}", Sha256::digest(json.as_bytes())) != digest
+                || serde_json::from_str::<serde_json::Value>(json).is_err()
+            {
+                return false;
+            }
+            if name == "export"
+                && serde_json::from_str::<serde_json::Value>(json).ok().as_ref()
+                    != Some(&report["terminal"]["closure"]["export"])
+            {
+                return false;
+            }
+        }
+        status != EndurancePhaseTerminalStatus::Completed
+            || (kind != "Startup" && app["app_owner_consumed"] == true)
+    }
+}
+
+fn phase_bmx_runtime_valid(
+    value: Option<&serde_json::Value>,
+    status: EndurancePhaseTerminalStatus,
+) -> bool {
+    // Independent plan replay determines whether this phase requires BMX.
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return true;
+    };
+    let booleans = [
+        "commands_released",
+        "namespace_owned",
+        "file_leases_released",
+        "deadline_exceeded",
+    ];
+    let errors = [
+        "namespace_validation_error",
+        "namespace_restore_error",
+        "namespace_remove_error",
+        "outstanding_owner_error",
+    ];
+    if value.as_object().is_none_or(|object| object.len() != 8)
+        || booleans.iter().any(|field| !value[*field].is_boolean())
+        || errors.iter().any(|field| {
+            value.get(*field).is_none_or(|error| !error.is_null() && !error.is_string())
+        })
+    {
+        return false;
+    }
+    status != EndurancePhaseTerminalStatus::Completed
+        || (value["commands_released"] == true
+            && value["namespace_owned"] == true
+            && value["file_leases_released"] == true
+            && value["deadline_exceeded"] == false
+            && errors.iter().all(|field| value[*field].is_null()))
+}
+
+fn phase_export_verifier_closed(value: &serde_json::Value, kind: EndurancePhaseKind) -> bool {
+    if kind == EndurancePhaseKind::PlaybackReference {
+        return value.is_null();
+    }
+    let exact = |value: &serde_json::Value, fields: &[&str]| {
+        value.as_object().is_some_and(|object| {
+            object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field))
+        })
+    };
+    if !exact(
+        value,
+        &[
+            "workers_started",
+            "workers_joined",
+            "workers_remaining",
+            "workers_abandoned",
+            "cancellation_requested",
+            "deadline_exceeded",
+            "last_worker",
+            "failure",
+            "terminal_publications",
+        ],
+    ) || !value["workers_started"]
+        .as_u64()
+        .is_some_and(|count| count > 0 && value["workers_joined"].as_u64() == Some(count))
+        || value["workers_remaining"].as_u64() != Some(0)
+        || value["workers_abandoned"].as_u64() != Some(0)
+        || !value["cancellation_requested"].is_boolean()
+        || value["deadline_exceeded"].as_bool() != Some(false)
+        || !value["failure"].is_null()
+    {
+        return false;
+    }
+    if !phase_export_terminal_publications_closed(&value["terminal_publications"]) {
+        return false;
+    }
+    let worker = &value["last_worker"];
+    if !exact(
+        worker,
+        &[
+            "job_id",
+            "output_path",
+            "thread_joined",
+            "evidence_persisted",
+            "native_cleanup",
+            "verification_failure",
+            "panic",
+            "failure",
+        ],
+    ) || !worker["job_id"].as_str().is_some_and(|id| {
+        id.len() == 36
+            && id.bytes().enumerate().all(|(index, byte)| {
+                if [8, 13, 18, 23].contains(&index) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                }
+            })
+            && id.bytes().any(|byte| byte != b'0' && byte != b'-')
+    }) || !worker["output_path"].as_str().is_some_and(|path| !path.trim().is_empty())
+        || worker["thread_joined"].as_bool() != Some(true)
+        || worker["evidence_persisted"].as_bool() != Some(true)
+        || !worker["verification_failure"].is_null()
+        || !worker["panic"].is_null()
+        || !worker["failure"].is_null()
+    {
+        return false;
+    }
+    let native = &worker["native_cleanup"];
+    exact(
+        native,
+        &[
+            "native_exit_observed",
+            "kill_error",
+            "wait_error",
+            "deadline_exceeded",
+            "stdin_error",
+            "stdout_error",
+            "stderr_error",
+        ],
+    ) && native["native_exit_observed"].as_bool() == Some(true)
+        && native["deadline_exceeded"].as_bool() == Some(false)
+        && [
+            "kill_error",
+            "wait_error",
+            "stdin_error",
+            "stdout_error",
+            "stderr_error",
+        ]
+        .iter()
+        .all(|field| native[field].is_null())
+}
+
+fn phase_export_terminal_publications_closed(value: &serde_json::Value) -> bool {
+    let exact = |value: &serde_json::Value, fields: &[&str]| {
+        value.as_object().is_some_and(|object| {
+            object.len() == fields.len() && fields.iter().all(|field| object.contains_key(*field))
+        })
+    };
+    if !exact(
+        value,
+        &[
+            "workers_started",
+            "workers_joined",
+            "workers_remaining",
+            "workers_abandoned",
+            "last_worker",
+            "failure",
+        ],
+    ) || !value["workers_started"]
+        .as_u64()
+        .is_some_and(|count| count > 0 && value["workers_joined"].as_u64() == Some(count))
+        || value["workers_remaining"].as_u64() != Some(0)
+        || value["workers_abandoned"].as_u64() != Some(0)
+        || !value["failure"].is_null()
+    {
+        return false;
+    }
+    let worker = &value["last_worker"];
+    if !exact(
+        worker,
+        &[
+            "job_id",
+            "output_path",
+            "thread_joined",
+            "evidence_persisted",
+            "terminal_snapshot_json",
+            "panic",
+            "failure",
+        ],
+    ) || worker["thread_joined"].as_bool() != Some(true)
+        || worker["evidence_persisted"].as_bool() != Some(true)
+        || !worker["panic"].is_null()
+        || !worker["failure"].is_null()
+        || !worker["job_id"].as_str().is_some_and(|id| {
+            id.len() == 36
+                && id.bytes().enumerate().all(|(index, byte)| {
+                    if [8, 13, 18, 23].contains(&index) {
+                        byte == b'-'
+                    } else {
+                        byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+                    }
+                })
+                && id.bytes().any(|byte| byte != b'0' && byte != b'-')
+        })
+        || !worker["output_path"].as_str().is_some_and(|path| !path.trim().is_empty())
+    {
+        return false;
+    }
+    let Some(json) = worker["terminal_snapshot_json"]
+        .as_str()
+        .filter(|json| !json.is_empty() && json.len() <= 2 * 1024 * 1024)
+    else {
+        return false;
+    };
+    let Ok(raw) = serde_json::from_str::<serde_json::Value>(json) else {
+        return false;
+    };
+    let job = &raw["job"];
+    exact(&raw, &["schema_version", "job"])
+        && raw["schema_version"].as_u64() == Some(1)
+        && exact(
+            job,
+            &[
+                "id",
+                "generation",
+                "output_path",
+                "output_policy",
+                "preset_name",
+                "status",
+                "progress",
+                "publication",
+                "diagnostics",
+                "created_at",
+                "started_at",
+                "completed_at",
+                "terminal_evidence",
+                "artifact_publication",
+                "executed",
+            ],
+        )
+        && job["id"] == worker["job_id"]
+        && job["output_path"] == worker["output_path"]
+        && matches!(
+            job["status"]["status"].as_str(),
+            Some("completed" | "cancelled" | "failed")
+        )
+        && job["generation"].as_u64().is_some()
+        && job["executed"].is_boolean()
+        && job["completed_at"].as_str().is_some_and(|value| !value.is_empty())
+}
+
+fn deserialize_optional_ancillary<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<EnduranceAncillaryPhaseEvidence>, D::Error> {
+    // A flattened Option otherwise silently turns partial evidence into None.
+    let fields = serde_json::Map::<String, serde_json::Value>::deserialize(deserializer)?;
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_value(serde_json::Value::Object(fields))
+        .map(Some)
+        .map_err(serde::de::Error::custom)
+}
+
+fn ancillary_evidence_from_root(
+    root: &serde_json::Value,
+) -> Result<Option<EnduranceAncillaryPhaseEvidence>, ()> {
+    let mut fields = serde_json::Map::new();
+    for name in [
+        "ancillary_program_sha256",
+        "ancillary_export_artifacts",
+        "wire_journals",
+    ] {
+        if let Some(value) = root.get(name) {
+            fields.insert(name.to_owned(), value.clone());
+        }
+    }
+    if fields.is_empty() {
+        return Ok(None);
+    }
+    let evidence: EnduranceAncillaryPhaseEvidence =
+        serde_json::from_value(serde_json::Value::Object(fields)).map_err(|_| ())?;
+    if !evidence.validates_inventory() {
+        return Err(());
+    }
+    Ok(Some(evidence))
+}
+
+/// Final process-local owner closure for the complete serial run.
 ///
 /// This contract is deliberately narrower than physical display-server
 /// termination. The EventLoop variant proves only that the product returned
@@ -702,6 +1209,13 @@ pub struct EndurancePhaseManifest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnduranceRunOwnerClosureEvidence {
+    /// Independent Surface and exact-runtime owners consumed before publication.
+    WithFfmpeg {
+        /// Existing process-local Surface/EventLoop closure.
+        surface: Box<EnduranceRunOwnerClosureEvidence>,
+        /// Raw owner-derived exact-runtime closure, separate from Surface facts.
+        ffmpeg: crate::QualifiedRuntimeCapsuleClosureEvidence,
+    },
     /// The admitted workload never created or required a physical Surface owner.
     NotApplicable,
     /// A process-local EventLoop owner was consumed after every phase owner.
@@ -763,10 +1277,24 @@ impl EnduranceRunOwnerClosureEvidence {
     }
 
     /// Whether every owner represented by this contract was returned.
-    pub const fn all_owned_authority_released(&self) -> bool {
+    pub fn all_owned_authority_released(&self) -> bool {
         match self {
             Self::NotApplicable => true,
             Self::EventLoop { closure } => closure.is_valid(),
+            Self::WithFfmpeg { surface, ffmpeg } => {
+                !matches!(surface.as_ref(), Self::WithFfmpeg { .. })
+                    && surface.all_owned_authority_released()
+                    && ffmpeg.all_resources_released()
+            }
+        }
+    }
+
+    /// Whether the run returned an actual process-local Surface owner.
+    pub fn has_event_loop(&self) -> bool {
+        match self {
+            Self::EventLoop { .. } => true,
+            Self::NotApplicable => false,
+            Self::WithFfmpeg { surface, .. } => matches!(surface.as_ref(), Self::EventLoop { .. }),
         }
     }
 
@@ -780,7 +1308,7 @@ impl EnduranceRunOwnerClosureEvidence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EnduranceRunManifest {
-    /// Run schema. Version 3 is required.
+    /// Run schema. Version 4 is required.
     pub schema_version: u32,
     /// Unique run identity.
     pub run_id: String,
@@ -812,12 +1340,19 @@ pub struct EnduranceRunManifest {
     pub owner_closure: EnduranceRunOwnerClosureEvidence,
     /// Serial phase manifests.
     pub phases: Vec<EndurancePhaseManifest>,
+    /// One immutable complete owner report for every started phase, in phase order.
+    pub phase_owner_history: Vec<EndurancePhaseOwnerReceipt>,
 }
 
 /// Deterministic measured values for one present phase.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct EndurancePhaseReport {
+    /// Unmodified preparation/measurement boundary from the phase owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_timing: Option<EndurancePhaseMeasurementTiming>,
+    /// Unmodified ANC evidence bound to the producer and consuming phase owner.
+    #[serde(flatten, deserialize_with = "deserialize_optional_ancillary")]
+    pub ancillary: Option<EnduranceAncillaryPhaseEvidence>,
     /// Phase identity.
     pub phase_id: String,
     /// Workload family.
@@ -914,6 +1449,8 @@ pub struct EnduranceQualificationReport {
     pub capture_authority_sha256: String,
     /// Replayed run-level owner closure retained in the final report digest.
     pub owner_closure: EnduranceRunOwnerClosureEvidence,
+    /// Unmodified complete phase closure reports retained in the final report digest.
+    pub phase_owner_history: Vec<EndurancePhaseOwnerReceipt>,
     /// Aggregate status.
     pub status: EnduranceQualificationStatus,
     /// Required phases absent from the manifest.
@@ -929,6 +1466,12 @@ impl EnduranceQualificationReport {
     pub fn verify_evidence(&self) -> bool {
         self.schema_version == REPORT_SCHEMA_VERSION
             && self.owner_closure.all_owned_authority_released()
+            && ((self.status != EnduranceQualificationStatus::Qualified
+                && self.phases.iter().all(|phase| phase.sample_count == 0))
+                || matches!(
+                    self.owner_closure,
+                    EnduranceRunOwnerClosureEvidence::WithFfmpeg { .. }
+                ))
             && report_digest(self).is_ok_and(|digest| digest == self.evidence_sha256)
     }
 }
@@ -1279,6 +1822,8 @@ where
     let mut failed_checks = failed.into_iter().map(str::to_owned).collect::<Vec<_>>();
     failed_checks.extend(incomplete.into_iter().map(str::to_owned));
     Ok(EndurancePhaseReport {
+        measurement_timing: phase.producer.measurement_timing,
+        ancillary: phase.producer.ancillary.clone(),
         phase_id: phase.phase_id.clone(),
         kind: requirement.kind,
         workload_sha256: phase.workload_sha256.clone(),
@@ -1320,6 +1865,8 @@ fn phase_report_without_samples(
         return Err(EnduranceQualificationError::EmptyPhase { phase_id: phase.phase_id.clone() });
     }
     Ok(EndurancePhaseReport {
+        measurement_timing: phase.producer.measurement_timing,
+        ancillary: phase.producer.ancillary.clone(),
         phase_id: phase.phase_id.clone(),
         kind: requirement.kind,
         workload_sha256: phase.workload_sha256.clone(),
@@ -1674,7 +2221,64 @@ fn validate_run_header(
     if run.environment_before_sha256 != run.environment_after_sha256 {
         return Err(EnduranceQualificationError::EnvironmentDrift);
     }
-    if !run.owner_closure.all_owned_authority_released() {
+    let started = run
+        .phases
+        .iter()
+        .filter(|phase| phase.terminal.status != EndurancePhaseTerminalStatus::NotRun)
+        .collect::<Vec<_>>();
+    let program = started
+        .first()
+        .and_then(|phase| phase.producer.ancillary.as_ref())
+        .map(|evidence| evidence.ancillary_program_sha256.as_str());
+    if started.windows(2).any(|pair| {
+        pair[1]
+            .producer
+            .measurement_timing
+            .is_none_or(|timing| timing.startup_started_at_run_us < pair[0].completed_at_run_us)
+    }) {
+        return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
+    }
+    if started.iter().any(|phase| {
+        phase
+            .producer
+            .ancillary
+            .as_ref()
+            .map(|evidence| evidence.ancillary_program_sha256.as_str())
+            != program
+    }) {
+        return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
+    }
+    if started.len() != run.phase_owner_history.len()
+        || run.phase_owner_history.iter().zip(started).enumerate().any(
+            |(ordinal, (owner, phase))| {
+                !owner.validates_binding(
+                    &run.run_id,
+                    &phase.phase_id,
+                    ordinal,
+                    phase.terminal.status,
+                ) || !owner.binds_ancillary(phase.producer.ancillary.as_ref())
+                    || serde_json::from_str::<serde_json::Value>(&owner.canonical_json)
+                        .ok()
+                        .and_then(|raw| raw.get("measurement_timing").cloned())
+                        != phase
+                            .producer
+                            .measurement_timing
+                            .and_then(|timing| serde_json::to_value(timing).ok())
+            },
+        )
+    {
+        return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
+    }
+    if !run.owner_closure.all_owned_authority_released()
+        || (run
+            .phases
+            .iter()
+            .any(|phase| phase.terminal.status != EndurancePhaseTerminalStatus::NotRun)
+            && !matches!(
+                run.owner_closure,
+                EnduranceRunOwnerClosureEvidence::WithFfmpeg { .. }
+            ))
+    {
         return Err(EnduranceQualificationError::InvalidRunOwnerClosure);
     }
     Ok(())
@@ -1685,6 +2289,34 @@ fn validate_phase_manifest(
     phase: &EndurancePhaseManifest,
     profile: &EnduranceQualificationProfile,
 ) -> Result<(), EnduranceQualificationError> {
+    let timing_valid = match (phase.terminal.status, phase.producer.measurement_timing) {
+        (EndurancePhaseTerminalStatus::NotRun, None) => true,
+        (EndurancePhaseTerminalStatus::NotRun, Some(_)) => false,
+        (_, Some(timing)) => {
+            timing.validates()
+                && timing.measurement_started_at_run_us == phase.started_at_run_us
+                && timing
+                    .measurement_deadline_at_run_us
+                    .checked_sub(timing.measurement_started_at_run_us)
+                    == Some(requirement.minimum_duration_us)
+                && phase.completed_at_run_us >= timing.measurement_deadline_at_run_us
+        }
+        (_, None) => false,
+    };
+    if !timing_valid {
+        return Err(EnduranceQualificationError::InvalidPhase { phase_id: phase.phase_id.clone() });
+    }
+    if phase.producer.ancillary.as_ref().is_some_and(|evidence| {
+        !evidence.validates_inventory()
+            || phase.terminal.status == EndurancePhaseTerminalStatus::NotRun
+            || evidence.ancillary_export_artifacts.len() as u64
+                != phase.terminal.counters.export_artifacts_verified
+            || (phase.terminal.status == EndurancePhaseTerminalStatus::Completed
+                && requirement.kind != EndurancePhaseKind::ContinuousExport
+                && evidence.wire_journals.is_empty())
+    }) {
+        return Err(EnduranceQualificationError::InvalidPhase { phase_id: phase.phase_id.clone() });
+    }
     validate_identity("phase_id", &phase.phase_id)?;
     validate_sha256("workload_sha256", &phase.workload_sha256)?;
     validate_identity("producer_owner", &phase.producer.owner)?;
